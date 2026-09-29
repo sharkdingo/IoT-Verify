@@ -10,6 +10,7 @@ import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
 import cn.edu.nju.Iot_Verify.dto.trace.TraceStateDto;
+import lombok.AccessLevel;
 import lombok.Builder;
 import lombok.Getter;
 
@@ -62,20 +63,16 @@ public class FixContext {
     @Builder.Default
     private final Clock clock = Clock.systemUTC();
 
-    @Builder.Default
-    private final Set<String> diagnostics = new LinkedHashSet<>();
-    @Builder.Default
-    private final Map<String, String> strategyGenerationFailures = new LinkedHashMap<>();
-    @Builder.Default
-    private final Map<String, String> strategySolverFailures = new LinkedHashMap<>();
-    @Builder.Default
-    private final Map<String, StrategyNoResult> strategyNoResults = new LinkedHashMap<>();
-    @Builder.Default
-    private final Map<String, StrategySearchProgress> strategySearchProgress = new LinkedHashMap<>();
-    @Builder.Default
-    private final Map<String, ParameterTarget> parameterTargets = new LinkedHashMap<>();
-    @Builder.Default
-    private final Set<String> matchedPreferredRangeTargetIds = new LinkedHashSet<>();
+    /**
+     * What the strategies record while the request runs, reachable only through the methods below: a final
+     * field with an initializer is left out of {@code @Builder}, and its getter is suppressed. A builder
+     * setter would let a caller pre-seed this state (a planted baseline verdict makes every pre-existing
+     * violation look newly broken, so valid repairs are rejected), and a getter would hand out the live
+     * collections outside the lock.
+     */
+    @Getter(AccessLevel.NONE)
+    private final RunState state = new RunState();
+
     /**
      * Shortest search for further alternatives. Without it a strategy that finds its first repair within a
      * second or two would get no time to look for others, while it is exactly then that looking is cheap.
@@ -83,26 +80,6 @@ public class FixContext {
      * together, so this covers several candidates beyond the first repair.
      */
     static final Duration MIN_ALTERNATIVES_SEARCH = Duration.ofSeconds(10);
-
-    /** Strategies from the current one to the end of the request that will actually run. */
-    private int strategiesLeft;
-    /** When the running strategy started; null when a strategy is driven without {@link #beginStrategy}. */
-    private Instant strategyStartedAt;
-    /**
-     * Set once the running strategy has found its first verified repair. The user already has an answer
-     * then, so looking for alternatives must not cost unboundedly more than getting that answer did, nor
-     * more than a fair share of the time left to the strategies still to run. The request deadline alone
-     * would let a strategy that is the only one requested spend minutes on alternatives after it found
-     * a repair in seconds.
-     */
-    private volatile Instant alternativesDeadline;
-    /**
-     * Verdict of the unmodified rules on the forward-verification model, needed only once a candidate
-     * repairs the target while other specifications still fail. The holder is set even when the verdict
-     * could not be obtained, so a failure is not retried; a run cut off by the deadline or a
-     * cancellation leaves it unset.
-     */
-    private BaselineVerdict baselineVerdict;
 
     /**
      * Returns true when the search must stop: the deadline has passed, or this worker was
@@ -134,7 +111,7 @@ public class FixContext {
     }
 
     private Instant effectiveDeadline() {
-        Instant alternatives = alternativesDeadline;
+        Instant alternatives = state.alternativesDeadline;
         if (alternatives == null) return deadline;
         return deadline == null || alternatives.isBefore(deadline) ? alternatives : deadline;
     }
@@ -146,12 +123,12 @@ public class FixContext {
      * @param strategiesLeft the strategies from this one to the end of the request that will run
      */
     public synchronized void beginStrategy(String strategy, int strategiesLeft) {
-        strategyGenerationFailures.remove(strategy);
-        strategySolverFailures.remove(strategy);
-        strategyNoResults.remove(strategy);
-        this.strategiesLeft = Math.max(1, strategiesLeft);
-        strategyStartedAt = clock.instant();
-        alternativesDeadline = null;
+        state.strategyGenerationFailures.remove(strategy);
+        state.strategySolverFailures.remove(strategy);
+        state.strategyNoResults.remove(strategy);
+        state.strategiesLeft = Math.max(1, strategiesLeft);
+        state.strategyStartedAt = clock.instant();
+        state.alternativesDeadline = null;
     }
 
     /**
@@ -163,62 +140,63 @@ public class FixContext {
      * is bounded without a request deadline, which production always sets.
      */
     public synchronized void startAlternativesSearch() {
-        if (deadline == null || alternativesDeadline != null) return;
+        if (deadline == null || state.alternativesDeadline != null) return;
         Instant now = clock.instant();
-        long toFirstRepair = strategyStartedAt == null ? 0 : Duration.between(strategyStartedAt, now).toMillis();
-        long share = Duration.between(now, deadline).toMillis() / Math.max(1, strategiesLeft);
+        long toFirstRepair = state.strategyStartedAt == null
+                ? 0 : Duration.between(state.strategyStartedAt, now).toMillis();
+        long share = Duration.between(now, deadline).toMillis() / Math.max(1, state.strategiesLeft);
         long window = Math.min(share, Math.max(toFirstRepair, MIN_ALTERNATIVES_SEARCH.toMillis()));
-        alternativesDeadline = now.plusMillis(window);
+        state.alternativesDeadline = now.plusMillis(window);
     }
 
     public synchronized void addDiagnostic(String diagnostic) {
         if (diagnostic != null && !diagnostic.isBlank()) {
-            diagnostics.add(diagnostic);
+            state.diagnostics.add(diagnostic);
         }
     }
 
     public synchronized List<String> diagnosticsSnapshot() {
-        return new ArrayList<>(diagnostics);
+        return new ArrayList<>(state.diagnostics);
     }
 
     public synchronized void recordStrategyGenerationFailure(String strategy, String reason) {
         if (strategy != null && !strategy.isBlank() && reason != null && !reason.isBlank()) {
-            strategyGenerationFailures.put(strategy, reason);
+            state.strategyGenerationFailures.put(strategy, reason);
         }
     }
 
     public synchronized String strategyGenerationFailure(String strategy) {
-        return strategyGenerationFailures.get(strategy);
+        return state.strategyGenerationFailures.get(strategy);
     }
 
     public synchronized void clearStrategySolverFailure(String strategy) {
-        strategySolverFailures.remove(strategy);
+        state.strategySolverFailures.remove(strategy);
     }
 
     public synchronized void recordStrategySolverFailure(String strategy, String reason) {
         if (strategy != null && !strategy.isBlank() && reason != null && !reason.isBlank()) {
-            strategySolverFailures.put(strategy, reason);
+            state.strategySolverFailures.put(strategy, reason);
         }
     }
 
     public synchronized String strategySolverFailure(String strategy) {
-        return strategySolverFailures.get(strategy);
+        return state.strategySolverFailures.get(strategy);
     }
 
     public synchronized void recordStrategyNoResult(String strategy, String status, String reason) {
         if (strategy != null && !strategy.isBlank() && status != null && !status.isBlank()
                 && reason != null && !reason.isBlank()) {
-            strategyNoResults.put(strategy, new StrategyNoResult(status, reason));
+            state.strategyNoResults.put(strategy, new StrategyNoResult(status, reason));
         }
     }
 
     public synchronized StrategyNoResult strategyNoResult(String strategy) {
-        return strategyNoResults.get(strategy);
+        return state.strategyNoResults.get(strategy);
     }
 
     public synchronized void initializeStrategySearch(String strategy, int attemptLimit) {
         if (strategy != null && !strategy.isBlank()) {
-            strategySearchProgress.put(strategy,
+            state.strategySearchProgress.put(strategy,
                     new StrategySearchProgress(0, Math.max(0, attemptLimit)));
         }
     }
@@ -227,52 +205,52 @@ public class FixContext {
         if (strategy == null || strategy.isBlank() || attempts <= 0) {
             return;
         }
-        StrategySearchProgress current = strategySearchProgress.get(strategy);
+        StrategySearchProgress current = state.strategySearchProgress.get(strategy);
         if (current == null) {
-            strategySearchProgress.put(strategy, new StrategySearchProgress(attempts, attempts));
+            state.strategySearchProgress.put(strategy, new StrategySearchProgress(attempts, attempts));
             return;
         }
         long updated = (long) current.attemptsUsed() + attempts;
-        strategySearchProgress.put(strategy, new StrategySearchProgress(
+        state.strategySearchProgress.put(strategy, new StrategySearchProgress(
                 (int) Math.min(updated, current.attemptLimit()), current.attemptLimit()));
     }
 
     public synchronized StrategySearchProgress strategySearchProgress(String strategy) {
-        return strategySearchProgress.get(strategy);
+        return state.strategySearchProgress.get(strategy);
     }
 
     public synchronized boolean hasStrategyAttemptsLeft(String strategy) {
-        StrategySearchProgress progress = strategySearchProgress.get(strategy);
+        StrategySearchProgress progress = state.strategySearchProgress.get(strategy);
         return progress != null && progress.attemptsUsed() < progress.attemptLimit();
     }
 
     public synchronized void registerParameterTarget(ParameterTarget target) {
         if (target != null && target.getTargetId() != null && !target.getTargetId().isBlank()) {
-            parameterTargets.putIfAbsent(target.getTargetId(), target);
+            state.parameterTargets.putIfAbsent(target.getTargetId(), target);
         }
     }
 
     public synchronized List<ParameterTarget> parameterTargetsSnapshot() {
-        return new ArrayList<>(parameterTargets.values());
+        return new ArrayList<>(state.parameterTargets.values());
     }
 
     public synchronized void markPreferredRangeTargetMatched(String targetId) {
         if (targetId != null && !targetId.isBlank()) {
-            matchedPreferredRangeTargetIds.add(targetId);
+            state.matchedPreferredRangeTargetIds.add(targetId);
         }
     }
 
     public synchronized Set<String> matchedPreferredRangeTargetIdsSnapshot() {
-        return new LinkedHashSet<>(matchedPreferredRangeTargetIds);
+        return new LinkedHashSet<>(state.matchedPreferredRangeTargetIds);
     }
 
     public synchronized BaselineVerdict baselineVerdict() {
-        return baselineVerdict;
+        return state.baselineVerdict;
     }
 
     public synchronized void recordBaselineVerdict(BaselineVerdict verdict) {
-        if (baselineVerdict == null) {
-            baselineVerdict = Objects.requireNonNull(verdict, "verdict");
+        if (state.baselineVerdict == null) {
+            state.baselineVerdict = Objects.requireNonNull(verdict, "verdict");
         }
     }
 
@@ -299,5 +277,42 @@ public class FixContext {
         public boolean available() {
             return violatedSpecIds != null;
         }
+    }
+
+    /**
+     * Guarded by the enclosing context's monitor. {@link #alternativesDeadline} is also read without it, by
+     * {@link FixContext#isExpired()} and {@link FixContext#remainingMillis()}, hence volatile.
+     */
+    private static final class RunState {
+        private final Set<String> diagnostics = new LinkedHashSet<>();
+        private final Map<String, String> strategyGenerationFailures = new LinkedHashMap<>();
+        private final Map<String, String> strategySolverFailures = new LinkedHashMap<>();
+        private final Map<String, StrategyNoResult> strategyNoResults = new LinkedHashMap<>();
+        private final Map<String, StrategySearchProgress> strategySearchProgress = new LinkedHashMap<>();
+        private final Map<String, ParameterTarget> parameterTargets = new LinkedHashMap<>();
+        private final Set<String> matchedPreferredRangeTargetIds = new LinkedHashSet<>();
+
+        /** Strategies from the current one to the end of the request that will actually run. */
+        private int strategiesLeft;
+        /**
+         * When the running strategy started; null when a strategy is driven without
+         * {@link FixContext#beginStrategy}.
+         */
+        private Instant strategyStartedAt;
+        /**
+         * Set once the running strategy has found its first verified repair. The user already has an answer
+         * then, so looking for alternatives must not cost unboundedly more than getting that answer did, nor
+         * more than a fair share of the time left to the strategies still to run. The request deadline alone
+         * would let a strategy that is the only one requested spend minutes on alternatives after it found
+         * a repair in seconds.
+         */
+        private volatile Instant alternativesDeadline;
+        /**
+         * Verdict of the unmodified rules on the forward-verification model, needed only once a candidate
+         * repairs the target while other specifications still fail. The holder is set even when the verdict
+         * could not be obtained, so a failure is not retried; a run cut off by the deadline or a
+         * cancellation leaves it unset.
+         */
+        private BaselineVerdict baselineVerdict;
     }
 }
