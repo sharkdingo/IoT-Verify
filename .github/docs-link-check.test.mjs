@@ -13,6 +13,13 @@ test('a heading anchor drops backticks and punctuation the way GitHub does', () 
   assert.equal(headingSlug('## 4. Capabilities: read and affect'), '4-capabilities-read-and-affect');
 });
 
+test('punctuation dropped between two spaces leaves a double hyphen, as on GitHub', () => {
+  // Collapsing the spaces accepted `#strategy-2-condition-adjustment-...`, which GitHub does not
+  // define, so a link that lands nowhere passed the check.
+  assert.equal(headingSlug('## Strategy 2 — condition adjustment (`ConditionAdjustStrategy`)'),
+    'strategy-2--condition-adjustment-conditionadjuststrategy');
+});
+
 test('anchors come from headings only, not from bold text that looks like one', () => {
   const anchors = definedAnchors([
     '# Title',

@@ -67,7 +67,7 @@ unbuilt, not broken.
 - [ ] Run `mvn -DforkCount=0 -Dtest=AwayModeUnlockSceneNusmvTest test` once. It takes
       seconds and proves the machine you are about to present on produces these numbers.
 - [ ] Decide in advance whether you are doing Act 2 (attack). It adds ~3 minutes and one
-      hard question you must be ready to answer — see [Act 2](#act-2-optional-one-spoofed-sensor).
+      hard question you must be ready to answer — see [Act 2](#act-2-optional--one-spoofed-sensor).
 - [ ] If you plan to open the AI panel, **send one throwaway message first.** There is no
       availability pre-flight anywhere in the client: the panel opens unconditionally, and a bad
       key, an unreachable endpoint, or a wrong base URL all surface only once the stream is

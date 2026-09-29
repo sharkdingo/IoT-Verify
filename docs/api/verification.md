@@ -312,7 +312,7 @@ for replay or repair only with a clear partial-evidence qualifier.
 | `disabledRuleCount` / `skippedSpecCount` | `Integer` | Model omissions |
 | `generationIssues` | `ModelGenerationIssueDto[]` | Itemized omission explanations |
 | `counterexamples` | `TraceSummaryDto[]` | Lightweight nested evidence with id, violated-specification snapshot, state count and timestamp — no model flag, because the model is run-level and this run's own `hasSmvModel` answers for all of them; the history query does not read the full states or frozen request, and damaged summary fields remain as `dataAvailable=false` placeholders |
-| `hasSmvModel` | `Boolean` | Whether the run still holds the model it checked, gating the per-run download; see [Downloading the SMV model](#downloading-the-smv-model-one-model-per-run-addressed-by-run) |
+| `hasSmvModel` | `Boolean` | Whether the run still holds the model it checked, gating the per-run download; see [Downloading the SMV model](#downloading-the-smv-model--one-model-per-run-addressed-by-run) |
 | `dataAvailable` | `Boolean` | `true` when the persisted summary fields decoded successfully; full state and frozen-request integrity is checked when detail is opened |
 | `unavailableReasonCode` | `String` | Present for an unavailable row; currently `PERSISTED_SEMANTIC_DATA_INVALID` |
 

@@ -17,7 +17,8 @@ export const shouldSkipDirectory = (name) => SKIP_DIRECTORIES.has(name);
 
 /**
  * GitHub's heading-to-anchor rule, reduced to what this repo needs: lowercase, drop backticks and
- * other punctuation, collapse whitespace to single hyphens.
+ * other punctuation, then turn each remaining space into a hyphen. Spaces are not collapsed, so
+ * dropped punctuation between two spaces (`A — B`) leaves a double hyphen (`a--b`).
  */
 export const headingSlug = (heading) => heading
   .replace(/^#+\s*/, '')
@@ -25,7 +26,7 @@ export const headingSlug = (heading) => heading
   .replace(/`/g, '')
   .replace(/[^\w\s-]/g, '')
   .trim()
-  .replace(/\s+/g, '-');
+  .replace(/\s/g, '-');
 
 /** Every anchor a document defines, from its ATX headings. */
 export const definedAnchors = (markdown) => new Set(
