@@ -699,12 +699,21 @@ as the only operational handle. They present the violated property through its l
 formula preview/kind, structured user-facing conditions, and checked expression; trace
 states use device/rule labels. Persistence `violatedSpecId`, device ids, rule ids, and the
 raw `TraceDto` are omitted from ordinary assistant output. `fix_violation` likewise omits
-the internal specification id and always states that analysis itself applied no Board
-change. REST trace DTOs retain ids in their documented technical contract.
+the trace's `violatedSpecId` and always states that analysis itself applied no Board
+change. Its suggestions are the signed payloads `apply_fix` must echo verbatim, so they keep
+`preexistingViolations[].specId`; the system prompt's id rule keeps it out of the reply. REST
+trace DTOs retain ids in their documented technical contract.
 
 `fix_violation` is advisory only: it returns automations observed in counterexample
 transitions and forward-verified suggestions, but it does not prove that every listed
 automation independently caused the violation and does not apply anything to the board.
+A strategy may return several alternative suggestions
+([listing rule](../architecture/auto-fix.md#listing-alternatives-fixalternatives)); the system
+prompt has the assistant present all of them for the user to choose, disclose an
+incomplete listing (`alternativesComplete=false`), and say that a suggestion's
+`preexistingViolations` stay violated after applying it. It also has the assistant treat the two
+[proof statuses](verification.md) as settled for the same strategy and ranges, rather than call
+`fix_violation` again to see whether the answer changes.
 The separate `apply_fix` tool closes that conversational workflow without weakening the
 REST contract. Its first call uses `confirmed=false`, an exact returned suggestion, and
 the exact `preferredRangeSelections` used to generate it. The server verifies the

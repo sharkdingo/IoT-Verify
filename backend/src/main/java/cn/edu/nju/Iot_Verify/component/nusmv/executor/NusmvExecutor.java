@@ -58,21 +58,30 @@ public class NusmvExecutor {
     // ==================== 批处理验证 ====================
 
     public NusmvResult execute(File smvFile) throws InterruptedException {
-        return executeInternal(smvFile, null);
+        return executeInternal(smvFile, null, List.of());
     }
 
     /**
-     * Execute within a caller-owned total budget. The budget includes waiting for the global
-     * concurrency permit and process execution; the configured NuSMV timeout remains an upper bound.
+     * Execute an automatic-fix model within a caller-owned total budget. The budget includes waiting
+     * for the global concurrency permit and process execution; the configured NuSMV timeout remains an
+     * upper bound.
+     *
+     * <p>Runs with {@code -df}. Repair models leave their search variables (parameter and lambda
+     * {@code FROZENVAR}s) unconstrained at init, so the forward reachable-state computation NuSMV does
+     * by default enumerates every combination of them and stalls on a joint search over a few
+     * thresholds. Without {@code FAIRNESS} (the generator emits none) that set is only an
+     * optimisation: disabling it leaves every verdict unchanged, though a printed counterexample may
+     * follow a different, equally valid path.
      */
-    public NusmvResult execute(File smvFile, long totalBudgetMs) throws InterruptedException {
+    public NusmvResult executeRepairSearch(File smvFile, long totalBudgetMs) throws InterruptedException {
         if (totalBudgetMs <= 0) {
             return NusmvResult.error("NuSMV execution was not started because the caller deadline expired");
         }
-        return executeInternal(smvFile, totalBudgetMs);
+        return executeInternal(smvFile, totalBudgetMs, List.of("-df"));
     }
 
-    private NusmvResult executeInternal(File smvFile, Long totalBudgetMs) throws InterruptedException {
+    private NusmvResult executeInternal(File smvFile, Long totalBudgetMs, List<String> extraArgs)
+            throws InterruptedException {
         if (smvFile == null || !smvFile.exists()) {
             return NusmvResult.error("NuSMV model file does not exist or is null");
         }
@@ -81,13 +90,14 @@ public class NusmvExecutor {
             if (!smvFile.exists()) {
                 return NusmvResult.error("NuSMV model file does not exist or is null");
             }
-            return executeActiveModel(smvFile, totalBudgetMs);
+            return executeActiveModel(smvFile, totalBudgetMs, extraArgs);
         } catch (IllegalStateException e) {
             return NusmvResult.error(e.getMessage());
         }
     }
 
-    private NusmvResult executeActiveModel(File smvFile, Long totalBudgetMs) throws InterruptedException {
+    private NusmvResult executeActiveModel(File smvFile, Long totalBudgetMs, List<String> extraArgs)
+            throws InterruptedException {
         long startedNanos = System.nanoTime();
         long configuredPermitTimeoutMs = Math.max(0, nusmvConfig.getAcquirePermitTimeoutMs());
         long permitTimeoutMs = totalBudgetMs == null
@@ -101,7 +111,7 @@ public class NusmvExecutor {
             return NusmvResult.busy("NuSMV execution is busy, please retry later");
         }
 
-        List<String> command = buildCommand(smvFile, List.of());
+        List<String> command = buildCommand(smvFile, extraArgs);
         log.info("Executing NuSMV verification");
         log.debug("NuSMV command: {}", String.join(" ", command));
 

@@ -1,11 +1,14 @@
 package cn.edu.nju.Iot_Verify.component.nusmv.fixer.strategy;
 
+import cn.edu.nju.Iot_Verify.component.nusmv.SpecResultAlignment;
 import cn.edu.nju.Iot_Verify.component.nusmv.executor.NusmvExecutor;
 import cn.edu.nju.Iot_Verify.component.nusmv.executor.NusmvExecutor.NusmvResult;
 import cn.edu.nju.Iot_Verify.component.nusmv.executor.NusmvExecutor.SpecCheckResult;
 import cn.edu.nju.Iot_Verify.component.nusmv.fixer.FixContext;
 import cn.edu.nju.Iot_Verify.component.nusmv.fixer.parameterize.ParameterizationConfig;
 import cn.edu.nju.Iot_Verify.component.nusmv.fixer.parameterize.CounterexampleInitialStateConstraints;
+import cn.edu.nju.Iot_Verify.component.nusmv.generator.GuardProbe;
+import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvGenerationContext;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvGenerator;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvRelationUtils;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.AttackScenarioSurfaceValidator;
@@ -15,7 +18,6 @@ import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvData;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvDataFactory;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
-import cn.edu.nju.Iot_Verify.dto.fix.FaultRuleDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
@@ -30,8 +32,8 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
-import java.util.Locale;
 import java.util.LinkedHashSet;
+import java.util.Locale;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -46,46 +48,112 @@ public final class FixStrategyUtils {
     private FixStrategyUtils() {}
 
     /**
-     * Forward-verify: regenerate the SMV model with modified rules and check all specs pass.
+     * How forward verification judged one candidate. Search strategies exclude a candidate that was not
+     * accepted either way; the distinction matters for what they may claim afterwards. A rejection is a
+     * verdict on the candidate (it breaks a specification the original rules satisfied, or it is not a
+     * board the user could save), while an inconclusive check proves nothing — so a strategy that left a
+     * candidate inconclusive cannot claim it listed every repair.
      */
-    public static boolean forwardVerify(SmvGenerator smvGenerator, NusmvExecutor nusmvExecutor,
-                                         FixContext ctx, List<RuleDto> modifiedRules) {
-        return forwardVerify(smvGenerator, nusmvExecutor, ctx, modifiedRules, null);
+    public enum Verdict { ACCEPTED, REJECTED, INCONCLUSIVE }
+
+    /**
+     * The path on which a rejected candidate violated a specification: the target it still fails, or a
+     * specification it newly breaks.
+     *
+     * @param counterexample NuSMV's trace text, from the first state line
+     */
+    public record Witness(String specId, String counterexample) {
+        public Witness {
+            Objects.requireNonNull(specId, "specId");
+            Objects.requireNonNull(counterexample, "counterexample");
+        }
     }
 
-    public static boolean forwardVerify(SmvGenerator smvGenerator, NusmvExecutor nusmvExecutor,
-                                         FixContext ctx, List<RuleDto> modifiedRules,
-                                         String strategyName) {
-        if (ctx.isExpired()) return false;
+    /**
+     * @param preexistingViolationIds for an accepted candidate, the specifications it still violates —
+     *                                every one of them already violated by the original rules
+     * @param witness                 for a candidate rejected on a specification verdict, the violating
+     *                                path when NuSMV printed one; {@code null} otherwise
+     */
+    public record Verification(Verdict verdict, List<String> preexistingViolationIds, Witness witness) {
+        public Verification {
+            Objects.requireNonNull(verdict, "verdict");
+            preexistingViolationIds = List.copyOf(preexistingViolationIds);
+            if (witness != null && verdict != Verdict.REJECTED) {
+                throw new IllegalArgumentException("only a rejection has a violating path");
+            }
+        }
+
+        static Verification accepted(List<String> preexistingViolationIds) {
+            return new Verification(Verdict.ACCEPTED, preexistingViolationIds, null);
+        }
+
+        static Verification rejected() {
+            return rejected(null);
+        }
+
+        static Verification rejected(Witness witness) {
+            return new Verification(Verdict.REJECTED, List.of(), witness);
+        }
+
+        static Verification inconclusive() {
+            return new Verification(Verdict.INCONCLUSIVE, List.of(), null);
+        }
+
+        public boolean isAccepted() {
+            return verdict == Verdict.ACCEPTED;
+        }
+    }
+
+    /**
+     * Forward-verify: regenerate the complete SMV model with the modified rules and accept it when the
+     * target specification passes without breaking any other (see {@link #judgeFailingCandidate}).
+     */
+    public static Verification forwardVerify(SmvGenerator smvGenerator, NusmvExecutor nusmvExecutor,
+                                             FixContext ctx, List<RuleDto> modifiedRules,
+                                             String strategyName) {
+        return forwardVerify(smvGenerator, nusmvExecutor, ctx, modifiedRules, strategyName, List.of());
+    }
+
+    /**
+     * As above, with {@code guardProbes} added to the checked model so a rejection's {@link Witness}
+     * reports their values. They are {@code DEFINE}s and cannot change the verdict.
+     */
+    public static Verification forwardVerify(SmvGenerator smvGenerator, NusmvExecutor nusmvExecutor,
+                                             FixContext ctx, List<RuleDto> modifiedRules,
+                                             String strategyName, List<GuardProbe> guardProbes) {
+        if (ctx.isExpired()) return Verification.inconclusive();
         if (!candidateRulesPersistable(modifiedRules)) {
             ctx.addDiagnostic("A candidate was rejected because it would create an identical automation rule.");
             log.info("Forward verification rejected a candidate containing identical automation rules");
-            return false;
+            return Verification.rejected();
         }
         File smvFile = null;
         try {
             SmvGenerator.GenerateResult genResult = generateResolved(
-                    smvGenerator, ctx, modifiedRules, SmvGenerator.GeneratePurpose.VERIFICATION);
-            if (genResult == null) return false;
+                    smvGenerator, ctx, modifiedRules, SmvGenerator.GeneratePurpose.VERIFICATION, guardProbes);
+            // generateResolved already said why: the candidate would change the attack scenario.
+            if (genResult == null) return Verification.rejected();
             smvFile = genResult.smvFile();
 
             if (genResult.disabledRuleCount() > 0 || genResult.skippedSpecCount() > 0) {
-                String diagnostic = "A candidate was rejected because forward verification generated an incomplete model ("
+                String diagnostic = "A candidate could not be checked because forward verification generated an incomplete model ("
                         + genResult.disabledRuleCount() + " rule(s) disabled, "
                         + genResult.skippedSpecCount() + " specification(s) skipped).";
                 ctx.addDiagnostic(diagnostic);
                 ctx.recordStrategyGenerationFailure(strategyName, diagnostic);
-                log.warn("Forward verification rejected incomplete generated model: disabledRules={}, skippedSpecs={}",
+                log.warn("Forward verification could not check a candidate, incomplete generated model: disabledRules={}, skippedSpecs={}",
                         genResult.disabledRuleCount(), genResult.skippedSpecCount());
-                return false;
+                // Nothing was checked, so nothing is known about the candidate itself.
+                return Verification.inconclusive();
             }
 
-            NusmvResult result = executeWithinDeadline(nusmvExecutor, smvFile, ctx);
+            NusmvResult result = executeCheck(nusmvExecutor, smvFile, ctx);
             if (!result.isSuccess()) {
                 log.warn("Forward verification: NuSMV execution failed: {}", result.getErrorMessage());
                 recordSolverFailure(ctx, strategyName,
                         "NuSMV could not complete forward verification for a candidate.");
-                return false;
+                return Verification.inconclusive();
             }
 
             List<SpecCheckResult> specResults = result.getSpecResults();
@@ -100,16 +168,18 @@ public final class FixStrategyUtils {
             if (!resultCountComplete || !emittedCountComplete) {
                 recordSolverFailure(ctx, strategyName,
                         "NuSMV forward verification did not return one reliable result for every specification.");
-                log.warn("Forward verification rejected incomplete result set: expected={}, emitted={}, parsed={}",
+                log.warn("Forward verification could not judge a candidate, incomplete result set: expected={}, emitted={}, parsed={}",
                         expectedSpecCount,
                         genResult.emittedSpecs() != null ? genResult.emittedSpecs().size() : 0,
                         specResults != null ? specResults.size() : 0);
-                return false;
+                return Verification.inconclusive();
             }
 
-            boolean allPass = specResults.stream().allMatch(SpecCheckResult::isPassed);
-            log.info("Forward verification result: allPass={}", allPass);
-            return allPass;
+            if (specResults.stream().allMatch(SpecCheckResult::isPassed)) {
+                log.info("Forward verification result: all specifications pass");
+                return Verification.accepted(List.of());
+            }
+            return judgeFailingCandidate(smvGenerator, nusmvExecutor, ctx, specResults, genResult.emittedSpecs());
         } catch (Exception e) {
             log.warn("Forward verification failed: {}", e.getMessage(), e);
             if (smvFile == null) {
@@ -124,7 +194,147 @@ public final class FixStrategyUtils {
             // an interrupt must survive the broad catch — otherwise ctx.isExpired() stops reporting it
             // and the search keeps taking solver permits for an already-answered request.
             preserveInterrupt(e);
-            return false;
+            return Verification.inconclusive();
+        } finally {
+            cleanupTempDir(smvFile);
+        }
+    }
+
+    /**
+     * A repair is judged against the violation it was asked to repair, not against every flaw on the
+     * board: a candidate is accepted when the target specification passes and every specification it
+     * still violates was already violated by the original rules. Requiring all specifications to pass
+     * made a counterexample unrepairable whenever an unrelated specification also failed, since no edit
+     * inside this counterexample's repair scope can reach it.
+     *
+     * <p>Fails closed. A candidate is rejected only on evidence — the target still fails, or it breaks a
+     * specification the original rules satisfied. When per-specification attribution is not certain, the
+     * target cannot be identified, or the original rules' verdict could not be obtained, the rule cannot
+     * be evaluated and the candidate is inconclusive, never accepted.
+     */
+    private static Verification judgeFailingCandidate(
+            SmvGenerator smvGenerator, NusmvExecutor nusmvExecutor, FixContext ctx,
+            List<SpecCheckResult> specResults, List<SmvGenerationContext.EmittedSpec> emittedSpecs)
+            throws InterruptedException {
+        Map<String, SpecCheckResult> results = resultsBySpecId(specResults, emittedSpecs);
+        String targetSpecId = targetSpecId(ctx);
+        SpecCheckResult target = results == null || targetSpecId == null ? null : results.get(targetSpecId);
+        if (target == null) {
+            log.info("Forward verification result: inconclusive, the target specification's verdict is not attributable");
+            return Verification.inconclusive();
+        }
+        if (!target.isPassed()) {
+            log.info("Forward verification result: rejected, the target specification still fails");
+            return Verification.rejected(witness(targetSpecId, target));
+        }
+        List<String> stillViolated = results.entrySet().stream()
+                .filter(entry -> !entry.getValue().isPassed())
+                .map(Map.Entry::getKey)
+                .toList();
+        FixContext.BaselineVerdict baseline = baselineVerdict(smvGenerator, nusmvExecutor, ctx);
+        if (!baseline.available()) {
+            log.info("Forward verification result: inconclusive, candidate violates {} and the original rules' verdict is unknown",
+                    stillViolated);
+            return Verification.inconclusive();
+        }
+        String newlyViolated = stillViolated.stream()
+                .filter(specId -> !baseline.violatedSpecIds().contains(specId))
+                .findFirst()
+                .orElse(null);
+        if (newlyViolated != null) {
+            log.info("Forward verification result: rejected, candidate violates {} (originally violated: {})",
+                    stillViolated, baseline.violatedSpecIds());
+            return Verification.rejected(witness(newlyViolated, results.get(newlyViolated)));
+        }
+        log.info("Forward verification result: target passes, pre-existing violations remain {}", stillViolated);
+        return Verification.accepted(stillViolated);
+    }
+
+    private static Witness witness(String specId, SpecCheckResult result) {
+        String trace = result.getCounterexample();
+        return trace == null || trace.isBlank() ? null : new Witness(specId, trace);
+    }
+
+    /** The result per specification id, or {@code null} when any verdict's attribution is uncertain. */
+    private static Map<String, SpecCheckResult> resultsBySpecId(
+            List<SpecCheckResult> specResults, List<SmvGenerationContext.EmittedSpec> emittedSpecs) {
+        if (emittedSpecs == null || emittedSpecs.size() != specResults.size()) return null;
+        SpecResultAlignment.Alignment alignment = SpecResultAlignment.align(specResults, emittedSpecs);
+        if (alignment.backFilled() > 0) return null;
+        Map<String, SpecCheckResult> results = new LinkedHashMap<>();
+        for (int i = 0; i < emittedSpecs.size(); i++) {
+            String specId = emittedSpecs.get(i) != null ? emittedSpecs.get(i).specId() : null;
+            SpecCheckResult result = alignment.aligned().get(i);
+            // "unknown" is the generator's placeholder for a specification without an id; it names no
+            // specification, so a verdict filed under it cannot be compared with the original rules'.
+            if (result == null || specId == null || specId.isBlank() || "unknown".equals(specId)
+                    || results.putIfAbsent(specId, result) != null) {
+                return null;
+            }
+        }
+        return results;
+    }
+
+    private static String targetSpecId(FixContext ctx) {
+        List<SpecificationDto> specs = ctx.getSpecs();
+        int index = ctx.getViolatedSpecIndex();
+        if (specs == null || index < 0 || index >= specs.size() || specs.get(index) == null) return null;
+        String id = specs.get(index).getId();
+        return id == null || id.isBlank() ? null : id;
+    }
+
+    /**
+     * The original rules' verdict on the same forward-verification model, memoized on the context. A
+     * failure is memoized too: it would recur for every candidate and each attempt costs a full NuSMV run.
+     * Two outcomes are not failures and are not memoized: a capacity refusal, which is retried, and a run
+     * cut off by the deadline or a cancellation, which a later strategy's window may still complete.
+     */
+    private static FixContext.BaselineVerdict baselineVerdict(
+            SmvGenerator smvGenerator, NusmvExecutor nusmvExecutor, FixContext ctx) throws InterruptedException {
+        FixContext.BaselineVerdict memo = ctx.baselineVerdict();
+        if (memo != null) return memo;
+        FixContext.BaselineVerdict verdict = computeBaselineVerdict(smvGenerator, nusmvExecutor, ctx);
+        if (!verdict.available() && ctx.isExpired()) {
+            // Cut off by the deadline or a cancellation: not a property of the rules, and the strategy's
+            // TIMED_OUT status already says the search was incomplete.
+            return verdict;
+        }
+        if (!verdict.available()) {
+            ctx.addDiagnostic("The original rules could not be re-checked, so a candidate was accepted only "
+                    + "if it satisfied every specification.");
+        }
+        ctx.recordBaselineVerdict(verdict);
+        return ctx.baselineVerdict();
+    }
+
+    private static FixContext.BaselineVerdict computeBaselineVerdict(
+            SmvGenerator smvGenerator, NusmvExecutor nusmvExecutor, FixContext ctx) throws InterruptedException {
+        File smvFile = null;
+        try {
+            SmvGenerator.GenerateResult genResult = generateResolved(
+                    smvGenerator, ctx, ctx.getAllRules(), SmvGenerator.GeneratePurpose.VERIFICATION, List.of());
+            if (genResult == null) return FixContext.BaselineVerdict.unavailable();
+            smvFile = genResult.smvFile();
+            if (genResult.disabledRuleCount() > 0 || genResult.skippedSpecCount() > 0) {
+                return FixContext.BaselineVerdict.unavailable();
+            }
+            NusmvResult result = executeCheck(nusmvExecutor, smvFile, ctx);
+            if (!result.isSuccess() || result.getSpecResults() == null) {
+                return FixContext.BaselineVerdict.unavailable();
+            }
+            Map<String, SpecCheckResult> results = resultsBySpecId(result.getSpecResults(), genResult.emittedSpecs());
+            if (results == null) return FixContext.BaselineVerdict.unavailable();
+            Set<String> violated = new LinkedHashSet<>();
+            results.forEach((specId, specResult) -> {
+                if (!specResult.isPassed()) violated.add(specId);
+            });
+            return new FixContext.BaselineVerdict(Collections.unmodifiableSet(violated));
+        } catch (InterruptedException e) {
+            throw e;
+        } catch (Exception e) {
+            log.warn("Baseline verification of the original rules failed: {}", e.getMessage(), e);
+            preserveInterrupt(e);
+            return FixContext.BaselineVerdict.unavailable();
         } finally {
             cleanupTempDir(smvFile);
         }
@@ -140,7 +350,13 @@ public final class FixStrategyUtils {
         InterruptPreservation.preserveInterrupt(e);
     }
 
+    /**
+     * A NuSMV run killed by the fix deadline or by cancellation did not fail; it was cut off. Recording
+     * it as a solver failure showed the user "NuSMV failed while searching" next to a timeout, two
+     * contradictory causes for one event. The caller's {@code TIMED_OUT} status already says it.
+     */
     static void recordSolverFailure(FixContext ctx, String strategyName, String reason) {
+        if (ctx.isExpired()) return;
         ctx.addDiagnostic(reason);
         ctx.recordStrategySolverFailure(strategyName, reason);
     }
@@ -161,7 +377,8 @@ public final class FixStrategyUtils {
             SmvGenerator smvGenerator,
             FixContext ctx,
             List<RuleDto> rules,
-            SmvGenerator.GeneratePurpose purpose) throws java.io.IOException {
+            SmvGenerator.GeneratePurpose purpose,
+            List<GuardProbe> guardProbes) throws java.io.IOException {
         AttackScenarioDto scenario = ctx.resolvedAttackScenario();
         if (!preservesExactAttackSelection(scenario, rules, ctx.getDeviceSmvMap())) {
             ctx.addDiagnostic("A candidate was rejected because it would remove an explicitly selected automation-link attack point or device attack point and change the original attack scenario.");
@@ -169,7 +386,7 @@ public final class FixStrategyUtils {
         }
         return smvGenerator.generateWithResolvedDeviceModel(
                 ctx.getUserId(), ctx.getDevices(), ctx.getEnvironmentVariables(), rules, ctx.getSpecs(),
-                scenario, ctx.isEnablePrivacy(), purpose, tempContext(ctx), ctx.getDeviceSmvMap());
+                scenario, ctx.isEnablePrivacy(), purpose, tempContext(ctx), ctx.getDeviceSmvMap(), guardProbes);
     }
 
     public static SmvGenerator.GenerateResult generateParameterizedResolved(
@@ -282,144 +499,34 @@ public final class FixStrategyUtils {
         }
     }
 
-    // ======================== E2: Expand parameterization scope ========================
-
     /**
-     * §5: faultRules ∪ rules sharing devices or environmental domains with violated spec.
-     * Uses the same device-reference resolver as the generator so scope expansion aligns raw board
-     * node ids with SMV-safe verification-time varNames consistently.
+     * Every repair model runs through {@link NusmvExecutor#executeRepairSearch}, deadline or not: its
+     * {@code -df} is what keeps an unconstrained search variable from stalling the reachability pass,
+     * and that need does not depend on whether the context carries a deadline.
      */
-    public static Set<Integer> expandRuleIndices(
-            List<FaultRuleDto> faultRules,
-            List<RuleDto> allRules,
-            SpecificationDto violatedSpec,
-            Map<String, DeviceSmvData> deviceSmvMap) {
-
-        Set<Integer> result = new LinkedHashSet<>();
-        if (allRules == null || allRules.isEmpty()) {
-            return result;
-        }
-
-        // 1. Collect fault rule indices
-        if (faultRules != null) {
-            for (FaultRuleDto fr : faultRules) {
-                int idx = fr.getRuleIndex();
-                if (idx >= 0 && idx < allRules.size()) {
-                    result.add(idx);
-                }
-            }
-        }
-
-        // 2. Extract spec device varNames
-        Set<String> specVarNames = new HashSet<>();
-        Set<String> specDomains = new HashSet<>();
-        if (violatedSpec != null) {
-            List<SpecConditionDto> allSpecConds = new ArrayList<>();
-            if (violatedSpec.getAConditions() != null) allSpecConds.addAll(violatedSpec.getAConditions());
-            if (violatedSpec.getIfConditions() != null) allSpecConds.addAll(violatedSpec.getIfConditions());
-            if (violatedSpec.getThenConditions() != null) allSpecConds.addAll(violatedSpec.getThenConditions());
-
-            for (SpecConditionDto sc : allSpecConds) {
-                if (sc.getDeviceId() == null || sc.getDeviceId().isBlank()) continue;
-                String varName = resolveVarNameInclusive(sc.getDeviceId(), deviceSmvMap);
-                if (varName != null) {
-                    specVarNames.add(varName);
-                    DeviceSmvData smv = deviceSmvMap.get(varName);
-                    collectImpactedDomains(smv, specDomains);
-                    // Trimmed to match extractCandidateConditions and admission: a padded key
-                    // otherwise missed the env-variable lookup, dropped that domain from
-                    // specDomains, and silently narrowed the parameterization scope to fewer rules.
-                    String specKey = sc.getKey() == null ? null : sc.getKey().trim();
-                    String specTargetType = sc.getTargetType() == null ? null : sc.getTargetType().trim();
-                    if ("variable".equalsIgnoreCase(specTargetType) && specKey != null
-                            && smv != null && smv.getEnvVariables() != null
-                            && smv.getEnvVariables().containsKey(specKey)) {
-                        specDomains.add(specKey);
-                    }
-                }
-            }
-        }
-
-        if (specVarNames.isEmpty() && specDomains.isEmpty()) return result;
-
-        // 3. Scan allRules for shared-device or shared-domain rules
-        for (int i = 0; i < allRules.size(); i++) {
-            if (result.contains(i)) continue;
-            RuleDto rule = allRules.get(i);
-            if (ruleReferencesAnyDevice(rule, specVarNames, deviceSmvMap)
-                    || ruleReferencesAnyDomain(rule, specDomains, deviceSmvMap)) {
-                result.add(i);
-            }
-        }
-        return result;
-    }
-
-    private static boolean ruleReferencesAnyDomain(
-            RuleDto rule, Set<String> targetDomains,
-            Map<String, DeviceSmvData> deviceSmvMap) {
-        if (rule == null || targetDomains.isEmpty()) return false;
-        if (rule.getConditions() != null) {
-            for (RuleDto.Condition condition : rule.getConditions()) {
-                if (condition == null || condition.getAttribute() == null
-                        || !"variable".equalsIgnoreCase(condition.getTargetType())) continue;
-                String varName = resolveVarNameInclusive(condition.getDeviceName(), deviceSmvMap);
-                DeviceSmvData smv = varName == null ? null : deviceSmvMap.get(varName);
-                if (smv != null && smv.getEnvVariables() != null
-                        && smv.getEnvVariables().containsKey(condition.getAttribute())
-                        && targetDomains.contains(condition.getAttribute())) {
-                    return true;
-                }
-            }
-        }
-        if (rule.getCommand() != null) {
-            String varName = resolveVarNameInclusive(rule.getCommand().getDeviceName(), deviceSmvMap);
-            DeviceSmvData smv = varName == null ? null : deviceSmvMap.get(varName);
-            Set<String> impacted = new HashSet<>();
-            collectImpactedDomains(smv, impacted);
-            if (impacted.stream().anyMatch(targetDomains::contains)) return true;
-        }
-        return false;
-    }
-
-    private static void collectImpactedDomains(DeviceSmvData smv, Set<String> target) {
-        if (smv == null) return;
-        if (smv.getImpactedVariables() != null) target.addAll(smv.getImpactedVariables());
-        if (smv.getImpactedEnvironmentVariables() != null) {
-            target.addAll(smv.getImpactedEnvironmentVariables().keySet());
-        }
-    }
-
-    /**
-     * Check if rule references any device in targetVarNames (via conditions or command).
-     */
-    private static boolean ruleReferencesAnyDevice(
-            RuleDto rule, Set<String> targetVarNames,
-            Map<String, DeviceSmvData> deviceSmvMap) {
-        if (rule.getConditions() != null) {
-            for (RuleDto.Condition cond : rule.getConditions()) {
-                if (cond == null || cond.getDeviceName() == null) continue;
-                String varName = resolveVarNameInclusive(cond.getDeviceName(), deviceSmvMap);
-                if (varName != null && targetVarNames.contains(varName)) return true;
-            }
-        }
-        if (rule.getCommand() != null && rule.getCommand().getDeviceName() != null) {
-            String varName = resolveVarNameInclusive(rule.getCommand().getDeviceName(), deviceSmvMap);
-            if (varName != null && targetVarNames.contains(varName)) return true;
-        }
-        return false;
-    }
-
     static NusmvResult executeWithinDeadline(NusmvExecutor nusmvExecutor, File smvFile,
                                               FixContext ctx) throws InterruptedException {
-        if (ctx.getDeadline() == null) {
-            return nusmvExecutor.execute(smvFile);
-        }
         long remainingMs = ctx.remainingMillis();
         if (remainingMs <= 0) {
-            ctx.addDiagnostic("The automatic-fix deadline expired before the next NuSMV check started.");
+            // No diagnostic: the strategy's TIMED_OUT status is the one statement of this outcome.
             return NusmvResult.error("Automatic-fix deadline expired before NuSMV execution");
         }
-        return nusmvExecutor.execute(smvFile, remainingMs);
+        return nusmvExecutor.executeRepairSearch(smvFile, remainingMs);
+    }
+
+    /**
+     * A verification run, retried while NuSMV refuses it for capacity. A refusal says nothing about the
+     * model, so it must not make a candidate inconclusive or leave the original rules' verdict unknown
+     * for the rest of the request. The deadline bounds the retries: under it, a permit wait that cannot
+     * fit the remaining budget comes back as an error, not as a refusal.
+     */
+    private static NusmvResult executeCheck(NusmvExecutor nusmvExecutor, File smvFile, FixContext ctx)
+            throws InterruptedException {
+        NusmvResult result = executeWithinDeadline(nusmvExecutor, smvFile, ctx);
+        while (result.isBusy() && !ctx.isExpired()) {
+            result = executeWithinDeadline(nusmvExecutor, smvFile, ctx);
+        }
+        return result;
     }
 
     static boolean hasEnvironmentPool(FixContext ctx) {
@@ -428,22 +535,6 @@ public final class FixStrategyUtils {
 
     static SmvGenerator.TempModelContext tempContext(FixContext ctx) {
         return SmvGenerator.TempModelContext.fixTrace(ctx != null ? ctx.getTraceId() : null);
-    }
-
-    /**
-     * Resolve device reference → varName for scope expansion. Ambiguity is fail-closed
-     * to match the generator's "do not silently bind to the wrong device" rule.
-     */
-    private static String resolveVarNameInclusive(
-            String primaryRef, Map<String, DeviceSmvData> deviceSmvMap) {
-        try {
-            DeviceSmvData smv = DeviceReferenceResolver.resolve(primaryRef, deviceSmvMap);
-            return smv != null ? smv.getVarName() : null;
-        } catch (SmvGenerationException e) {
-            log.warn("resolveVarNameInclusive: device reference '{}' failed, skipping: {}",
-                    primaryRef, e.getMessage());
-            return null;
-        }
     }
 
     /**
@@ -486,11 +577,13 @@ public final class FixStrategyUtils {
 
     /**
      * Extract candidate conditions from violated spec not already in the rule.
-     * Dispatches by targetType; validates compilability; dedup by 4-tuple; truncates at max.
+     * Dispatches by targetType; validates compilability; drops conditions {@code effects} establishes;
+     * dedup by 4-tuple; truncates at max.
      */
-    public static List<RuleDto.Condition> extractCandidateConditions(
+    static List<RuleDto.Condition> extractCandidateConditions(
             SpecificationDto violatedSpec,
             RuleDto rule,
+            CommandEffects effects,
             Map<String, DeviceSmvData> deviceSmvMap,
             int maxCandidatesPerRule) {
 
@@ -579,12 +672,12 @@ public final class FixStrategyUtils {
             }
 
             ParameterizationConfig.ConditionValueInfo freeValueInfo = candidateConditionValueInfo(
-                    candidate, rule, deviceSmvMap, "candidate_value_probe");
+                    candidate, rule, effects, deviceSmvMap, "candidate_value_probe");
             if (freeValueInfo == null) {
                 // Fixed-value postconditions can make the useful automation unreachable. A free-Y
                 // candidate is handled differently: its domain has already had those values removed.
-                if (isCommandOutcomeCondition(rule, candidate, deviceSmvMap)) {
-                    log.debug("extractCandidates: skipped command-outcome condition for rule command {}",
+                if (effects.establishes(candidate)) {
+                    log.debug("extractCandidates: skipped condition established by rule command {} or a rule it triggers",
                             rule.getCommand() != null ? rule.getCommand().getAction() : "<none>");
                     continue;
                 }
@@ -623,12 +716,17 @@ public final class FixStrategyUtils {
             RuleDto.Condition candidate,
             Map<String, DeviceSmvData> deviceSmvMap,
             String frozenVarName) {
-        return candidateConditionValueInfo(candidate, null, deviceSmvMap, frozenVarName);
+        return candidateConditionValueInfo(candidate, null, CommandEffects.NONE, deviceSmvMap, frozenVarName);
     }
 
+    /**
+     * As above, with the values {@code effects} establishes removed from the domain, as well as those
+     * the pre-state of {@code rule}'s command rules out.
+     */
     static ParameterizationConfig.ConditionValueInfo candidateConditionValueInfo(
             RuleDto.Condition candidate,
             RuleDto rule,
+            CommandEffects effects,
             Map<String, DeviceSmvData> deviceSmvMap,
             String frozenVarName) {
         if (candidate == null || frozenVarName == null || frozenVarName.isBlank()) return null;
@@ -649,7 +747,7 @@ public final class FixStrategyUtils {
             if (!List.of("=", "!=", "in", "not in").contains(relation)) return null;
             List<String> values = smv.getModeStates() == null
                     ? null : smv.getModeStates().get(candidate.getAttribute());
-            return filterCommandIncompatibleValues(candidate, rule, deviceSmvMap,
+            return filterCommandIncompatibleValues(candidate, rule, effects, deviceSmvMap,
                     discreteConditionValueInfo(frozenVarName, values));
         }
         if (!"variable".equals(targetType)) return null;
@@ -669,7 +767,7 @@ public final class FixStrategyUtils {
 
         if (variable.getValues() != null && !variable.getValues().isEmpty()) {
             if (!List.of("=", "!=", "in", "not in").contains(relation)) return null;
-            return filterCommandIncompatibleValues(candidate, rule, deviceSmvMap,
+            return filterCommandIncompatibleValues(candidate, rule, effects, deviceSmvMap,
                     discreteConditionValueInfo(frozenVarName, variable.getValues()));
         }
         if (variable.getLowerBound() == null || variable.getUpperBound() == null
@@ -686,6 +784,7 @@ public final class FixStrategyUtils {
     private static ParameterizationConfig.ConditionValueInfo filterCommandIncompatibleValues(
             RuleDto.Condition candidate,
             RuleDto rule,
+            CommandEffects effects,
             Map<String, DeviceSmvData> deviceSmvMap,
             ParameterizationConfig.ConditionValueInfo valueInfo) {
         if (valueInfo == null || rule == null || valueInfo.getValues() == null
@@ -695,7 +794,7 @@ public final class FixStrategyUtils {
         List<String> allowedValues = valueInfo.getValues().stream()
                 .filter(value -> {
                     RuleDto.Condition selected = copyConditionWithValue(candidate, value);
-                    return !isCommandOutcomeCondition(rule, selected, deviceSmvMap)
+                    return !effects.establishes(selected)
                             && !isCommandPrestateIncompatible(rule, selected, deviceSmvMap);
                 })
                 .toList();
@@ -734,34 +833,35 @@ public final class FixStrategyUtils {
     }
 
     /**
-     * Whether a candidate condition is satisfied by the state that the same rule command produces.
-     * Such a condition cannot initiate that command from its normal pre-state and is therefore a
-     * misleading automatic-fix candidate. Negative conditions (for example {@code != taking_photo})
-     * remain eligible when they can hold in the command's declared start state; a negative condition
-     * that is false in every concrete start state is rejected as unreachable as well.
+     * Whether calling {@code api} on {@code device} definitely makes {@code candidate}, a condition on
+     * that same device, hold: the API's end state satisfies a positive state or mode condition, or its
+     * event satisfies an API condition that asserts the event. Negative state and mode conditions (for
+     * example {@code != taking_photo}) are never established; they are legitimate guards against
+     * repeating a command. Internal variables are never established, since commands do not assign them.
      */
-    static boolean isCommandOutcomeCondition(
-            RuleDto rule,
-            RuleDto.Condition candidate,
-            Map<String, DeviceSmvData> deviceSmvMap) {
-        CommandApiContext command = commandApiContext(rule, candidate, deviceSmvMap);
-        if (command == null) return false;
-        DeviceSmvData commandDevice = command.device();
-        DeviceManifest.API api = command.api();
-        if (api == null || api.getEndState() == null || api.getEndState().isBlank()) {
+    static boolean apiOutcomeSatisfies(
+            DeviceSmvData commandDevice,
+            DeviceManifest.API api,
+            RuleDto.Condition candidate) {
+        if (commandDevice == null || api == null || candidate == null) return false;
+        String targetType = candidate.getTargetType() == null
+                ? ""
+                : candidate.getTargetType().trim().toLowerCase(Locale.ROOT);
+        String relation = SmvRelationUtils.normalizeRelation(candidate.getRelation());
+        if ("api".equals(targetType)) {
+            return Boolean.TRUE.equals(api.getSignal())
+                    && candidate.getAttribute() != null
+                    && candidate.getAttribute().trim().equals(api.getName())
+                    && assertsSignal(relation, candidate.getValue());
+        }
+        if (api.getEndState() == null || api.getEndState().isBlank()) {
             return false;
         }
-
-        String relation = SmvRelationUtils.normalizeRelation(candidate.getRelation());
-        // Only positive membership can be guaranteed by an action's result. != and not-in are
-        // legitimate guards that prevent repeated commands and must remain eligible.
+        // Only positive membership can be guaranteed by an action's result.
         if (!"=".equals(relation) && !"in".equals(relation)) {
             return false;
         }
 
-        String targetType = candidate.getTargetType() == null
-                ? ""
-                : candidate.getTargetType().trim().toLowerCase(Locale.ROOT);
         if ("mode".equals(targetType)) {
             int modeIndex = commandDevice.getModes() == null
                     ? -1
@@ -781,6 +881,21 @@ public final class FixStrategyUtils {
                 : candidate.getValue() == null ? List.of() : List.of(candidate.getValue());
         return candidateValues.stream().anyMatch(value -> stateConditionMatchesTuple(
                 commandDevice, value, endTuple));
+    }
+
+    /**
+     * Whether an API condition with this normalized relation and value is exactly "the event
+     * happened", as the generator renders it: a bare condition is {@code <api>_a=TRUE}.
+     */
+    private static boolean assertsSignal(String relation, String value) {
+        if (relation == null) return true;
+        List<String> values = SmvRelationUtils.splitRuleValues(value);
+        if (values.isEmpty()) return false;
+        return switch (relation) {
+            case "=", "in" -> values.stream().allMatch("TRUE"::equalsIgnoreCase);
+            case "!=", "not in" -> values.stream().allMatch("FALSE"::equalsIgnoreCase);
+            default -> false;
+        };
     }
 
     /**

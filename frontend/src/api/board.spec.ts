@@ -12,7 +12,6 @@ vi.mock('./http', () => ({
 
 import http from './http'
 import boardApi, { BOARD_RESPONSE_INCOMPLETE_CODE } from './board'
-import { FIX_RESPONSE_INCOMPLETE_CODE } from '@/utils/fixResponse'
 import type { DeviceNode } from '@/types/node'
 import type { PortableSceneFile } from '@/types/scene'
 import type { Specification } from '@/types/spec'
@@ -1931,10 +1930,10 @@ describe('board mutation response contracts', () => {
       appliedSuggestion: {
         strategy: 'remove',
         description: 'Remove the conflicting rule',
-        verified: true,
         parameterAdjustments: [],
         conditionAdjustments: [],
-        removedRuleDescriptions: ['Old rule']
+        removedRuleDescriptions: ['Old rule'],
+        preexistingViolations: []
       },
       previousRuleCount: 2,
       currentRuleCount: 1,
@@ -1962,10 +1961,10 @@ describe('board mutation response contracts', () => {
       suggestionToken: 'signed-remove-suggestion',
       strategy: 'remove',
       description: 'Remove the conflicting rule',
-      verified: true,
       parameterAdjustments: [],
       conditionAdjustments: [],
-      removedRuleDescriptions: ['Old rule']
+      removedRuleDescriptions: ['Old rule'],
+      preexistingViolations: []
     })
 
     expect(result.rules).toEqual([expect.objectContaining({
@@ -2141,25 +2140,27 @@ describe('board mutation response contracts', () => {
   })
 
   it('rejects an automatic-fix result whose rule count contradicts its snapshot', async () => {
+    const suggestion = {
+      strategy: 'condition' as const,
+      description: 'Adjust a condition',
+      parameterAdjustments: [],
+      conditionAdjustments: [{
+        action: 'remove' as const,
+        attribute: 'motion',
+        targetType: 'api' as const,
+        description: 'Remove the motion event from the automation.',
+        ruleDescription: 'Motion turns on the light',
+        deviceLabel: 'Hall sensor',
+        modelTokenSource: 'BUNDLED' as const
+      }],
+      removedRuleDescriptions: [],
+      preexistingViolations: []
+    }
     vi.mocked(http.post).mockResolvedValue(resultEnvelope({
       applied: true,
       strategy: 'condition',
       verificationEvidenceReused: true,
-      appliedSuggestion: {
-        strategy: 'condition',
-        description: 'Adjust a condition',
-        verified: true,
-        parameterAdjustments: [],
-        conditionAdjustments: [{
-          action: 'remove',
-          attribute: 'motion',
-          targetType: 'api',
-          description: 'Remove the motion event from the automation.',
-          ruleDescription: 'Motion turns on the light',
-          deviceLabel: 'Hall sensor'
-        }],
-        removedRuleDescriptions: []
-      },
+      appliedSuggestion: suggestion,
       previousRuleCount: 1,
       currentRuleCount: 1,
       message: 'Applied.',
@@ -2168,15 +2169,52 @@ describe('board mutation response contracts', () => {
 
     await expect(boardApi.applyFix(7, {
       suggestionToken: 'signed-condition-suggestion',
-      strategy: 'condition',
-      description: 'Adjust a condition',
-      verified: true,
+      ...suggestion
+    })).rejects.toMatchObject({
+      code: BOARD_RESPONSE_INCOMPLETE_CODE,
+      message: expect.stringContaining('rule counts must match the authoritative rules snapshot')
+    })
+  })
+
+  // A strategy can list several alternatives. A response confirming a different one — a sibling the user
+  // did not pick — is well-formed on its own, so only the identity check can tell it apart.
+  it('rejects an applied fix that reports a different suggestion than the one submitted', async () => {
+    const submitted = {
+      strategy: 'remove' as const,
+      description: 'Remove the conflicting rule',
       parameterAdjustments: [],
       conditionAdjustments: [],
-      removedRuleDescriptions: []
-    })).rejects.toMatchObject({
-      code: FIX_RESPONSE_INCOMPLETE_CODE
-    })
+      removedRuleDescriptions: ['Old rule'],
+      preexistingViolations: []
+    }
+    vi.mocked(http.post).mockResolvedValue(resultEnvelope({
+      applied: true,
+      strategy: 'remove',
+      verificationEvidenceReused: true,
+      appliedSuggestion: { ...submitted, removedRuleDescriptions: ['Other rule'] },
+      previousRuleCount: 2,
+      currentRuleCount: 1,
+      message: 'Applied.',
+      canUndo: true,
+      canRedo: false,
+      rules: [{
+        id: 9,
+        conditions: [{ deviceName: 'sensor_1', attribute: 'motion', targetType: 'api' }],
+        command: {
+          deviceName: 'light_1',
+          action: 'turn_on',
+          contentDevice: null,
+          content: null
+        },
+        ruleString: 'Motion turns on the light'
+      }]
+    }))
+
+    await expect(boardApi.applyFix(7, { suggestionToken: 'signed-remove-suggestion', ...submitted }))
+      .rejects.toMatchObject({
+        code: BOARD_RESPONSE_INCOMPLETE_CODE,
+        message: expect.stringContaining('appliedSuggestion is not the suggestion that was submitted')
+      })
   })
 
   // Apply reuses the run's verification evidence after drift checks and never re-solves, so this
@@ -2190,10 +2228,10 @@ describe('board mutation response contracts', () => {
       appliedSuggestion: {
         strategy: 'remove',
         description: 'Remove the conflicting rule',
-        verified: true,
         parameterAdjustments: [],
         conditionAdjustments: [],
-        removedRuleDescriptions: ['Old rule']
+        removedRuleDescriptions: ['Old rule'],
+        preexistingViolations: []
       },
       previousRuleCount: 2,
       currentRuleCount: 1,
@@ -2219,14 +2257,15 @@ describe('board mutation response contracts', () => {
       suggestionToken: 'signed-remove-suggestion',
       strategy: 'remove',
       description: 'Remove the conflicting rule',
-      verified: true,
       parameterAdjustments: [],
       conditionAdjustments: [],
-      removedRuleDescriptions: ['Old rule']
+      removedRuleDescriptions: ['Old rule'],
+      preexistingViolations: []
       // The response-shape validator owns this rejection, so it carries the board contract code
       // rather than the fix-suggestion parser's own.
     })).rejects.toMatchObject({
       code: 'BOARD_RESPONSE_INCOMPLETE'
     })
   })
+
 })

@@ -112,7 +112,7 @@ clears **both** violated properties — though not in the same way, as the next 
 
 Repair is where this scene is most instructive, and it is not the flattering result. Parameter
 adjustment reports `SKIPPED_NO_PARAMETERIZABLE_VALUES` (the scene is entirely enum-valued) and
-condition adjustment reports `NO_VERIFIED_SUGGESTION` — adding "only unlock when someone is
+condition adjustment reports `NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE` — adding "only unlock when someone is
 home" genuinely does not repair the property, because occupancy evolves freely and no rule
 re-locks the door after the resident leaves. Permanent removal of the convenience-unlock rule
 is the only verified repair, and forward verification confirms `6 / 0`. A tool that declines

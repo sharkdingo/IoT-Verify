@@ -138,7 +138,6 @@ class VerificationControllerFixTest {
         FixSuggestionDto suggestion = FixSuggestionDto.builder()
                 .strategy("parameter")
                 .description("Adjust threshold")
-                .verified(true)
                 .suggestionToken("signed-suggestion")
                 .build();
         request.setSuggestion(suggestion);

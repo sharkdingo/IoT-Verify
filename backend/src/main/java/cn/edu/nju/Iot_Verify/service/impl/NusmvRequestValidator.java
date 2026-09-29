@@ -169,8 +169,10 @@ final class NusmvRequestValidator {
     /*
      * A device may not take a name the automatic fixer will mint.
      *
-     * The other generated identifiers are namespaced (`iot_verify_…`) so user input cannot reach them. The fix
-     * strategies' `param_` / `lambda_` / `condition_value_` are not, and `param_` cannot be renamed — it is the
+     * The other generated identifiers are namespaced (`iot_verify_…`) and registered below by their concrete
+     * names. Condition adjustment's guard probes are namespaced too, but their names are only known once a fix
+     * runs, so they are reserved by prefix here. The fix strategies' `param_` / `lambda_` / `condition_value_`
+     * are not namespaced at all, and `param_` cannot be renamed — it is the
      * wire format for `PreferredRangeSelection.targetId`, validated by a `@Pattern` on the DTO and by
      * `^param_[A-Za-z0-9_-]{24}$` in the frontend's `fixResponse.ts`.
      *

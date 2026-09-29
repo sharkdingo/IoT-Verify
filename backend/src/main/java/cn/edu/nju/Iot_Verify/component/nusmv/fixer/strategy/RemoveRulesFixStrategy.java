@@ -5,26 +5,24 @@ import cn.edu.nju.Iot_Verify.component.nusmv.fixer.FixStrategy;
 
 import cn.edu.nju.Iot_Verify.component.nusmv.executor.NusmvExecutor;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvGenerator;
-import cn.edu.nju.Iot_Verify.dto.fix.FaultRuleDto;
 import cn.edu.nju.Iot_Verify.dto.fix.FixSuggestionDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
-import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
-import java.math.BigInteger;
 import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * RemoveRulesFixStrategy: attempts to fix a specification violation by finding a minimal set of
- * fault rules to remove, then re-verifying with NuSMV.
+ * RemoveRulesFixStrategy: attempts to fix a specification violation by finding the minimal sets of
+ * repair-scope rules to remove, then re-verifying with NuSMV.
  *
  * Algorithm:
- * 1. Start with disabling 1 fault rule, then try combinations of 2, 3, ... up to max.
- * 2. For each candidate set, regenerate the NuSMV model without the disabled rules and re-verify.
- * 3. Return the first combination where all specs pass.
+ * 1. Try removing 1 rule, then combinations of 2, 3, ... up to every rule in the repair scope.
+ * 2. For each candidate set, regenerate the NuSMV model without those rules and re-verify
+ *    (see FixStrategyUtils#forwardVerify).
+ * 3. List every accepted combination, skipping those that contain a listed one (see FixAlternatives).
  */
 @Slf4j
 @Component
@@ -47,116 +45,98 @@ public class RemoveRulesFixStrategy implements FixStrategy {
     }
 
     @Override
-    public FixSuggestionDto tryFix(FixContext ctx) {
-        List<FaultRuleDto> faultRules = ctx.getFaultRules();
+    public StrategyOutcome tryFix(FixContext ctx) {
         List<RuleDto> allRules = ctx.getAllRules();
         int maxAttempts = ctx.getMaxAttempts() > 0 ? ctx.getMaxAttempts() : 20;
 
-        if (faultRules == null || faultRules.isEmpty()) {
-            return null;
-        }
-
-        // A lower-priority rule may be dormant in this particular trace and take over after the
-        // localized rule is removed. Include the same spec-related expansion used by the other
-        // strategies so minimal removal combinations can account for those backup automations.
-        Set<Integer> candidateIndices = new LinkedHashSet<>();
-        int violatedSpecIndex = ctx.getViolatedSpecIndex();
-        if (ctx.getSpecs() != null && violatedSpecIndex >= 0
-                && violatedSpecIndex < ctx.getSpecs().size()) {
-            SpecificationDto violatedSpec = ctx.getSpecs().get(violatedSpecIndex);
-            candidateIndices.addAll(FixStrategyUtils.expandRuleIndices(
-                    faultRules, allRules, violatedSpec, ctx.getDeviceSmvMap()));
-        } else {
-            faultRules.stream()
-                    .map(FaultRuleDto::getRuleIndex)
-                    .filter(index -> index != null && index >= 0 && index < allRules.size())
-                    .forEach(candidateIndices::add);
-        }
-        List<Integer> faultIndices = new ArrayList<>(candidateIndices);
-        if (faultIndices.isEmpty()) {
-            return null;
+        // The repair scope includes rules that stayed dormant in this trace but can influence the
+        // property: one of them may take over once the localized rule is gone, so a minimal removal
+        // set must be able to contain it.
+        List<Integer> candidates = ctx.getRepairRuleIndices().stream()
+                .filter(index -> index != null && index >= 0 && index < allRules.size())
+                .toList();
+        if (candidates.isEmpty()) {
+            return StrategyOutcome.none();
         }
         ctx.initializeStrategySearch(NAME, maxAttempts);
 
-        int attempts = 0;
-
-        // Try disabling increasing numbers of rules (1, 2, 3, ...)
-        for (int count = 1; count <= faultIndices.size() && attempts < maxAttempts; count++) {
-            int[] result = new int[count];
-            attempts = tryCombinations(faultIndices, result, 0, 0, count,
-                    ctx, allRules, attempts, maxAttempts);
-            if (attempts < 0) {
-                // Negative means a fix was found; decode the combo from result array
-                List<Integer> combo = new ArrayList<>();
-                for (int idx : result) combo.add(idx);
-                List<String> ruleDescriptions = combo.stream()
-                        .map(idx -> describeRule(allRules, idx))
-                        .collect(Collectors.toList());
-
-                return FixSuggestionDto.builder()
-                        .strategy(NAME)
-                        .description("Permanently remove " + combo.size() + " automation rule(s): "
-                                + String.join(", ", ruleDescriptions))
-                        .removedRuleIndices(combo)
-                        .removedRuleDescriptions(ruleDescriptions)
-                        .verified(true)
-                        .build();
-            }
+        // Smallest removals first: a combination containing a listed one is then never checked.
+        FixAlternatives alternatives = new FixAlternatives(ctx);
+        boolean exhausted = true;
+        for (int size = 1; size <= candidates.size() && exhausted; size++) {
+            exhausted = checkRemovals(candidates, new ArrayList<>(), 0, size, alternatives, ctx);
         }
 
-        log.info("RemoveRulesFixStrategy exhausted {} attempts without finding a fix", attempts);
-        if (!ctx.isExpired() && combinationCount(faultIndices.size())
-                .compareTo(BigInteger.valueOf(attempts)) > 0) {
+        StrategyOutcome outcome = alternatives.outcome(exhausted);
+        if (outcome.suggestions().isEmpty() && outcome.alternativesComplete()) {
+            // Every combination reached forward verification and was rejected; there is no pinned
+            // counterexample step here that could have ruled a combination out before it.
+            ctx.recordStrategyNoResult(NAME, "ALL_CANDIDATES_REJECTED",
+                    "Every combination of the rules that can influence the violated property was checked;"
+                            + " removing any of them either leaves the target specification violated, breaks a"
+                            + " specification the original rules satisfied, or changes the fixed attack scenario.");
+        } else if (outcome.suggestions().isEmpty() && !exhausted && !ctx.isExpired()) {
             ctx.recordStrategyNoResult(NAME, "SEARCH_BUDGET_EXHAUSTED",
-                    "Rule-removal search consumed " + attempts + " of " + maxAttempts
-                            + " allowed attempts before all candidate combinations were checked.");
+                    "Rule-removal search reached its candidate limit before all candidate combinations"
+                            + " were checked.");
         }
-        return null;
-    }
-
-    private static BigInteger combinationCount(int candidateCount) {
-        return candidateCount <= 0
-                ? BigInteger.ZERO
-                : BigInteger.ONE.shiftLeft(candidateCount).subtract(BigInteger.ONE);
+        return outcome;
     }
 
     /**
-     * Lazy DFS combination generator + verifier. Returns negative if fix found (combo stored in result[]),
-     * otherwise returns updated attempts count.
+     * Check, in lexicographic order, every removal of {@code size} rules that extends {@code chosen} with
+     * candidates from {@code from} on. A prefix that already contains a listed removal is skipped whole,
+     * since every extension of it does too.
+     *
+     * @return false when the search stopped before checking them all
      */
-    private int tryCombinations(List<Integer> faultIndices, int[] result, int start, int depth, int count,
-                                FixContext ctx, List<RuleDto> allRules,
-                                int attempts, int maxAttempts) {
-        if (depth == count) {
-            if (attempts >= maxAttempts || ctx.isExpired()) return attempts;
-            attempts++;
-            ctx.addStrategyAttempts(NAME, 1);
-
-            List<Integer> combo = new ArrayList<>();
-            for (int idx : result) combo.add(faultIndices.get(idx));
-
-            List<RuleDto> remainingRules = removeRulesByIndex(allRules, combo);
-            log.info("Fix attempt {}/{}: removing rule indices {} ({} rules remaining)",
-                    attempts, maxAttempts, combo, remainingRules.size());
-
-            boolean allPass = FixStrategyUtils.forwardVerify(
-                    smvGenerator, nusmvExecutor, ctx, remainingRules, NAME);
-            if (allPass) {
-                // Store the winning combo indices back into result for caller
-                for (int i = 0; i < count; i++) result[i] = faultIndices.get(result[i]);
-                return -1; // signal: fix found
-            }
-            return attempts;
+    private boolean checkRemovals(List<Integer> candidates, List<Integer> chosen, int from, int size,
+                                  FixAlternatives alternatives, FixContext ctx) {
+        if (alternatives.covers(changes(chosen))) return true;
+        if (chosen.size() == size) return check(chosen, alternatives, ctx);
+        for (int i = from; i <= candidates.size() - (size - chosen.size()); i++) {
+            chosen.add(candidates.get(i));
+            boolean finished = checkRemovals(candidates, chosen, i + 1, size, alternatives, ctx);
+            chosen.remove(chosen.size() - 1);
+            if (!finished) return false;
         }
+        return true;
+    }
 
-        for (int i = start; i < faultIndices.size(); i++) {
-            if (attempts >= maxAttempts || ctx.isExpired()) return attempts;
-            result[depth] = i;
-            attempts = tryCombinations(faultIndices, result, i + 1, depth + 1, count,
-                    ctx, allRules, attempts, maxAttempts);
-            if (attempts < 0) return attempts; // propagate fix-found signal
+    /** @return false when the removal could not be checked: listing limit, attempt budget or time. */
+    private boolean check(List<Integer> removal, FixAlternatives alternatives, FixContext ctx) {
+        if (alternatives.full() || !ctx.hasStrategyAttemptsLeft(NAME) || ctx.isExpired()) return false;
+        ctx.addStrategyAttempts(NAME, 1);
+        List<RuleDto> allRules = ctx.getAllRules();
+        List<RuleDto> remainingRules = removeRulesByIndex(allRules, removal);
+        log.info("Fix attempt {}: removing rule indices {} ({} rules remaining)",
+                ctx.strategySearchProgress(NAME).attemptsUsed(), removal, remainingRules.size());
+
+        FixStrategyUtils.Verification verification = FixStrategyUtils.forwardVerify(
+                smvGenerator, nusmvExecutor, ctx, remainingRules, NAME);
+        if (verification.isAccepted()) {
+            alternatives.accept(changes(removal), suggestion(List.copyOf(removal), allRules), verification);
+        } else {
+            alternatives.notAccepted(changes(removal), verification);
         }
-        return attempts;
+        return true;
+    }
+
+    private static Set<String> changes(List<Integer> removal) {
+        return removal.stream().map(String::valueOf).collect(Collectors.toSet());
+    }
+
+    private static FixSuggestionDto suggestion(List<Integer> removal, List<RuleDto> allRules) {
+        List<String> ruleDescriptions = removal.stream()
+                .map(idx -> describeRule(allRules, idx))
+                .collect(Collectors.toList());
+        return FixSuggestionDto.builder()
+                .strategy(NAME)
+                .description("Permanently remove " + removal.size() + " automation rule(s): "
+                        + String.join(", ", ruleDescriptions))
+                .removedRuleIndices(removal)
+                .removedRuleDescriptions(ruleDescriptions)
+                .build();
     }
 
     private List<RuleDto> removeRulesByIndex(List<RuleDto> allRules, List<Integer> indicesToRemove) {

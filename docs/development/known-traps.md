@@ -112,6 +112,14 @@ failure. `mvn clean test-compile` on the identical sources succeeds.
 The failure looks exactly like a real overload bug, so the instinct is to "fix" the overloads and
 break working code. Run `mvn clean` first and re-read the error.
 
+### Restoring a file from a backup copy keeps the mutated class
+
+Undoing a mutation check by copying the backup back (`Copy-Item`, `cp -p`) restores the *old* mtime,
+which is older than the class compiled from the mutant, so the incremental compile skips the file and
+the tests keep running the mutant. It surfaced as a test that stayed red after the restore, on
+sources identical to a green run. Touch the restored file (`(Get-Item f).LastWriteTime = Get-Date`)
+or run `mvn clean` before the confirming run.
+
 ### Anything else writing to `target/classes` corrupts the run
 
 Two symptoms: a `BUILD FAILURE` whose error list is empty (the tell is *no* `[ERROR] …java:[line]`

@@ -11,6 +11,7 @@ import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvGenerationContext;
 import cn.edu.nju.Iot_Verify.dto.model.ModelGenerationIssueReasonCode;
 import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.AttackSurface;
+import cn.edu.nju.Iot_Verify.component.nusmv.generator.GuardProbe;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.PropertyDimension;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvRelationUtils;
 import cn.edu.nju.Iot_Verify.exception.SmvGenerationException;
@@ -69,7 +70,7 @@ public class SmvMainModuleBuilder {
         }
         ParamCtx ctx = new ParamCtx(config, ruleIndexMap);
         return buildInternal(userId, devices, environmentVariables, rules, deviceSmvMap,
-                attackScenario, enablePrivacy, ctx, context);
+                attackScenario, enablePrivacy, ctx, context, List.of());
     }
 
     private static boolean hasParameterizationFrozenVars(ParamCtx ctx) {
@@ -182,8 +183,22 @@ public class SmvMainModuleBuilder {
                        AttackScenarioDto attackScenario,
                        boolean enablePrivacy,
                        SmvGenerationContext context) {
+        return build(userId, devices, environmentVariables, rules, deviceSmvMap,
+                attackScenario, enablePrivacy, context, List.of());
+    }
+
+    /** As {@link #build}, and appends {@code guardProbes} as main-module {@code DEFINE}s. */
+    public String build(Long userId,
+                        List<DeviceVerificationDto> devices,
+                        List<BoardEnvironmentVariableDto> environmentVariables,
+                        List<RuleDto> rules,
+                        Map<String, DeviceSmvData> deviceSmvMap,
+                        AttackScenarioDto attackScenario,
+                        boolean enablePrivacy,
+                        SmvGenerationContext context,
+                        List<GuardProbe> guardProbes) {
         return buildInternal(userId, devices, environmentVariables, rules, deviceSmvMap,
-                attackScenario, enablePrivacy, null, context);
+                attackScenario, enablePrivacy, null, context, guardProbes);
     }
 
     private String buildInternal(Long userId,
@@ -194,7 +209,9 @@ public class SmvMainModuleBuilder {
                                   AttackScenarioDto attackScenario,
                                   boolean enablePrivacy,
                                   ParamCtx paramCtx,
-                                  SmvGenerationContext context) {
+                                  SmvGenerationContext context,
+                                  List<GuardProbe> guardProbes) {
+        List<GuardProbe> safeGuardProbes = guardProbes != null ? guardProbes : List.of();
 
         if (attackScenario == null) {
             throw SmvGenerationException.invalidBuilderInput(
@@ -224,7 +241,8 @@ public class SmvMainModuleBuilder {
         Map<String, DeviceManifest.InternalVariable> environmentDomains =
                 collectEnvironmentDomains(devices, deviceSmvMap);
         AttackSurface attackSurface = AttackSurface.analyze(rules, deviceSmvMap);
-        validateMainNamespace(devices, rules, deviceSmvMap, environmentDomains, isAttack, paramCtx);
+        validateMainNamespace(devices, rules, deviceSmvMap, environmentDomains, isAttack, paramCtx,
+                safeGuardProbes);
 
         StringBuilder content = new StringBuilder();
 
@@ -352,6 +370,7 @@ public class SmvMainModuleBuilder {
         appendExternalVariableAssignments(content, devices, deviceSmvMap, isAttack);
         appendInternalVariableTransitions(content, devices, deviceSmvMap, isAttack);
         appendRuleExecutionProbeAssignments(content, rules, deviceSmvMap, isAttack, paramCtx, context);
+        appendGuardProbes(content, safeGuardProbes, deviceSmvMap, isAttack, paramCtx);
 
         return content.toString();
     }
@@ -361,8 +380,12 @@ public class SmvMainModuleBuilder {
                                        Map<String, DeviceSmvData> deviceSmvMap,
                                        Map<String, DeviceManifest.InternalVariable> environmentDomains,
                                        boolean isAttack,
-                                       ParamCtx paramCtx) {
+                                       ParamCtx paramCtx,
+                                       List<GuardProbe> guardProbes) {
         Map<String, String> identifiers = new LinkedHashMap<>();
+        for (GuardProbe probe : guardProbes) {
+            registerMainIdentifier(identifiers, probe.name(), "generated guard probe");
+        }
         if (isAttack) {
             registerMainIdentifier(identifiers, SmvConstants.NUSMV_COMPROMISED_POINT_COUNT,
                     "generated compromised-point counter");
@@ -434,7 +457,7 @@ public class SmvMainModuleBuilder {
      * The generated-name half of the main namespace — a backstop, not the first line of defence.
      *
      * `NusmvRequestValidator.validateMainNamespace` runs on every verify and simulate request and now also
-     * reserves the fix-generated prefixes (`param_`, `lambda_`, `condition_value_`) against device names, so a
+     * reserves the fix-generated prefixes (`SmvConstants.FIX_GENERATED_NAME_PREFIXES`) against device names, so a
      * user learns about the clash at their first verification rather than when they later ask for a fix. Before
      * that reservation existed, a device named `condition_value_r0_c1` saved and verified fine — confirmed
      * against the running API — and only this throw stopped it, from a surface the user was not editing.
@@ -733,6 +756,18 @@ public class SmvMainModuleBuilder {
         StringBuilder condition = new StringBuilder();
         // User-authored IF conditions describe the source state. The command produces the next state.
         appendRuleConditions(condition, rule, deviceSmvMap, false, targetVarName, paramCtx, context);
+        appendRuleBaseTerms(condition, rule, targetSmv, targetVarName, api, isAttack, paramCtx);
+        return condition.toString();
+    }
+
+    /** The guard terms besides the trigger conditions, each prefixed with {@code " & "}. */
+    private void appendRuleBaseTerms(StringBuilder condition,
+                                     RuleDto rule,
+                                     DeviceSmvData targetSmv,
+                                     String targetVarName,
+                                     DeviceManifest.API api,
+                                     boolean isAttack,
+                                     ParamCtx paramCtx) {
         if (targetSmv.getModes() != null) {
             for (int modeIndex = 0; modeIndex < targetSmv.getModes().size(); modeIndex++) {
                 String startState = getStateForMode(api.getStartState(), modeIndex, true);
@@ -745,7 +780,6 @@ public class SmvMainModuleBuilder {
         if (isAttack) {
             appendCommandDeliveryGuard(condition, targetVarName, rule, paramCtx);
         }
-        return condition.toString();
     }
 
     private void appendCommandDeliveryGuard(StringBuilder content,
@@ -815,6 +849,100 @@ public class SmvMainModuleBuilder {
             content.append("\n\tnext(").append(probeName).append(") := ")
                     .append(expression).append(";");
         }
+    }
+
+    /**
+     * Emits each probe as a {@code DEFINE}, rendered by the code that renders the guard component it
+     * reports. A probe that cannot be rendered is omitted rather than defined as a constant: its reader
+     * treats a missing value as unknown, whereas a stand-in would read as a fact about the model.
+     */
+    private void appendGuardProbes(StringBuilder content,
+                                   List<GuardProbe> guardProbes,
+                                   Map<String, DeviceSmvData> deviceSmvMap,
+                                   boolean isAttack,
+                                   ParamCtx paramCtx) {
+        List<String> definitions = new ArrayList<>();
+        for (GuardProbe probe : guardProbes) {
+            String expression = guardProbeExpression(probe, deviceSmvMap, isAttack, paramCtx);
+            if (expression == null || expression.isBlank()) {
+                log.debug("Guard probe {} ({}) could not be rendered and is omitted", probe.name(), probe.kind());
+                continue;
+            }
+            definitions.add("\n\t" + probe.name() + " := " + expression + ";");
+        }
+        if (!definitions.isEmpty()) {
+            content.append("\nDEFINE");
+            definitions.forEach(content::append);
+        }
+    }
+
+    private String guardProbeExpression(GuardProbe probe,
+                                        Map<String, DeviceSmvData> deviceSmvMap,
+                                        boolean isAttack,
+                                        ParamCtx paramCtx) {
+        // A probe reports a guard of this model, so it may only name one of this model's rules; the
+        // delivery guard's link term is keyed by the rule's position among them.
+        if (probe.rule() != null && !paramCtx.ruleIndexMap().containsKey(probe.rule())) {
+            return null;
+        }
+        // Rendering never records into the generation context: the guard itself already reported
+        // whatever made it unresolvable, and a probe must not count that rule as disabled twice.
+        return switch (probe.kind()) {
+            case RULE_BASE -> ruleBaseProbeExpression(probe.rule(), deviceSmvMap, isAttack, paramCtx);
+            case RULE_CONDITIONS -> {
+                StringBuilder conditions = new StringBuilder();
+                appendRuleConditions(conditions, probe.rule(), deviceSmvMap, false, null, paramCtx,
+                        SmvGenerationContext.noop());
+                yield conditions.toString();
+            }
+            case CONDITION -> buildSingleCondition(probe.condition(), deviceSmvMap, false, null,
+                    null, 0, null);
+            case OPERAND -> conditionOperand(probe.condition(), deviceSmvMap);
+        };
+    }
+
+    private String ruleBaseProbeExpression(RuleDto rule,
+                                           Map<String, DeviceSmvData> deviceSmvMap,
+                                           boolean isAttack,
+                                           ParamCtx paramCtx) {
+        if (rule.getCommand() == null || rule.getCommand().getDeviceName() == null
+                || rule.getCommand().getAction() == null) {
+            return null;
+        }
+        DeviceSmvData targetSmv = DeviceSmvDataFactory.findDeviceSmvDataStrict(
+                rule.getCommand().getDeviceName(), deviceSmvMap);
+        if (targetSmv == null) {
+            return null;
+        }
+        DeviceManifest.API api = DeviceSmvDataFactory.findApi(targetSmv.getManifest(), rule.getCommand().getAction());
+        if (api == null) {
+            return null;
+        }
+        StringBuilder terms = new StringBuilder();
+        appendRuleBaseTerms(terms, rule, targetSmv, targetSmv.getVarName(), api, isAttack, paramCtx);
+        return terms.isEmpty() ? "TRUE" : terms.substring(" & ".length());
+    }
+
+    /**
+     * The left-hand side a mode or variable condition compares: the expression
+     * {@link #buildSingleCondition} relates to the condition's value.
+     */
+    private static String conditionOperand(RuleDto.Condition condition, Map<String, DeviceSmvData> deviceSmvMap) {
+        if (condition.getAttribute() == null || condition.getTargetType() == null) {
+            return null;
+        }
+        DeviceSmvData smv = DeviceSmvDataFactory.findDeviceSmvDataStrict(condition.getDeviceName(), deviceSmvMap);
+        if (smv == null) {
+            return null;
+        }
+        String attr = condition.getAttribute().trim();
+        String targetType = condition.getTargetType().trim().toLowerCase(Locale.ROOT);
+        boolean resolves = switch (targetType) {
+            case "mode" -> smv.getModes() != null && smv.getModes().contains(attr);
+            case "variable" -> findInternalVariableByName(smv, attr) != null;
+            default -> false;
+        };
+        return resolves ? smv.getVarName() + "." + attr : null;
     }
 
     private void recordDisabledRule(SmvGenerationContext context,
@@ -965,7 +1093,7 @@ public class SmvMainModuleBuilder {
                     rhsValue = valueInfo.getFrozenVarName();
                 }
             }
-            String expr = buildRuleRelationExpr(lhsExpr, normalizedRel, rhsValue);
+            String expr = SmvRelationUtils.ruleRelationExpression(lhsExpr, normalizedRel, rhsValue);
             if (expr == null || expr.isBlank()) {
                 log.warn("Rule condition failed to build relation expression for device '{}' attribute '{}'", deviceId, attr);
                 return null;
@@ -2176,40 +2304,6 @@ private String buildRuleStateCondition(RuleDto.Condition condition, DeviceSmvDat
 
     private static boolean isSupportedRuleRelation(String relation) {
         return SmvRelationUtils.isSupportedRelation(relation);
-    }
-
-    /**
-     * Handle IN/NOT_IN by expanding to SMV expressions: (x=a | x=b) or (x!=a & x!=b).
-     * For other relations, returns left + relation + value directly.
-     */
-    private static String buildRuleRelationExpr(String left, String relation, String value) {
-        if ("in".equals(relation) || "not in".equals(relation)) {
-            String[] parts = value.split("[,;|]");
-            List<String> cleaned = new ArrayList<>();
-            for (String p : parts) {
-                String trimmed = p.trim();
-                if (!trimmed.isEmpty()) {
-                    cleaned.add(trimmed);
-                }
-            }
-            if (cleaned.isEmpty()) {
-                log.warn("Empty value list for '{}' relation on {}", relation, left);
-                return null;
-            }
-            String op = "in".equals(relation) ? "=" : "!=";
-            String join = "in".equals(relation) ? " | " : " & ";
-            if (cleaned.size() == 1) {
-                return left + op + cleaned.get(0);
-            }
-            StringBuilder sb = new StringBuilder("(");
-            for (int i = 0; i < cleaned.size(); i++) {
-                if (i > 0) sb.append(join);
-                sb.append(left).append(op).append(cleaned.get(i));
-            }
-            sb.append(")");
-            return sb.toString();
-        }
-        return left + relation + value;
     }
 
     private static List<String> splitRuleValues(String value) {

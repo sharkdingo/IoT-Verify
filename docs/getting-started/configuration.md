@@ -199,7 +199,7 @@ process that starts it.
 | :--- | :--- | :--- |
 | `FIX_MAX_ATTEMPTS` | `20` | Max main candidate attempts per fix strategy; a multi-threshold parameter search shares this budget between one-threshold probes and joint solving, refinement is separately bounded by `FIX_MAX_REFINE_ATTEMPTS`, and the whole pipeline by `FIX_TIMEOUT_MS` |
 | `FIX_MAX_CANDIDATES_PER_RULE` | `5` | Max candidate fixes per rule |
-| `FIX_MAX_REFINE_ATTEMPTS` | `10` | Max refinement-loop iterations |
+| `FIX_MAX_REFINE_ATTEMPTS` | `10` | Max refinement-loop iterations for each listed parameter alternative |
 | `FIX_TIMEOUT_MS` | `300000` | Overall fix timeout / soft deadline (ms) |
 
 ## Device Templates

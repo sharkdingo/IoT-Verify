@@ -188,6 +188,22 @@ class ApplyFixToolTest {
     }
 
     @Test
+    void preview_rejectsAPreexistingViolationMissingAFieldTheSchemaRequires() throws Exception {
+        // The schema marks every field required; accepting a partial entry meant the model could drop
+        // the formula the user needs to recognise which specification stays violated.
+        ObjectNode args = previewArgs(signedPublicRemovalSuggestion());
+        ((ObjectNode) args.path("suggestion")).putArray("preexistingViolations")
+                .addObject().put("specId", "s2").put("templateId", "1");
+
+        JsonNode result = objectMapper.readTree(tool.execute(args.toString()));
+
+        assertEquals("VALIDATION_ERROR", result.path("errorCode").asText());
+        assertTrue(result.path("error").asText().contains("preexistingViolations[0].formulaPreview"),
+                result.path("error").asText());
+        verifyNoInteractions(fixService);
+    }
+
+    @Test
     void preview_rejectsTamperedSuggestionUnderItsOriginalSignature() throws Exception {
         FixSuggestionDto suggestion = signedPublicRemovalSuggestion();
         ObjectNode args = previewArgs(suggestion);
@@ -267,7 +283,6 @@ class ApplyFixToolTest {
                         .upperBound(40)
                         .description("Lower the trigger threshold")
                         .build()))
-                .verified(true)
                 .build();
         String signedToken = tokenService.issue(
                 7L, 31L, serverSuggestion, Map.of(targetId, new PreferredRange(10, 20)));
@@ -478,7 +493,6 @@ class ApplyFixToolTest {
                 .description("Remove the conflicting nighttime unlock automation")
                 .removedRuleIndices(List.of(1))
                 .removedRuleDescriptions(List.of("When presence is detected, unlock the front door"))
-                .verified(true)
                 .build();
     }
 

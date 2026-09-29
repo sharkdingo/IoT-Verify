@@ -5,6 +5,7 @@ import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvGenerator;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvGenerationContext;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.AttackSurface;
 import cn.edu.nju.Iot_Verify.component.nusmv.parser.SmvTraceParser;
+import cn.edu.nju.Iot_Verify.component.nusmv.SpecResultAlignment;
 import cn.edu.nju.Iot_Verify.component.nusmv.executor.NusmvExecutor;
 import cn.edu.nju.Iot_Verify.component.nusmv.executor.NusmvExecutor.NusmvResult;
 import cn.edu.nju.Iot_Verify.component.nusmv.executor.NusmvExecutor.SpecCheckResult;
@@ -1625,104 +1626,22 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
     private List<SpecCheckResult> alignSpecResultsToEmittedSpecs(List<SpecCheckResult> rawSpecResults,
                                                                   List<SmvGenerationContext.EmittedSpec> emittedSpecs,
                                                                   List<String> checkLogs) {
-        Map<String, Deque<SpecCheckResult>> byExpression = new HashMap<>();
-        Set<SpecCheckResult> used = Collections.newSetFromMap(new IdentityHashMap<>());
-        for (SpecCheckResult result : rawSpecResults) {
-            if (result == null) continue;
-            String key = normalizeSpecExpression(result.getSpecExpression());
-            if (key.isBlank()) continue;
-            byExpression.computeIfAbsent(key, ignored -> new ArrayDeque<>()).add(result);
-        }
-
-        List<SpecCheckResult> aligned = new ArrayList<>(Collections.nCopies(emittedSpecs.size(), null));
-        boolean reordered = false;
-        for (int i = 0; i < emittedSpecs.size(); i++) {
-            SmvGenerationContext.EmittedSpec emittedSpec = emittedSpecs.get(i);
-            String key = normalizeSpecExpression(expression(emittedSpec));
-            Deque<SpecCheckResult> matches = byExpression.get(key);
-            if (matches == null || matches.isEmpty()) {
-                continue;
-            }
-            SpecCheckResult matched = matches.removeFirst();
-            aligned.set(i, matched);
-            used.add(matched);
-            if (i >= rawSpecResults.size() || rawSpecResults.get(i) != matched) {
-                reordered = true;
-            }
-        }
-
-        Deque<SpecCheckResult> unmatchedInOriginalOrder = new ArrayDeque<>();
-        for (SpecCheckResult result : rawSpecResults) {
-            if (result != null && !used.contains(result)) {
-                unmatchedInOriginalOrder.add(result);
-            }
-        }
+        SpecResultAlignment.Alignment alignment = SpecResultAlignment.align(rawSpecResults, emittedSpecs);
         /*
-         * Positional back-fill for results no expression matched — and it says so.
-         *
-         * This is a *guess*: it pairs leftover results with unfilled slots by position. Silence here was the
-         * defect. `rawSpecResults.size() == effectiveSpecs.size()` still holds afterwards, so `parseIncomplete`
-         * stays false and the run reports a definite SATISFIED/VIOLATED whose per-spec attribution was guessed —
-         * a user could then fix the rule behind the wrong specification. The aggregate verdict is unaffected
-         * (all-pass is order-independent), which is exactly why nothing else would surface it.
-         *
-         * It should not fire: NuSMV echoes each specification verbatim, so the expression match succeeds even
-         * when it reorders them. If it does fire, something changed about that echo and the attribution is no
-         * longer trustworthy, which is the user's business rather than a debugging detail.
+         * A back-filled result keeps `rawSpecResults.size() == effectiveSpecs.size()`, so `parseIncomplete` stays
+         * false and the run reports a definite SATISFIED/VIOLATED whose per-spec attribution was guessed — a user
+         * could then fix the rule behind the wrong specification. Silence here was the defect, so it is logged.
          */
-        int backFilled = 0;
-        for (int i = 0; i < aligned.size() && !unmatchedInOriginalOrder.isEmpty(); i++) {
-            if (aligned.get(i) == null) {
-                SpecCheckResult fallback = unmatchedInOriginalOrder.removeFirst();
-                aligned.set(i, fallback);
-                used.add(fallback);
-                backFilled++;
-            }
-        }
-        if (backFilled > 0 && checkLogs != null) {
-            checkLogs.add("[spec-attribution-uncertain] " + backFilled
+        if (alignment.backFilled() > 0 && checkLogs != null) {
+            checkLogs.add("[spec-attribution-uncertain] " + alignment.backFilled()
                     + " specification result(s) could not be matched to a submitted specification by expression "
                     + "and were assigned by position; which specification each of those verdicts describes is "
                     + "not certain.");
         }
-
-        if (reordered && checkLogs != null) {
+        if (alignment.reordered() && checkLogs != null) {
             checkLogs.add("NuSMV returned specification results in a different order; results were matched by expression.");
         }
-
-        return aligned;
-    }
-
-    /*
-     * Why stripping parentheses is safe here, and what makes it safe.
-     *
-     * This looks alarming in isolation: dropping every parenthesis makes semantically *different* formulas
-     * normalize alike — `AG (a & (b | c))` and `AG ((a & b) | c)` both become `aga&b|c`, and NuSMV really does
-     * give them different verdicts (measured on 2.7.1: `false` and `true` respectively). Colliding keys share one
-     * Deque, so attribution would then depend on arrival order — and NuSMV *does* reorder: three specs submitted
-     * `AG (a & (b|c))`, `AG ((a&b)|c)`, `AG a` came back with `AG a` first.
-     *
-     * It is nevertheless unreachable, because a collision needs two specs from the same template with identical
-     * operands — i.e. a duplicate — and `BoardStorageServiceImpl.validateNoIdenticalSpecifications` rejects that
-     * with a `ConflictException` on both spec-write paths (`saveSpecsInternal` and `saveBoardBatch`). The eight
-     * templates in `docs/architecture/spec-templates.md` differ by operator (`AG`/`AF`, `AX`/`AF`, `EX`/`EG`),
-     * which stripping does not touch, so all eight yield distinct keys.
-     *
-     * The leniency is not gratuitous either: matching by expression is what handles the reordering above. If a
-     * future change lets two distinct specs share a normalized key — a new template, or relaxing the duplicate
-     * check — the positional back-fill below becomes a silent misattribution, so re-derive this note then.
-     */
-    private String normalizeSpecExpression(String expression) {
-        if (expression == null) {
-            return "";
-        }
-        String normalized = expression.trim()
-                .replaceFirst("(?i)^CTL\\s*SPEC\\s+", "")
-                .replaceFirst("(?i)^LTL\\s*SPEC\\s+", "")
-                .toLowerCase(Locale.ROOT);
-        normalized = normalized.replaceAll("\\s+", "");
-        normalized = normalized.replace("(", "").replace(")", "");
-        return normalized;
+        return alignment.aligned();
     }
 
     private void appendParsedSpecResult(List<SpecResultDto> specResults,

@@ -1125,7 +1125,7 @@ Fast, no NuSMV invocation. **Response**: `FaultLocalizationResultDto`
 | `sourceModelComplete` | `boolean` | `true` only when the saved source verification explicitly recorded a complete generated model; missing metadata fails closed as `false` |
 | `sourceDisabledRuleCount` / `sourceSkippedSpecCount` | `int` | Source-verification omission counts |
 | `sourceGenerationIssues` | `ModelGenerationIssueDto[]` | Itemized `{ issueType, itemLabel, reasonCode, reason }` explanations copied from the source verification |
-| `faultRules` | `FaultRuleDto[]` | Automation rules observed in counterexample transitions |
+| `faultRules` | `FaultRuleDto[]` | Automation rules that fired in counterexample transitions *and* can influence the violated property (the [repair scope](../architecture/auto-fix.md#pipeline-rulefixer)); a fired rule that writes nothing the property depends on is omitted. When the property references no modeled device, every fired rule is kept |
 | `summary` | `String` | Interpretation that distinguishes transition involvement from proven independent causation |
 | `warnings` | `String[]` | Source-completeness limitations that the UI must present |
 
@@ -1220,11 +1220,11 @@ omitted), never when the caller explicitly supplies an empty or malformed select
 | `traceId` | `Long` | |
 | `violatedSpecId` | `String` | |
 | `faultRules` | `FaultRuleDto[]` | Same schema as fault localization |
-| `suggestions` | `FixSuggestionDto[]` | Advisory proposals that passed every submitted specification in the complete formal model used for the fix attempt. Each verified suggestion includes a short-lived `suggestionToken` binding the exact visible proposal to this user, trace, strategy, and preferred ranges |
+| `suggestions` | `FixSuggestionDto[]` | Advisory proposals that passed forward verification in the complete formal model used for the fix attempt: the violated specification holds and no specification the original rules satisfied is broken ([acceptance rule](../architecture/auto-fix.md#forward-verification-fixstrategyutilsforwardverify)). A strategy may list several alternatives, smallest change first ([listing rule](../architecture/auto-fix.md#listing-alternatives-fixalternatives)); the user applies one. Each suggestion includes a short-lived `suggestionToken` binding the exact visible proposal to this user, trace, strategy, and preferred ranges |
 | `strategyAttempts` | `FixStrategyAttemptDto[]` | One entry per requested strategy, including skipped/failed attempts and a user-readable reason |
-| `fixable` | `boolean` | Whether at least one complete-model, forward-verified suggestion was found; not whether repair was merely attempted |
-| `sourceModelComplete` | `Boolean` | Whether the counterexample source verification used a complete model |
-| `sourceDisabledRuleCount` / `sourceSkippedSpecCount` | `Integer` | Source-verification generation omissions |
+| `fixable` | `boolean` | Whether `suggestions` is non-empty, i.e. at least one complete-model, forward-verified suggestion was found; not whether repair was merely attempted |
+| `sourceModelComplete` | `boolean` | Whether the counterexample source verification used a complete model |
+| `sourceDisabledRuleCount` / `sourceSkippedSpecCount` | `int` | Source-verification generation omissions |
 | `sourceGenerationIssues` | `ModelGenerationIssueDto[]` | Itemized `{ issueType, itemLabel, reasonCode, reason }` explanations from the source verification |
 | `templateSnapshotComparison` | `NOT_CHECKED \| UNCHANGED \| CHANGED \| UNAVAILABLE` | Structured comparison between current device templates and the frozen run snapshot; clients localize drift/unavailable limitations from this field |
 | `summary` | `String` | Overall result summary |
@@ -1232,28 +1232,65 @@ omitted), never when the caller explicitly supplies an empty or malformed select
 | `parameterTargets` | `ParameterTarget[]` | Every bounded numeric inequality eligible for preferred-range selection in this attempt, independent of whether a verified suggestion was found |
 | `unusedPreferredRangeSelections` | `PreferredRangeSelection[]` | Preferred range selections that matched no parameter-adjustment target |
 
-`FixStrategyAttemptDto` is
-`{ strategy, status, reason, attemptsUsed?, attemptLimit? }`. The two nullable attempt
-fields are present together when a strategy starts its main candidate search; they do not
-include the parameter strategy's separate post-solution refinement budget. Status is one of
-`VERIFIED`, `NOT_VERIFIED`, `NO_VERIFIED_SUGGESTION`, `FAILED_MODEL_GENERATION`,
-`FAILED_SOLVER_EXECUTION`, `SEARCH_BUDGET_EXHAUSTED`, `TIMED_OUT`, `SKIPPED_TIMEOUT`,
-`SKIPPED_NO_SPEC`, `SKIPPED_NO_PARAMETERIZABLE_VALUES`, `SKIPPED_NO_FAULT_RULES`, `SKIPPED_UNSUPPORTED`, or
-`SKIPPED_INCOMPLETE_SOURCE_MODEL`. This distinguishes "no verified repair was found"
-from "the strategy started but did not finish" (`TIMED_OUT`) and "the strategy was
-not run" (`SKIPPED_*`). The suggestion/attempt correspondence is checked in both
-directions: a `VERIFIED` attempt must carry its suggestion (a verified attempt with no
-suggestion is `NO_VERIFIED_SUGGESTION`, never `VERIFIED`), and each suggestion's
-`verified` flag must match its attempt's status. Checking only one direction let a
-response claim a repair passed forward verification while offering nothing to apply. `FAILED_MODEL_GENERATION` means the strategy could not construct
+`FixStrategyAttemptDto` is `{ strategy, status, reason, alternativesComplete }`. It carries no
+attempt counter: the strategies spend their budget on different kinds of NuSMV checks, so one
+number could not mean the same thing across them, and the status already says whether the search
+finished. Status is one of
+`VERIFIED`, `NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE`, `ALL_CANDIDATES_REJECTED`, `INCONCLUSIVE`,
+`FAILED_MODEL_GENERATION`, `FAILED_SOLVER_EXECUTION`, `SEARCH_BUDGET_EXHAUSTED`, `TIMED_OUT`,
+`SKIPPED_TIMEOUT`, `SKIPPED_NO_SPEC`, `SKIPPED_NO_PARAMETERIZABLE_VALUES`, `SKIPPED_NO_FAULT_RULES`,
+`SKIPPED_UNSUPPORTED`, or `SKIPPED_INCOMPLETE_SOURCE_MODEL`. This distinguishes "no repair of this
+kind exists" from "the strategy started but did not finish" (`TIMED_OUT`) and "the strategy was
+not run" (`SKIPPED_*`).
+
+Two statuses are proofs over the strategy's searched space, which is the allowed edits against the
+pinned counterexample. Re-running with the same inputs returns the same answer, because the fix
+works on the trace's frozen snapshot:
+
+- `NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE`: the search space was exhausted and no allowed edit prevents
+  the pinned counterexample, so no candidate ever reached forward verification. A parameter search
+  whose preferred ranges share no value with the template bounds is the vacuous case.
+- `ALL_CANDIDATES_REJECTED`: edits that prevent the pinned counterexample exist, but every one was
+  rejected. Forward verification found the target specification still violated or a
+  baseline-satisfied specification broken, or the edit was ineligible (a rule left without a trigger
+  condition, a changed attack scenario). Rule removal has no pinned-counterexample step, so a
+  complete rule-removal search that listed nothing always ends here.
+
+`INCONCLUSIVE` means the search ended without a repair and without that proof. Forward verification
+could not settle some candidate, so a repair of this kind may still exist.
+
+`VERIFIED` means the strategy listed at least one suggestion, and
+`alternativesComplete` (a boolean on `VERIFIED` only, `null` otherwise) says whether that list is
+every minimal repair of its kind (`true`) or the search stopped first (`false`). The
+suggestion/attempt correspondence is checked in both directions: every suggestion belongs to a
+`VERIFIED` attempt of its strategy, and a `VERIFIED` attempt has at least one suggestion. Checking
+only one direction let a response claim a repair passed forward verification while offering
+nothing to apply. `FAILED_MODEL_GENERATION` means the strategy could not construct
 a complete candidate model, for example because the persisted counterexample initial state
 could not be replayed. `FAILED_SOLVER_EXECUTION` covers NuSMV execution failure and missing,
-incomplete, or unparseable solver output. `SEARCH_BUDGET_EXHAUSTED` means unchecked candidates
-remain after `attemptsUsed == attemptLimit`. None of these three incomplete outcomes is evidence
-that no repair exists.
+incomplete, or unparseable solver output; a NuSMV run cut off by the fix deadline is not a
+solver failure but part of `TIMED_OUT`. `SEARCH_BUDGET_EXHAUSTED` means the strategy used its
+`FIX_MAX_ATTEMPTS` budget while unchecked candidates remained and listed nothing; a listing cut
+short after its first repair is `VERIFIED` with `alternativesComplete=false`. None of these
+incomplete outcomes is evidence that no repair exists.
+
+A strategy run can record more than one of these outcomes, for example a transient solver failure
+and later a proof, and reports one, in this order: `VERIFIED`; a proof
+(`NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE`, `ALL_CANDIDATES_REJECTED`) or
+`SKIPPED_NO_PARAMETERIZABLE_VALUES`; `TIMED_OUT`; `FAILED_MODEL_GENERATION`;
+`FAILED_SOLVER_EXECUTION`; `SEARCH_BUDGET_EXHAUSTED`; `INCONCLUSIVE`. A proof or a precondition
+does not depend on the clock, so a deadline that passes after the strategy reached it does not turn
+it into `TIMED_OUT`.
 
 `FixSuggestionDto`: `{ suggestionToken, strategy, description, parameterAdjustments[],
-conditionAdjustments[], removedRuleDescriptions: String[], verified }`.
+conditionAdjustments[], removedRuleDescriptions: String[], preexistingViolations[] }`.
+Only candidates forward verification accepted are returned, so every suggestion is a verified one;
+its `suggestionToken` is what `/fix/apply` checks.
+`PreexistingViolation`: `{ specId, templateId, formulaPreview }` — a specification the original
+rules already violated on the same model and this suggestion leaves violated. It is `[]` when every
+specification holds; alternatives of one strategy can differ in it. It is part of the signed suggestion,
+so `/fix/apply` and the AI `apply_fix` tool must receive it unchanged. Clients label the row from
+`templateId`; `specId` is an identifier, not display text.
 All collection fields in `FixResultDto` and `FixSuggestionDto` are always serialized as
 JSON arrays. A collection that does not apply to the selected strategy is `[]`, never
 `null`, so clients can distinguish "no such changes" from a malformed response.
@@ -1361,11 +1398,8 @@ returns `409` rather than discarding newer work.
 
 Effect per strategy: `parameter` overwrites the target condition's value (and relation);
 `condition` adds/removes conditions; `remove` permanently deletes the flagged rules. A condition fix
-that would leave a rule with no trigger conditions is rejected. Positive condition candidates that
-merely repeat the command target's declared API `EndState` are also rejected as postconditions: they
-can make the original automation unreachable while producing a vacuous property pass. A candidate
-that is provably false under the command API's concrete `StartState` is rejected for the same reason;
-wildcard start-state segments are not treated as contradictions. During apply, NuSMV-normalized
+that would leave a rule with no trigger conditions is rejected; which conditions are offered at all
+is the candidate filter in [condition adjustment](../architecture/auto-fix.md). During apply, NuSMV-normalized
 device references are mapped back to the current raw board node ids; an unmappable reference fails
 the transaction without writing a rule.
 

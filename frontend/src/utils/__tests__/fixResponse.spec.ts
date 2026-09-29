@@ -34,7 +34,7 @@ const parameterSuggestion = {
   }],
   conditionAdjustments: [],
   removedRuleDescriptions: [],
-  verified: true
+  preexistingViolations: []
 }
 
 const conditionSuggestion = {
@@ -54,7 +54,7 @@ const conditionSuggestion = {
     modelTokenSource: 'CUSTOM'
   }],
   removedRuleDescriptions: [],
-  verified: true
+  preexistingViolations: []
 }
 
 const removeSuggestion = {
@@ -64,7 +64,7 @@ const removeSuggestion = {
   parameterAdjustments: [],
   conditionAdjustments: [],
   removedRuleDescriptions: ['When hall motion is active, take a camera photo'],
-  verified: true
+  preexistingViolations: []
 }
 
 const localization = () => ({
@@ -85,7 +85,8 @@ const fixResult = () => ({
   strategyAttempts: [{
     strategy: 'parameter',
     status: 'VERIFIED',
-    reason: 'The concrete suggestion passed forward verification.'
+    reason: 'The concrete suggestion passed forward verification.',
+    alternativesComplete: true
   }],
   fixable: true,
   templateSnapshotComparison: 'UNCHANGED',
@@ -110,7 +111,8 @@ const fixResultFor = (suggestion: typeof parameterSuggestion | typeof conditionS
   strategyAttempts: [{
     strategy: suggestion.strategy,
     status: 'VERIFIED',
-    reason: 'The concrete suggestion passed forward verification.'
+    reason: 'The concrete suggestion passed forward verification.',
+    alternativesComplete: true
   }],
   parameterTargets: suggestion.strategy === 'parameter' ? fixResult().parameterTargets : []
 })
@@ -148,6 +150,24 @@ describe('automatic-fix response contracts', () => {
     expect(validateFixResult(fixResult(), 12, ['parameter'])).toEqual(fixResult())
   })
 
+  it('accepts a verified suggestion that names the specifications the original rules already violated', () => {
+    const suggestion = {
+      ...parameterSuggestion,
+      preexistingViolations: [{ specId: 'spec_7', templateId: '3', formulaPreview: 'CTL AG NOT (co2 > 1000)' }]
+    }
+    expect(validateFixSuggestion(suggestion, 'Fix suggestion', 'parameter')).toEqual(suggestion)
+  })
+
+  it('rejects pre-existing violations that are missing or malformed', () => {
+    const { preexistingViolations: _omitted, ...missing } = parameterSuggestion
+    expect(() => validateFixSuggestion(missing, 'Fix suggestion', 'parameter'))
+      .toThrow(/preexistingViolations must be an array/)
+    expect(() => validateFixSuggestion({
+      ...parameterSuggestion,
+      preexistingViolations: [{ specId: 'spec_7', templateId: '3', formulaPreview: '' }]
+    }, 'Fix suggestion', 'parameter')).toThrow(/formulaPreview must be non-blank text/)
+  })
+
   it('rejects a fix result that omits an array required by the backend contract', () => {
     const { unusedPreferredRangeSelections: _unused, ...incomplete } = fixResult()
 
@@ -183,11 +203,64 @@ describe('automatic-fix response contracts', () => {
       strategyAttempts: ['parameter', 'condition', 'remove'].map(strategy => ({
         strategy,
         status: 'VERIFIED',
-        reason: 'The concrete suggestion passed forward verification.'
+        reason: 'The concrete suggestion passed forward verification.',
+        alternativesComplete: true
       }))
     }
 
     expect(validateFixResult(result, 12, [])).toEqual(result)
+  })
+
+  it('accepts several alternatives listed by one strategy', () => {
+    const second = {
+      ...parameterSuggestion,
+      suggestionToken: 'signed-parameter-alternative',
+      parameterAdjustments: [{ ...parameterSuggestion.parameterAdjustments[0], newValue: '22' }]
+    }
+    const result = {
+      ...fixResult(),
+      suggestions: [parameterSuggestion, second],
+      strategyAttempts: [{ ...fixResult().strategyAttempts[0], alternativesComplete: false }]
+    }
+
+    expect(validateFixResult(result, 12, ['parameter'])).toEqual(result)
+  })
+
+  it('requires a VERIFIED attempt to state whether its listing is complete', () => {
+    const { alternativesComplete: _omitted, ...attempt } = fixResult().strategyAttempts[0]
+
+    expect(() => validateFixResult({ ...fixResult(), strategyAttempts: [attempt] }, 12, ['parameter']))
+      .toThrow(/alternativesComplete must be boolean/)
+  })
+
+  it('rejects listing completeness on an attempt that listed nothing', () => {
+    expect(() => validateFixResult({
+      ...fixResult(),
+      suggestions: [],
+      fixable: false,
+      strategyAttempts: [{
+        strategy: 'parameter',
+        status: 'ALL_CANDIDATES_REJECTED',
+        reason: 'Forward verification rejected every candidate.',
+        alternativesComplete: true
+      }]
+    }, 12, ['parameter'])).toThrow(/alternativesComplete is only meaningful on VERIFIED/)
+  })
+
+  it('rejects a suggestion whose strategy did not report VERIFIED', () => {
+    expect(() => validateFixResult({
+      ...fixResult(),
+      strategyAttempts: [{
+        strategy: 'parameter',
+        status: 'TIMED_OUT',
+        reason: 'The strategy did not finish.'
+      }]
+    }, 12, ['parameter'])).toThrow(/a suggestion needs a VERIFIED strategy attempt/)
+  })
+
+  it('rejects a fixable flag that denies the listed suggestions', () => {
+    expect(() => validateFixResult({ ...fixResult(), fixable: false }, 12, ['parameter']))
+      .toThrow(/fixable must match the listed suggestions/)
   })
 
   it('does not trust a fixable flag without a verified suggestion', () => {
@@ -196,8 +269,8 @@ describe('automatic-fix response contracts', () => {
       suggestions: [],
       strategyAttempts: [{
         strategy: 'parameter',
-        status: 'NO_VERIFIED_SUGGESTION',
-        reason: 'No candidate passed forward verification.'
+        status: 'INCONCLUSIVE',
+        reason: 'The search ended without settling every candidate.'
       }]
     }, 12, ['parameter'])).toThrow(expect.objectContaining({
       code: FIX_RESPONSE_INCOMPLETE_CODE
@@ -255,8 +328,7 @@ describe('automatic-fix response contracts', () => {
         relation: '=',
         value: 'trusted'
       }],
-      removedRuleDescriptions: [],
-      verified: true
+      removedRuleDescriptions: []
     }, 'Fix suggestion', 'condition')).toThrow(expect.objectContaining({
       code: FIX_RESPONSE_INCOMPLETE_CODE
     }))
@@ -278,16 +350,14 @@ describe('automatic-fix response contracts', () => {
     expect(validateFixResult(result, 12, ['parameter'])).toEqual(result)
   })
 
-  it('accepts solver failure and budget exhaustion with bounded attempt progress', () => {
+  it('accepts solver failure and budget exhaustion as distinct outcomes', () => {
     const solverFailure = {
       ...fixResult(),
       suggestions: [],
       strategyAttempts: [{
         strategy: 'parameter',
         status: 'FAILED_SOLVER_EXECUTION',
-        reason: 'NuSMV returned incomplete output.',
-        attemptsUsed: 3,
-        attemptLimit: 7
+        reason: 'NuSMV returned incomplete output.'
       }],
       fixable: false
     }
@@ -297,9 +367,7 @@ describe('automatic-fix response contracts', () => {
       strategyAttempts: [{
         strategy: 'parameter',
         status: 'SEARCH_BUDGET_EXHAUSTED',
-        reason: 'Unchecked candidates remain.',
-        attemptsUsed: 7,
-        attemptLimit: 7
+        reason: 'Unchecked candidates remain.'
       }],
       fixable: false
     }
@@ -308,37 +376,25 @@ describe('automatic-fix response contracts', () => {
     expect(validateFixResult(budgetExhausted, 12, ['parameter'])).toEqual(budgetExhausted)
   })
 
-  it('rejects incomplete or impossible attempt progress', () => {
-    const missingLimit = {
-      ...fixResult(),
-      strategyAttempts: [{
-        strategy: 'parameter',
-        status: 'SEARCH_BUDGET_EXHAUSTED',
-        reason: 'Unchecked candidates remain.',
-        attemptsUsed: 3
-      }]
-    }
-    const overLimit = {
-      ...fixResult(),
-      strategyAttempts: [{
-        strategy: 'parameter',
-        status: 'SEARCH_BUDGET_EXHAUSTED',
-        reason: 'Unchecked candidates remain.',
-        attemptsUsed: 8,
-        attemptLimit: 7
-      }]
-    }
-
-    expect(() => validateFixResult(missingLimit, 12, ['parameter'])).toThrow(
-      expect.objectContaining({ code: FIX_RESPONSE_INCOMPLETE_CODE })
-    )
-    expect(() => validateFixResult(overLimit, 12, ['parameter'])).toThrow(
-      expect.objectContaining({ code: FIX_RESPONSE_INCOMPLETE_CODE })
-    )
-  })
-
   it('accepts parameter targets even when the search found no suggestion', () => {
     const result = {
+      ...fixResult(),
+      suggestions: [],
+      strategyAttempts: [{
+        strategy: 'parameter',
+        status: 'NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE',
+        reason: 'No threshold values within the allowed ranges prevent this counterexample.'
+      }],
+      fixable: false
+    }
+
+    expect(validateFixResult(result, 12, ['parameter'])).toEqual(result)
+    expect(result.parameterTargets).toHaveLength(1)
+  })
+
+  // The status was split into what the search proved; a server still sending it predates that split.
+  it('rejects the retired NO_VERIFIED_SUGGESTION status', () => {
+    expect(() => validateFixResult({
       ...fixResult(),
       suggestions: [],
       strategyAttempts: [{
@@ -347,10 +403,7 @@ describe('automatic-fix response contracts', () => {
         reason: 'No candidate passed forward verification.'
       }],
       fixable: false
-    }
-
-    expect(validateFixResult(result, 12, ['parameter'])).toEqual(result)
-    expect(result.parameterTargets).toHaveLength(1)
+    }, 12, ['parameter'])).toThrow(/strategyAttempts\[0\]\.status is invalid/)
   })
 })
 

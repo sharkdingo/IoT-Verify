@@ -202,14 +202,13 @@ class AwayModeUnlockSceneNusmvTest {
         fixResult.getStrategyAttempts().forEach(a -> attemptStatus.put(a.getStrategy(), a.getStatus()));
         assertEquals("SKIPPED_NO_PARAMETERIZABLE_VALUES", attemptStatus.get("parameter"),
                 "this scene is enum-valued, so parameter tuning has nothing to adjust");
-        assertEquals("NO_VERIFIED_SUGGESTION", attemptStatus.get("condition"));
+        assertEquals("NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE", attemptStatus.get("condition"));
         assertEquals("VERIFIED", attemptStatus.get("remove"));
 
         FixSuggestionDto removeFix = fixResult.getSuggestions().stream()
                 .filter(s -> "remove".equals(s.getStrategy()))
                 .findFirst()
                 .orElseThrow(() -> new AssertionError("no removal suggestion offered"));
-        assertTrue(removeFix.isVerified());
         assertEquals(List.of(1), removeFix.getRemovedRuleIndices(),
                 "removal must target exactly the convenience-unlock rule");
 

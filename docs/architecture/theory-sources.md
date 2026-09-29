@@ -140,23 +140,24 @@ These are intentional, not drift. Keep the list honest when adding more.
 - Generation is *observable*: a rule or spec that cannot be modeled is reported through
   `disabledRuleCount` / `skippedSpecCount` / `generationIssues` rather than silently dropped. The
   papers assume well-formed input.
+- Auto-fix departs from Salus §5 in its repair scope, its acceptance rule across several
+  specifications, and its listing of alternatives; each is stated once in
+  [auto-fix.md](auto-fix.md#paper-alignment-boundaries).
 
 ## Conformance checked against the papers (2026-08-04)
 
-Read alongside the implementation, and now **pinned by `TheorySourceConformanceTest`** — five rules that fail if a
+Read alongside the implementation, and now **pinned by `TheorySourceConformanceTest`**, whose checks fail if a
 claim below stops being true of the code, naming the paragraph that has become false. A dated conformance note is
 otherwise the kind of assertion that rots silently: the paper does not change, the code does, and nothing fails when
 they diverge. Verified conforming:
 
-- **Salus §5.3 parameter refinement** — the single-parameter search orders candidates by
-  `distance(value, original) = |value - original|` and walks outward, so it offers the closest working
-  value first (`ParameterAdjustStrategy`). Two other paths in the same class do **not** inherit that
-  guarantee, and claiming they do would overstate conformance: the coordinated multi-parameter path
-  selects the extreme in-bounds tightening hint (`Collections.max`/`min`) because several parameters must
-  hold together, and the joint FROZENVAR solve takes NuSMV's assignment and then narrows it with a
-  budget-capped greedy pass (`refineToClosest`) rather than a proof of minimality. Ties in the
-  single-parameter walk break in the relation's direction (higher first for `>`/`>=`). So "closest first"
-  is a property of the single-parameter walk, not of every suggestion the strategy can return.
+- **Salus §5.3 parameter refinement** — a solved value is moved toward the original by
+  `refineToClosest` (`ParameterAdjustStrategy`): each iteration re-solves `¬ρ` with that threshold
+  confined to `refinementWindow`, the values strictly closer than the current best
+  (`|value - original| < distance(best, original)`), so every accepted value is a smaller edit than the
+  one before. This does **not** prove a minimum edit: the pass is greedy, one threshold at a time with the
+  others held at their solved values, and capped by `FIX_MAX_REFINE_ATTEMPTS` and the fix deadline. When
+  the budget runs out the suggestion is the closest value verified so far.
 - **Salus §5.2 condition candidates** — candidate conditions to add are derived from the violated
   specification's own conditions (`FixStrategyUtils`), not invented.
 - **HAFuzz distance-guided search** — the explorer keeps the minimum-distance seed per round and
@@ -176,8 +177,8 @@ they diverge. Verified conforming:
   and is the kind of claim `TheorySourceConformanceTest` cannot catch: it greps the two `Math.scalb`
   substrings and so pins the formula's shape while leaving its instantiation unchecked.
 - **FSM thesis ch.4 repair loop** — the ¬ρ search proposes candidate values and `forwardVerify`
-  re-checks each against the real specification; a rejected candidate is added to the exclusion
-  invariants rather than retried. `forwardVerify` also refuses to confirm a fix whose regenerated
+  re-checks each against the real specification; a candidate it does not accept is excluded by an
+  invariant on the next solve rather than retried. `forwardVerify` also refuses to confirm a fix whose regenerated
   model is incomplete (`disabledRuleCount`/`skippedSpecCount`), so a repair is never certified
   against a property that was never emitted.
 
@@ -219,8 +220,9 @@ they diverge. Verified conforming:
   repair can introduce or remove it. When explaining such a verdict, "no reachable violation" and "this
   subject never varies" are different claims, and only the first describes the automation.
 
-  So a green forward verification means "no submitted property is violated", never "every property is
-  still meaningful". A repair that satisfies an implication property by removing its antecedent is
+  So a green forward verification means "the target property holds and no property the original rules
+  satisfied is violated" (properties that were already violated are listed with the suggestion), never
+  "every property is still meaningful". A repair that satisfies an implication property by removing its antecedent is
   reported as verified, and callers that present the result to a user should say which kind of
   satisfaction they are showing rather than implying the stronger one.
 

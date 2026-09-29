@@ -2,6 +2,7 @@ package cn.edu.nju.Iot_Verify.component.nusmv.executor;
 
 import cn.edu.nju.Iot_Verify.configure.NusmvConfig;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -11,6 +12,7 @@ import java.io.File;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
@@ -65,7 +67,7 @@ class NusmvExecutorTimeoutTest {
         NusmvExecutor executor = new NusmvExecutor(config);
         File model = Files.createTempFile("expired-fix", ".smv").toFile();
 
-        NusmvExecutor.NusmvResult result = executor.execute(model, 0);
+        NusmvExecutor.NusmvResult result = executor.executeRepairSearch(model, 0);
 
         assertFalse(result.isSuccess());
         assertTrue(result.getErrorMessage().contains("deadline expired"));
@@ -87,18 +89,41 @@ class NusmvExecutorTimeoutTest {
         semaphoreField.set(executor, occupied);
         File model = Files.createTempFile("busy-fix", ".smv").toFile();
 
-        NusmvExecutor.NusmvResult result = executor.execute(model, 1);
+        NusmvExecutor.NusmvResult result = executor.executeRepairSearch(model, 1);
 
         assertFalse(result.isSuccess());
         assertEquals(0, occupied.availablePermits(), "a busy call must not create a phantom permit");
         assertTrue(model.delete());
     }
 
+    /**
+     * Repair models leave their search variables unconstrained, and without {@code -df} NuSMV's
+     * reachability pass enumerates them. The JVM stands in for NuSMV: it names any option it rejects.
+     */
     @Test
-    void terminateProcessTreeStopsWrapperAndDiscoveredDescendant() throws Exception {
-        String javaExecutable = new File(System.getProperty("java.home"),
+    void repairSearchPassesDfWhileOrdinaryVerificationDoesNot(@TempDir Path dir) throws Exception {
+        NusmvConfig config = new NusmvConfig();
+        config.setPath(javaExecutable());
+        NusmvExecutor executor = new NusmvExecutor(config);
+        // Its own directory: the executor writes output.txt beside the model.
+        File model = Files.createFile(dir.resolve("model.smv")).toFile();
+
+        NusmvExecutor.NusmvResult repair = executor.executeRepairSearch(model, 30_000);
+        NusmvExecutor.NusmvResult ordinary = executor.execute(model);
+
+        assertTrue(repair.getErrorMessage().contains("-df"), repair.getErrorMessage());
+        assertFalse(ordinary.getErrorMessage().contains("-df"), ordinary.getErrorMessage());
+    }
+
+    private static String javaExecutable() {
+        return new File(System.getProperty("java.home"),
                 "bin" + File.separator + (System.getProperty("os.name").toLowerCase().contains("windows")
                         ? "java.exe" : "java")).getAbsolutePath();
+    }
+
+    @Test
+    void terminateProcessTreeStopsWrapperAndDiscoveredDescendant() throws Exception {
+        String javaExecutable = javaExecutable();
         Process wrapper = new ProcessBuilder(
                 javaExecutable,
                 "-cp", System.getProperty("java.class.path"),

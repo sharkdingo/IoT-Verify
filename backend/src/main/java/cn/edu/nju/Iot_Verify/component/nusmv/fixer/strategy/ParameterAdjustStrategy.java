@@ -14,15 +14,12 @@ import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceReferenceResol
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvData;
 import cn.edu.nju.Iot_Verify.configure.FixConfig;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
-import cn.edu.nju.Iot_Verify.dto.fix.FaultRuleDto;
 import cn.edu.nju.Iot_Verify.dto.fix.FixSuggestionDto;
 import cn.edu.nju.Iot_Verify.dto.fix.ParameterAdjustment;
 import cn.edu.nju.Iot_Verify.dto.fix.ParameterTarget;
 import cn.edu.nju.Iot_Verify.dto.fix.PreferredRange;
 import cn.edu.nju.Iot_Verify.dto.fix.PreferredRangeSelection;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
-import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
-import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -34,9 +31,11 @@ import java.util.stream.Collectors;
 /**
  * §5.1 Rule Parameter Adjustment (Salus paper).
  *
- * <p>Parameterizes numeric thresholds in fault rules as FROZENVAR,
- * uses NuSMV with negated spec (¬ρ) to find corrective values,
- * then verifies the candidate fix.</p>
+ * <p>Parameterizes numeric thresholds of the rules that can influence the violated property as
+ * FROZENVARs, uses NuSMV with the negated spec (¬ρ) on the pinned counterexample to find corrective
+ * values — first one threshold at a time, then jointly — and forward-verifies each candidate on the
+ * complete model before refining it toward the original values. It lists every minimal set of moved
+ * thresholds it verifies (see {@link FixAlternatives}).</p>
  */
 @Slf4j
 @Component
@@ -50,16 +49,24 @@ public class ParameterAdjustStrategy implements FixStrategy {
     private final NusmvExecutor nusmvExecutor;
     private final FixConfig fixConfig;
 
-    // §5.3 refinement: three-state result from NuSMV-guided candidate search (heuristic extension of paper §5.1)
-    private enum RefineStatus { CANDIDATE, UNSAT, ERROR }
+    /**
+     * Outcome of one ¬ρ solve on the pinned counterexample. UNSAT is a proof that no value in the given
+     * ranges prevents the violation; ERROR is not, and must never be reported as one. BUSY is the one
+     * failure that says nothing about the model: NuSMV's concurrency cap refused the run, so the same
+     * solve can succeed once a permit frees up.
+     */
+    private enum SolveStatus { CANDIDATE, UNSAT, ERROR, BUSY, GENERATION_FAILED }
 
-    private record RefineResult(RefineStatus status, Integer candidateValue) {
-        static RefineResult candidate(int value) { return new RefineResult(RefineStatus.CANDIDATE, value); }
-        static RefineResult unsat() { return new RefineResult(RefineStatus.UNSAT, null); }
-        static RefineResult error() { return new RefineResult(RefineStatus.ERROR, null); }
+    /**
+     * {@code values} maps each FROZENVAR name to the solver's value and is empty unless CANDIDATE;
+     * {@code error} explains an ERROR or BUSY. The caller decides whether an error is worth reporting:
+     * in the search it is, during refinement of an already verified repair it is not.
+     */
+    private record SolveResult(SolveStatus status, Map<String, Integer> values, String error) {
+        static SolveResult of(SolveStatus status) { return new SolveResult(status, Map.of(), null); }
+        static SolveResult error(String reason) { return new SolveResult(SolveStatus.ERROR, Map.of(), reason); }
+        boolean failed() { return status == SolveStatus.ERROR || status == SolveStatus.BUSY; }
     }
-
-    private record SingleParameterSearchResult(FixSuggestionDto suggestion, int attempts) {}
 
     @Override
     public String name() {
@@ -67,29 +74,25 @@ public class ParameterAdjustStrategy implements FixStrategy {
     }
 
     @Override
-    public FixSuggestionDto tryFix(FixContext ctx) {
-        List<FaultRuleDto> faultRules = ctx.getFaultRules();
+    public StrategyOutcome tryFix(FixContext ctx) {
         List<RuleDto> allRules = ctx.getAllRules();
         Map<String, DeviceSmvData> deviceSmvMap = ctx.getDeviceSmvMap();
-        int violatedSpecIndex = ctx.getViolatedSpecIndex();
         int maxAttempts = ctx.getMaxAttempts() > 0 ? ctx.getMaxAttempts() : 20;
+        List<Integer> repairIndices = ctx.getRepairRuleIndices();
 
-        if (faultRules == null || faultRules.isEmpty()) return null;
+        if (allRules == null || repairIndices == null || repairIndices.isEmpty()) return StrategyOutcome.none();
 
-        // §5: Expand parameterization scope to rules sharing devices with violated spec
-        SpecificationDto violatedSpec = ctx.getSpecs().get(violatedSpecIndex);
-        Set<Integer> expandedIndices = FixStrategyUtils.expandRuleIndices(
-                faultRules, allRules, violatedSpec, deviceSmvMap);
-
-        // Step 1: Identify parameterizable numeric conditions in expanded rule set
+        // Step 1: bounded integer thresholds in the rules that can influence the violated property.
+        // The scope is fault-first, so the targets below are too.
         Map<String, ParameterizationConfig.ParamInfo> thresholds = new LinkedHashMap<>();
         List<ParameterAdjustment> adjustmentTemplate = new ArrayList<>();
         int eligibleTargetCount = 0;
         int preferredRangeEmptyIntersections = 0;
 
-        for (int ruleIdx : expandedIndices) {
+        for (int ruleIdx : repairIndices) {
+            if (ruleIdx < 0 || ruleIdx >= allRules.size()) continue;
             RuleDto rule = allRules.get(ruleIdx);
-            if (rule.getConditions() == null) continue;
+            if (rule == null || rule.getConditions() == null) continue;
 
             for (int condIdx = 0; condIdx < rule.getConditions().size(); condIdx++) {
                 RuleDto.Condition cond = rule.getConditions().get(condIdx);
@@ -172,442 +175,261 @@ public class ParameterAdjustStrategy implements FixStrategy {
         }
 
         if (thresholds.isEmpty()) {
-            log.info("ParameterAdjustStrategy: no numeric conditions found in fault rules");
+            log.info("ParameterAdjustStrategy: no numeric conditions found in the repair scope");
             if (eligibleTargetCount == 0) {
                 ctx.recordStrategyNoResult(NAME, "SKIPPED_NO_PARAMETERIZABLE_VALUES",
-                        "No expanded fault rule contains a bounded numeric inequality that the parameter strategy can adjust.");
+                        "No rule that can influence the violated property compares a numeric value with a threshold, so there is no parameter to adjust.");
             } else if (preferredRangeEmptyIntersections == eligibleTargetCount) {
-                ctx.recordStrategyNoResult(NAME, "NO_VERIFIED_SUGGESTION",
+                // Vacuously settled: the allowed ranges contain no value at all. Widening them is the
+                // only way to a different answer, which is what the client says for narrowed ranges.
+                ctx.recordStrategyNoResult(NAME, "NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE",
                         "Every eligible numeric target was excluded because its preferred range does not overlap the declared template bounds.");
             }
-            return null;
+            return StrategyOutcome.none();
         }
 
         ctx.initializeStrategySearch(NAME, maxAttempts);
         log.info("ParameterAdjustStrategy: found {} parameterizable threshold(s)", thresholds.size());
+        return new ThresholdSearch(ctx, allRules, thresholds, adjustmentTemplate).run(maxAttempts);
+    }
 
-        // §5.3/user intent: before enumerating a Cartesian product, try the smaller repair
-        // class in which exactly one threshold changes. Values are checked nearest-first and
-        // final verification removes the counterexample-only replay constraints, then checks every
-        // submitted specification from the ordinary authored-model initialization.
-        if (thresholds.size() > 1 && maxAttempts > 1) {
-            int singleParameterBudget = Math.max(1, maxAttempts / 2);
-            SingleParameterSearchResult singleParameterResult = tryClosestSingleParameterFix(
-                    adjustmentTemplate, allRules, violatedSpec, faultRules,
-                    singleParameterBudget, ctx);
-            ctx.addStrategyAttempts(NAME, singleParameterResult.attempts());
-            if (singleParameterResult.suggestion() != null) {
-                return singleParameterResult.suggestion();
-            }
-            maxAttempts = Math.max(0, maxAttempts - singleParameterResult.attempts());
-            if (maxAttempts == 0) {
-                log.info("ParameterAdjustStrategy: minimal-change probe exhausted the full search budget");
-                recordBudgetExhausted(ctx);
-                return null;
-            }
+    /**
+     * One request's search. A repair is identified by the thresholds it moves (see
+     * {@link FixAlternatives}); the same thresholds moved to other values are variants of it, and
+     * refinement already picks the variant closest to the original.
+     */
+    private final class ThresholdSearch {
+        private final FixContext ctx;
+        private final List<RuleDto> allRules;
+        private final Map<String, ParameterizationConfig.ParamInfo> thresholds;
+        private final List<ParameterAdjustment> adjustmentTemplate;
+        private final Map<String, Integer> originals = new LinkedHashMap<>();
+        private final FixAlternatives alternatives;
+        /** Checked, unaccepted assignments over every threshold, so no solve returns one again. */
+        private final List<Map<String, Integer>> excluded = new ArrayList<>();
+
+        ThresholdSearch(FixContext ctx, List<RuleDto> allRules,
+                        Map<String, ParameterizationConfig.ParamInfo> thresholds,
+                        List<ParameterAdjustment> adjustmentTemplate) {
+            this.ctx = ctx;
+            this.allRules = allRules;
+            this.thresholds = thresholds;
+            this.adjustmentTemplate = adjustmentTemplate;
+            this.alternatives = new FixAlternatives(ctx);
+            // tryFix admits only thresholds whose original value parses as an integer.
+            thresholds.forEach((key, info) -> originals.put(key, Integer.parseInt(info.getOriginalValue())));
         }
 
-        // Redundant automations can require several thresholds to move together: changing either
-        // rule alone leaves the other one able to reproduce the violation. Before invoking the
-        // Cartesian FROZENVAR solve, try one deterministic coordinated boundary candidate for
-        // rules that issue the same command as a localized fault rule.
-        if (thresholds.size() > 1 && maxAttempts > 0) {
-            SingleParameterSearchResult coordinatedResult = tryCoordinatedPolicyFix(
-                    adjustmentTemplate, allRules, violatedSpec, faultRules, ctx);
-            ctx.addStrategyAttempts(NAME, coordinatedResult.attempts());
-            if (coordinatedResult.suggestion() != null) {
-                return coordinatedResult.suggestion();
+        StrategyOutcome run(int maxAttempts) {
+            // Phase 1: one threshold at a time. A repair that moves a single value is the easiest for a
+            // user to judge, so those are found first. Each probe is one ¬ρ solve on the pinned
+            // counterexample: UNSAT settles a threshold in a single NuSMV call, and only a returned
+            // value pays for a full-model verification. Half the budget is reserved for the joint phase.
+            // It needs every original value inside its search range: a preferred range that excludes
+            // a threshold's original obliges that threshold to move, and a single-threshold solve holds
+            // it at its original, so it would list repairs outside the range the user asked for.
+            if (thresholds.size() > 1 && maxAttempts > 1 && originalsWithinRanges()
+                    && !searchEachAlone(Math.max(1, maxAttempts / 2))) {
+                return alternatives.outcome(false);
             }
-            maxAttempts = Math.max(0, maxAttempts - coordinatedResult.attempts());
-            if (maxAttempts == 0) {
-                recordBudgetExhausted(ctx);
-                return null;
-            }
+            // Phase 2: all thresholds jointly. Redundant rules need this: moving either one alone
+            // leaves the other able to reproduce the violation. Only its UNSAT proves that no other
+            // repair exists.
+            return searchJointly();
         }
 
-        // Step 2: Iterate with NuSMV
-        List<String> exclusionInvars = new ArrayList<>();
-        List<String> frozenVarNames = thresholds.values().stream()
-                .map(ParameterizationConfig.ParamInfo::getFrozenVarName)
-                .collect(Collectors.toList());
+        private boolean originalsWithinRanges() {
+            return thresholds.entrySet().stream().allMatch(entry -> {
+                int original = originals.get(entry.getKey());
+                return original >= entry.getValue().getLowerBound() && original <= entry.getValue().getUpperBound();
+            });
+        }
 
-        for (int attempt = 0; attempt < maxAttempts; attempt++) {
-            if (ctx.isExpired()) {
-                log.info("ParameterAdjustStrategy: deadline expired at attempt {}/{}", attempt + 1, maxAttempts);
-                break;
-            }
-            ctx.addStrategyAttempts(NAME, 1);
-            ParameterizationConfig config = ParameterizationConfig.builder()
-                    .parameterizedThresholds(thresholds)
-                    .negatedSpecIndex(violatedSpecIndex)
-                    .exclusionInvars(new ArrayList<>(exclusionInvars))
-                    .build();
-
-            // Step 2a: Generate parameterized model with ¬ρ
-            File smvFile = null;
-            try {
-                SmvGenerator.GenerateResult genResult =
-                        FixStrategyUtils.generateParameterizedResolved(
-                                smvGenerator, ctx, allRules, config);
-                if (genResult == null) {
-                    log.warn("ParameterAdjust attempt {}: SMV generation returned null", attempt + 1);
-                    ctx.recordStrategyGenerationFailure(NAME,
-                            "The parameter candidate model could not preserve the original attack scenario.");
-                    return null;
-                }
-                if (!FixStrategyUtils.candidateModelComplete(genResult, ctx, NAME)) {
-                    return null;
-                }
-                smvFile = genResult.smvFile();
-
-                NusmvResult result = FixStrategyUtils.executeWithinDeadline(nusmvExecutor, smvFile, ctx);
-                if (!result.isSuccess()) {
-                    log.warn("ParameterAdjust attempt {}: NuSMV execution failed: {}",
-                            attempt + 1, result.getErrorMessage());
-                    FixStrategyUtils.recordSolverFailure(ctx, NAME,
-                            "NuSMV failed while searching for parameter values.");
-                    continue;
-                }
-
-                // Step 2b: Check ¬ρ result
-                List<SpecCheckResult> specResults = result.getSpecResults();
-                if (specResults == null || specResults.isEmpty()) {
-                    log.warn("ParameterAdjust attempt {}: empty spec results", attempt + 1);
-                    FixStrategyUtils.recordSolverFailure(ctx, NAME,
-                            "NuSMV returned no usable specification result during parameter search.");
-                    continue;
-                }
-
-                SpecCheckResult negatedResult = specResults.get(0);
-                if (negatedResult.isPassed()) {
-                    // ¬ρ universally true — more INVARs only restrict further, cannot help
-                    log.info("ParameterAdjust: ¬ρ is universally true, no parameter fix possible");
-                    ctx.clearStrategySolverFailure(NAME);
-                    return null;
-                }
-
-                // Step 2c: Extract FROZENVAR values from counterexample
-                String rawOutput = result.getOutput();
-                Map<String, String> extractedValues = ParameterExtractor.extract(rawOutput, frozenVarNames);
-                if (extractedValues.isEmpty()) {
-                    log.warn("ParameterAdjust attempt {}: failed to extract FROZENVAR values", attempt + 1);
-                    FixStrategyUtils.recordSolverFailure(ctx, NAME,
-                            "NuSMV output did not contain the parameter assignment required by the search.");
-                    continue;
-                }
-
-                // Step 2d: Build candidate adjustments
-                List<ParameterAdjustment> candidateAdjustments = new ArrayList<>();
-                List<RuleDto> modifiedRules = FixStrategyUtils.deepCopyRules(allRules);
-                boolean allExtracted = true;
-
-                for (ParameterAdjustment template : adjustmentTemplate) {
-                    String key = "r" + template.getRuleIndex() + "_c" + template.getConditionIndex();
-                    ParameterizationConfig.ParamInfo paramInfo = thresholds.get(key);
-                    String newValue = extractedValues.get(paramInfo.getFrozenVarName());
-                    if (newValue == null) {
-                        allExtracted = false;
-                        break;
+        /** Each threshold alone, the others at their original values, in repair-scope order. */
+        private boolean searchEachAlone(int phaseBudget) {
+            int used = 0;
+            for (String key : thresholds.keySet()) {
+                Map<String, ParameterizationConfig.ParamInfo> alone = Map.of(key, thresholds.get(key));
+                while (used < phaseBudget && canSolve()) {
+                    used++;
+                    ctx.addStrategyAttempts(NAME, 1);
+                    SolveResult solved = solve(allRules, alone, exclusions(alone), ctx);
+                    if (solved.status() == SolveStatus.GENERATION_FAILED) return false;
+                    if (solved.failed()) {
+                        FixStrategyUtils.recordSolverFailure(ctx, NAME, solved.error());
+                        // A refused permit says nothing about the model, so the same solve is retried.
+                        if (solved.status() == SolveStatus.BUSY) continue;
                     }
-
-                    candidateAdjustments.add(ParameterAdjustment.builder()
-                            .targetId(template.getTargetId())
-                            .ruleIndex(template.getRuleIndex())
-                            .conditionIndex(template.getConditionIndex())
-                            .attribute(template.getAttribute())
-                            .relation(template.getRelation())
-                            .originalValue(template.getOriginalValue())
-                            .newValue(newValue)
-                            .lowerBound(template.getLowerBound())
-                            .upperBound(template.getUpperBound())
-                            .build());
-
-                    // Apply to modified rules
-                    RuleDto rule = modifiedRules.get(template.getRuleIndex());
-                    rule.getConditions().get(template.getConditionIndex()).setValue(newValue);
+                    // UNSAT: this threshold alone cannot help. Any other failure: move on rather than
+                    // repeat the identical solve; the joint phase still covers this threshold. A listed
+                    // repair: other values of this threshold are only variants of it.
+                    if (solved.status() != SolveStatus.CANDIDATE || offer(solved.values())) break;
                 }
-
-                if (!allExtracted) {
-                    log.warn("ParameterAdjust attempt {}: incomplete FROZENVAR extraction", attempt + 1);
-                    FixStrategyUtils.recordSolverFailure(ctx, NAME,
-                            "NuSMV output contained an incomplete parameter assignment.");
-                    continue;
-                }
-
-                // Step 2e: Forward-verify with modified rules
-                if (FixStrategyUtils.forwardVerify(smvGenerator, nusmvExecutor, ctx, modifiedRules, NAME)) {
-                    // §5.3: Refine to closest original values
-                    refineToClosest(candidateAdjustments, thresholds, extractedValues, allRules, ctx);
-
-                    candidateAdjustments.forEach(adjustment ->
-                            adjustment.setDescription(describeParameterAdjustment(adjustment, allRules)));
-                    String description = candidateAdjustments.stream()
-                            .map(ParameterAdjustment::getDescription)
-                            .collect(Collectors.joining("; "));
-
-                    return FixSuggestionDto.builder()
-                            .strategy(NAME)
-                            .description("Adjust parameter(s): " + description)
-                            .parameterAdjustments(candidateAdjustments)
-                            .verified(true)
-                            .build();
-                }
-
-                // Step 2f: Add INVAR to exclude this configuration and retry
-                StringBuilder exclusion = new StringBuilder("!(");
-                List<String> eqParts = new ArrayList<>();
-                for (Map.Entry<String, String> entry : extractedValues.entrySet()) {
-                    eqParts.add(entry.getKey() + "=" + entry.getValue());
-                }
-                exclusion.append(String.join(" & ", eqParts)).append(")");
-                exclusionInvars.add(exclusion.toString());
-
-                log.info("ParameterAdjust attempt {}: forward verification failed, excluding configuration", attempt + 1);
-
-            } catch (Exception e) {
-                log.warn("ParameterAdjust attempt {}: failed: {}", attempt + 1, e.getMessage(), e);
-                if (e instanceof cn.edu.nju.Iot_Verify.exception.SmvGenerationException) {
-                    String reason = "Parameter candidate generation failed: " + e.getMessage();
-                    ctx.addDiagnostic(reason);
-                    ctx.recordStrategyGenerationFailure(NAME, reason);
-                    return null;
-                }
-                FixStrategyUtils.preserveInterrupt(e);
-                FixStrategyUtils.recordSolverFailure(ctx, NAME,
-                        "Parameter search encountered an execution error: " + e.getMessage());
-                // Continue to next attempt — exception may be transient or INVAR-dependent, but a
-                // restored interrupt makes `ctx.isExpired()` stop the loop on the next pass.
-            } finally {
-                FixStrategyUtils.cleanupTempDir(smvFile);
+                if (used >= phaseBudget) break;
             }
+            return true;
         }
 
-        log.info("ParameterAdjustStrategy: exhausted attempts without finding a fix");
-        if (!ctx.isExpired()) {
-            FixContext.StrategySearchProgress progress = ctx.strategySearchProgress(NAME);
-            if (progress != null && progress.attemptsUsed() >= progress.attemptLimit()) {
+        private StrategyOutcome searchJointly() {
+            boolean exhausted = false;
+            while (canSolve()) {
+                ctx.addStrategyAttempts(NAME, 1);
+                SolveResult solved = solve(allRules, thresholds, exclusions(thresholds), ctx);
+                if (solved.status() == SolveStatus.GENERATION_FAILED) return alternatives.outcome(false);
+                if (solved.status() == SolveStatus.UNSAT) {
+                    // More exclusions only restrict further, so no later attempt can succeed.
+                    exhausted = true;
+                    break;
+                }
+                if (solved.failed()) {
+                    // The next iteration would run the identical model (no exclusion was added), so a
+                    // retry can only repeat the failure until the deadline, unless the run was merely
+                    // refused a permit.
+                    FixStrategyUtils.recordSolverFailure(ctx, NAME, solved.error());
+                    if (solved.status() == SolveStatus.BUSY) continue;
+                    break;
+                }
+                offer(solved.values());
+            }
+            return finish(exhausted);
+        }
+
+        private StrategyOutcome finish(boolean exhausted) {
+            StrategyOutcome outcome = alternatives.outcome(exhausted);
+            if (!outcome.suggestions().isEmpty()) return outcome;
+            if (outcome.alternativesComplete()) {
+                log.info("ParameterAdjust: no threshold assignment is left to check, no parameter fix exists");
+                // The proof supersedes a transient solver failure on an earlier attempt.
+                ctx.clearStrategySolverFailure(NAME);
+                if (alternatives.anyRejected()) {
+                    ctx.recordStrategyNoResult(NAME, "ALL_CANDIDATES_REJECTED",
+                            "Threshold values that prevent this counterexample exist, but forward verification on"
+                                    + " the complete model rejected every one of them.");
+                } else {
+                    ctx.recordStrategyNoResult(NAME, "NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE",
+                            "No threshold values within the allowed ranges prevent this counterexample.");
+                }
+            } else if (!ctx.isExpired() && !ctx.hasStrategyAttemptsLeft(NAME)) {
                 recordBudgetExhausted(ctx);
             }
+            return outcome;
         }
-        return null;
+
+        /**
+         * Forward-verify a solved assignment and list it if accepted. Either way it is excluded from
+         * later solves: a listed repair through the superset exclusion, anything else exactly.
+         *
+         * @return whether the assignment was listed
+         */
+        private boolean offer(Map<String, Integer> solvedValues) {
+            Map<String, Integer> assignment = new LinkedHashMap<>(originals);
+            solvedValues.forEach((frozenVar, value) -> assignment.put(keyOfFrozenVar(thresholds, frozenVar), value));
+            Set<String> moved = moved(assignment);
+            if (moved.isEmpty()) {
+                // The counterexample's own board: nothing to verify, and nothing the user could apply.
+                excluded.add(assignment);
+                return false;
+            }
+            FixStrategyUtils.Verification verification = FixStrategyUtils.forwardVerify(
+                    smvGenerator, nusmvExecutor, ctx, withValues(assignment, moved), NAME);
+            if (!verification.isAccepted()) {
+                excluded.add(assignment);
+                alternatives.notAccepted(moved, verification);
+                log.info("ParameterAdjust: candidate moving {} was not accepted, excluding it", moved);
+                return false;
+            }
+            list(assignment, moved, verification);
+            return true;
+        }
+
+        /** Refine an accepted assignment toward the original values and list the result. */
+        private void list(Map<String, Integer> assignment, Set<String> moved,
+                          FixStrategyUtils.Verification verification) {
+            Map<String, String> discovered = new LinkedHashMap<>();
+            assignment.forEach((key, value) ->
+                    discovered.put(thresholds.get(key).getFrozenVarName(), String.valueOf(value)));
+            List<ParameterAdjustment> adjustments = new ArrayList<>();
+            for (ParameterAdjustment template : adjustmentTemplate) {
+                if (moved.contains(paramKey(template))) {
+                    adjustments.add(adjustmentWithValue(template, assignment.get(paramKey(template)), allRules));
+                }
+            }
+            FixStrategyUtils.Verification refined =
+                    refineToClosest(adjustments, thresholds, discovered, verification, allRules, ctx);
+            // A threshold refinement returned to its original value is no longer part of this repair.
+            adjustments.removeIf(adjustment -> Objects.equals(
+                    safeParseInt(adjustment.getNewValue()), safeParseInt(adjustment.getOriginalValue())));
+            adjustments.forEach(adjustment ->
+                    adjustment.setDescription(describeParameterAdjustment(adjustment, allRules)));
+            alternatives.accept(
+                    adjustments.stream().map(ParameterAdjustStrategy::paramKey).collect(Collectors.toSet()),
+                    FixSuggestionDto.builder()
+                            .strategy(NAME)
+                            .description("Adjust parameter(s): " + adjustments.stream()
+                                    .map(ParameterAdjustment::getDescription)
+                                    .collect(Collectors.joining("; ")))
+                            .parameterAdjustments(adjustments)
+                            .build(),
+                    refined);
+        }
+
+        private Set<String> moved(Map<String, Integer> assignment) {
+            Set<String> moved = new LinkedHashSet<>();
+            assignment.forEach((key, value) -> {
+                if (!value.equals(originals.get(key))) moved.add(key);
+            });
+            return moved;
+        }
+
+        /**
+         * INVARs for a solve over {@code space}, the thresholds outside it held at their original
+         * values: no excluded assignment, and no assignment that moves at least the thresholds of a
+         * listed repair. One that moves a threshold outside the space cannot occur in it and is left out.
+         */
+        private List<String> exclusions(Map<String, ParameterizationConfig.ParamInfo> space) {
+            List<String> invars = new ArrayList<>();
+            for (Map<String, Integer> assignment : excluded) {
+                if (!space.keySet().containsAll(moved(assignment))) continue;
+                invars.add("!(" + space.keySet().stream()
+                        .map(key -> space.get(key).getFrozenVarName() + "=" + assignment.get(key))
+                        .collect(Collectors.joining(" & ")) + ")");
+            }
+            for (Set<String> changes : alternatives.listedChanges()) {
+                if (!space.keySet().containsAll(changes)) continue;
+                invars.add("!(" + space.keySet().stream()
+                        .filter(changes::contains)
+                        .map(key -> space.get(key).getFrozenVarName() + "!=" + originals.get(key))
+                        .collect(Collectors.joining(" & ")) + ")");
+            }
+            return invars;
+        }
+
+        private boolean canSolve() {
+            return !alternatives.full() && ctx.hasStrategyAttemptsLeft(NAME) && !ctx.isExpired();
+        }
+
+        private List<RuleDto> withValues(Map<String, Integer> assignment, Set<String> keys) {
+            List<RuleDto> modified = FixStrategyUtils.deepCopyRules(allRules);
+            keys.forEach(key -> applyParamValue(modified, key, String.valueOf(assignment.get(key))));
+            return modified;
+        }
+    }
+
+    private static String paramKey(ParameterAdjustment template) {
+        return "r" + template.getRuleIndex() + "_c" + template.getConditionIndex();
+    }
+
+    private static String keyOfFrozenVar(Map<String, ParameterizationConfig.ParamInfo> thresholds, String frozenVar) {
+        return thresholds.entrySet().stream()
+                .filter(entry -> entry.getValue().getFrozenVarName().equals(frozenVar))
+                .map(Map.Entry::getKey)
+                .findFirst()
+                .orElseThrow();
     }
 
     private static void recordBudgetExhausted(FixContext ctx) {
-        FixContext.StrategySearchProgress progress = ctx.strategySearchProgress(NAME);
-        int used = progress != null ? progress.attemptsUsed() : 0;
-        int limit = progress != null ? progress.attemptLimit() : 0;
         ctx.recordStrategyNoResult(NAME, "SEARCH_BUDGET_EXHAUSTED",
-                "Parameter search consumed " + used + " of " + limit
-                        + " allowed attempts before it could establish that no repair exists.");
-    }
-
-    private SingleParameterSearchResult tryClosestSingleParameterFix(
-            List<ParameterAdjustment> adjustmentTemplate,
-            List<RuleDto> allRules,
-            SpecificationDto violatedSpec,
-            List<FaultRuleDto> faultRules,
-            int maxAttempts,
-            FixContext ctx) {
-        Set<Integer> localizedRuleIndices = faultRules.stream()
-                .filter(Objects::nonNull)
-                .map(FaultRuleDto::getRuleIndex)
-                .collect(Collectors.toCollection(LinkedHashSet::new));
-        List<ParameterAdjustment> orderedTemplates = new ArrayList<>(adjustmentTemplate);
-        orderedTemplates.sort(Comparator.comparingInt(template ->
-                localizedRuleIndices.contains(template.getRuleIndex()) ? 0 : 1));
-
-        int attempts = 0;
-        for (ParameterAdjustment template : orderedTemplates) {
-            if (attempts >= maxAttempts || ctx.isExpired()) break;
-            Integer original = safeParseInt(template.getOriginalValue());
-            if (original == null) continue;
-
-            LinkedHashSet<Integer> policyHints = numericPolicyHints(
-                    violatedSpec, template, allRules, ctx.getDeviceSmvMap());
-            Integer verifiedValue = null;
-            int verifiedDistance = Integer.MAX_VALUE;
-
-            List<Integer> policyProbes = new ArrayList<>(policyHints.stream()
-                    .sorted(Comparator.comparingLong(value -> distance(value, original)))
-                    .toList());
-            Set<Integer> scheduledPolicyProbes = new LinkedHashSet<>(policyProbes);
-            Set<Integer> attemptedPolicyProbes = new HashSet<>();
-            for (int probeIndex = 0; probeIndex < policyProbes.size(); probeIndex++) {
-                int hint = policyProbes.get(probeIndex);
-                if (attempts >= maxAttempts || ctx.isExpired()) break;
-                if (hint == original || hint < template.getLowerBound() || hint > template.getUpperBound()) {
-                    continue;
-                }
-                if (!singleParameterCandidatePersistable(template, hint, allRules)) {
-                    Integer next = tighteningNeighbor(hint, template.getRelation());
-                    if (next != null
-                            && next >= template.getLowerBound()
-                            && next <= template.getUpperBound()
-                            && scheduledPolicyProbes.add(next)) {
-                        policyProbes.add(next);
-                    }
-                    continue;
-                }
-                attemptedPolicyProbes.add(hint);
-                attempts++;
-                if (singleParameterForwardVerifies(template, hint, allRules, ctx)) {
-                    verifiedValue = hint;
-                    verifiedDistance = (int) Math.min(Integer.MAX_VALUE, distance(hint, original));
-                    break;
-                }
-            }
-
-            NearestValueCursor cursor = new NearestValueCursor(
-                    original, template.getLowerBound(), template.getUpperBound(), template.getRelation());
-            while (attempts < maxAttempts && !ctx.isExpired()) {
-                Integer candidate = cursor.next();
-                if (candidate == null) break;
-                long candidateDistance = distance(candidate, original);
-                if (verifiedValue != null && candidateDistance >= verifiedDistance) break;
-                if (attemptedPolicyProbes.contains(candidate)) continue;
-                if (!singleParameterCandidatePersistable(template, candidate, allRules)) continue;
-                attempts++;
-                if (singleParameterForwardVerifies(template, candidate, allRules, ctx)) {
-                    verifiedValue = candidate;
-                    verifiedDistance = (int) Math.min(Integer.MAX_VALUE, candidateDistance);
-                }
-            }
-
-            if (verifiedValue != null) {
-                ParameterAdjustment adjustment = adjustmentWithValue(template, verifiedValue, allRules);
-                return new SingleParameterSearchResult(FixSuggestionDto.builder()
-                        .strategy(NAME)
-                        .description("Adjust parameter: " + adjustment.getDescription())
-                        .parameterAdjustments(List.of(adjustment))
-                        .verified(true)
-                        .build(), attempts);
-            }
-        }
-        return new SingleParameterSearchResult(null, attempts);
-    }
-
-    private SingleParameterSearchResult tryCoordinatedPolicyFix(
-            List<ParameterAdjustment> adjustmentTemplate,
-            List<RuleDto> allRules,
-            SpecificationDto violatedSpec,
-            List<FaultRuleDto> faultRules,
-            FixContext ctx) {
-        Set<String> localizedCommandKeys = faultRules.stream()
-                .filter(Objects::nonNull)
-                .map(FaultRuleDto::getRuleIndex)
-                .filter(index -> index != null && index >= 0 && index < allRules.size())
-                .map(index -> commandKey(allRules.get(index), ctx.getDeviceSmvMap()))
-                .filter(Objects::nonNull)
-                .collect(Collectors.toCollection(LinkedHashSet::new));
-        if (localizedCommandKeys.isEmpty()) {
-            return new SingleParameterSearchResult(null, 0);
-        }
-
-        List<ParameterAdjustment> coordinated = new ArrayList<>();
-        for (ParameterAdjustment template : adjustmentTemplate) {
-            if (template.getRuleIndex() < 0 || template.getRuleIndex() >= allRules.size()) continue;
-            String commandKey = commandKey(allRules.get(template.getRuleIndex()), ctx.getDeviceSmvMap());
-            if (!localizedCommandKeys.contains(commandKey)) continue;
-
-            Integer original = safeParseInt(template.getOriginalValue());
-            if (original == null) continue;
-            boolean tightenHigher = ">".equals(template.getRelation()) || ">=".equals(template.getRelation());
-            List<Integer> tighteningHints = numericPolicyHints(
-                    violatedSpec, template, allRules, ctx.getDeviceSmvMap()).stream()
-                    .filter(value -> value >= template.getLowerBound() && value <= template.getUpperBound())
-                    .filter(value -> tightenHigher ? value > original : value < original)
-                    .toList();
-            if (tighteningHints.isEmpty()) continue;
-            int selected = tightenHigher
-                    ? Collections.max(tighteningHints)
-                    : Collections.min(tighteningHints);
-            coordinated.add(adjustmentWithValue(template, selected, allRules));
-        }
-        if (coordinated.size() < 2) {
-            return new SingleParameterSearchResult(null, 0);
-        }
-
-        List<RuleDto> modifiedRules = FixStrategyUtils.deepCopyRules(allRules);
-        coordinated.forEach(adjustment -> applyAdjustment(modifiedRules, adjustment));
-
-        // Equal coordinated boundaries can make redundant rules identical. Move later rules one
-        // discrete step farther in the same tightening direction until the Board invariant holds.
-        int structuralSteps = 0;
-        int maxStructuralSteps = allRules.size() + coordinated.size() + 1;
-        while (!FixStrategyUtils.candidateRulesPersistable(modifiedRules)
-                && structuralSteps < maxStructuralSteps) {
-            boolean advanced = false;
-            for (int index = coordinated.size() - 1; index >= 0; index--) {
-                ParameterAdjustment adjustment = coordinated.get(index);
-                Integer current = safeParseInt(adjustment.getNewValue());
-                Integer next = current == null ? null : tighteningNeighbor(current, adjustment.getRelation());
-                if (next == null || next < adjustment.getLowerBound() || next > adjustment.getUpperBound()) {
-                    continue;
-                }
-                adjustment.setNewValue(String.valueOf(next));
-                adjustment.setDescription(describeParameterAdjustment(adjustment, allRules));
-                applyAdjustment(modifiedRules, adjustment);
-                structuralSteps++;
-                advanced = true;
-                if (FixStrategyUtils.candidateRulesPersistable(modifiedRules)) break;
-            }
-            if (!advanced) {
-                return new SingleParameterSearchResult(null, 0);
-            }
-        }
-        if (!FixStrategyUtils.candidateRulesPersistable(modifiedRules)) {
-            return new SingleParameterSearchResult(null, 0);
-        }
-
-        if (!FixStrategyUtils.forwardVerify(smvGenerator, nusmvExecutor, ctx, modifiedRules, NAME)) {
-            return new SingleParameterSearchResult(null, 1);
-        }
-        String description = coordinated.stream()
-                .map(ParameterAdjustment::getDescription)
-                .collect(Collectors.joining("; "));
-        return new SingleParameterSearchResult(FixSuggestionDto.builder()
-                .strategy(NAME)
-                .description("Adjust parameters together: " + description)
-                .parameterAdjustments(coordinated)
-                .verified(true)
-                .build(), 1);
-    }
-
-    private static void applyAdjustment(List<RuleDto> rules, ParameterAdjustment adjustment) {
-        rules.get(adjustment.getRuleIndex()).getConditions()
-                .get(adjustment.getConditionIndex()).setValue(adjustment.getNewValue());
-    }
-
-    private static String commandKey(
-            RuleDto rule, Map<String, DeviceSmvData> deviceSmvMap) {
-        return FixStrategyUtils.commandFingerprint(rule, deviceSmvMap);
-    }
-
-    private boolean singleParameterForwardVerifies(
-            ParameterAdjustment template, int value, List<RuleDto> allRules, FixContext ctx) {
-        List<RuleDto> modifiedRules = FixStrategyUtils.deepCopyRules(allRules);
-        modifiedRules.get(template.getRuleIndex()).getConditions()
-                .get(template.getConditionIndex()).setValue(String.valueOf(value));
-        return FixStrategyUtils.forwardVerify(smvGenerator, nusmvExecutor, ctx, modifiedRules, NAME);
-    }
-
-    private static boolean singleParameterCandidatePersistable(
-            ParameterAdjustment template, int value, List<RuleDto> allRules) {
-        List<RuleDto> modifiedRules = FixStrategyUtils.deepCopyRules(allRules);
-        modifiedRules.get(template.getRuleIndex()).getConditions()
-                .get(template.getConditionIndex()).setValue(String.valueOf(value));
-        return FixStrategyUtils.candidateRulesPersistable(modifiedRules);
-    }
-
-    private static Integer tighteningNeighbor(int value, String relation) {
-        String normalized = SmvRelationUtils.normalizeRelation(relation);
-        if ((">".equals(normalized) || ">=".equals(normalized)) && value < Integer.MAX_VALUE) {
-            return value + 1;
-        }
-        if (("<".equals(normalized) || "<=".equals(normalized)) && value > Integer.MIN_VALUE) {
-            return value - 1;
-        }
-        return null;
+                "Parameter search reached its candidate limit before it could establish that no repair exists.");
     }
 
     private static ParameterAdjustment adjustmentWithValue(
@@ -627,62 +449,6 @@ public class ParameterAdjustStrategy implements FixStrategy {
         return adjustment;
     }
 
-    private static LinkedHashSet<Integer> numericPolicyHints(
-            SpecificationDto violatedSpec,
-            ParameterAdjustment template,
-            List<RuleDto> allRules,
-            Map<String, DeviceSmvData> deviceSmvMap) {
-        LinkedHashSet<Integer> result = new LinkedHashSet<>();
-        if (violatedSpec == null) return result;
-        RuleDto.Condition adjustedCondition = conditionAt(
-                allRules, template.getRuleIndex(), template.getConditionIndex());
-        if (adjustedCondition == null) return result;
-        List<SpecConditionDto> conditions = new ArrayList<>();
-        if (violatedSpec.getAConditions() != null) conditions.addAll(violatedSpec.getAConditions());
-        if (violatedSpec.getIfConditions() != null) conditions.addAll(violatedSpec.getIfConditions());
-        if (violatedSpec.getThenConditions() != null) conditions.addAll(violatedSpec.getThenConditions());
-        for (SpecConditionDto condition : conditions) {
-            if (condition == null || !Objects.equals(template.getAttribute(), condition.getKey())) continue;
-            if (!sameNumericDomain(adjustedCondition, condition, deviceSmvMap)) continue;
-            Integer value = safeParseInt(condition.getValue());
-            if (value != null) addPolicyBoundaryHints(result, value);
-        }
-        return result;
-    }
-
-    private static void addPolicyBoundaryHints(Set<Integer> hints, int value) {
-        if (value > Integer.MIN_VALUE) hints.add(value - 1);
-        hints.add(value);
-        if (value < Integer.MAX_VALUE) hints.add(value + 1);
-    }
-
-    private static RuleDto.Condition conditionAt(
-            List<RuleDto> rules, int ruleIndex, int conditionIndex) {
-        if (rules == null || ruleIndex < 0 || ruleIndex >= rules.size()) return null;
-        RuleDto rule = rules.get(ruleIndex);
-        if (rule == null || rule.getConditions() == null
-                || conditionIndex < 0 || conditionIndex >= rule.getConditions().size()) return null;
-        return rule.getConditions().get(conditionIndex);
-    }
-
-    private static boolean sameNumericDomain(
-            RuleDto.Condition adjustedCondition,
-            SpecConditionDto policyCondition,
-            Map<String, DeviceSmvData> deviceSmvMap) {
-        DeviceSmvData adjustedDevice = DeviceReferenceResolver.resolve(
-                adjustedCondition.getDeviceName(), deviceSmvMap);
-        DeviceSmvData policyDevice = DeviceReferenceResolver.resolve(
-                policyCondition.getDeviceId(), deviceSmvMap);
-        if (adjustedDevice == null || policyDevice == null) return false;
-        if (Objects.equals(adjustedDevice.getVarName(), policyDevice.getVarName())) return true;
-        String attribute = adjustedCondition.getAttribute();
-        return attribute != null
-                && adjustedDevice.getEnvVariables() != null
-                && policyDevice.getEnvVariables() != null
-                && adjustedDevice.getEnvVariables().containsKey(attribute)
-                && policyDevice.getEnvVariables().containsKey(attribute);
-    }
-
     static long distance(int value, int original) {
         return Math.abs((long) value - original);
     }
@@ -693,39 +459,6 @@ public class ParameterAdjustStrategy implements FixStrategy {
         long upper = Math.min((long) upperBound, (long) original + bestDistance - 1L);
         return new int[]{(int) lower, (int) upper};
     }
-
-    private static final class NearestValueCursor {
-        private final int original;
-        private final int lowerBound;
-        private final int upperBound;
-        private final boolean preferHigher;
-        private long lower;
-        private long upper;
-
-        private NearestValueCursor(int original, int lowerBound, int upperBound, String relation) {
-            this.original = original;
-            this.lowerBound = lowerBound;
-            this.upperBound = upperBound;
-            String normalized = SmvRelationUtils.normalizeRelation(relation);
-            this.preferHigher = ">".equals(normalized) || ">=".equals(normalized);
-            this.lower = Math.min((long) upperBound, (long) original - 1);
-            this.upper = Math.max((long) lowerBound, (long) original + 1);
-        }
-
-        private Integer next() {
-            boolean hasLower = lower >= lowerBound && lower <= upperBound;
-            boolean hasUpper = upper >= lowerBound && upper <= upperBound;
-            if (!hasLower && !hasUpper) return null;
-            long lowerDistance = hasLower ? distance((int) lower, original) : Long.MAX_VALUE;
-            long upperDistance = hasUpper ? distance((int) upper, original) : Long.MAX_VALUE;
-            if (upperDistance < lowerDistance || (preferHigher && upperDistance == lowerDistance)) {
-                return (int) upper++;
-            }
-            return (int) lower--;
-        }
-    }
-
-    // ======================== §5.3: Refine to closest original ========================
 
     static String describeParameterAdjustment(ParameterAdjustment adjustment, List<RuleDto> allRules) {
         String base = describeRule(allRules, adjustment.getRuleIndex())
@@ -763,6 +496,8 @@ public class ParameterAdjustStrategy implements FixStrategy {
         return "Rule #" + (ruleIndex + 1);
     }
 
+    // ======================== §5.3: Refine to closest original ========================
+
     /**
      * §5.3 NuSMV-guided branch-and-bound refinement (heuristic extension of paper §5.1/§5.3).
      *
@@ -771,20 +506,23 @@ public class ParameterAdjustStrategy implements FixStrategy {
      * monotonicity — uses exclusion constraints instead of binary search pruning.</p>
      *
      * <p>Budget: maxRefineAttempts counts refinement loop iterations (each = 1 NuSMV ¬ρ + up to 1
-     * forward-verify). The try-original step is outside the budget (extra cost ≤ param count).
-     * Total NuSMV calls ≤ paramCount + maxRefineAttempts × 2.
-     * Budget is shared across all parameters: if the original value is not pre-excluded and
-     * NuSMV re-returns it in the loop, up to two iterations may be consumed per parameter
-     * (first verify fails → un-exclude → retry). With many parameters and a small
-     * maxRefineAttempts, later parameters may have reduced refinement capacity.</p>
+     * forward-verify), shared across all parameters, so with a small budget later parameters may have
+     * reduced refinement capacity. The try-original step is outside the budget and runs only for a
+     * joint repair in which another threshold moved (extra cost ≤ param count).
+     * Total NuSMV calls ≤ paramCount + maxRefineAttempts × 2.</p>
+     *
+     * @param verification the forward verification of the assignment in {@code discoveredValues}
+     * @return the forward verification of the refined assignment, which is the one the caller lists
      */
-    private void refineToClosest(
+    private FixStrategyUtils.Verification refineToClosest(
             List<ParameterAdjustment> candidateAdjustments,
             Map<String, ParameterizationConfig.ParamInfo> thresholds,
             Map<String, String> discoveredValues,
+            FixStrategyUtils.Verification verification,
             List<RuleDto> allRules,
             FixContext ctx) {
 
+        FixStrategyUtils.Verification accepted = verification;
         int[] remainingBudget = { fixConfig.getMaxRefineAttempts() };
 
         for (ParameterAdjustment adj : candidateAdjustments) {
@@ -812,9 +550,19 @@ public class ParameterAdjustStrategy implements FixStrategy {
             // already the intersection of the manifest domain with the user's preferred range, so a user
             // who narrowed the range to exclude the original must not be handed the original back
             // labelled with the range they asked for.
+            //
+            // And only when some other threshold actually moved. Otherwise the "original" board is the
+            // one that produced this counterexample, and a full-model verification would spend tens of
+            // seconds re-proving a violation already on record.
             boolean originalWithinBounds =
                     original >= paramInfo.getLowerBound() && original <= paramInfo.getUpperBound();
-            if (bestDist > 0 && originalWithinBounds) {
+            boolean otherThresholdMoved = thresholds.entrySet().stream()
+                    .filter(e -> !e.getKey().equals(paramKey))
+                    .anyMatch(e -> !Objects.equals(
+                            safeParseInt(discoveredValues.get(e.getValue().getFrozenVarName())),
+                            safeParseInt(e.getValue().getOriginalValue())));
+            boolean originalRejected = false;
+            if (bestDist > 0 && originalWithinBounds && otherThresholdMoved) {
                 List<RuleDto> testRules = FixStrategyUtils.deepCopyRules(allRules);
                 for (Map.Entry<String, ParameterizationConfig.ParamInfo> e : thresholds.entrySet()) {
                     String value;
@@ -827,10 +575,14 @@ public class ParameterAdjustStrategy implements FixStrategy {
                     applyParamValue(testRules, e.getKey(), value);
                 }
                 try {
-                    if (FixStrategyUtils.forwardVerify(smvGenerator, nusmvExecutor, ctx, testRules, NAME)) {
+                    FixStrategyUtils.Verification originalVerification =
+                            FixStrategyUtils.forwardVerify(smvGenerator, nusmvExecutor, ctx, testRules, NAME);
+                    if (originalVerification.isAccepted()) {
                         best = original;
                         bestDist = 0;
+                        accepted = originalVerification;
                     }
+                    originalRejected = originalVerification.verdict() == FixStrategyUtils.Verdict.REJECTED;
                 } catch (Exception e) {
                     // forwardVerify re-arms the flag itself, but keep the guard at the catch so a
                     // future call added inside this block cannot silently swallow a cancellation.
@@ -845,18 +597,15 @@ public class ParameterAdjustStrategy implements FixStrategy {
                 continue;
             }
 
-            // Step B: NuSMV-guided branch-and-bound loop
+            // Step B: NuSMV-guided branch-and-bound loop. Every value it checks is excluded afterwards.
             Set<Integer> exclusionValues = new HashSet<>();
             exclusionValues.add(current); // don't re-return the initial discovered value
-            Set<Integer> seen = new HashSet<>();
-            seen.add(current);
-            // original NOT excluded here: forwardVerify conflates genuine infeasibility
-            // with tool errors (both return false). If NuSMV re-discovers original in the
-            // loop, it costs at most 2 budget iterations (first verify fails → un-exclude
-            // → retry) and allows recovery from transient failures (achieving distance=0).
-
-            int consecutiveErrors = 0;
-            boolean originalRetried = false;
+            if (!otherThresholdMoved || originalRejected) {
+                // With nothing else moved, the original value rebuilds the board that produced the
+                // counterexample (same reason as Step A); a rejected original is settled. Only an
+                // inconclusive Step A leaves the original reachable, for one more check.
+                exclusionValues.add(original);
+            }
 
             // Prepare baseRules with other params fixed at discovered values
             List<RuleDto> baseRules = FixStrategyUtils.deepCopyRules(allRules);
@@ -886,45 +635,42 @@ public class ParameterAdjustStrategy implements FixStrategy {
                     exclusionInvars.add("!(" + paramInfo.getFrozenVarName() + "=" + excl + ")");
                 }
 
-                RefineResult result = nusmvSolveForRefine(paramKey, L, U, thresholds,
-                        exclusionInvars, baseRules, ctx);
+                ParameterizationConfig.ParamInfo narrowed = ParameterizationConfig.ParamInfo.builder()
+                        .frozenVarName(paramInfo.getFrozenVarName())
+                        .lowerBound(L)
+                        .upperBound(U)
+                        .originalValue(paramInfo.getOriginalValue())
+                        .build();
+                SolveResult result = solve(baseRules, Map.of(paramKey, narrowed), exclusionInvars, ctx);
 
                 switch (result.status()) {
                     case UNSAT:
-                        break refineLoop;
+                    case GENERATION_FAILED:
                     case ERROR:
-                        consecutiveErrors++;
-                        if (consecutiveErrors >= 3) break refineLoop;
+                        // A failure would recur on the identical model, since nothing new was excluded.
+                        // The value already accepted is listed as it stands.
+                        break refineLoop;
+                    case BUSY:
+                        // A refused permit says nothing about the model; the shared budget bounds retries.
                         continue refineLoop;
                     case CANDIDATE:
-                        consecutiveErrors = 0;
-                        int cand = result.candidateValue();
-                        exclusionValues.add(cand);
-                        if (seen.contains(cand)) continue refineLoop;
-                        seen.add(cand);
+                        int cand = result.values().get(paramInfo.getFrozenVarName());
+                        // A value already excluded can come back only from a misbehaving solver.
+                        if (!exclusionValues.add(cand)) continue refineLoop;
 
                         // Forward-verify the candidate (from baseRules copy, never mutate baseRules)
                         try {
                             List<RuleDto> verifyRules = FixStrategyUtils.deepCopyRules(baseRules);
                             applyParamValue(verifyRules, paramKey, String.valueOf(cand));
-                            if (FixStrategyUtils.forwardVerify(smvGenerator, nusmvExecutor, ctx, verifyRules, NAME)) {
+                            FixStrategyUtils.Verification candidateVerification =
+                                    FixStrategyUtils.forwardVerify(smvGenerator, nusmvExecutor, ctx, verifyRules, NAME);
+                            if (candidateVerification.isAccepted()) {
                                 best = cand;
                                 bestDist = distance(cand, original);
-                            } else if (cand == original && !originalRetried) {
-                                // forwardVerify can't distinguish genuine infeasibility from
-                                // tool error. Un-exclude original to allow one more NuSMV retry.
-                                // Cost: ≤1 extra iteration if original is genuinely infeasible.
-                                exclusionValues.remove(cand);
-                                seen.remove(cand);
-                                originalRetried = true;
+                                accepted = candidateVerification;
                             }
                         } catch (Exception e) {
                             FixStrategyUtils.preserveInterrupt(e);
-                            if (cand == original && !originalRetried) {
-                                exclusionValues.remove(cand);
-                                seen.remove(cand);
-                                originalRetried = true;
-                            }
                             log.warn("refineToClosest: candidate {} verify failed: {}", cand, e.getMessage());
                         }
                         continue refineLoop;
@@ -934,114 +680,90 @@ public class ParameterAdjustStrategy implements FixStrategy {
             adj.setNewValue(String.valueOf(best));
             discoveredValues.put(paramInfo.getFrozenVarName(), String.valueOf(best));
         }
+        return accepted;
     }
 
     /**
-     * Run a single-param parameterized NuSMV solve for refinement.
+     * One ¬ρ solve (Salus §5.1): the given thresholds become FROZENVARs over their ranges, the
+     * counterexample's first state is pinned, and NuSMV checks the negated property. A counterexample to
+     * ¬ρ carries threshold values under which the violation does not happen from that state; ¬ρ holding
+     * proves no such values exist. The search phases and refinement share this, so a solver hiccup and a
+     * genuine UNSAT are told apart the same way everywhere.
      *
-     * <p>Builds a ParameterizationConfig with only the target param as FROZENVAR (narrowed bounds),
-     * other params already applied to rulesWithOtherParamsApplied. Returns three-state result.</p>
-     *
-     * <p>UNSAT: only when NuSMV successfully executes AND ¬ρ passes (no satisfying assignment).
-     * All other failures (execution error, extraction failure, out-of-bounds) → ERROR.</p>
+     * <p>A generation failure is recorded here because it ends the whole strategy; solver errors are only
+     * returned, see {@link SolveResult}.</p>
      */
-    private RefineResult nusmvSolveForRefine(
-            String paramKey, int narrowedLower, int narrowedUpper,
-            Map<String, ParameterizationConfig.ParamInfo> allThresholds,
+    private SolveResult solve(
+            List<RuleDto> rules,
+            Map<String, ParameterizationConfig.ParamInfo> parameterized,
             List<String> exclusionInvars,
-            List<RuleDto> rulesWithOtherParamsApplied,
             FixContext ctx) {
-
-        ParameterizationConfig.ParamInfo originalInfo = allThresholds.get(paramKey);
-        ParameterizationConfig.ParamInfo narrowed = ParameterizationConfig.ParamInfo.builder()
-                .frozenVarName(originalInfo.getFrozenVarName())
-                .lowerBound(narrowedLower)
-                .upperBound(narrowedUpper)
-                .originalValue(originalInfo.getOriginalValue())
-                .build();
-
-        Map<String, ParameterizationConfig.ParamInfo> singleParam = new LinkedHashMap<>();
-        singleParam.put(paramKey, narrowed);
-
         ParameterizationConfig config = ParameterizationConfig.builder()
-                .parameterizedThresholds(singleParam)
+                .parameterizedThresholds(new LinkedHashMap<>(parameterized))
                 .negatedSpecIndex(ctx.getViolatedSpecIndex())
                 .exclusionInvars(new ArrayList<>(exclusionInvars))
                 .build();
-
         File smvFile = null;
         try {
             SmvGenerator.GenerateResult genResult =
-                    FixStrategyUtils.generateParameterizedResolved(
-                            smvGenerator, ctx, rulesWithOtherParamsApplied, config);
-            if (genResult == null) return RefineResult.error();
-            if (!FixStrategyUtils.candidateModelComplete(genResult, ctx, NAME)) return RefineResult.error();
+                    FixStrategyUtils.generateParameterizedResolved(smvGenerator, ctx, rules, config);
+            if (genResult == null) {
+                ctx.recordStrategyGenerationFailure(NAME,
+                        "The parameter candidate model could not preserve the original attack scenario.");
+                return SolveResult.of(SolveStatus.GENERATION_FAILED);
+            }
+            if (!FixStrategyUtils.candidateModelComplete(genResult, ctx, NAME)) {
+                return SolveResult.of(SolveStatus.GENERATION_FAILED);
+            }
             smvFile = genResult.smvFile();
 
             NusmvResult result = FixStrategyUtils.executeWithinDeadline(nusmvExecutor, smvFile, ctx);
             if (!result.isSuccess()) {
-                log.warn("nusmvSolveForRefine: execution failed: {}", result.getErrorMessage());
-                FixStrategyUtils.recordSolverFailure(ctx, NAME,
-                        "NuSMV failed while refining a verified parameter repair.");
-                return RefineResult.error();
+                log.warn("ParameterAdjust solve: NuSMV execution failed: {}", result.getErrorMessage());
+                return result.isBusy()
+                        ? new SolveResult(SolveStatus.BUSY, Map.of(),
+                                "NuSMV was busy while searching for parameter values.")
+                        : SolveResult.error("NuSMV failed while searching for parameter values.");
             }
-
             List<SpecCheckResult> specResults = result.getSpecResults();
             if (specResults == null || specResults.isEmpty()) {
-                FixStrategyUtils.recordSolverFailure(ctx, NAME,
-                        "NuSMV returned no usable specification result during parameter refinement.");
-                return RefineResult.error();
+                return SolveResult.error("NuSMV returned no usable specification result during parameter search.");
             }
-
             if (specResults.get(0).isPassed()) {
-                // ¬ρ universally true → no satisfying assignment in [L,U] minus exclusions
-                return RefineResult.unsat();
+                return SolveResult.of(SolveStatus.UNSAT);
             }
 
-            // Extract FROZENVAR value from counterexample
-            Map<String, String> extracted = ParameterExtractor.extract(
-                    result.getOutput(), List.of(narrowed.getFrozenVarName()));
-            String valueStr = extracted.get(narrowed.getFrozenVarName());
-            if (valueStr == null) {
-                log.warn("nusmvSolveForRefine: failed to extract value for {}", narrowed.getFrozenVarName());
-                FixStrategyUtils.recordSolverFailure(ctx, NAME,
-                        "NuSMV output did not contain the parameter value required for refinement.");
-                return RefineResult.error();
+            List<String> frozenVarNames = parameterized.values().stream()
+                    .map(ParameterizationConfig.ParamInfo::getFrozenVarName)
+                    .toList();
+            Map<String, String> extracted = ParameterExtractor.extract(result.getOutput(), frozenVarNames);
+            Map<String, Integer> values = new LinkedHashMap<>();
+            for (ParameterizationConfig.ParamInfo info : parameterized.values()) {
+                Integer value = safeParseInt(extracted.get(info.getFrozenVarName()));
+                if (value == null) {
+                    return SolveResult.error("NuSMV output did not contain the parameter assignment required by the search.");
+                }
+                // Defensive: NuSMV honours FROZENVAR ranges, but an out-of-range value must not be applied.
+                if (value < info.getLowerBound() || value > info.getUpperBound()) {
+                    log.warn("ParameterAdjust solve: {}={} outside [{},{}]", info.getFrozenVarName(), value,
+                            info.getLowerBound(), info.getUpperBound());
+                    return SolveResult.error("NuSMV returned a parameter value outside the requested bounds.");
+                }
+                values.put(info.getFrozenVarName(), value);
             }
-
-            int cand;
-            try {
-                cand = Integer.parseInt(valueStr);
-            } catch (NumberFormatException e) {
-                log.warn("nusmvSolveForRefine: non-integer value '{}' for {}", valueStr, narrowed.getFrozenVarName());
-                FixStrategyUtils.recordSolverFailure(ctx, NAME,
-                        "NuSMV output contained a non-integer parameter value during refinement.");
-                return RefineResult.error();
-            }
-
-            // Bounds check (defensive — NuSMV should respect FROZENVAR range, but guard against edge cases)
-            if (cand < narrowedLower || cand > narrowedUpper) {
-                log.warn("nusmvSolveForRefine: candidate {} outside [{},{}], treating as error",
-                        cand, narrowedLower, narrowedUpper);
-                FixStrategyUtils.recordSolverFailure(ctx, NAME,
-                        "NuSMV returned a parameter value outside the requested refinement bounds.");
-                return RefineResult.error();
-            }
-
-            return RefineResult.candidate(cand);
-
+            return new SolveResult(SolveStatus.CANDIDATE, values, null);
         } catch (Exception e) {
-            log.warn("nusmvSolveForRefine: exception: {}", e.getMessage(), e);
-            // executeWithinDeadline declares InterruptedException, and this catch is broad enough to
-            // consume it — clearing the flag with it. Without re-arming, ctx.isExpired() stops
-            // reporting the cancellation and the refine loop keeps taking NuSMV permits for a request
-            // whose response was already sent.
-            FixStrategyUtils.preserveInterrupt(e);
-            if (!(e instanceof cn.edu.nju.Iot_Verify.exception.SmvGenerationException)) {
-                FixStrategyUtils.recordSolverFailure(ctx, NAME,
-                        "Parameter refinement encountered an execution error: " + e.getMessage());
+            log.warn("ParameterAdjust solve failed: {}", e.getMessage(), e);
+            if (e instanceof cn.edu.nju.Iot_Verify.exception.SmvGenerationException) {
+                String reason = "Parameter candidate generation failed: " + e.getMessage();
+                ctx.addDiagnostic(reason);
+                ctx.recordStrategyGenerationFailure(NAME, reason);
+                return SolveResult.of(SolveStatus.GENERATION_FAILED);
             }
-            return RefineResult.error();
+            // executeWithinDeadline declares InterruptedException, and this catch consumes it — clearing
+            // the flag. Re-arm it so ctx.isExpired() stops every loop that calls this.
+            FixStrategyUtils.preserveInterrupt(e);
+            return SolveResult.error("Parameter search encountered an execution error: " + e.getMessage());
         } finally {
             FixStrategyUtils.cleanupTempDir(smvFile);
         }

@@ -1,6 +1,9 @@
 package cn.edu.nju.Iot_Verify.component.nusmv.generator;
 
+import cn.edu.nju.Iot_Verify.component.nusmv.SpecResultAlignment;
 import cn.edu.nju.Iot_Verify.component.nusmv.executor.NusmvExecutor;
+import cn.edu.nju.Iot_Verify.component.nusmv.fixer.FixContext;
+import cn.edu.nju.Iot_Verify.component.nusmv.fixer.FixStrategy;
 import cn.edu.nju.Iot_Verify.component.nusmv.fixer.RuleFixer;
 import cn.edu.nju.Iot_Verify.component.nusmv.fixer.localize.FaultLocalizer;
 import cn.edu.nju.Iot_Verify.component.nusmv.fixer.strategy.ConditionAdjustStrategy;
@@ -26,6 +29,7 @@ import cn.edu.nju.Iot_Verify.dto.fix.FaultRuleDto;
 import cn.edu.nju.Iot_Verify.dto.fix.FixResultDto;
 import cn.edu.nju.Iot_Verify.dto.fix.FixSuggestionDto;
 import cn.edu.nju.Iot_Verify.dto.fix.ParameterAdjustment;
+import cn.edu.nju.Iot_Verify.dto.fix.PreexistingViolationDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
@@ -46,6 +50,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -232,7 +237,6 @@ class AcceptanceDemoScenarioNusmvTest {
                 .filter(suggestion -> "remove".equals(suggestion.getStrategy()))
                 .findFirst()
                 .orElseThrow();
-        assertTrue(removal.isVerified());
         assertEquals(List.of(0), removal.getRemovedRuleIndices());
 
         Set<Integer> removedIndices = new HashSet<>(removal.getRemovedRuleIndices());
@@ -341,7 +345,6 @@ class AcceptanceDemoScenarioNusmvTest {
                 Map.of());
         FixSuggestionDto removal = fixResult.getSuggestions().stream()
                 .filter(suggestion -> "remove".equals(suggestion.getStrategy()))
-                .filter(FixSuggestionDto::isVerified)
                 .findFirst()
                 .orElseThrow();
         assertEquals(List.of(0), removal.getRemovedRuleIndices());
@@ -424,7 +427,6 @@ class AcceptanceDemoScenarioNusmvTest {
         assertVerifiedAttempt(fixResult, "parameter");
         FixSuggestionDto suggestion = fixResult.getSuggestions().stream()
                 .filter(candidate -> "parameter".equals(candidate.getStrategy()))
-                .filter(FixSuggestionDto::isVerified)
                 .findFirst()
                 .orElseThrow(() -> new AssertionError(fixResult.getStrategyAttempts().toString()));
         assertTrue(suggestion.getParameterAdjustments().stream()
@@ -503,17 +505,9 @@ class AcceptanceDemoScenarioNusmvTest {
         assertTrue(fixResult.isFixable(), fixResult::getSummary);
         assertEquals(1, fixResult.getFaultRules().size());
         assertVerifiedAttempt(fixResult, "condition");
-        FixSuggestionDto suggestion = fixResult.getSuggestions().stream()
-                .filter(candidate -> "condition".equals(candidate.getStrategy()))
-                .filter(FixSuggestionDto::isVerified)
-                .findFirst()
-                .orElseThrow(() -> new AssertionError(fixResult.getStrategyAttempts().toString()));
-        assertTrue(suggestion.getConditionAdjustments().stream()
-                        .anyMatch(adjustment -> "add".equals(adjustment.getAction())
-                                && "occupied".equals(adjustment.getAttribute())
-                                && "present".equalsIgnoreCase(adjustment.getValue())),
-                () -> "The solved guard must require occupancy instead of copying occupied=absent: "
-                        + suggestion.getConditionAdjustments());
+        FixSuggestionDto suggestion = listedRepair(fixResult, "condition",
+                "a solved guard requiring occupancy instead of copying occupied=absent",
+                candidate -> addsOccupancyGuard(candidate, 0));
 
         List<RuleDto> repairedRules = FixStrategyApplier.apply(
                 "condition", suggestion, rules, baselineModel.deviceSmvMap(),
@@ -637,44 +631,28 @@ class AcceptanceDemoScenarioNusmvTest {
                 strategies, 20, Map.of());
 
         assertTrue(fixResult.isFixable(), fixResult::getSummary);
-        assertEquals(3, fixResult.getSuggestions().size(), fixResult::getSummary);
         assertEquals(3, fixResult.getStrategyAttempts().size());
         strategies.forEach(strategy -> assertVerifiedAttempt(fixResult, strategy));
 
-        FixSuggestionDto parameter = suggestionFor(fixResult, "parameter");
-        assertTrue(parameter.getParameterAdjustments().stream()
+        FixSuggestionDto parameter = listedRepair(fixResult, "parameter",
+                "rule 0's 28 moved to 37, skipping the duplicate boundary at 36",
+                suggestion -> suggestion.getParameterAdjustments().stream()
                         .anyMatch(adjustment -> adjustment.getRuleIndex() == 0
                                 && "28".equals(adjustment.getOriginalValue())
-                                && "37".equals(adjustment.getNewValue())),
-                () -> "Expected the duplicate boundary at 36 to be skipped in favor of 37: "
-                        + parameter.getParameterAdjustments());
-        FixSuggestionDto condition = suggestionFor(fixResult, "condition");
-        assertTrue(condition.getConditionAdjustments().stream()
-                        .anyMatch(adjustment -> adjustment.getRuleIndex() == 0
-                                && "add".equals(adjustment.getAction())
-                                && "occupied".equals(adjustment.getAttribute())
-                                && "present".equalsIgnoreCase(adjustment.getValue())),
-                () -> "Expected a positive occupancy guard: " + condition.getConditionAdjustments());
-        FixSuggestionDto removal = suggestionFor(fixResult, "remove");
-        assertEquals(List.of(0), removal.getRemovedRuleIndices());
-
+                                && "37".equals(adjustment.getNewValue())));
+        FixSuggestionDto condition = listedRepair(fixResult, "condition",
+                "a positive occupancy guard on rule 0", suggestion -> addsOccupancyGuard(suggestion, 0));
+        FixSuggestionDto removal = listedRepair(fixResult, "remove", "removing rule 0",
+                suggestion -> List.of(0).equals(suggestion.getRemovedRuleIndices()));
+        // lowOff is violated by the original rules too, so an alternative may legitimately leave it
+        // failing; the scenario's intended repairs fix every specification.
         for (FixSuggestionDto suggestion : List.of(parameter, condition, removal)) {
-            List<RuleDto> repairedRules = "condition".equals(suggestion.getStrategy())
-                    ? FixStrategyApplier.apply(
-                            suggestion.getStrategy(), suggestion, rules, baselineModel.deviceSmvMap(),
-                            Map.of("occupancy_1", "occupancy_1"))
-                    : FixStrategyApplier.apply(
-                            suggestion.getStrategy(), suggestion, rules, baselineModel.deviceSmvMap());
-            SmvGenerator.GenerateResult repairedModel = generator.generateWithEnvironment(
-                    USER_ID, devices, environment, repairedRules, specs,
-                    AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
-            assertCompleteModel(repairedModel);
-            NusmvExecutor.NusmvResult repaired = executor.execute(repairedModel.smvFile());
-            assertTrue(repaired.isSuccess(), repaired::getErrorMessage);
-            assertEquals(specs.size(), repaired.getSpecResults().size());
-            assertFalse(repaired.hasAnyViolation(),
-                    () -> suggestion.getStrategy() + " must repair every combined-scene specification");
+            assertTrue(suggestion.getPreexistingViolations().isEmpty(),
+                    () -> suggestion.getStrategy() + " must repair every combined-scene specification: "
+                            + suggestion.getPreexistingViolations());
         }
+        assertEveryListedAlternativeHolds(fixResult.getSuggestions(), neverUnsafeLowHeat.getId(), rules, devices,
+                environment, specs, baselineModel.deviceSmvMap(), generator, executor);
 
         FixResultDto unknownSpecResult = fixer.fix(
                 306L, "UNKNOWN_SPEC", states, rules, devices, environment, specs,
@@ -683,7 +661,7 @@ class AcceptanceDemoScenarioNusmvTest {
         assertEquals("SKIPPED_NO_SPEC", attemptStatus(unknownSpecResult, "parameter"));
         assertEquals("SKIPPED_NO_SPEC", attemptStatus(unknownSpecResult, "condition"));
         assertEquals("VERIFIED", attemptStatus(unknownSpecResult, "remove"));
-        assertTrue(suggestionFor(unknownSpecResult, "remove").isVerified());
+        assertFalse(listed(unknownSpecResult, "remove").isEmpty());
     }
 
     @Test
@@ -739,30 +717,19 @@ class AcceptanceDemoScenarioNusmvTest {
                 baselineModel.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), false,
                 strategies, 20, Map.of());
 
-        assertEquals(3, fixResult.getSuggestions().size(), fixResult::getSummary);
         strategies.forEach(strategy -> assertVerifiedAttempt(fixResult, strategy));
-        FixSuggestionDto parameter = suggestionFor(fixResult, "parameter");
-        assertTrue(parameter.getParameterAdjustments().stream()
+        listedRepair(fixResult, "parameter",
+                "rule 0's 22 tightened past the duplicate <=14 boundary to <=13",
+                suggestion -> suggestion.getParameterAdjustments().stream()
                         .anyMatch(adjustment -> adjustment.getRuleIndex() == 0
                                 && "22".equals(adjustment.getOriginalValue())
-                                && "13".equals(adjustment.getNewValue())),
-                () -> "The duplicate <=14 boundary must tighten once more to <=13: "
-                        + parameter.getParameterAdjustments());
-        FixSuggestionDto condition = suggestionFor(fixResult, "condition");
-        assertTrue(condition.getConditionAdjustments().stream()
-                        .anyMatch(adjustment -> adjustment.getRuleIndex() == 0
-                                && "add".equals(adjustment.getAction())
-                                && "occupied".equals(adjustment.getAttribute())
-                                && "present".equalsIgnoreCase(adjustment.getValue())),
-                () -> "Expected a positive occupancy guard on the unsafe cooling rule: "
-                        + condition.getConditionAdjustments());
-        FixSuggestionDto removal = suggestionFor(fixResult, "remove");
-        assertEquals(List.of(0), removal.getRemovedRuleIndices());
-
-        assertSuggestionsRepairAllSpecs(
-                List.of(parameter, condition, removal), rules, devices, environment, specs,
-                baselineModel.deviceSmvMap(), generator, executor,
-                Map.of("occupancy_1", "occupancy_1"));
+                                && "13".equals(adjustment.getNewValue())));
+        listedRepair(fixResult, "condition", "a positive occupancy guard on the unsafe cooling rule",
+                suggestion -> addsOccupancyGuard(suggestion, 0));
+        listedRepair(fixResult, "remove", "removing rule 0",
+                suggestion -> List.of(0).equals(suggestion.getRemovedRuleIndices()));
+        assertEveryListedAlternativeHolds(fixResult.getSuggestions(), safety.getId(), rules, devices, environment,
+                specs, baselineModel.deviceSmvMap(), generator, executor);
     }
 
     @Test
@@ -821,36 +788,119 @@ class AcceptanceDemoScenarioNusmvTest {
                 .map(FaultRuleDto::getRuleIndex)
                 .collect(java.util.stream.Collectors.toSet()),
                 "Command priority should localize only the executed rule; the backup rule is dormant in this trace");
-        assertEquals(3, fixResult.getSuggestions().size(), fixResult::getSummary);
         strategies.forEach(strategy -> assertVerifiedAttempt(fixResult, strategy));
 
-        FixSuggestionDto parameter = suggestionFor(fixResult, "parameter");
-        for (int ruleIndex : List.of(0, 1)) {
-            assertTrue(parameter.getParameterAdjustments().stream()
-                            .anyMatch(adjustment -> adjustment.getRuleIndex() == ruleIndex
-                                    && "temperature".equals(adjustment.getAttribute())
-                                    && Integer.parseInt(adjustment.getNewValue()) >= 36),
-                    () -> "Both redundant temperature triggers must move beyond the unsafe boundary: "
-                            + parameter.getParameterAdjustments());
-        }
-        FixSuggestionDto condition = suggestionFor(fixResult, "condition");
-        for (int ruleIndex : List.of(0, 1)) {
-            assertTrue(condition.getConditionAdjustments().stream()
-                            .anyMatch(adjustment -> adjustment.getRuleIndex() == ruleIndex
-                                    && "add".equals(adjustment.getAction())
-                                    && "occupied".equals(adjustment.getAttribute())
-                                    && "present".equalsIgnoreCase(adjustment.getValue())),
-                    () -> "Both redundant rules need the occupancy guard: "
-                            + condition.getConditionAdjustments());
-        }
-        FixSuggestionDto removal = suggestionFor(fixResult, "remove");
-        assertEquals(List.of(0, 1), removal.getRemovedRuleIndices(),
+        listedRepair(fixResult, "parameter",
+                "both redundant temperature triggers moved beyond the unsafe boundary",
+                suggestion -> List.of(0, 1).stream().allMatch(ruleIndex ->
+                        suggestion.getParameterAdjustments().stream()
+                                .anyMatch(adjustment -> adjustment.getRuleIndex() == ruleIndex
+                                        && "temperature".equals(adjustment.getAttribute())
+                                        && Integer.parseInt(adjustment.getNewValue()) >= 36)));
+        listedRepair(fixResult, "condition", "the occupancy guard on both redundant rules",
+                suggestion -> addsOccupancyGuard(suggestion, 0) && addsOccupancyGuard(suggestion, 1));
+        // Removal checks smaller sets first, so the pair is listed only because neither single removal
+        // repaired the trace.
+        assertEquals(List.of(List.of(0, 1)), listed(fixResult, "remove").stream()
+                        .map(FixSuggestionDto::getRemovedRuleIndices)
+                        .toList(),
                 "Neither single removal is sufficient; the minimal destructive repair is the pair");
+        assertEveryListedAlternativeHolds(fixResult.getSuggestions(), safety.getId(), rules, devices, environment,
+                specs, baselineModel.deviceSmvMap(), generator, executor);
+    }
 
-        assertSuggestionsRepairAllSpecs(
-                List.of(parameter, condition, removal), rules, devices, environment, specs,
-                baselineModel.deviceSmvMap(), generator, executor,
-                Map.of("occupancy_1", "occupancy_1"));
+    @Test
+    void conditionSearch_learnsFromARejectedPathWithoutLosingARepair() throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required for the counterexample-learning regression");
+
+        ObjectMapper objectMapper = new ObjectMapper();
+        ObjectNode scene = withOccupancySensor(objectMapper, "30");
+        SmvGenerator generator = buildGenerator(objectMapper, scene);
+        NusmvExecutor executor = buildExecutor(nusmvPath);
+        List<DeviceVerificationDto> devices = readDevices(scene);
+        List<BoardEnvironmentVariableDto> environment = readEnvironment(scene);
+        List<RuleDto> rules = List.of(
+                rule(81L, "In fan-only mode, heat",
+                        command("ac_1", "heat"),
+                        ruleCondition("ac_1", "HvacMode", "mode", "=", "fanOnly")),
+                rule(82L, "At least 28, switch to fan-only",
+                        command("ac_1", "fanOnly"),
+                        ruleCondition("temperature_1", "temperature", "variable", ">=", "28")));
+        SpecificationDto safety = neverSpec(
+                "learning-heating-safety",
+                "Do not heat an unoccupied room below 35 degrees",
+                specCondition("occupancy_1", "variable", "occupied", "=", "absent"),
+                specCondition("temperature_1", "variable", "temperature", "<", "35"),
+                specCondition("ac_1", "mode", "HvacMode", "=", "heat"));
+        SpecificationDto response = responseSpec(
+                "learning-warm-response",
+                "At 28 degrees the air conditioner must leave auto",
+                specCondition("temperature_1", "variable", "temperature", ">=", "28"),
+                specCondition("ac_1", "mode", "HvacMode", "!=", "auto"));
+        List<SpecificationDto> specs = List.of(safety, response);
+
+        SmvGenerator.GenerateResult baselineModel = generator.generateWithEnvironment(
+                USER_ID, devices, environment, rules, specs,
+                AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
+        assertCompleteModel(baselineModel);
+        NusmvExecutor.NusmvResult baseline = executor.execute(baselineModel.smvFile());
+        assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
+        Map<String, NusmvExecutor.SpecCheckResult> baselineVerdicts = verdictsBySpecId(baseline, baselineModel);
+        assertFalse(baselineVerdicts.get(safety.getId()).isPassed());
+        assertTrue(baselineVerdicts.get(response.getId()).isPassed(),
+                "The response must hold originally, so a guard on the fan-only rule newly breaks it");
+        List<TraceStateDto> states = new SmvTraceParser().parseCounterexampleStates(
+                baselineVerdicts.get(safety.getId()).getCounterexample(), baselineModel.deviceSmvMap(), rules);
+        List<FaultRuleDto> faultRules = new FaultLocalizer().localize(states, rules, baselineModel.deviceSmvMap());
+        List<Integer> repairScope = faultRules.stream().map(FaultRuleDto::getRuleIndex).toList();
+        // RuleFixer searches fault rules first, so the fan-only rule's guards are rejected — and learned
+        // from — before the heating rule's repairs are found. A lemma that excluded too much would drop them.
+        assertEquals(List.of(1, 0), repairScope, "The fan-only rule fires first on the violating path");
+
+        // Driven without a request deadline: RuleFixer's time share for alternatives would bound the
+        // search by the clock, and this checks which candidates the search itself has to examine.
+        FixContext ctx = FixContext.builder()
+                .traceId(314L)
+                .faultRules(faultRules)
+                .repairRuleIndices(repairScope)
+                .allRules(rules)
+                .devices(devices)
+                .environmentVariables(environment)
+                .specs(specs)
+                .deviceSmvMap(baselineModel.deviceSmvMap())
+                .violatedSpecIndex(0)
+                .userId(USER_ID)
+                .attackScenario(AttackScenarioDto.none())
+                .enablePrivacy(false)
+                .maxAttempts(20)
+                .preferredRanges(Map.of())
+                .counterexampleInitialState(states.get(0))
+                .requireCounterexampleReplay(true)
+                .build();
+        FixConfig fixConfig = new FixConfig();
+        fixConfig.setMaxCandidatesPerRule(5);
+        FixStrategy.StrategyOutcome outcome =
+                new ConditionAdjustStrategy(generator, executor, fixConfig).tryFix(ctx);
+
+        // Every guard on the fan-only rule that avoids this counterexample stops it from firing somewhere
+        // at 28 degrees or above, which breaks the response. Checked one by one, the temperature guard's
+        // values alone exceed this budget; learning from a rejected path excludes them together.
+        assertTrue(outcome.alternativesComplete(),
+                () -> "The search must be exhausted within its attempts, used "
+                        + ctx.strategySearchProgress("condition"));
+        Set<Set<String>> changeSets = new HashSet<>();
+        for (FixSuggestionDto suggestion : outcome.suggestions()) {
+            Set<String> changes = new HashSet<>();
+            suggestion.getConditionAdjustments().forEach(adjustment -> changes.add(
+                    adjustment.getRuleIndex() + " " + adjustment.getAction() + " " + adjustment.getAttribute()));
+            changeSets.add(changes);
+        }
+        assertEquals(Set.of(Set.of("0 add occupied"), Set.of("0 add temperature")), changeSets,
+                "Exactly the heating rule's two guards repair the violation without breaking the response");
+        assertEveryListedAlternativeHolds(outcome.suggestions(), safety.getId(), rules, devices, environment, specs,
+                baselineModel.deviceSmvMap(), generator, executor);
     }
 
     @Test
@@ -941,24 +991,16 @@ class AcceptanceDemoScenarioNusmvTest {
                 baselineModel.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), false,
                 strategies, 20, Map.of());
 
-        assertEquals("NO_VERIFIED_SUGGESTION", attemptStatus(fixResult, "parameter"));
+        assertEquals("NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE", attemptStatus(fixResult, "parameter"));
         assertVerifiedAttempt(fixResult, "condition");
         assertVerifiedAttempt(fixResult, "remove");
-        assertEquals(2, fixResult.getSuggestions().size(), fixResult::getSummary);
-        FixSuggestionDto condition = suggestionFor(fixResult, "condition");
-        assertTrue(condition.getConditionAdjustments().stream()
-                        .anyMatch(adjustment -> adjustment.getRuleIndex() == 0
-                                && "add".equals(adjustment.getAction())
-                                && "occupied".equals(adjustment.getAttribute())
-                                && "present".equalsIgnoreCase(adjustment.getValue())),
-                () -> "Expected an occupancy guard when the numeric boundary cannot move: "
-                        + condition.getConditionAdjustments());
-        FixSuggestionDto removal = suggestionFor(fixResult, "remove");
-        assertEquals(List.of(0), removal.getRemovedRuleIndices());
-        assertSuggestionsRepairAllSpecs(
-                List.of(condition, removal), rules, devices, environment, specs,
-                baselineModel.deviceSmvMap(), generator, executor,
-                Map.of("occupancy_1", "occupancy_1"));
+        assertTrue(listed(fixResult, "parameter").isEmpty(), fixResult::getSummary);
+        listedRepair(fixResult, "condition", "an occupancy guard when the numeric boundary cannot move",
+                suggestion -> addsOccupancyGuard(suggestion, 0));
+        listedRepair(fixResult, "remove", "removing rule 0",
+                suggestion -> List.of(0).equals(suggestion.getRemovedRuleIndices()));
+        assertEveryListedAlternativeHolds(fixResult.getSuggestions(), safety.getId(), rules, devices, environment,
+                specs, baselineModel.deviceSmvMap(), generator, executor);
     }
 
     @Test
@@ -1005,20 +1047,21 @@ class AcceptanceDemoScenarioNusmvTest {
                 List.of("parameter"), 20, Map.of());
 
         assertVerifiedAttempt(fixResult, "parameter");
-        FixSuggestionDto parameter = suggestionFor(fixResult, "parameter");
+        FixSuggestionDto parameter = listedRepair(fixResult, "parameter", "rule 0's > 99 moved to > 100",
+                suggestion -> suggestion.getParameterAdjustments().stream()
+                        .anyMatch(candidate -> candidate.getRuleIndex() == 0
+                                && ">".equals(candidate.getRelation())
+                                && "99".equals(candidate.getOriginalValue())
+                                && "100".equals(candidate.getNewValue())));
         ParameterAdjustment adjustment = parameter.getParameterAdjustments().stream()
                 .filter(candidate -> candidate.getRuleIndex() == 0)
                 .findFirst()
                 .orElseThrow();
-        assertEquals(">", adjustment.getRelation());
-        assertEquals("99", adjustment.getOriginalValue());
-        assertEquals("100", adjustment.getNewValue());
         assertTrue(adjustment.getDescription().contains("rule unreachable"),
                 adjustment::getDescription);
 
-        assertSuggestionsRepairAllSpecs(
-                List.of(parameter), rules, devices, environment, specs,
-                baselineModel.deviceSmvMap(), generator, executor, Map.of());
+        assertEveryListedAlternativeHolds(fixResult.getSuggestions(), safety.getId(), rules, devices, environment,
+                specs, baselineModel.deviceSmvMap(), generator, executor);
     }
 
     @Test
@@ -1084,16 +1127,11 @@ class AcceptanceDemoScenarioNusmvTest {
                 baselineModel.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), false,
                 List.of("condition"), 20, Map.of());
 
-        FixSuggestionDto suggestion = fixResult.getSuggestions().stream()
-                .filter(candidate -> "condition".equals(candidate.getStrategy()))
-                .filter(FixSuggestionDto::isVerified)
-                .findFirst()
-                .orElseThrow(() -> new AssertionError(fixResult.getStrategyAttempts().toString()));
-        assertTrue(suggestion.getConditionAdjustments().stream()
-                .anyMatch(adjustment -> adjustment.getRuleIndex() == 1
-                        && "remove".equals(adjustment.getAction())),
-                () -> "Expected the over-constrained door rule to lose one condition: "
-                        + suggestion.getConditionAdjustments());
+        FixSuggestionDto suggestion = listedRepair(fixResult, "condition",
+                "the over-constrained door rule losing one condition",
+                candidate -> candidate.getConditionAdjustments().stream()
+                        .anyMatch(adjustment -> adjustment.getRuleIndex() == 1
+                                && "remove".equals(adjustment.getAction())));
 
         List<RuleDto> repairedRules = FixStrategyApplier.apply(
                 "condition", suggestion, rules, baselineModel.deviceSmvMap());
@@ -1152,7 +1190,6 @@ class AcceptanceDemoScenarioNusmvTest {
 
         FixSuggestionDto suggestion = fixResult.getSuggestions().stream()
                 .filter(candidate -> "remove".equals(candidate.getStrategy()))
-                .filter(FixSuggestionDto::isVerified)
                 .findFirst()
                 .orElseThrow(() -> new AssertionError(fixResult.getStrategyAttempts().toString()));
         List<RuleDto> repairedRules = FixStrategyApplier.apply(
@@ -1303,7 +1340,6 @@ class AcceptanceDemoScenarioNusmvTest {
                     Map.of());
             Optional<FixSuggestionDto> removal = fixResult.getSuggestions().stream()
                     .filter(suggestion -> "remove".equals(suggestion.getStrategy()))
-                    .filter(FixSuggestionDto::isVerified)
                     .filter(suggestion -> suggestion.getRemovedRuleDescriptions()
                             .contains(expectation.removedRuleDescription()))
                     .findFirst();
@@ -1316,6 +1352,19 @@ class AcceptanceDemoScenarioNusmvTest {
 
     private long violationCount(NusmvExecutor.NusmvResult result) {
         return result.getSpecResults().stream().filter(spec -> !spec.isPassed()).count();
+    }
+
+    /** NuSMV prints verdicts in its own order; the product attributes them to specifications this way. */
+    private Map<String, NusmvExecutor.SpecCheckResult> verdictsBySpecId(
+            NusmvExecutor.NusmvResult result, SmvGenerator.GenerateResult model) {
+        SpecResultAlignment.Alignment alignment =
+                SpecResultAlignment.align(result.getSpecResults(), model.emittedSpecs());
+        assertEquals(0, alignment.backFilled(), "Every verdict must be attributable to its specification");
+        Map<String, NusmvExecutor.SpecCheckResult> verdicts = new java.util.LinkedHashMap<>();
+        for (int i = 0; i < alignment.aligned().size(); i++) {
+            verdicts.put(model.emittedSpecs().get(i).specId(), alignment.aligned().get(i));
+        }
+        return verdicts;
     }
 
     private void assertCompleteModel(SmvGenerator.GenerateResult result) {
@@ -1338,13 +1387,33 @@ class AcceptanceDemoScenarioNusmvTest {
                 .orElseThrow(() -> new AssertionError("Missing strategy attempt for " + strategy));
     }
 
-    private FixSuggestionDto suggestionFor(FixResultDto result, String strategy) {
+    private List<FixSuggestionDto> listed(FixResultDto result, String strategy) {
         return result.getSuggestions().stream()
                 .filter(suggestion -> strategy.equals(suggestion.getStrategy()))
-                .filter(FixSuggestionDto::isVerified)
+                .toList();
+    }
+
+    /**
+     * The repair a scenario is built around, among the alternatives its strategy listed. Which other
+     * minimal repairs a strategy also lists, and so which one comes first, depends on how far its search got
+     * within its time share, so a scenario names the repair it expects instead of taking the first.
+     */
+    private FixSuggestionDto listedRepair(
+            FixResultDto result, String strategy, String expected, Predicate<FixSuggestionDto> matches) {
+        List<FixSuggestionDto> alternatives = listed(result, strategy);
+        return alternatives.stream()
+                .filter(matches)
                 .findFirst()
-                .orElseThrow(() -> new AssertionError(
-                        "Missing verified " + strategy + " suggestion: " + result.getStrategyAttempts()));
+                .orElseThrow(() -> new AssertionError("Expected " + strategy + " to list " + expected
+                        + "; listed " + alternatives + ", attempts " + result.getStrategyAttempts()));
+    }
+
+    private boolean addsOccupancyGuard(FixSuggestionDto suggestion, int ruleIndex) {
+        return suggestion.getConditionAdjustments().stream()
+                .anyMatch(adjustment -> adjustment.getRuleIndex() == ruleIndex
+                        && "add".equals(adjustment.getAction())
+                        && "occupied".equals(adjustment.getAttribute())
+                        && "present".equalsIgnoreCase(adjustment.getValue()));
     }
 
     private RuleFixer allStrategyFixer(
@@ -1362,23 +1431,27 @@ class AcceptanceDemoScenarioNusmvTest {
                 fixConfig);
     }
 
-    private void assertSuggestionsRepairAllSpecs(
+    /**
+     * Every listed alternative, applied on its own, must satisfy the target and leave violated exactly the
+     * specifications it reports as pre-existing — the user may choose any of them, not only the one a
+     * scenario is built around.
+     */
+    private void assertEveryListedAlternativeHolds(
             List<FixSuggestionDto> suggestions,
+            String targetSpecId,
             List<RuleDto> originalRules,
             List<DeviceVerificationDto> devices,
             List<BoardEnvironmentVariableDto> environment,
             List<SpecificationDto> specs,
             Map<String, cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvData> deviceSmvMap,
             SmvGenerator generator,
-            NusmvExecutor executor,
-            Map<String, String> persistenceDeviceRefs) throws Exception {
+            NusmvExecutor executor) throws Exception {
+        // The test board's device ids are the SMV names the fixer reports, so an added condition maps to itself.
+        Map<String, String> persistenceDeviceRefs = deviceSmvMap.keySet().stream()
+                .collect(java.util.stream.Collectors.toMap(ref -> ref, ref -> ref));
         for (FixSuggestionDto suggestion : suggestions) {
-            List<RuleDto> repairedRules = "condition".equals(suggestion.getStrategy())
-                    ? FixStrategyApplier.apply(
-                            suggestion.getStrategy(), suggestion, originalRules, deviceSmvMap,
-                            persistenceDeviceRefs)
-                    : FixStrategyApplier.apply(
-                            suggestion.getStrategy(), suggestion, originalRules, deviceSmvMap);
+            List<RuleDto> repairedRules = FixStrategyApplier.apply(
+                    suggestion.getStrategy(), suggestion, originalRules, deviceSmvMap, persistenceDeviceRefs);
             SmvGenerator.GenerateResult repairedModel = generator.generateWithEnvironment(
                     USER_ID, devices, environment, repairedRules, specs,
                     AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
@@ -1386,8 +1459,19 @@ class AcceptanceDemoScenarioNusmvTest {
             NusmvExecutor.NusmvResult repaired = executor.execute(repairedModel.smvFile());
             assertTrue(repaired.isSuccess(), repaired::getErrorMessage);
             assertEquals(specs.size(), repaired.getSpecResults().size());
-            assertFalse(repaired.hasAnyViolation(),
-                    () -> suggestion.getStrategy() + " must repair every submitted specification");
+            Set<String> violated = new HashSet<>();
+            verdictsBySpecId(repaired, repairedModel).forEach((specId, verdict) -> {
+                if (!verdict.isPassed()) violated.add(specId);
+            });
+            Set<String> reported = new HashSet<>();
+            for (PreexistingViolationDto violation : suggestion.getPreexistingViolations()) {
+                reported.add(violation.getSpecId());
+            }
+            assertFalse(violated.contains(targetSpecId),
+                    () -> suggestion.getStrategy() + " alternative must satisfy the target: " + suggestion);
+            assertEquals(reported, violated,
+                    () -> suggestion.getStrategy() + " alternative must report exactly what it leaves violated: "
+                            + suggestion);
         }
     }
 

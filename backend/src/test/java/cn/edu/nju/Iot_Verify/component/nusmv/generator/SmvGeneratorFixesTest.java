@@ -3933,4 +3933,87 @@ class SmvGeneratorFixesTest {
                 "Admission compares trimmed, so generation must too, got:\n" + smv);
         assertTrue(smv.contains("unlocked"), smv);
     }
+
+    // ======================== guard probes ========================
+
+    @Test
+    @DisplayName("Guard probes define the components of the guard the rule's transition reads")
+    void guardProbes_renderTheComponentsOfTheRulesGuard() {
+        RuleDto rule = ruleCommanding("unlock");
+        RuleDto.Condition hot = rule.getConditions().get(0);
+
+        String smv = mainBuilder.build(1L, lockAndSensorDtos(), null, List.of(rule), lockAndSensorMap(),
+                AttackScenarioDto.none(), false, SmvGenerationContext.noop(), List.of(
+                        GuardProbe.ofRule(0, GuardProbe.Kind.RULE_BASE, rule),
+                        GuardProbe.ofRule(1, GuardProbe.Kind.RULE_CONDITIONS, rule),
+                        GuardProbe.ofCondition(2, GuardProbe.Kind.CONDITION, hot),
+                        GuardProbe.ofCondition(3, GuardProbe.Kind.OPERAND, hot)));
+
+        assertTrue(smv.contains("\nDEFINE"
+                + "\n\tiot_verify_guard_probe_0 := lock_1.Mode=locked;"
+                + "\n\tiot_verify_guard_probe_1 := sensor_1.temperature>30;"
+                + "\n\tiot_verify_guard_probe_2 := sensor_1.temperature>30;"
+                + "\n\tiot_verify_guard_probe_3 := sensor_1.temperature;"), smv);
+        // The probes decompose exactly the guard the transition reads: its conditions, then its base terms.
+        assertTrue(smv.contains("sensor_1.temperature>30 & lock_1.Mode=locked: unlocked;"), smv);
+    }
+
+    @Test
+    @DisplayName("Under attack a rule-base probe carries the command-delivery guard")
+    void guardProbes_ruleBaseUnderAttackIncludesDeliveryGuard() {
+        RuleDto rule = ruleCommanding("unlock");
+
+        String smv = mainBuilder.build(1L, lockAndSensorDtos(), null, List.of(rule), lockAndSensorMap(),
+                AttackScenarioDto.anyUpToBudget(10), false, SmvGenerationContext.noop(),
+                List.of(GuardProbe.ofRule(0, GuardProbe.Kind.RULE_BASE, rule)));
+
+        assertTrue(smv.contains("\n\tiot_verify_guard_probe_0 := lock_1.Mode=locked & lock_1.is_attack=FALSE & "
+                + SmvConstants.AUTOMATION_LINK_ATTACK_PREFIX + "0=FALSE;"), smv);
+    }
+
+    @Test
+    @DisplayName("A guard probe that cannot be rendered is omitted, not defined as a constant")
+    void guardProbes_unrenderableProbesAreOmitted() {
+        RuleDto rule = ruleCommanding("unlock");
+        // Equal by value, but not a rule of this model: the model holds its rules by identity.
+        RuleDto copy = ruleCommanding("unlock");
+        RuleDto.Condition unknownDevice = RuleDto.Condition.builder().deviceName("ghost_1")
+                .attribute("temperature").targetType("variable").relation(">").value("30").build();
+
+        String smv = mainBuilder.build(1L, lockAndSensorDtos(), null, List.of(rule), lockAndSensorMap(),
+                AttackScenarioDto.none(), false, SmvGenerationContext.noop(), List.of(
+                        GuardProbe.ofRule(0, GuardProbe.Kind.RULE_BASE, copy),
+                        GuardProbe.ofRule(1, GuardProbe.Kind.RULE_CONDITIONS, copy),
+                        GuardProbe.ofCondition(2, GuardProbe.Kind.CONDITION, unknownDevice),
+                        GuardProbe.ofCondition(3, GuardProbe.Kind.OPERAND, unknownDevice),
+                        GuardProbe.ofRule(4, GuardProbe.Kind.RULE_BASE, rule)));
+
+        assertFalse(smv.contains("iot_verify_guard_probe_0"), smv);
+        assertFalse(smv.contains("iot_verify_guard_probe_1"), smv);
+        assertFalse(smv.contains("iot_verify_guard_probe_2"), smv);
+        assertFalse(smv.contains("iot_verify_guard_probe_3"), smv);
+        assertTrue(smv.contains("\n\tiot_verify_guard_probe_4 := lock_1.Mode=locked;"), smv);
+    }
+
+    @Test
+    @DisplayName("A guard probe name joins the main namespace and fails closed on a collision")
+    void guardProbes_collidingWithADeviceName_throwsCategorizedException() {
+        RuleDto rule = ruleCommanding("unlock");
+        Map<String, DeviceSmvData> map = lockAndSensorMap();
+        DeviceSmvData lock = map.remove("lock_1");
+        lock.setVarName("iot_verify_guard_probe_0");
+        map.put("iot_verify_guard_probe_0", lock);
+        rule.getCommand().setDeviceName("iot_verify_guard_probe_0");
+        DeviceVerificationDto lockDto = device("iot_verify_guard_probe_0", "Lock");
+        lockDto.setState("locked");
+
+        SmvGenerationException ex = assertThrows(SmvGenerationException.class,
+                () -> mainBuilder.build(1L, List.of(lockDto, lockAndSensorDtos().get(1)), null, List.of(rule), map,
+                        AttackScenarioDto.none(), false, SmvGenerationContext.noop(),
+                        List.of(GuardProbe.ofRule(0, GuardProbe.Kind.RULE_BASE, rule))));
+
+        assertEquals("INVALID_BUILDER_INPUT", ex.getErrorCategory());
+        assertTrue(ex.getMessage().contains("main namespace"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("iot_verify_guard_probe_0"), ex.getMessage());
+    }
 }

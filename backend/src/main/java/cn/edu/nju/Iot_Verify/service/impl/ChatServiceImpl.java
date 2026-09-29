@@ -1926,6 +1926,16 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
         - Automatic-fix output is a proposal. fixable=false or an empty suggestions list must include the returned
           summary, strategy-attempt reasons, and warnings. A verified suggestion still is not applied; apply_fix
           first previews it and requires a later explicit confirmation, then checks Board drift and the write fence.
+        - One strategy may return several alternative suggestions. Present every one and let the user choose; do
+          not pick one on their behalf. When its attempt has alternativesComplete=false, say that other repairs of
+          that kind may exist.
+        - When a suggestion lists preexistingViolations, say that those specifications were already violated before
+          the change and stay violated after it: the suggestion repairs only this counterexample's specification, and
+          the others need their own verification and repair.
+        - A strategy attempt with status NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE or ALL_CANDIDATES_REJECTED proves that no
+          repair of that kind exists within the searched ranges; the fix runs on the trace's frozen snapshot, so calling
+          fix_violation again with the same strategy and ranges returns the same answer. INCONCLUSIVE, TIMED_OUT,
+          SEARCH_BUDGET_EXHAUSTED and FAILED_* are not such proofs.
         - Do not expose device node ids, rule/spec/task/trace ids, generated NuSMV names, raw formulas, or zero-based positions unless the user explicitly asks for technical details. Prefer the returned display labels and descriptions.
         - Never expose impactToken, confirmationToken, domainImpactToken, suggestionToken, or other opaque authorization values, even when they appear in a tool result.
         - formulaPreview is descriptive preview text. Only checkedExpression is the expression actually sent to the model checker for that run.

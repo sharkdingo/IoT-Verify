@@ -658,6 +658,10 @@ class ChatServiceImplToolLoopControlTest {
         assertTrue(visible.contains("SATISFIED with modelComplete=false"));
         assertTrue(visible.contains("one possible formal-model trajectory"));
         assertTrue(visible.contains("A verified suggestion still is not applied"));
+        assertTrue(visible.contains("Present every one and let the user choose"));
+        assertTrue(visible.contains("alternativesComplete=false"));
+        assertTrue(visible.contains("When a suggestion lists preexistingViolations"));
+        assertTrue(visible.contains("NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE or ALL_CANDIDATES_REJECTED proves"));
         assertTrue(visible.contains("apply_fix"));
         assertTrue(visible.contains("Never expose impactToken"));
         assertTrue(visible.contains("suggestionToken"));

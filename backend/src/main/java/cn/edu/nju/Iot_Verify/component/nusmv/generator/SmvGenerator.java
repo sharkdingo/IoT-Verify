@@ -220,6 +220,26 @@ public class SmvGenerator {
                                                            TempModelContext tempModelContext,
                                                            Map<String, DeviceSmvData> resolvedDeviceSmvMap)
             throws IOException {
+        return generateWithResolvedDeviceModel(userId, devices, environmentVariables, rules, specs,
+                attackScenario, enablePrivacy, purpose, tempModelContext, resolvedDeviceSmvMap, List.of());
+    }
+
+    /**
+     * As above, with {@code guardProbes} appended to the main module. The probes are {@code DEFINE}s, so
+     * they change what a counterexample reports, never which specifications hold.
+     */
+    public GenerateResult generateWithResolvedDeviceModel(Long userId,
+                                                           List<DeviceVerificationDto> devices,
+                                                           List<BoardEnvironmentVariableDto> environmentVariables,
+                                                           List<RuleDto> rules,
+                                                           List<SpecificationDto> specs,
+                                                           AttackScenarioDto attackScenario,
+                                                           boolean enablePrivacy,
+                                                           GeneratePurpose purpose,
+                                                           TempModelContext tempModelContext,
+                                                           Map<String, DeviceSmvData> resolvedDeviceSmvMap,
+                                                           List<GuardProbe> guardProbes)
+            throws IOException {
         AttackScenarioDto safeAttackScenario = validateAttackScenario(attackScenario);
         if (devices == null || devices.isEmpty()) {
             throw SmvGenerationException.invalidBuilderInput("SmvGenerator", "devices", "must not be null or empty");
@@ -230,7 +250,7 @@ public class SmvGenerator {
         applyEnvironmentPoolLabels(deviceSmvMap, environmentVariables);
         SmvGenerationContext context = SmvGenerationContext.collecting();
         String smvContent = buildSmvContent(deviceSmvMap, userId, devices, environmentVariables, safeRules, safeSpecs,
-                safeAttackScenario, enablePrivacy, context);
+                safeAttackScenario, enablePrivacy, context, guardProbes != null ? guardProbes : List.of());
 
         Path tempDir = Files.createTempDirectory(resolveTempDirPrefix(purpose, userId, tempModelContext));
         File smvFile = tempDir.resolve("model.smv").toFile();
@@ -511,9 +531,10 @@ public class SmvGenerator {
                                    List<SpecificationDto> specs,
                                    AttackScenarioDto attackScenario,
                                    boolean enablePrivacy,
-                                   SmvGenerationContext context) {
+                                   SmvGenerationContext context,
+                                   List<GuardProbe> guardProbes) {
         return buildSmvContentInternal(deviceSmvMap, userId, devices, environmentVariables, rules, specs,
-                attackScenario, enablePrivacy, null, context);
+                attackScenario, enablePrivacy, null, context, guardProbes);
     }
 
     private String buildParameterizedSmvContent(Map<String, DeviceSmvData> deviceSmvMap,
@@ -527,7 +548,7 @@ public class SmvGenerator {
                                                 ParameterizationConfig config,
                                                 SmvGenerationContext context) {
         return buildSmvContentInternal(deviceSmvMap, userId, devices, environmentVariables, rules, specs,
-                attackScenario, enablePrivacy, config, context);
+                attackScenario, enablePrivacy, config, context, List.of());
     }
 
     private String buildSmvContentInternal(Map<String, DeviceSmvData> deviceSmvMap,
@@ -539,7 +560,8 @@ public class SmvGenerator {
                                            AttackScenarioDto attackScenario,
                                            boolean enablePrivacy,
                                            ParameterizationConfig config,
-                                           SmvGenerationContext context) {
+                                           SmvGenerationContext context,
+                                           List<GuardProbe> guardProbes) {
 
         AttackScenarioDto safeAttackScenario = validateAttackScenario(attackScenario);
         log.debug("Building SMV content: {} devices, {} rules, {} specs, attack={}, attackBudget={}, privacy={}",
@@ -573,7 +595,7 @@ public class SmvGenerator {
                 ? mainModuleBuilder.buildParameterized(userId, devices, environmentVariables, rules,
                         deviceSmvMap, safeAttackScenario, enablePrivacy, config, context)
                 : mainModuleBuilder.build(userId, devices, environmentVariables, rules, deviceSmvMap,
-                        safeAttackScenario, enablePrivacy, context));
+                        safeAttackScenario, enablePrivacy, context, guardProbes));
 
         if (config != null) {
             // Only emit the negated spec (¬ρ)

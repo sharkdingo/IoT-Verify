@@ -5,6 +5,7 @@ import cn.edu.nju.Iot_Verify.component.nusmv.fixer.strategy.FixStrategyApplier;
 import cn.edu.nju.Iot_Verify.dto.fix.ConditionAdjustment;
 import cn.edu.nju.Iot_Verify.dto.fix.FixSuggestionDto;
 import cn.edu.nju.Iot_Verify.dto.fix.ParameterAdjustment;
+import cn.edu.nju.Iot_Verify.dto.fix.PreexistingViolationDto;
 import cn.edu.nju.Iot_Verify.dto.fix.PreferredRange;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.exception.BadRequestException;
@@ -40,7 +41,6 @@ class FixSuggestionTokenServiceTest {
                 .description("Remove conflicting automation")
                 .removedRuleIndices(List.of(2, 4))
                 .removedRuleDescriptions(List.of("Rule 3", "Rule 5"))
-                .verified(true)
                 .build();
         Map<String, PreferredRange> ranges = Map.of();
 
@@ -69,7 +69,6 @@ class FixSuggestionTokenServiceTest {
         FixSuggestionDto suggestion = FixSuggestionDto.builder()
                 .strategy("parameter")
                 .description("Adjust threshold")
-                .verified(true)
                 .build();
         Map<String, PreferredRange> ranges = Map.of(
                 "rule:1:condition:0", new PreferredRange(10, 20));
@@ -84,6 +83,39 @@ class FixSuggestionTokenServiceTest {
                 "rule:1:condition:0", new PreferredRange(0, 100));
         assertThrows(BadRequestException.class, () -> service.verify(
                 7L, 11L, "parameter", suggestion, token, changedRanges));
+    }
+
+    // The pre-existing list is what tells the user this suggestion leaves other specifications violated.
+    // A client that dropped or edited it would present the repair as cleaner than it was verified to be.
+    @Test
+    void verify_rejectsDroppedOrEditedPreexistingViolations() throws Exception {
+        FixSuggestionDto suggestion = FixSuggestionDto.builder()
+                .strategy("remove")
+                .description("Remove conflicting automation")
+                .removedRuleIndices(List.of(1))
+                .removedRuleDescriptions(List.of("Rule 2"))
+                .preexistingViolations(List.of(PreexistingViolationDto.builder()
+                        .specId("spec_other")
+                        .templateId("1")
+                        .formulaPreview("AG !(window.open & heater.on)")
+                        .build()))
+                .build();
+        String token = service.issue(7L, 11L, suggestion, Map.of());
+        byte[] wire = objectMapper.writeValueAsBytes(suggestion);
+
+        FixSuggestionDto dropped = objectMapper.readValue(wire, FixSuggestionDto.class);
+        dropped.setPreexistingViolations(List.of());
+        assertThrows(BadRequestException.class, () -> service.verify(
+                7L, 11L, "remove", dropped, token, Map.of()));
+
+        FixSuggestionDto edited = objectMapper.readValue(wire, FixSuggestionDto.class);
+        edited.getPreexistingViolations().get(0).setFormulaPreview("AG TRUE");
+        assertThrows(BadRequestException.class, () -> service.verify(
+                7L, 11L, "remove", edited, token, Map.of()));
+
+        FixSuggestionDto unchanged = objectMapper.readValue(wire, FixSuggestionDto.class);
+        assertEquals(suggestion.getPreexistingViolations(), service.verify(
+                7L, 11L, "remove", unchanged, token, Map.of()).getPreexistingViolations());
     }
 
     @Test
@@ -116,7 +148,6 @@ class FixSuggestionTokenServiceTest {
                 .strategy("parameter")
                 .description("Adjust coordinated thresholds")
                 .parameterAdjustments(List.of(firstAdjustment, secondAdjustment))
-                .verified(true)
                 .build();
         String token = service.issue(7L, 11L, serverSuggestion, Map.of());
 
@@ -190,7 +221,6 @@ class FixSuggestionTokenServiceTest {
                 .strategy("condition")
                 .description("Add coordinated trigger conditions")
                 .conditionAdjustments(List.of(firstAdjustment, secondAdjustment))
-                .verified(true)
                 .build();
         String token = service.issue(7L, 11L, serverSuggestion, Map.of());
 

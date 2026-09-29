@@ -8,7 +8,8 @@ import java.util.Locale;
 
 /**
  * Shared relation normalization and validation logic for SMV generation.
- * Used by SmvModelValidator, SmvMainModuleBuilder, SmvSpecificationBuilder, and FixStrategyUtils.
+ * Used by SmvModelValidator, SmvMainModuleBuilder, SmvSpecificationBuilder, FixStrategyUtils, and
+ * CounterexampleLemma.
  */
 public final class SmvRelationUtils {
 
@@ -77,6 +78,37 @@ public final class SmvRelationUtils {
                 || "<=".equals(relation)
                 || "in".equals(relation)
                 || "not in".equals(relation);
+    }
+
+    /**
+     * A rule condition's relation as an SMV expression: IN/NOT_IN expand to {@code (x=a | x=b)} and
+     * {@code (x!=a & x!=b)}, a single-element list without parentheses; any other relation is
+     * {@code left + relation + value}. Returns {@code null} for an IN/NOT_IN with no values.
+     *
+     * <p>The one rendering of a rule-condition relation: the main module builds rule guards with it, and
+     * condition adjustment's counterexample lemma rebuilds a free candidate's guard with it, so the lemma
+     * cannot drift from the guard NuSMV actually evaluates.
+     */
+    public static String ruleRelationExpression(String left, String relation, String value) {
+        if ("in".equals(relation) || "not in".equals(relation)) {
+            List<String> cleaned = splitRuleValues(value);
+            if (cleaned.isEmpty()) {
+                return null;
+            }
+            String op = "in".equals(relation) ? "=" : "!=";
+            String join = "in".equals(relation) ? " | " : " & ";
+            if (cleaned.size() == 1) {
+                return left + op + cleaned.get(0);
+            }
+            StringBuilder sb = new StringBuilder("(");
+            for (int i = 0; i < cleaned.size(); i++) {
+                if (i > 0) sb.append(join);
+                sb.append(left).append(op).append(cleaned.get(i));
+            }
+            sb.append(")");
+            return sb.toString();
+        }
+        return left + relation + value;
     }
 
     /**

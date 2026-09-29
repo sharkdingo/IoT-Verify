@@ -20,16 +20,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * The conformance claims in {@code docs/architecture/theory-sources.md} must still be true of the code.
  *
  * <p>That document is the only place recording which paper owns which semantics, and it makes four specific,
- * checkable claims about algorithms. It is also dated — "checked against the papers (2026-07-31)" — which is
- * exactly the kind of assertion that silently rots: the paper does not change, the code does, and nothing fails
- * when they diverge.
+ * checkable claims about algorithms. Its conformance section is also dated, which is exactly the kind of
+ * assertion that silently rots: the paper does not change, the code does, and nothing fails when they diverge.
  *
  * <p>Each claim was verified by reading the implementation alongside the document:
  *
  * <ul>
- *   <li><b>Salus §5.3</b> — {@code ParameterAdjustStrategy} sorts candidates by
- *       {@code comparingLong(value -> distance(value, original))} where {@code distance} is
- *       {@code Math.abs(value - original)}, so the closest working value is offered first.</li>
+ *   <li><b>Salus §5.3</b> — {@code ParameterAdjustStrategy.refineToClosest} re-solves each changed threshold
+ *       inside {@code refinementWindow}, which keeps only values strictly closer to the original than the
+ *       current best ({@code distance} is {@code Math.abs(value - original)}), so each accepted value is a
+ *       smaller edit.</li>
  *   <li><b>Salus §5.2</b> — {@code FixStrategyUtils} derives candidate conditions from the violated
  *       specification's own {@code aConditions}, {@code ifConditions} and {@code thenConditions}, not from
  *       invented predicates.</li>
@@ -38,13 +38,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *       2^(l_up−l) / (2^l_up − 1) exactly.</li>
  *   <li><b>FSM thesis ch.4</b> — {@code forwardVerify} refuses to confirm a repair when
  *       {@code disabledRuleCount() > 0 || skippedSpecCount() > 0}, so a vacuous pass is never reported as a fix;
- *       rejected candidates are added to {@code exclusionInvars} rather than retried.</li>
+ *       a candidate it does not accept is added to {@code excluded}, which the next solve negates as an INVAR,
+ *       rather than retried.</li>
  * </ul>
  *
  * <p>This test pins the *structural fingerprint* of each claim rather than re-deriving the mathematics. A
  * behavioural test already covers the weight formula ({@code PaperDistanceMetricPropertyTest}) and the parameter
  * search ({@code ParameterAdjustStrategyTest}). What was unguarded is the link between those behaviours and the
- * document that describes them — so if someone changes the ordering comparator or drops the incompleteness
+ * document that describes them — so if someone widens the refinement window or drops the incompleteness
  * refusal, this fails and names the paragraph that has become false.
  */
 class TheorySourceConformanceTest {
@@ -59,15 +60,19 @@ class TheorySourceConformanceTest {
     }
 
     @Test
-    @DisplayName("Salus 5.3: parameter candidates are ordered by distance from the original value")
-    void parameterCandidatesOrderedByDistance() throws IOException {
-        String strategy = source("component", "nusmv", "fixer", "strategy", "ParameterAdjustStrategy.java");
-        // The ordering is the claim. Offering a distant value before a nearer working one would still "fix" the
-        // model while contradicting the paper and surprising the user with a larger change than necessary.
-        assertTrue(strategy.contains("distance(value, original)"),
-                "theory-sources.md claims Salus 5.3 ordering by distance from the original value; "
-                        + "ParameterAdjustStrategy no longer sorts by it");
-        assertTrue(strategy.replaceAll("\\s+", " ").contains("Math.abs((long) value - original)"),
+    @DisplayName("Salus 5.3: refinement only accepts values strictly closer to the original")
+    void parameterRefinementNarrowsTowardTheOriginal() throws IOException {
+        String flat = source("component", "nusmv", "fixer", "strategy", "ParameterAdjustStrategy.java")
+                .replaceAll("\\s+", " ");
+        // The strictly-closer window is the claim. Widening it would let refinement return a value no nearer
+        // than the one it started from, so the suggestion would stop being the smallest edit found.
+        assertTrue(flat.contains("(long) original - bestDistance + 1L")
+                        && flat.contains("(long) original + bestDistance - 1L"),
+                "theory-sources.md claims Salus 5.3 refinement re-solves only strictly closer values; "
+                        + "refinementWindow no longer excludes the current distance");
+        assertTrue(flat.contains("refinementWindow( original, bestDist,"),
+                "refineToClosest should confine each re-solve to refinementWindow");
+        assertTrue(flat.contains("Math.abs((long) value - original)"),
                 "distance() should be absolute difference from the original value");
     }
 
@@ -172,9 +177,18 @@ class TheorySourceConformanceTest {
                 "forwardVerify no longer refuses a regenerated model with skipped specifications, so a "
                         + "repair could be certified against a property that was never checked");
 
-        String strategy = source("component", "nusmv", "fixer", "strategy", "ParameterAdjustStrategy.java");
-        assertTrue(strategy.contains("exclusionInvars"),
-                "rejected candidates should be excluded via invariants rather than retried");
+        // The exclusion half of the loop: a candidate forward verification does not accept is recorded as
+        // excluded, and every excluded assignment becomes a negated INVAR on the next solve. This used to grep
+        // "exclusionInvars", a name the refinement pass also uses, so dropping the exclusion from the search
+        // loop left the test green while the solver was free to return the rejected assignment again.
+        String strategy = source("component", "nusmv", "fixer", "strategy", "ParameterAdjustStrategy.java")
+                .replaceAll("\\s+", " ");
+        assertTrue(strategy.contains("if (!verification.isAccepted()) { excluded.add(assignment);"),
+                "theory-sources.md claims a candidate forward verification does not accept is excluded rather "
+                        + "than retried; offer() no longer records it as excluded");
+        assertTrue(strategy.contains("for (Map<String, Integer> assignment : excluded) {")
+                        && strategy.contains("invars.add(\"!(\" +"),
+                "excluded assignments should become negated INVARs on the next solve");
     }
 
     @Test

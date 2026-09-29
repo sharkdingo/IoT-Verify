@@ -224,8 +224,9 @@ variables (`a_<name>`), the internal compromised-point counter, automation-link 
 rule probes, and
 auto-fix parameterization variables.
 Generation rejects concrete collisions in that namespace. The automatic-fix prefixes
-`param_`, `lambda_` and `condition_value_` **are** part of the user contract: a device id
-may not *start* with any of them, refused at board admission and again at request time. A
+`param_`, `lambda_`, `condition_value_` and `iot_verify_guard_probe_` **are** part of the user
+contract: a device id may not *start* with any of them, refused at board admission and again
+at request time. A
 device id may still *contain* them (`my_param_x` is fine), and `a_` is not prefix-reserved —
 a collision with a generated `a_<name>` is judged on the concrete name, not the prefix. Board writes
 preflight collisions derivable from stored environment domains, rules, attack analysis,
@@ -556,12 +557,13 @@ Backend DTOs: `FaultRuleDto`, `FixSuggestionDto`, `ParameterAdjustment`,
 | `parameterAdjustments[]` | Parameter strategy | Numeric threshold edits plus readable description | UI; server recompute/apply |
 | `conditionAdjustments[].targetType` | Condition strategy | Rule condition semantics | UI; server recompute/apply |
 | `removedRuleDescriptions[]` | Remove strategy | Readable rules that would be permanently deleted | UI; server retains positions internally |
-| `verified` | Fix strategy re-verification | Whether suggestion passed re-check | UI/apply guard |
+| `preexistingViolations[]` | Forward verification vs. the original rules on the same model | Specifications already violated before the fix and left violated by it | UI note beside the suggestion; signed with it |
 | `preferredRangeSelections` | User selection from parameter-adjustment targets | Numeric tuning constraints | Parameter strategy |
 
-Fix apply accepts only a strategy and optional preferred ranges. It recomputes a verified
-suggestion from the trace context before writing; the frontend never round-trips an
-operation list or internal locator.
+Fix apply accepts the exact suggestion returned by `/fix` together with its signed token (and the
+preferred ranges it was generated under); the token covers the visible suggestion and every hidden
+operation locator, so the client cannot alter what is written and never sees an internal locator.
+Contract and drift guards: [../api/verification.md](../api/verification.md).
 
 Persisted board rule ids cross the verification/simulation model boundary as correlation
 identity only: `modelRequest.ts` includes a positive database id so parsed

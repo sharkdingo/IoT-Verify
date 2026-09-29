@@ -34,6 +34,9 @@ import java.util.stream.Collectors;
  * Existing conditions: lambda=TRUE → keep, lambda=FALSE → remove.
  * Candidate conditions (from violated spec): lambda=TRUE → add, lambda=FALSE → ignore.
  * NuSMV solves for which conditions to remove/add.</p>
+ *
+ * <p>The search continues after the first verified repair and lists every minimal set of touched
+ * conditions it verifies (see {@link FixAlternatives}).</p>
  */
 @Slf4j
 @Component
@@ -53,40 +56,54 @@ public class ConditionAdjustStrategy implements FixStrategy {
     }
 
     @Override
-    public FixSuggestionDto tryFix(FixContext ctx) {
+    public StrategyOutcome tryFix(FixContext ctx) {
         List<FaultRuleDto> faultRules = ctx.getFaultRules();
         List<RuleDto> allRules = ctx.getAllRules();
         int violatedSpecIndex = ctx.getViolatedSpecIndex();
         int maxAttempts = ctx.getMaxAttempts() > 0 ? ctx.getMaxAttempts() : 20;
 
-        if (faultRules == null || faultRules.isEmpty()) return null;
+        Set<Integer> repairIndices = new LinkedHashSet<>(ctx.getRepairRuleIndices());
+        if (repairIndices.isEmpty()) return StrategyOutcome.none();
 
-        // §5: Expand scope + prepare augmented rules with candidate conditions
+        // §5.2: candidate conditions on every rule that can influence the violated property
         SpecificationDto violatedSpec = ctx.getSpecs().get(violatedSpecIndex);
         Map<String, DeviceSmvData> deviceSmvMap = ctx.getDeviceSmvMap();
-        Set<Integer> expandedIndices = FixStrategyUtils.expandRuleIndices(
-                faultRules, allRules, violatedSpec, deviceSmvMap);
 
-        PreparedData prep = prepareAugmentedRules(allRules, expandedIndices, violatedSpec, deviceSmvMap);
-        if (prep == null) return null;
+        PreparedData prep = prepareAugmentedRules(allRules, repairIndices, violatedSpec, deviceSmvMap);
+        if (prep == null) return StrategyOutcome.none();
 
         ctx.initializeStrategySearch(NAME, maxAttempts);
         log.info("ConditionAdjustStrategy: created {} lambda variable(s)", prep.conditionLambdas.size());
+        CounterexampleLemma lemma = CounterexampleLemma.plan(
+                prep.augmentedRules, prep.conditionLambdas, prep.candidateConditionValues);
 
-        // Solve loop
+        // Solve loop. A checked assignment is excluded exactly; a rejected one also excludes every
+        // assignment its violating path cannot tell apart from it (see CounterexampleLemma), and a
+        // listed repair excludes every assignment that flips at least the same conditions (see
+        // supersetExclusion).
+        FixAlternatives alternatives = new FixAlternatives(ctx);
         List<String> exclusionInvars = new ArrayList<>();
-        List<String> prioritizedConfigurations = maxAttempts > 1
+        List<Set<String>> prioritizedConfigurations = maxAttempts > 1
                 ? prioritizedConfigurations(prep, deviceSmvMap, faultRules)
                 : List.of();
         int prioritizedBudget = maxAttempts > 1 ? Math.max(1, maxAttempts / 2) : 0;
         int prioritizedIndex = 0;
-        Set<Integer> partialOutputHashes = new HashSet<>();
-        int consecutivePartials = 0;
+        boolean exhausted = false;
+        // Set when a run failed without excluding anything (other than a refused permit), so the next
+        // iteration would rebuild the identical model and can only repeat the failure.
+        boolean failedWithoutProgress = false;
 
-        for (int attempt = 0; attempt < maxAttempts; attempt++) {
+        for (int attempt = 0; attempt < maxAttempts && !alternatives.full(); attempt++) {
             if (ctx.isExpired()) {
                 log.info("ConditionAdjustStrategy: deadline expired at attempt {}/{}", attempt + 1, maxAttempts);
                 break;
+            }
+            if (failedWithoutProgress) {
+                // A failed pinned configuration is left to the joint search, which still covers it; a
+                // failed joint run ends the search.
+                if (prioritizedIndex >= prioritizedConfigurations.size()) break;
+                prioritizedIndex++;
+                failedWithoutProgress = false;
             }
             ctx.addStrategyAttempts(NAME, 1);
             if (attempt >= prioritizedBudget
@@ -95,9 +112,14 @@ public class ConditionAdjustStrategy implements FixStrategy {
                         prioritizedBudget);
                 prioritizedIndex = prioritizedConfigurations.size();
             }
+            // A pinned configuration that contains a listed repair can only yield supersets of it.
+            while (prioritizedIndex < prioritizedConfigurations.size()
+                    && alternatives.covers(prioritizedConfigurations.get(prioritizedIndex))) {
+                prioritizedIndex++;
+            }
             List<String> attemptInvars = new ArrayList<>(exclusionInvars);
             if (prioritizedIndex < prioritizedConfigurations.size()) {
-                attemptInvars.add(prioritizedConfigurations.get(prioritizedIndex));
+                attemptInvars.add(lambdaConfiguration(prep, prioritizedConfigurations.get(prioritizedIndex)));
             }
             ParameterizationConfig config = ParameterizationConfig.builder()
                     .conditionLambdas(prep.conditionLambdas)
@@ -116,10 +138,10 @@ public class ConditionAdjustStrategy implements FixStrategy {
                     log.warn("ConditionAdjust attempt {}: SMV generation returned null", attempt + 1);
                     ctx.recordStrategyGenerationFailure(NAME,
                             "The condition candidate model could not preserve the original attack scenario.");
-                    return null;
+                    return alternatives.outcome(false);
                 }
                 if (!FixStrategyUtils.candidateModelComplete(genResult, ctx, NAME)) {
-                    return null;
+                    return alternatives.outcome(false);
                 }
                 smvFile = genResult.smvFile();
 
@@ -127,8 +149,10 @@ public class ConditionAdjustStrategy implements FixStrategy {
                 if (!result.isSuccess()) {
                     log.warn("ConditionAdjust attempt {}: NuSMV execution failed: {}",
                             attempt + 1, result.getErrorMessage());
-                    FixStrategyUtils.recordSolverFailure(ctx, NAME,
-                            "NuSMV failed while searching for condition changes.");
+                    FixStrategyUtils.recordSolverFailure(ctx, NAME, result.isBusy()
+                            ? "NuSMV was busy while searching for condition changes."
+                            : "NuSMV failed while searching for condition changes.");
+                    failedWithoutProgress = !result.isBusy();
                     continue;
                 }
 
@@ -137,6 +161,7 @@ public class ConditionAdjustStrategy implements FixStrategy {
                     log.warn("ConditionAdjust attempt {}: empty spec results", attempt + 1);
                     FixStrategyUtils.recordSolverFailure(ctx, NAME,
                             "NuSMV returned no usable specification result during condition search.");
+                    failedWithoutProgress = true;
                     continue;
                 }
 
@@ -148,48 +173,30 @@ public class ConditionAdjustStrategy implements FixStrategy {
                         prioritizedIndex++;
                         continue;
                     }
-                    log.info("ConditionAdjust: ¬ρ is universally true, no condition fix possible");
-                    ctx.clearStrategySolverFailure(NAME);
-                    return null;
+                    log.info("ConditionAdjust: ¬ρ is universally true, no further condition fix possible");
+                    exhausted = true;
+                    break;
                 }
 
                 // Extract lambda values
                 String rawOutput = result.getOutput();
                 Map<String, String> extractedValues = ParameterExtractor.extract(rawOutput, prep.frozenVarNames);
-                if (extractedValues.isEmpty()) {
-                    log.warn("ConditionAdjust attempt {}: failed to extract condition parameters", attempt + 1);
-                    FixStrategyUtils.recordSolverFailure(ctx, NAME,
-                            "NuSMV output did not contain the condition assignment required by the search.");
-                    continue;
-                }
                 if (extractedValues.size() < prep.frozenVarNames.size()) {
-                    int outputHash = rawOutput != null ? rawOutput.hashCode() : 0;
-                    if (!partialOutputHashes.add(outputHash)) {
-                        consecutivePartials++;
-                    } else {
-                        consecutivePartials = 0;
-                    }
-                    log.warn("ConditionAdjust attempt {}: partial extraction ({}/{}), retrying without exclusion{}",
-                            attempt + 1, extractedValues.size(), prep.frozenVarNames.size(),
-                            consecutivePartials > 0 ? " (duplicate #" + consecutivePartials + ")" : "");
-                    if (consecutivePartials >= 2) {
-                        log.info("ConditionAdjust: repeated partial extraction, giving up");
-                        FixStrategyUtils.recordSolverFailure(ctx, NAME,
-                                "NuSMV repeatedly returned incomplete condition assignments.");
-                        break;
-                    }
-                    // Do NOT add exclusion from partial values — incomplete assignment
-                    // would over-exclude valid solutions from the search space.
+                    // An incomplete assignment can be neither interpreted nor excluded (excluding the
+                    // part that was read would rule out valid completions of it), so the next attempt
+                    // would rebuild the identical model and read the same output.
+                    log.warn("ConditionAdjust attempt {}: extracted {}/{} condition parameters",
+                            attempt + 1, extractedValues.size(), prep.frozenVarNames.size());
+                    FixStrategyUtils.recordSolverFailure(ctx, NAME,
+                            "NuSMV output did not contain the complete condition assignment required by the search.");
+                    failedWithoutProgress = true;
                     continue;
                 }
-                consecutivePartials = 0;
 
                 // Interpret results: determine removals and additions
                 InterpretedResult ir = interpretResults(prep, extractedValues, allRules, deviceSmvMap);
 
-                boolean anyChange = ir.adjustments.stream()
-                        .anyMatch(a -> "remove".equals(a.getAction()) || "add".equals(a.getAction()));
-                if (!anyChange) {
+                if (ir.changes.isEmpty()) {
                     log.info("ConditionAdjust attempt {}: no changes, adding exclusion", attempt + 1);
                     addExclusion(exclusionInvars, prep, extractedValues);
                     continue;
@@ -204,27 +211,45 @@ public class ConditionAdjustStrategy implements FixStrategy {
                 // hand the user a "verified" suggestion that can never be applied. Exclude and keep searching.
                 if (emptiesAnyRule(modifiedRules, ir.conditionsToRemove.keySet())) {
                     log.info("ConditionAdjust attempt {}: solution empties a rule's conditions; excluding", attempt + 1);
+                    // It avoids the counterexample but is not a persistable rule, the same ground on
+                    // which forward verification rejects a candidate.
+                    alternatives.notAccepted(ir.changes, FixStrategyUtils.Verification.rejected());
                     addExclusion(exclusionInvars, prep, extractedValues);
                     continue;
                 }
 
-                // Forward verify
-                if (FixStrategyUtils.forwardVerify(smvGenerator, nusmvExecutor, ctx, modifiedRules, NAME)) {
+                CounterexampleLemma.Attempt lemmaAttempt = lemma != null ? lemma.attempt(modifiedRules) : null;
+                FixStrategyUtils.Verification verification = FixStrategyUtils.forwardVerify(
+                        smvGenerator, nusmvExecutor, ctx, modifiedRules, NAME,
+                        lemmaAttempt != null ? lemmaAttempt.probes() : List.of());
+                if (verification.isAccepted()) {
                     // Filter out action="keep" entries — they add no value for the user
                     List<ConditionAdjustment> actionableAdjustments = ir.adjustments.stream()
                             .filter(a -> !"keep".equals(a.getAction()))
                             .collect(Collectors.toList());
-                    String description = buildDescription(ir.adjustments);
-                    return FixSuggestionDto.builder()
+                    alternatives.accept(ir.changes, FixSuggestionDto.builder()
                             .strategy(NAME)
-                            .description("Adjust conditions: " + description)
+                            .description("Adjust conditions: " + buildDescription(ir.adjustments))
                             .conditionAdjustments(actionableAdjustments)
-                            .verified(true)
-                            .build();
+                            .build(), verification);
+                    exclusionInvars.add(supersetExclusion(prep, ir.changes));
+                    log.info("ConditionAdjust attempt {}: listed a verified repair, excluding its supersets",
+                            attempt + 1);
+                    continue;
                 }
 
+                alternatives.notAccepted(ir.changes, verification);
                 addExclusion(exclusionInvars, prep, extractedValues);
-                log.info("ConditionAdjust attempt {}: forward verification failed, excluding configuration", attempt + 1);
+                String learned = lemmaAttempt != null ? lemmaAttempt.learn(verification, ctx.getSpecs()) : null;
+                if (CounterexampleLemma.REFUTES_ALL.equals(learned)) {
+                    log.info("ConditionAdjust attempt {}: every remaining assignment shares the rejected candidate's"
+                            + " violation", attempt + 1);
+                    exhausted = true;
+                    break;
+                }
+                if (learned != null) exclusionInvars.add(learned);
+                log.info("ConditionAdjust attempt {}: forward verification did not accept the candidate, excluding it{}",
+                        attempt + 1, learned != null ? " and the assignments its violation also refutes" : "");
 
             } catch (Exception e) {
                 log.warn("ConditionAdjust attempt {}: failed: {}", attempt + 1, e.getMessage(), e);
@@ -232,27 +257,43 @@ public class ConditionAdjustStrategy implements FixStrategy {
                     String reason = "Condition candidate generation failed: " + e.getMessage();
                     ctx.addDiagnostic(reason);
                     ctx.recordStrategyGenerationFailure(NAME, reason);
-                    return null;
+                    return alternatives.outcome(false);
                 }
                 FixStrategyUtils.preserveInterrupt(e);
                 FixStrategyUtils.recordSolverFailure(ctx, NAME,
                         "Condition search encountered an execution error: " + e.getMessage());
+                failedWithoutProgress = true;
             } finally {
                 FixStrategyUtils.cleanupTempDir(smvFile);
             }
         }
 
-        log.info("ConditionAdjustStrategy: exhausted attempts without finding a fix");
-        if (!ctx.isExpired()) {
-            FixContext.StrategySearchProgress progress = ctx.strategySearchProgress(NAME);
-            if (progress != null && progress.attemptsUsed() >= progress.attemptLimit()) {
-                ctx.recordStrategyNoResult(NAME, "SEARCH_BUDGET_EXHAUSTED",
-                        "Condition search consumed " + progress.attemptsUsed() + " of "
-                                + progress.attemptLimit()
-                                + " allowed attempts before it could establish that no repair exists.");
+        StrategyOutcome outcome = alternatives.outcome(exhausted);
+        if (outcome.suggestions().isEmpty()) {
+            if (outcome.alternativesComplete()) {
+                // The solver proved that no unchecked assignment is left, which supersedes a
+                // transient failure on an earlier attempt.
+                ctx.clearStrategySolverFailure(NAME);
+                if (alternatives.anyRejected()) {
+                    ctx.recordStrategyNoResult(NAME, "ALL_CANDIDATES_REJECTED",
+                            "Condition changes that prevent this counterexample exist, but each one either leaves a"
+                                    + " rule without a trigger condition or was rejected by forward verification on"
+                                    + " the complete model.");
+                } else {
+                    ctx.recordStrategyNoResult(NAME, "NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE",
+                            "No combination of removing existing trigger conditions and adding candidate ones"
+                                    + " prevents this counterexample.");
+                }
+            } else if (!exhausted && !ctx.isExpired()) {
+                FixContext.StrategySearchProgress progress = ctx.strategySearchProgress(NAME);
+                if (progress != null && progress.attemptsUsed() >= progress.attemptLimit()) {
+                    ctx.recordStrategyNoResult(NAME, "SEARCH_BUDGET_EXHAUSTED",
+                            "Condition search reached its candidate limit before it could establish that"
+                                    + " no repair exists.");
+                }
             }
         }
-        return null;
+        return outcome;
     }
 
     // -------- Preparation: deep copy + inject candidates + build lambdas --------
@@ -266,13 +307,16 @@ public class ConditionAdjustStrategy implements FixStrategy {
         List<RuleDto> augmentedRules = FixStrategyUtils.deepCopyRules(allRules);
         Map<Integer, Integer> originalCondCounts = new HashMap<>();
 
+        Map<Integer, CommandEffects> effectsByRule = new HashMap<>();
         for (int ruleIdx : expandedIndices) {
             RuleDto augRule = augmentedRules.get(ruleIdx);
             originalCondCounts.put(ruleIdx, augRule.getConditions() != null
                     ? augRule.getConditions().size() : 0);
 
+            CommandEffects effects = CommandEffects.of(allRules.get(ruleIdx), allRules, deviceSmvMap);
+            effectsByRule.put(ruleIdx, effects);
             List<RuleDto.Condition> candidates = FixStrategyUtils.extractCandidateConditions(
-                    violatedSpec, allRules.get(ruleIdx), deviceSmvMap, fixConfig.getMaxCandidatesPerRule());
+                    violatedSpec, allRules.get(ruleIdx), effects, deviceSmvMap, fixConfig.getMaxCandidatesPerRule());
             if (!candidates.isEmpty()) {
                 if (augRule.getConditions() == null) {
                     augRule.setConditions(new ArrayList<>());
@@ -303,7 +347,7 @@ public class ConditionAdjustStrategy implements FixStrategy {
                     ParameterizationConfig.ConditionValueInfo valueInfo =
                             FixStrategyUtils.candidateConditionValueInfo(
                                     augRule.getConditions().get(condIdx), allRules.get(ruleIdx),
-                                    deviceSmvMap, valueName);
+                                    effectsByRule.get(ruleIdx), deviceSmvMap, valueName);
                     if (valueInfo != null) {
                         candidateConditionValues.put(key, valueInfo);
                         frozenVarNames.add(valueName);
@@ -332,6 +376,7 @@ public class ConditionAdjustStrategy implements FixStrategy {
         List<ConditionAdjustment> adjustments = new ArrayList<>();
         Map<Integer, List<Integer>> conditionsToRemove = new LinkedHashMap<>();
         Map<Integer, List<RuleDto.Condition>> conditionsToAdd = new LinkedHashMap<>();
+        Set<String> changes = new LinkedHashSet<>();
 
         for (Map.Entry<String, String> entry : prep.conditionLambdas.entrySet()) {
             String key = entry.getKey();
@@ -369,6 +414,7 @@ public class ConditionAdjustStrategy implements FixStrategy {
                 String action = "FALSE".equalsIgnoreCase(lambdaValue) ? "remove" : "keep";
                 if ("remove".equals(action)) {
                     conditionsToRemove.computeIfAbsent(ruleIdx, k -> new ArrayList<>()).add(condIdx);
+                    changes.add(key);
                 }
                 adjustments.add(ConditionAdjustment.builder()
                         .ruleIndex(ruleIdx).conditionIndex(condIdx)
@@ -381,12 +427,13 @@ public class ConditionAdjustStrategy implements FixStrategy {
                         .relation(cond != null ? cond.getRelation() : null)
                         .value(cond != null ? cond.getValue() : null)
                         .description(action + " " + conditionSummary(deviceLabel, cond)
-                                + " from " + ruleDescription)
+                                + " from '" + ruleDescription + "'")
                         .build());
             } else {
                 // Candidate condition
                 if ("TRUE".equalsIgnoreCase(lambdaValue)) {
                     conditionsToAdd.computeIfAbsent(ruleIdx, k -> new ArrayList<>()).add(cond);
+                    changes.add(key);
                     adjustments.add(ConditionAdjustment.builder()
                             .ruleIndex(ruleIdx).conditionIndex(condIdx)
                             .action("add")
@@ -398,14 +445,14 @@ public class ConditionAdjustStrategy implements FixStrategy {
                             .relation(cond.getRelation())
                             .value(cond.getValue())
                             .description("add " + conditionSummary(deviceLabel, cond)
-                                    + " to " + ruleDescription)
+                                    + " to '" + ruleDescription + "'")
                             .build());
                 }
                 // lambda=FALSE for candidate → ignore, not recorded
             }
         }
 
-        return new InterpretedResult(adjustments, conditionsToRemove, conditionsToAdd);
+        return new InterpretedResult(adjustments, conditionsToRemove, conditionsToAdd, changes);
     }
 
     // -------- Apply changes --------
@@ -475,7 +522,8 @@ public class ConditionAdjustStrategy implements FixStrategy {
         if (rules != null && ruleIndex >= 0 && ruleIndex < rules.size()) {
             RuleDto rule = rules.get(ruleIndex);
             if (rule != null && rule.getRuleString() != null && !rule.getRuleString().isBlank()) {
-                return "'" + rule.getRuleString() + "'";
+                // Unquoted: this is the structured ruleDescription field, and the UI supplies its own quotes.
+                return rule.getRuleString().trim();
             }
         }
         return "affected rule";
@@ -552,11 +600,26 @@ public class ConditionAdjustStrategy implements FixStrategy {
         return eqParts.isEmpty() ? null : "!(" + String.join(" & ", eqParts) + ")";
     }
 
-    private static List<String> prioritizedConfigurations(
+    /**
+     * Excludes every assignment that makes at least the changes of a listed repair. Such an
+     * assignment edits more of the board than the listed repair without being needed for it; an
+     * assignment that makes only some of them, or others, stays reachable.
+     */
+    private static String supersetExclusion(PreparedData prep, Set<String> changes) {
+        List<String> literals = new ArrayList<>();
+        for (String key : changes) {
+            // An existing condition is removed by lambda=FALSE, a candidate is added by lambda=TRUE.
+            literals.add(prep.conditionLambdas.get(key) + "=" + (isCandidateKey(prep, key) ? "TRUE" : "FALSE"));
+        }
+        return "!(" + String.join(" & ", literals) + ")";
+    }
+
+    /** Change sets to pin before the unrestricted joint search, most likely repairs first. */
+    private static List<Set<String>> prioritizedConfigurations(
             PreparedData prep,
             Map<String, DeviceSmvData> deviceSmvMap,
             List<FaultRuleDto> faultRules) {
-        List<String> configurations = new ArrayList<>();
+        List<Set<String>> configurations = new ArrayList<>();
         Set<Integer> localizedRuleIndices = faultRules.stream()
                 .filter(Objects::nonNull)
                 .map(FaultRuleDto::getRuleIndex)
@@ -567,13 +630,13 @@ public class ConditionAdjustStrategy implements FixStrategy {
         for (String key : prep.conditionLambdas.keySet()) {
             if (isCandidateKey(prep, key)
                     && localizedRuleIndices.contains(ruleIndexForKey(key))) {
-                configurations.add(lambdaConfiguration(prep, key));
+                configurations.add(Set.of(key));
             }
         }
         // If no one-guard addition works, try removing one existing condition at a time.
         for (String key : prep.conditionLambdas.keySet()) {
             if (!isCandidateKey(prep, key) && originalConditionCount(prep, key) > 1) {
-                configurations.add(lambdaConfiguration(prep, key));
+                configurations.add(Set.of(key));
             }
         }
         // Redundant rules issuing the same unsafe behavior can require the same guard on each
@@ -600,7 +663,7 @@ public class ConditionAdjustStrategy implements FixStrategy {
                     .distinct()
                     .count();
             if (distinctRules > 1) {
-                configurations.add(lambdaConfiguration(prep, keys));
+                configurations.add(Set.copyOf(keys));
             }
         }
         // Keep expanded-rule additions reachable for unusual priority interactions, but place
@@ -608,7 +671,7 @@ public class ConditionAdjustStrategy implements FixStrategy {
         for (String key : prep.conditionLambdas.keySet()) {
             if (isCandidateKey(prep, key)
                     && !localizedRuleIndices.contains(ruleIndexForKey(key))) {
-                configurations.add(lambdaConfiguration(prep, key));
+                configurations.add(Set.of(key));
             }
         }
         return configurations;
@@ -649,10 +712,6 @@ public class ConditionAdjustStrategy implements FixStrategy {
         return prep.originalCondCounts.getOrDefault(Integer.parseInt(matcher.group(1)), 0);
     }
 
-    private static String lambdaConfiguration(PreparedData prep, String changedKey) {
-        return lambdaConfiguration(prep, Set.of(changedKey));
-    }
-
     private static String lambdaConfiguration(PreparedData prep, Set<String> changedKeys) {
         List<String> assignments = new ArrayList<>();
         for (Map.Entry<String, String> lambda : prep.conditionLambdas.entrySet()) {
@@ -673,9 +732,16 @@ public class ConditionAdjustStrategy implements FixStrategy {
             List<String> frozenVarNames
     ) {}
 
+    /**
+     * @param changes the lambda keys whose condition is removed or added. A repair is identified by
+     *                which conditions it touches, not by the value an added guard compares against:
+     *                the same guard with another threshold is a variant of that repair, not an
+     *                alternative to it.
+     */
     private record InterpretedResult(
             List<ConditionAdjustment> adjustments,
             Map<Integer, List<Integer>> conditionsToRemove,
-            Map<Integer, List<RuleDto.Condition>> conditionsToAdd
+            Map<Integer, List<RuleDto.Condition>> conditionsToAdd,
+            Set<String> changes
     ) {}
 }

@@ -4,7 +4,7 @@ import { createI18n } from 'vue-i18n'
 import { defineComponent, ref } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import FixResultDialog from '../FixResultDialog.vue'
-import type { FixResult } from '@/types/fix'
+import type { FixResult, FixStrategyAttemptStatus } from '@/types/fix'
 import { useAuth } from '@/stores/auth'
 import { FIX_RESPONSE_INCOMPLETE_CODE } from '@/utils/fixResponse'
 
@@ -110,12 +110,13 @@ const removeResult = (): FixResult => ({
     parameterAdjustments: [],
     conditionAdjustments: [],
     removedRuleDescriptions: ['Gas leak unlocks exit'],
-    verified: true
+    preexistingViolations: []
   }],
   strategyAttempts: [{
     strategy: 'remove',
     status: 'VERIFIED',
-    reason: 'Passed forward verification.'
+    reason: 'Passed forward verification.',
+    alternativesComplete: true
   }],
   fixable: true,
   sourceModelComplete: true,
@@ -148,12 +149,13 @@ const parameterResult = (): FixResult => ({
     }],
     conditionAdjustments: [],
     removedRuleDescriptions: [],
-    verified: true
+    preexistingViolations: []
   }],
   strategyAttempts: [{
     strategy: 'parameter',
     status: 'VERIFIED',
-    reason: 'Passed forward verification.'
+    reason: 'Passed forward verification.',
+    alternativesComplete: true
   }],
   parameterTargets: [{
     targetId: 'param_abcdefghijklmnopqrstuvwx',
@@ -186,12 +188,13 @@ const conditionResult = (): FixResult => ({
       modelTokenSource: 'CUSTOM'
     }],
     removedRuleDescriptions: [],
-    verified: true
+    preexistingViolations: []
   }],
   strategyAttempts: [{
     strategy: 'condition',
     status: 'VERIFIED',
-    reason: 'Passed forward verification.'
+    reason: 'Passed forward verification.',
+    alternativesComplete: true
   }]
 })
 
@@ -214,6 +217,21 @@ const jointParameterResult = (): FixResult => {
       ...result.parameterTargets,
       secondTarget
     ]
+  }
+}
+
+// Two independent verified repairs of one strategy, as the server lists them: smallest change first.
+const parameterAlternativesResult = (alternativesComplete = true): FixResult => {
+  const joint = jointParameterResult()
+  const suggestion = joint.suggestions[0]!
+  const [first, second] = suggestion.parameterAdjustments
+  return {
+    ...joint,
+    suggestions: [
+      { ...suggestion, suggestionToken: 'signed-parameter-option-1', parameterAdjustments: [first!] },
+      { ...suggestion, suggestionToken: 'signed-parameter-option-2', parameterAdjustments: [second!] }
+    ],
+    strategyAttempts: [{ ...joint.strategyAttempts[0]!, alternativesComplete }]
   }
 }
 
@@ -282,34 +300,41 @@ const conditionWithoutSuggestionResult = (): FixResult => ({
   suggestions: [],
   strategyAttempts: [{
     strategy: 'condition',
-    status: 'NO_VERIFIED_SUGGESTION',
-    reason: 'The strategy ran, but no candidate suggestion passed forward checking.'
+    status: 'NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE',
+    reason: 'No combination of condition changes prevents this counterexample.'
   }],
   fixable: false
 })
 
-const parameterWithoutSuggestionResult = (): FixResult => ({
+// A parameter search that listed nothing, keeping its target catalog, ended with `status`.
+const parameterOutcomeResult = (status: FixStrategyAttemptStatus): FixResult => ({
   ...parameterResult(),
   suggestions: [],
-  strategyAttempts: [{
-    strategy: 'parameter',
-    status: 'NO_VERIFIED_SUGGESTION',
-    reason: 'No candidate passed forward verification.'
-  }],
+  strategyAttempts: [{ strategy: 'parameter', status, reason: 'Server reason.' }],
   fixable: false
 })
 
-const parameterBudgetExhaustedResult = (): FixResult => ({
-  ...parameterResult(),
-  suggestions: [],
-  strategyAttempts: [{
-    strategy: 'parameter',
-    status: 'SEARCH_BUDGET_EXHAUSTED',
-    reason: 'Unchecked candidates remain.',
-    attemptsUsed: 5,
-    attemptLimit: 5
+const parameterBudgetExhaustedResult = () => parameterOutcomeResult('SEARCH_BUDGET_EXHAUSTED')
+
+// No rule that fired in the counterexample can influence the violated specification.
+const noFaultRulesResult = (): FixResult => ({
+  ...parameterOutcomeResult('SKIPPED_NO_FAULT_RULES'),
+  parameterTargets: []
+})
+
+// The backend refuses to search an incomplete source model and skips the template snapshot comparison.
+const incompleteSourceModelResult = (): FixResult => ({
+  ...parameterOutcomeResult('SKIPPED_INCOMPLETE_SOURCE_MODEL'),
+  parameterTargets: [],
+  sourceModelComplete: false,
+  sourceDisabledRuleCount: 1,
+  sourceGenerationIssues: [{
+    issueType: 'RULE_DISABLED',
+    itemLabel: 'Gas leak unlocks exit',
+    reasonCode: 'RULE_UNRESOLVABLE_COMMAND_ACTION',
+    reason: 'Server reason.'
   }],
-  fixable: false
+  templateSnapshotComparison: 'NOT_CHECKED'
 })
 
 const mountedDialogs: VueWrapper[] = []
@@ -346,10 +371,40 @@ const mountPersistentDialogHost = () => {
   return wrapper
 }
 
+// Opens the dialog and runs the default (parameter) strategy against `result`.
+const tryParameter = async (result: FixResult) => {
+  boardApi.fixTrace.mockResolvedValueOnce(result)
+  const wrapper = mountDialog()
+  await flush()
+  await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+  await flush()
+  await wrapper.vm.$nextTick()
+  return wrapper
+}
+
+const alternativesChecked = (wrapper: VueWrapper) =>
+  wrapper.findAll('[data-testid="fix-alternative"] input[type="radio"]')
+    .map(radio => (radio.element as HTMLInputElement).checked)
+
+const parameterApplied = (suggestion: FixResult['suggestions'][number]) => ({
+  applied: true,
+  strategy: 'parameter',
+  verificationEvidenceReused: true,
+  appliedSuggestion: suggestion,
+  previousRuleCount: 1,
+  currentRuleCount: 1,
+  message: 'Changed one threshold.',
+  rules: []
+})
+
 describe('FixResultDialog strategy workflow', () => {
   beforeEach(() => {
     vi.useRealTimers()
     vi.clearAllMocks()
+    // clearAllMocks keeps queued `mockResolvedValueOnce` values; a test that fails before consuming its
+    // queue would hand them to the next test, turning one failure into a cascade.
+    boardApi.fixTrace.mockReset()
+    boardApi.applyFix.mockReset()
     authStore.logout()
     authStore.login(defaultToken, { userId: 1, phone: '13800138000', username: 'alice' })
     boardApi.getFaultRules.mockResolvedValue({
@@ -430,7 +485,9 @@ describe('FixResultDialog strategy workflow', () => {
     await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
 
     expect(boardApi.fixTrace).not.toHaveBeenCalled()
-    expect(elementPlus.error).toHaveBeenCalledWith('fixAuthenticationRequired')
+    // The selected strategy states the failure in its own panel; a toast would say it twice.
+    expect(wrapper.text()).toContain('fixAuthenticationRequired')
+    expect(elementPlus.error).not.toHaveBeenCalled()
   })
 
   it('localizes bundled fault actions while preserving custom and legacy collisions', async () => {
@@ -542,37 +599,35 @@ describe('FixResultDialog strategy workflow', () => {
     await flush()
     await wrapper.vm.$nextTick()
 
-    // A parameter result exposes the preferred-range panel with a row per target.
-    expect(wrapper.find('[data-testid="fix-run-with-preferences"]').exists()).toBe(true)
-    // Add a row the way the panel's "Add" button does, then type bounds into it.
-    const dialog = wrapper.vm as any
-    dialog.addPreferenceRow()
-    await wrapper.vm.$nextTick()
-    expect(dialog.preferredRangeRows.length).toBeGreaterThan(0)
-    dialog.preferredRangeRows[0].lower = 18
-    dialog.preferredRangeRows[0].upper = 22
-    await wrapper.vm.$nextTick()
+    // A parameter result exposes one fixed search-range row per target; narrow it.
+    const bounds = wrapper.findAll('[data-testid="fix-parameter-range-row"] input[type="number"]')
+    expect(bounds).toHaveLength(2)
+    await bounds[0]!.setValue('18')
+    await bounds[1]!.setValue('22')
 
-    // Now start a second search and act on the preference controls while it is in flight.
+    // Now start a second search and act on the range controls while it is in flight.
     const pending = deferred<FixResult>()
     boardApi.fixTrace.mockReturnValueOnce(pending.promise)
     await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
     await wrapper.vm.$nextTick()
 
-    const runWithPreferences = wrapper.get('[data-testid="fix-run-with-preferences"]')
-    expect(runWithPreferences.attributes('disabled')).toBeDefined()
+    expect(boardApi.fixTrace.mock.calls.at(-1)![1].preferredRangeSelections)
+      .toEqual([{ targetId: 'param_abcdefghijklmnopqrstuvwx', lower: 18, upper: 22 }])
     expect(wrapper.get('[data-testid="fix-preference-blocked"]').text())
       .toBe('fixSearchInProgress')
+    expect(bounds[0]!.attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-testid="fix-keep-original"]').attributes('disabled')).toBeDefined()
 
     // Both halves of the guard are asserted separately, because either alone would hide a
     // regression in the other: `trigger('click')` no-ops on a disabled button, so clicking proves
     // nothing about the handler, and the handler alone would leave a live-looking control.
-    const reset = wrapper.get('[data-testid="fix-clear-preferences"]')
+    const reset = wrapper.get('[data-testid="fix-reset-ranges"]')
     expect(reset.attributes('disabled')).toBeDefined()
 
+    const dialog = wrapper.vm as any
     const callsBefore = boardApi.fixTrace.mock.calls.length
     // Invoke the handler directly, as a stale queued event or a programmatic caller would.
-    await dialog.clearPreferenceRows()
+    dialog.resetPreferenceRows()
     await wrapper.vm.$nextTick()
 
     // The decisive assertion: typed bounds survive a Reset that could not act.
@@ -1051,12 +1106,18 @@ describe('FixResultDialog strategy workflow', () => {
     await wrapper.vm.$nextTick()
     expect(wrapper.find('[data-testid="fix-apply-current"]').exists()).toBe(true)
 
+    // A narrowed range is what makes a retry meaningful once a verified suggestion exists.
+    await wrapper.findAll('[data-testid="fix-parameter-range-row"] input[type="number"]')[0]!.setValue('60')
     const retry = deferred<FixResult>()
     boardApi.fixTrace.mockReturnValueOnce(retry.promise)
-    await wrapper.get('[data-testid="fix-run-with-preferences"]').trigger('click')
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
 
     expect(wrapper.find('[data-testid="fix-apply-current"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="fix-strategy-loading"]').exists()).toBe(true)
+    // The old suggestion is gone, not merely hidden behind the "ranges changed" notice.
+    expect(wrapper.find('[data-testid="fix-parameter-preferences-stale"]').exists()).toBe(false)
+    retry.resolve(parameterResult())
+    await flush()
   })
 
   it('retains independently verified suggestions while trying all three strategies', async () => {
@@ -1153,6 +1214,160 @@ describe('FixResultDialog strategy workflow', () => {
     ])
   })
 
+  it('lists specifications the original rules already violated beside a verified suggestion', async () => {
+    const result = parameterResult()
+    result.suggestions[0]!.preexistingViolations = [
+      { specId: 'spec-7', templateId: '3', formulaPreview: 'CTL AG NOT (co2 > 1000)' }
+    ]
+    boardApi.fixTrace.mockResolvedValueOnce(result)
+    const wrapper = mountDialog()
+    await flush()
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+    await wrapper.vm.$nextTick()
+
+    const note = wrapper.get('[data-testid="fix-preexisting-violations"]')
+    expect(note.text()).toContain('fixPreexistingViolationsTitle')
+    const rows = note.findAll('[data-testid="fix-preexisting-violation"]')
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.text()).toContain('CTL AG NOT (co2 > 1000)')
+    // The row names the specification by its template, never by its internal id.
+    expect(rows[0]!.text()).not.toContain('spec-7')
+  })
+
+  it('shows no pre-existing violation note when every specification holds', async () => {
+    boardApi.fixTrace.mockResolvedValueOnce(parameterResult())
+    const wrapper = mountDialog()
+    await flush()
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+    await wrapper.vm.$nextTick()
+
+    // The verified suggestion rendered, so the note's absence is a decision rather than an empty dialog.
+    expect(wrapper.find('[data-testid="fix-apply-current"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="fix-preexisting-violations"]').exists()).toBe(false)
+  })
+
+  it('states a verified outcome once and describes the strategy once', async () => {
+    boardApi.fixTrace.mockResolvedValueOnce(parameterResult())
+    const wrapper = mountDialog()
+    await flush()
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+    await wrapper.vm.$nextTick()
+
+    const text = wrapper.text()
+    const occurrences = (needle: string) => text.split(needle).length - 1
+    expect(occurrences('fixAttemptReason.VERIFIED')).toBe(1)
+    expect(occurrences('fixStrategyParameterDesc')).toBe(1)
+  })
+
+  it('lists every option of one strategy as one radio group, the smallest change selected', async () => {
+    const wrapper = await tryParameter(parameterAlternativesResult())
+
+    const options = wrapper.findAll('[data-testid="fix-alternative"]')
+    expect(options).toHaveLength(2)
+    expect(options[0]!.text()).toContain('85')
+    expect(options[1]!.text()).toContain('86')
+    const radios = wrapper.findAll('[data-testid="fix-alternative"] input[type="radio"]')
+    // A shared name is what makes the inputs one group for arrow keys and screen readers.
+    expect(new Set(radios.map(radio => radio.attributes('name')))).toEqual(new Set(['fix-alternative']))
+    expect(alternativesChecked(wrapper)).toEqual([true, false])
+    // Every option passed the same check, so the verdict is not repeated per option.
+    expect(wrapper.text().split('fixAttemptReason.VERIFIED').length - 1).toBe(1)
+  })
+
+  it('applies the option the user selected with the radio', async () => {
+    const result = parameterAlternativesResult()
+    boardApi.applyFix.mockResolvedValueOnce(parameterApplied(result.suggestions[1]!))
+    const wrapper = await tryParameter(result)
+
+    await wrapper.findAll('[data-testid="fix-alternative"] input[type="radio"]')[1]!.setValue(true)
+    expect(alternativesChecked(wrapper)).toEqual([false, true])
+    await wrapper.get('[data-testid="fix-apply-current"]').trigger('click')
+    await flush()
+
+    expect(boardApi.applyFix).toHaveBeenCalledWith(7, result.suggestions[1], undefined)
+  })
+
+  it('selects an option when its card is clicked', async () => {
+    const wrapper = await tryParameter(parameterAlternativesResult())
+
+    await wrapper.findAll('[data-testid="fix-alternative"]')[1]!.trigger('click')
+
+    expect(alternativesChecked(wrapper)).toEqual([false, true])
+  })
+
+  it('keeps the applied option selected while apply is running', async () => {
+    const result = parameterAlternativesResult()
+    const pending = deferred<ReturnType<typeof parameterApplied>>()
+    boardApi.applyFix.mockReturnValueOnce(pending.promise)
+    const wrapper = await tryParameter(result)
+
+    await wrapper.get('[data-testid="fix-apply-current"]').trigger('click')
+    await wrapper.vm.$nextTick()
+    const radios = wrapper.findAll('[data-testid="fix-alternative"] input[type="radio"]')
+    expect(radios.every(radio => radio.attributes('disabled') !== undefined)).toBe(true)
+    await wrapper.findAll('[data-testid="fix-alternative"]')[1]!.trigger('click')
+    expect(alternativesChecked(wrapper)).toEqual([true, false])
+
+    pending.resolve(parameterApplied(result.suggestions[0]!))
+    await flush()
+    expect(boardApi.applyFix).toHaveBeenCalledWith(7, result.suggestions[0], undefined)
+  })
+
+  it('starts a retried search from its smallest option again', async () => {
+    const wrapper = await tryParameter(parameterAlternativesResult())
+    await wrapper.findAll('[data-testid="fix-alternative"]')[1]!.trigger('click')
+    expect(alternativesChecked(wrapper)).toEqual([false, true])
+
+    // Narrowing a range is what makes a retry meaningful once options exist.
+    await wrapper.findAll('[data-testid="fix-parameter-range-row"] input[type="number"]')[0]!.setValue('60')
+    boardApi.fixTrace.mockResolvedValueOnce(parameterAlternativesResult())
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+    await wrapper.vm.$nextTick()
+
+    expect(alternativesChecked(wrapper)).toEqual([true, false])
+  })
+
+  it('shows a single option without selection chrome', async () => {
+    const wrapper = await tryParameter(parameterResult())
+
+    expect(wrapper.find('[data-testid="fix-alternative"]').exists()).toBe(false)
+    expect(wrapper.find('input[name="fix-alternative"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('fixAlternativesTitle')
+    expect(wrapper.text()).toContain('85')
+    expect(wrapper.find('[data-testid="fix-apply-current"]').exists()).toBe(true)
+  })
+
+  it.each([
+    ['a complete listing', () => parameterAlternativesResult(true), false],
+    ['an incomplete listing of several options', () => parameterAlternativesResult(false), true],
+    ['an incomplete listing of one option', (): FixResult => ({
+      ...parameterResult(),
+      strategyAttempts: [{ ...parameterResult().strategyAttempts[0]!, alternativesComplete: false }]
+    }), true]
+  ] as const)('states that options may be missing only for %s', async (_label, resultFactory, expectedNote) => {
+    const wrapper = await tryParameter(resultFactory())
+
+    expect(wrapper.find('[data-testid="fix-alternatives-incomplete"]').exists()).toBe(expectedNote)
+  })
+
+  it('lets each option state the specifications it leaves violated', async () => {
+    // Forward verification computes this per candidate, so two options may differ.
+    const result = parameterAlternativesResult()
+    result.suggestions[1]!.preexistingViolations = [
+      { specId: 'spec-7', templateId: '3', formulaPreview: 'CTL AG NOT (co2 > 1000)' }
+    ]
+    const wrapper = await tryParameter(result)
+
+    const options = wrapper.findAll('[data-testid="fix-alternative"]')
+    expect(options[0]!.find('[data-testid="fix-preexisting-violations"]').exists()).toBe(false)
+    expect(options[1]!.get('[data-testid="fix-preexisting-violations"]').text())
+      .toContain('CTL AG NOT (co2 > 1000)')
+  })
+
   it.each([
     ['>', true],
     ['>=', false]
@@ -1171,23 +1386,55 @@ describe('FixResultDialog strategy workflow', () => {
       .toBe(expectedWarning)
   })
 
-  it('invalidates a parameter suggestion as soon as a preference is edited', async () => {
+  it('keeps a verified parameter suggestion current until a search range is actually narrowed', async () => {
     boardApi.fixTrace.mockResolvedValueOnce(parameterResult())
     const wrapper = mountDialog()
     await flush()
     await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
     await flush()
 
-    await wrapper.get('[data-testid="fix-use-current-preferences"]').trigger('click')
-    await wrapper.vm.$nextTick()
+    // Rows start at the template bounds, which express no preference.
+    expect(wrapper.find('[data-testid="fix-apply-current"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="fix-reset-ranges"]').exists()).toBe(false)
+
+    const bounds = wrapper.findAll('[data-testid="fix-parameter-range-row"] input[type="number"]')
+    await bounds[0]!.setValue('60')
 
     expect(wrapper.find('[data-testid="fix-parameter-preferences-stale"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="fix-apply-current"]').exists()).toBe(false)
-    expect(wrapper.find('select').exists()).toBe(true)
+
+    // Restoring the template range makes the suggestion current again without a re-run.
+    await wrapper.get('[data-testid="fix-reset-ranges"]').trigger('click')
+    expect(wrapper.find('[data-testid="fix-parameter-preferences-stale"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="fix-apply-current"]').exists()).toBe(true)
   })
 
-  it('offers preferred ranges from parameter targets when no suggestion was found', async () => {
-    boardApi.fixTrace.mockResolvedValueOnce(parameterWithoutSuggestionResult())
+  it('sends only narrowed rows as preferred ranges on retry', async () => {
+    boardApi.fixTrace.mockResolvedValueOnce(jointParameterResult())
+    const wrapper = mountDialog()
+    await flush()
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+
+    expect(boardApi.fixTrace.mock.calls[0]![1].preferredRangeSelections).toBeUndefined()
+    const rows = wrapper.findAll('[data-testid="fix-parameter-range-row"]')
+    expect(rows).toHaveLength(2)
+    await rows[1]!.findAll('input[type="number"]')[1]!.setValue('90')
+
+    boardApi.fixTrace.mockResolvedValueOnce(jointParameterResult())
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+
+    const second = jointParameterResult().parameterTargets[1]!
+    expect(boardApi.fixTrace.mock.calls[1]![1].preferredRangeSelections)
+      .toEqual([{ targetId: second.targetId, lower: second.lowerBound, upper: 90 }])
+    // The typed bound survives the catalog the re-run returns.
+    expect((wrapper.findAll('[data-testid="fix-parameter-range-row"]')[1]!
+      .findAll('input[type="number"]')[1]!.element as HTMLInputElement).value).toBe('90')
+  })
+
+  it('offers search ranges from parameter targets when no suggestion was found', async () => {
+    boardApi.fixTrace.mockResolvedValueOnce(parameterBudgetExhaustedResult())
     const wrapper = mountDialog()
     await flush()
     await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
@@ -1195,15 +1442,11 @@ describe('FixResultDialog strategy workflow', () => {
     await wrapper.vm.$nextTick()
 
     expect(wrapper.find('[data-testid="fix-apply-current"]').exists()).toBe(false)
-    const seedButton = wrapper.get('[data-testid="fix-use-current-preferences"]')
-    expect(seedButton.attributes('disabled')).toBeUndefined()
-    await seedButton.trigger('click')
-    await wrapper.vm.$nextTick()
-    expect(wrapper.find('select').exists()).toBe(true)
+    expect(wrapper.findAll('[data-testid="fix-parameter-range-row"]')).toHaveLength(1)
   })
 
   it('builds a localized bundled parameter label without exposing the backend English description', async () => {
-    const result = parameterWithoutSuggestionResult()
+    const result = parameterBudgetExhaustedResult()
     result.parameterTargets = result.parameterTargets.map(target => ({
       ...target,
       attribute: 'workingState',
@@ -1215,9 +1458,6 @@ describe('FixResultDialog strategy workflow', () => {
     await flush()
     await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
     await flush()
-    await wrapper.vm.$nextTick()
-
-    await wrapper.get('[data-testid="fix-use-current-preferences"]').trigger('click')
     await wrapper.vm.$nextTick()
 
     expect(wrapper.text()).toContain('调整 工作状态 大于 70')
@@ -1233,29 +1473,166 @@ describe('FixResultDialog strategy workflow', () => {
     await wrapper.vm.$nextTick()
 
     expect(wrapper.text()).toContain('fixStrategyBudgetExhaustedTitle')
-    expect(wrapper.text()).toContain('fixAttemptProgress')
-    expect(wrapper.text()).not.toContain('noVerifiedFixSuggestion')
+    expect(wrapper.text()).toContain('fixParameterBudgetExhaustedDetail')
+    expect(wrapper.find('[data-testid="fix-attempt-outcome-note"]').exists()).toBe(false)
   })
 
-  it('locks a parameter at its original value for the next search', async () => {
+  // The same request against the same frozen snapshot reproduces the budget outcome exactly.
+  it('offers a retry after an exhausted budget only once the search ranges change', async () => {
+    boardApi.fixTrace.mockResolvedValueOnce(parameterBudgetExhaustedResult())
+    const wrapper = mountDialog()
+    await flush()
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+
+    expect(wrapper.find('[data-testid="fix-try-current"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="fix-try-next-strategy"]').exists()).toBe(true)
+
+    await wrapper.findAll('[data-testid="fix-parameter-range-row"] input[type="number"]')[1]!.setValue('90')
+
+    expect(wrapper.find('[data-testid="fix-try-current"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="fix-try-next-strategy"]').exists()).toBe(false)
+  })
+
+  it('states a full-range parameter proof as final and moves on instead of offering a retry', async () => {
+    boardApi.fixTrace.mockResolvedValueOnce(parameterOutcomeResult('NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE'))
+    const wrapper = mountDialog()
+    await flush()
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+
+    const outcome = wrapper.get('[data-testid="fix-attempt-outcome"]')
+    expect(outcome.text()).toContain('fixStrategyCannotRepairTitle')
+    expect(outcome.text()).toContain('fixParameterNoCandidateDetail')
+    expect(wrapper.get('[data-testid="fix-attempt-outcome-note"]').text()).toBe('fixProofCompleteNote')
+    // Every value of the template ranges was settled, so no narrower range can find more.
+    expect(wrapper.find('[data-testid="fix-parameter-ranges"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="fix-try-current"]').exists()).toBe(false)
+
+    boardApi.fixTrace.mockResolvedValueOnce(conditionResult())
+    await wrapper.get('[data-testid="fix-try-next-strategy"]').trigger('click')
+    await flush()
+
+    expect(boardApi.fixTrace.mock.calls[1]![1].strategies).toEqual(['condition'])
+    expect(wrapper.get('[data-testid="fix-strategy-condition"]').attributes('aria-pressed')).toBe('true')
+    expect(wrapper.find('[data-testid="fix-apply-current"]').exists()).toBe(true)
+  })
+
+  it('limits a narrowed parameter proof to the searched ranges and retries once they are restored', async () => {
+    boardApi.fixTrace.mockResolvedValueOnce(parameterBudgetExhaustedResult())
+    const wrapper = mountDialog()
+    await flush()
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+    await wrapper.findAll('[data-testid="fix-parameter-range-row"] input[type="number"]')[1]!.setValue('90')
+    boardApi.fixTrace.mockResolvedValueOnce(parameterOutcomeResult('ALL_CANDIDATES_REJECTED'))
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+
+    expect(boardApi.fixTrace.mock.calls[1]![1].preferredRangeSelections).toHaveLength(1)
+    expect(wrapper.text()).toContain('fixParameterCannotRepairInRangesTitle')
+    expect(wrapper.text()).toContain('fixParameterAllRejectedDetail')
+    expect(wrapper.get('[data-testid="fix-attempt-outcome-note"]').text()).toBe('fixProofNarrowedRangesNote')
+    expect(wrapper.find('[data-testid="fix-parameter-ranges"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="fix-try-current"]').exists()).toBe(false)
+
+    await wrapper.get('[data-testid="fix-reset-ranges"]').trigger('click')
+
+    expect(wrapper.find('[data-testid="fix-try-current"]').exists()).toBe(true)
+  })
+
+  it('keeps the retry for an inconclusive search, which proves nothing', async () => {
+    boardApi.fixTrace.mockResolvedValueOnce(parameterOutcomeResult('INCONCLUSIVE'))
+    const wrapper = mountDialog()
+    await flush()
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+
+    expect(wrapper.text()).toContain('fixStrategyInconclusiveTitle')
+    expect(wrapper.find('[data-testid="fix-attempt-outcome-note"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="fix-parameter-ranges"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="fix-try-current"]').text()).toContain('retryFixStrategy')
+  })
+
+  it('offers no primary action once every strategy has settled without a repair', async () => {
+    boardApi.fixTrace
+      .mockResolvedValueOnce(parameterOutcomeResult('NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE'))
+      .mockResolvedValueOnce(conditionWithoutSuggestionResult())
+      .mockResolvedValueOnce({
+        ...removeResult(),
+        suggestions: [],
+        strategyAttempts: [{ strategy: 'remove', status: 'ALL_CANDIDATES_REJECTED', reason: 'Server reason.' }],
+        fixable: false
+      })
+    const wrapper = mountDialog()
+    await flush()
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+    await wrapper.get('[data-testid="fix-try-next-strategy"]').trigger('click')
+    await flush()
+    await wrapper.get('[data-testid="fix-try-next-strategy"]').trigger('click')
+    await flush()
+
+    expect(boardApi.fixTrace.mock.calls.map(call => call[1].strategies))
+      .toEqual([['parameter'], ['condition'], ['remove']])
+    expect(wrapper.text()).toContain('fixRemoveAllRejectedDetail')
+    expect(wrapper.find('[data-testid="fix-try-current"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="fix-try-next-strategy"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="fix-apply-current"]').exists()).toBe(false)
+    // Every strategy proved it cannot repair this over its whole space, so "yet" would promise more.
+    expect(wrapper.get('[data-testid="fix-result-header"] .iot-dialog__subtitle').text()).toBe('noVerifiedOptions')
+  })
+
+  // A strategy that does not apply to this model is as final as one that proved it cannot repair it.
+  it('says no option exists when one strategy does not apply and the others proved they cannot repair it', async () => {
+    boardApi.fixTrace
+      .mockResolvedValueOnce({ ...parameterOutcomeResult('SKIPPED_NO_PARAMETERIZABLE_VALUES'), parameterTargets: [] })
+      .mockResolvedValueOnce(conditionWithoutSuggestionResult())
+      .mockResolvedValueOnce({
+        ...removeResult(),
+        suggestions: [],
+        strategyAttempts: [{ strategy: 'remove', status: 'ALL_CANDIDATES_REJECTED', reason: 'Server reason.' }],
+        fixable: false
+      })
+    const wrapper = mountDialog()
+    await flush()
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+    await wrapper.get('[data-testid="fix-try-next-strategy"]').trigger('click')
+    await flush()
+    await wrapper.get('[data-testid="fix-try-next-strategy"]').trigger('click')
+    await flush()
+
+    expect(wrapper.find('[data-testid="fix-try-current"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="fix-try-next-strategy"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="fix-result-header"] .iot-dialog__subtitle').text()).toBe('noVerifiedOptions')
+  })
+
+  it('keeps a parameter at its original value for the next search and can release it', async () => {
     boardApi.fixTrace.mockResolvedValueOnce(parameterResult())
     const wrapper = mountDialog()
     await flush()
     await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
     await flush()
 
-    await wrapper.get('[data-testid="fix-lock-original"]').trigger('click')
-    await wrapper.vm.$nextTick()
+    const keep = wrapper.get('[data-testid="fix-keep-original"]')
+    expect(keep.attributes('aria-pressed')).toBe('false')
+    await keep.trigger('click')
 
-    const bounds = wrapper.findAll('input[type="number"]')
-    expect(bounds).toHaveLength(2)
-    expect((bounds[0].element as HTMLInputElement).value).toBe('70')
-    expect((bounds[1].element as HTMLInputElement).value).toBe('70')
+    const bounds = wrapper.findAll('[data-testid="fix-parameter-range-row"] input[type="number"]')
+    expect((bounds[0]!.element as HTMLInputElement).value).toBe('70')
+    expect((bounds[1]!.element as HTMLInputElement).value).toBe('70')
+    expect(keep.attributes('aria-pressed')).toBe('true')
     expect(wrapper.find('[data-testid="fix-parameter-preferences-stale"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="fix-apply-current"]').exists()).toBe(false)
+
+    await keep.trigger('click')
+    expect((bounds[0]!.element as HTMLInputElement).value).toBe('0')
+    expect((bounds[1]!.element as HTMLInputElement).value).toBe('100')
+    expect(wrapper.find('[data-testid="fix-apply-current"]').exists()).toBe(true)
   })
 
-  it('explains that condition adjustment was tried without a verified proposal', async () => {
+  it('explains why condition adjustment cannot repair the violation', async () => {
     boardApi.fixTrace.mockResolvedValueOnce(conditionWithoutSuggestionResult())
     const wrapper = mountDialog()
     await flush()
@@ -1265,9 +1642,10 @@ describe('FixResultDialog strategy workflow', () => {
     await flush()
     await wrapper.vm.$nextTick()
 
-    expect(wrapper.text()).toContain('conditionFixNoVerifiedSuggestion')
-    expect(wrapper.text()).toContain('conditionFixNoVerifiedSuggestionDetail')
-    expect(wrapper.text()).not.toContain('noFixSuggestionsForStrategy')
+    expect(wrapper.text()).toContain('fixStrategyCannotRepairTitle')
+    expect(wrapper.text()).toContain('fixConditionNoCandidateDetail')
+    expect(wrapper.get('[data-testid="fix-attempt-outcome-note"]').text()).toBe('fixProofCompleteNote')
+    expect(wrapper.find('[data-testid="fix-try-current"]').exists()).toBe(false)
   })
 
   it('shows and applies a verified condition adjustment without destructive confirmation', async () => {
@@ -1490,5 +1868,255 @@ describe('FixResultDialog strategy workflow', () => {
     // No standing precondition, so nothing to describe — an empty region would be noise.
     expect(apply.attributes('aria-describedby')).toBeUndefined()
     expect(wrapper.find('[data-testid="fix-apply-readiness"]').exists()).toBe(false)
+  })
+
+  it('explains an Apply block only while an option is listed', async () => {
+    const wrapper = mountDialog()
+    await flush()
+
+    // Nothing has been searched, so there is nothing to apply and nothing to explain.
+    expect(wrapper.find('[data-testid="fix-apply-readiness"]').exists()).toBe(false)
+
+    boardApi.fixTrace.mockResolvedValueOnce(incompleteSourceModelResult())
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+
+    expect(wrapper.find('[data-testid="fix-apply-current"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="fix-apply-readiness"]').exists()).toBe(false)
+    // The refusal is attributed to the incomplete model, not to a comparison that never ran.
+    expect(wrapper.text()).toContain('fixSourceModelIncompleteLimitation')
+    expect(wrapper.text()).not.toContain('fixTemplateSnapshotUnavailableLimitation')
+  })
+
+  it('states a changed template snapshot once, beside the Apply it blocks', async () => {
+    const wrapper = await tryParameter({ ...parameterResult(), templateSnapshotComparison: 'CHANGED' })
+
+    expect(wrapper.text().split('fixTemplateSnapshotChangedLimitation').length - 1).toBe(1)
+    expect(wrapper.get('[data-testid="fix-apply-readiness"]').text()).toBe('fixTemplateSnapshotChangedLimitation')
+  })
+
+  it.each([
+    ['no fired rule can influence the specification', noFaultRulesResult],
+    ['the source model is incomplete', incompleteSourceModelResult]
+  ])('offers no other strategy after a dialog-wide skip because %s', async (_label, resultFactory) => {
+    const result = resultFactory()
+    const status = result.strategyAttempts[0]!.status
+    const wrapper = await tryParameter(result)
+
+    expect(wrapper.find('[data-testid="fix-try-current"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="fix-try-next-strategy"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="fix-result-header"] .iot-dialog__subtitle').text()).toBe('noVerifiedOptions')
+
+    // Another strategy would only return the same skip, so its tab shows that outcome instead of Try.
+    await wrapper.get('[data-testid="fix-strategy-condition"]').trigger('click')
+    const outcome = wrapper.get('[data-testid="fix-attempt-outcome"]')
+    expect(outcome.text()).toContain('fixStrategyNotRunTitle')
+    expect(outcome.text()).toContain(`fixAttemptReason.${status}`)
+    expect(wrapper.find('[data-testid="fix-try-current"]').exists()).toBe(false)
+    expect(boardApi.fixTrace).toHaveBeenCalledOnce()
+  })
+  it.each([
+    ['a cleared bound', [''], 'preferredRangeCompleteFields', [true, false]],
+    ['a fractional bound', ['31.5'], 'preferredRangeIntegerBounds', [true, false]],
+    ['reversed bounds', ['80', '20'], 'preferredRangeLowerBeforeUpper', [true, true]]
+  ] as const)('marks %s inline and keeps Try disabled without a toast', async (
+    _label,
+    values,
+    message,
+    invalid
+  ) => {
+    // INCONCLUSIVE keeps both the ranges and a retry on screen.
+    const wrapper = await tryParameter(parameterOutcomeResult('INCONCLUSIVE'))
+    const bounds = wrapper.findAll('[data-testid="fix-parameter-range-row"] input[type="number"]')
+    for (const [index, value] of values.entries()) await bounds[index]!.setValue(value)
+
+    const issue = wrapper.get('[data-testid="fix-range-issue"]')
+    expect(issue.text()).toBe(message)
+    const issueId = issue.attributes('id')
+    bounds.forEach((input, index) => {
+      expect(input.attributes('aria-invalid')).toBe(invalid[index] ? 'true' : undefined)
+      expect(input.attributes('aria-describedby')).toBe(invalid[index] ? issueId : undefined)
+    })
+    const tryButton = wrapper.get('[data-testid="fix-try-current"]')
+    expect(tryButton.attributes('disabled')).toBeDefined()
+    expect(tryButton.attributes('aria-describedby')).toBe(issueId)
+
+    // A disabled button ignores clicks, so the handler is called the way a stale queued event would.
+    await (wrapper.vm as any).trySelectedStrategy()
+    expect(boardApi.fixTrace).toHaveBeenCalledOnce()
+    expect(elementPlus.warning).not.toHaveBeenCalled()
+
+    await bounds[0]!.setValue('10')
+    await bounds[1]!.setValue('90')
+    expect(wrapper.find('[data-testid="fix-range-issue"]').exists()).toBe(false)
+    expect(bounds[0]!.attributes('aria-invalid')).toBeUndefined()
+    expect(wrapper.get('[data-testid="fix-try-current"]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('names every range control after its own row target', async () => {
+    const wrapper = await tryParameter(jointParameterResult())
+
+    const rows = wrapper.findAll('[data-testid="fix-parameter-range-row"]')
+    expect(rows).toHaveLength(2)
+    const names = new Set<string>()
+    for (const row of rows) {
+      const controls = [...row.findAll('input[type="number"]'), row.get('[data-testid="fix-keep-original"]')]
+      for (const control of controls) {
+        const [targetId, labelId] = control.attributes('aria-labelledby')!.split(' ')
+        // Both referenced labels sit in this row, so each name starts with this row's target.
+        expect(row.get(`[id="${targetId}"]`).text()).toContain('preferredRangeTargetLabel')
+        expect(row.find(`[id="${labelId}"]`).exists()).toBe(true)
+        names.add(`${targetId} ${labelId}`)
+      }
+    }
+    expect(names.size).toBe(6)
+  })
+
+  it('names the verified mark on a strategy tab for screen readers', async () => {
+    const wrapper = await tryParameter(parameterResult())
+
+    const mark = wrapper.get('[data-testid="fix-strategy-parameter"] [data-testid="fix-strategy-verified"]')
+    expect(mark.text()).toBe('fixStrategyHasVerifiedOption')
+    expect(mark.classes()).toContain('sr-only')
+    expect(wrapper.find('[data-testid="fix-strategy-condition"] [data-testid="fix-strategy-verified"]').exists())
+      .toBe(false)
+  })
+  it.each([
+    ['the Apply that replaces Try', parameterResult, 'verifiedSolution', '[data-testid="fix-apply-current"]'],
+    ['the dialog when no action is left', noFaultRulesResult, 'fixStrategyNotRunTitle', '[role="dialog"]']
+  ])('announces a settled search and hands focus to %s', async (_label, resultFactory, announced, focusTarget) => {
+    const pending = deferred<FixResult>()
+    boardApi.fixTrace.mockReturnValueOnce(pending.promise)
+    const wrapper = mount(FixResultDialog, {
+      props: { visible: true, traceId: 7, violatedSpecId: 'spec-1' },
+      global: { plugins: [i18n] },
+      attachTo: document.body
+    })
+    mountedDialogs.push(wrapper)
+    await flush()
+
+    const tryButton = wrapper.get('[data-testid="fix-try-current"]')
+    ;(tryButton.element as HTMLButtonElement).focus()
+    await tryButton.trigger('click')
+    const announcement = wrapper.get('[data-testid="fix-search-announcement"]')
+    expect(announcement.attributes('aria-live')).toBe('polite')
+    expect(announcement.text()).toBe('tryingFixStrategy')
+
+    pending.resolve(resultFactory())
+    await flush()
+    await wrapper.vm.$nextTick()
+
+    expect(announcement.text()).toBe(announced)
+    expect(document.activeElement).toBe(wrapper.get(focusTarget).element)
+  })
+
+  it('says why Apply waits while another strategy searches', async () => {
+    const wrapper = await tryParameter(parameterResult())
+    const pending = deferred<FixResult>()
+    boardApi.fixTrace.mockReturnValueOnce(pending.promise)
+    await wrapper.get('[data-testid="fix-strategy-condition"]').trigger('click')
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await wrapper.get('[data-testid="fix-strategy-parameter"]').trigger('click')
+
+    const apply = wrapper.get('[data-testid="fix-apply-current"]')
+    expect(apply.attributes('disabled')).toBeDefined()
+    expect(apply.attributes('aria-describedby')).toBe('fix-apply-readiness')
+    expect(wrapper.get('[data-testid="fix-apply-readiness"]').text()).toBe('fixApplyWaitsForSearch')
+    // The footer owns this fact while an option is listed; the body does not repeat it.
+    expect(wrapper.find('[data-testid="fix-another-strategy-running"]').exists()).toBe(false)
+
+    // Without an option, the body states it and the disabled Try points there.
+    await wrapper.get('[data-testid="fix-strategy-remove"]').trigger('click')
+    expect(wrapper.find('[data-testid="fix-another-strategy-running"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="fix-try-current"]').attributes('aria-describedby'))
+      .toBe('fix-another-strategy-running')
+
+    pending.resolve(conditionResult())
+    await flush()
+    await wrapper.get('[data-testid="fix-strategy-parameter"]').trigger('click')
+
+    expect(wrapper.get('[data-testid="fix-apply-current"]').attributes('disabled')).toBeUndefined()
+    expect(wrapper.find('[data-testid="fix-apply-readiness"]').exists()).toBe(false)
+  })
+  it('toasts a failed search only when its strategy is no longer on screen', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const rejection = { response: { status: 503, data: { message: 'Unavailable' } } }
+    boardApi.fixTrace.mockRejectedValueOnce(rejection)
+    const wrapper = mountDialog()
+    await flush()
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+
+    // Still selected: the inline error card is the one statement of the failure.
+    expect(wrapper.text()).toContain('fixStrategyRequestFailed')
+    expect(elementPlus.error).not.toHaveBeenCalled()
+
+    const pending = deferred<FixResult>()
+    boardApi.fixTrace.mockReturnValueOnce(pending.promise)
+    await wrapper.get('[data-testid="fix-strategy-condition"]').trigger('click')
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await wrapper.get('[data-testid="fix-strategy-remove"]').trigger('click')
+    pending.reject(rejection)
+    await flush()
+
+    expect(elementPlus.error).toHaveBeenCalledOnce()
+    await wrapper.get('[data-testid="fix-strategy-condition"]').trigger('click')
+    expect(wrapper.text()).toContain('fixStrategyRequestFailed')
+    errorSpy.mockRestore()
+  })
+
+  it('states search progress once, in the loading panel, and keeps the header static', async () => {
+    const pending = deferred<FixResult>()
+    boardApi.fixTrace.mockReturnValueOnce(pending.promise)
+    const wrapper = mountDialog()
+    await flush()
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+
+    expect(wrapper.get('[data-testid="fix-strategy-loading"]').findAll('p').map(line => line.text()))
+      .toEqual(['fixProgressStage_QUEUED', 'fixSearchProgress'])
+    expect(wrapper.get('[data-testid="fix-result-header"] .iot-dialog__subtitle').text())
+      .toBe('selectFixStrategyPrompt')
+
+    pending.resolve(parameterResult())
+    await flush()
+  })
+
+  it.each([
+    ['TIMED_OUT', 'fixStrategyTimedOutTitle'],
+    // The request's time limit ran out before this strategy started, so it never ran at all.
+    ['SKIPPED_TIMEOUT', 'fixStrategyNotRunTitle']
+  ] as const)('titles a %s attempt as %s and keeps its retry', async (status, title) => {
+    const wrapper = await tryParameter(parameterOutcomeResult(status))
+
+    const outcome = wrapper.get('[data-testid="fix-attempt-outcome"]')
+    expect(outcome.text()).toContain(title)
+    expect(outcome.text()).toContain(`fixAttemptReason.${status}`)
+    expect(wrapper.get('[data-testid="fix-try-current"]').text()).toContain('retryFixStrategy')
+  })
+
+  it('keeps "yet" in the header while an outcome could still change on retry', async () => {
+    boardApi.fixTrace
+      .mockResolvedValueOnce(parameterOutcomeResult('NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE'))
+      .mockResolvedValueOnce(conditionWithoutSuggestionResult())
+      .mockResolvedValueOnce({
+        ...removeResult(),
+        suggestions: [],
+        strategyAttempts: [{ strategy: 'remove', status: 'TIMED_OUT', reason: 'Server reason.' }],
+        fixable: false
+      })
+    const wrapper = mountDialog()
+    await flush()
+    const subtitle = () => wrapper.get('[data-testid="fix-result-header"] .iot-dialog__subtitle').text()
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+    expect(subtitle()).toBe('noVerifiedSolutionsYet')
+    await wrapper.get('[data-testid="fix-try-next-strategy"]').trigger('click')
+    await flush()
+    await wrapper.get('[data-testid="fix-try-next-strategy"]').trigger('click')
+    await flush()
+
+    // Two proofs and a timeout: the timed-out strategy may still find an option.
+    expect(wrapper.find('[data-testid="fix-try-current"]').exists()).toBe(true)
+    expect(subtitle()).toBe('noVerifiedSolutionsYet')
   })
 })

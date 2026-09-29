@@ -3,7 +3,6 @@ package cn.edu.nju.Iot_Verify.component.nusmv.fixer.strategy;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvData;
 import cn.edu.nju.Iot_Verify.component.nusmv.fixer.parameterize.ParameterizationConfig;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
-import cn.edu.nju.Iot_Verify.dto.fix.FaultRuleDto;
 import cn.edu.nju.Iot_Verify.dto.model.AttackPointDto;
 import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
@@ -95,8 +94,6 @@ class FixStrategyUtilsTest {
                 "a selected falsifiable-reading device remains effectful without command rules");
     }
 
-    // ======================== E2: expandRuleIndices ========================
-
     private Map<String, DeviceSmvData> buildDeviceMap(String... varNames) {
         Map<String, DeviceSmvData> map = new LinkedHashMap<>();
         for (String name : varNames) {
@@ -157,146 +154,56 @@ class FixStrategyUtilsTest {
         return sc;
     }
 
-    @Test
-    void expandRuleIndices_includesFaultRulesAndSharedDeviceRules() {
-        // rule0: conditions on deviceA; rule1: conditions on deviceA; rule2: conditions on deviceB
-        RuleDto rule0 = RuleDto.builder()
-                .conditions(List.of(RuleDto.Condition.builder()
-                        .deviceName("deviceA").targetType("variable").attribute("temperature").relation(">").value("30").build()))
-                .command(RuleDto.Command.builder().deviceName("deviceB").action("on").build())
-                .build();
-        RuleDto rule1 = RuleDto.builder()
-                .conditions(List.of(RuleDto.Condition.builder()
-                        .deviceName("deviceA").targetType("variable").attribute("temperature").relation("<").value("10").build()))
-                .command(RuleDto.Command.builder().deviceName("deviceC").action("off").build())
-                .build();
-        RuleDto rule2 = RuleDto.builder()
-                .conditions(List.of(RuleDto.Condition.builder()
-                        .deviceName("deviceC").targetType("state").attribute("state").relation("=").value("on").build()))
-                .command(RuleDto.Command.builder().deviceName("deviceC").action("off").build())
-                .build();
-        List<RuleDto> allRules = List.of(rule0, rule1, rule2);
-
-        // faultRules: only rule0, rule2
-        List<FaultRuleDto> faultRules = List.of(
-                FaultRuleDto.builder().ruleIndex(0).build(),
-                FaultRuleDto.builder().ruleIndex(2).build());
-
-        // spec references deviceA → rule1 also shares deviceA → should be included
-        SpecificationDto spec = buildSpec(buildSpecCond("deviceA", "variable", "temperature", ">", "25"));
-        Map<String, DeviceSmvData> deviceMap = buildDeviceMap("deviceA", "deviceB", "deviceC");
-
-        Set<Integer> result = FixStrategyUtils.expandRuleIndices(faultRules, allRules, spec, deviceMap);
-
-        assertEquals(Set.of(0, 1, 2), result);
+    /** Candidates for {@code rule} on a board where no other rule reacts to it. */
+    private static List<RuleDto.Condition> extractForRuleAlone(
+            SpecificationDto spec, RuleDto rule, Map<String, DeviceSmvData> deviceMap, int max) {
+        return FixStrategyUtils.extractCandidateConditions(
+                spec, rule, CommandEffects.of(rule, List.of(rule), deviceMap), deviceMap, max);
     }
 
-    @Test
-    void expandRuleIndices_emptySpec_returnsFaultRulesOnly() {
-        RuleDto rule0 = RuleDto.builder()
-                .conditions(List.of(RuleDto.Condition.builder()
-                        .deviceName("deviceA").targetType("variable").attribute("temp").relation(">").value("30").build()))
-                .command(RuleDto.Command.builder().deviceName("deviceB").action("on").build())
-                .build();
-        List<FaultRuleDto> faultRules = List.of(FaultRuleDto.builder().ruleIndex(0).build());
-        SpecificationDto spec = buildSpec(); // empty conditions
-        Map<String, DeviceSmvData> deviceMap = buildDeviceMap("deviceA");
-
-        Set<Integer> result = FixStrategyUtils.expandRuleIndices(faultRules, List.of(rule0), spec, deviceMap);
-
-        assertEquals(Set.of(0), result);
+    /**
+     * Trace 196's chain, reduced: "light the way" turns the lamp on, the lamp turning on makes the
+     * camera take a photo, and the camera taking a photo makes the hub send it.
+     */
+    private Map<String, DeviceSmvData> buildLampCameraHubMap() {
+        Map<String, DeviceSmvData> deviceMap = buildDeviceMap("lamp", "camera", "hub", "bed");
+        deviceMap.get("lamp").setManifest(DeviceManifest.builder()
+                .name("Lamp")
+                .apis(List.of(DeviceManifest.API.builder()
+                        .name("on").startState("off").endState("on").signal(true).build()))
+                .build());
+        DeviceSmvData camera = deviceMap.get("camera");
+        camera.setModes(List.of("MachineState"));
+        camera.getModeStates().clear();
+        camera.getModeStates().put("MachineState", new ArrayList<>(List.of("off", "on", "takingphoto")));
+        camera.setStates(List.of("off", "on", "takingphoto"));
+        camera.setManifest(DeviceManifest.builder()
+                .name("Camera")
+                .apis(List.of(DeviceManifest.API.builder()
+                        .name("take photo").startState("on").endState("taking photo").signal(true).build()))
+                .build());
+        deviceMap.get("hub").setManifest(DeviceManifest.builder()
+                .name("Hub")
+                .apis(List.of(DeviceManifest.API.builder()
+                        .name("send photo").startState("_").endState("").signal(true).build()))
+                .build());
+        return deviceMap;
     }
 
-    @Test
-    void expandRuleIndices_commandDeviceMatch() {
-        RuleDto rule0 = RuleDto.builder()
-                .conditions(List.of(RuleDto.Condition.builder()
-                        .deviceName("deviceB").targetType("variable").attribute("temp").relation(">").value("30").build()))
-                .command(RuleDto.Command.builder().deviceName("deviceB").action("on").build())
+    private static RuleDto commandRule(String device, String action, RuleDto.Condition... conditions) {
+        return RuleDto.builder()
+                .conditions(new ArrayList<>(Arrays.asList(conditions)))
+                .command(RuleDto.Command.builder().deviceName(device).action(action).build())
                 .build();
-        // rule1 has no condition on deviceA, but command targets deviceA
-        RuleDto rule1 = RuleDto.builder()
-                .conditions(List.of(RuleDto.Condition.builder()
-                        .deviceName("deviceB").targetType("variable").attribute("temp").relation("<").value("10").build()))
-                .command(RuleDto.Command.builder().deviceName("deviceA").action("on").build())
-                .build();
-        List<RuleDto> allRules = List.of(rule0, rule1);
-
-        List<FaultRuleDto> faultRules = List.of(FaultRuleDto.builder().ruleIndex(0).build());
-        SpecificationDto spec = buildSpec(buildSpecCond("deviceA", "variable", "temp", ">", "25"));
-        Map<String, DeviceSmvData> deviceMap = buildDeviceMap("deviceA", "deviceB");
-
-        Set<Integer> result = FixStrategyUtils.expandRuleIndices(faultRules, allRules, spec, deviceMap);
-
-        assertTrue(result.contains(1), "rule1 should be included via command.deviceName match");
     }
 
-    @Test
-    void expandRuleIndices_includesRulesSharingEnvironmentalDomain() {
-        Map<String, DeviceSmvData> deviceMap = new LinkedHashMap<>(buildDeviceMap(
-                "heater", "sensor", "fan"));
-        DeviceManifest.InternalVariable temperature = DeviceManifest.InternalVariable.builder()
-                .name("temperature").isInside(false).lowerBound(0).upperBound(100).build();
-        deviceMap.get("heater").setImpactedVariables(List.of("temperature"));
-        deviceMap.get("heater").getImpactedEnvironmentVariables().put("temperature", temperature);
-        deviceMap.get("sensor").getEnvVariables().put("temperature", temperature);
-
-        RuleDto sharedDomainRule = RuleDto.builder()
-                .conditions(List.of(RuleDto.Condition.builder()
-                        .deviceName("sensor").targetType("variable").attribute("temperature")
-                        .relation(">").value("30").build()))
-                .command(RuleDto.Command.builder().deviceName("fan").action("on").build())
-                .build();
-        SpecificationDto spec = buildSpec(
-                buildSpecCond("heater", "state", null, "=", "on"));
-
-        Set<Integer> result = FixStrategyUtils.expandRuleIndices(
-                null, List.of(sharedDomainRule), spec, deviceMap);
-
-        assertEquals(Set.of(0), result);
+    private static RuleDto.Condition apiEvent(String device, String api) {
+        return RuleDto.Condition.builder().deviceName(device).targetType("api").attribute(api).build();
     }
 
-    @Test
-    void expandRuleIndices_ignoresSpecDeviceLabelWhenDeviceIdIsUnknown() {
-        RuleDto rule = RuleDto.builder()
-                .conditions(List.of(RuleDto.Condition.builder()
-                        .deviceName("LivingRoomAC").targetType("variable").attribute("temperature").relation(">").value("30").build()))
-                .command(RuleDto.Command.builder().deviceName("LivingRoomAC").action("on").build())
-                .build();
-        SpecConditionDto specCond = buildSpecCond("node-1", "variable", "temperature", ">", "25");
-        specCond.setDeviceLabel("LivingRoomAC");
-        SpecificationDto spec = buildSpec(specCond);
-        Map<String, DeviceSmvData> deviceMap = buildDeviceMap("LivingRoomAC");
-
-        Set<Integer> result = FixStrategyUtils.expandRuleIndices(null, List.of(rule), spec, deviceMap);
-
-        assertTrue(result.isEmpty(),
-                "deviceLabel is display-only; scope expansion must not resolve unknown deviceId through label fallback");
-    }
-
-    @Test
-    void expandRuleIndices_nullFaultRules_scansSharedDeviceOnly() {
-        RuleDto rule0 = RuleDto.builder()
-                .conditions(List.of(RuleDto.Condition.builder()
-                        .deviceName("deviceA").targetType("variable").attribute("temp").relation(">").value("30").build()))
-                .command(RuleDto.Command.builder().deviceName("deviceB").action("on").build())
-                .build();
-        SpecificationDto spec = buildSpec(buildSpecCond("deviceA", "variable", "temp", ">", "25"));
-        Map<String, DeviceSmvData> deviceMap = buildDeviceMap("deviceA", "deviceB");
-
-        Set<Integer> result = FixStrategyUtils.expandRuleIndices(null, List.of(rule0), spec, deviceMap);
-
-        assertEquals(Set.of(0), result);
-    }
-
-    @Test
-    void expandRuleIndices_outOfBoundsFaultRuleIndex_skipped() {
-        List<FaultRuleDto> faultRules = List.of(FaultRuleDto.builder().ruleIndex(99).build());
-        SpecificationDto spec = buildSpec();
-
-        Set<Integer> result = FixStrategyUtils.expandRuleIndices(faultRules, List.of(), spec, Map.of());
-
-        assertTrue(result.isEmpty());
+    private static RuleDto.Condition stateIs(String device, String relation, String value) {
+        return RuleDto.Condition.builder()
+                .deviceName(device).targetType("state").attribute("state").relation(relation).value(value).build();
     }
 
     // ======================== E1: extractCandidateConditions ========================
@@ -312,7 +219,7 @@ class FixStrategyUtilsTest {
         SpecificationDto spec = buildSpec(
                 buildSpecCond("thermo", "  STATE  ", "  state  ", "=", "on"));
 
-        List<RuleDto.Condition> candidates = FixStrategyUtils.extractCandidateConditions(
+        List<RuleDto.Condition> candidates = extractForRuleAlone(
                 spec, rule, deviceMap, 5);
 
         assertEquals(1, candidates.size());
@@ -328,7 +235,7 @@ class FixStrategyUtilsTest {
         SpecificationDto spec = buildSpec(
                 buildSpecCond("sensor", "  VARIABLE  ", "  temperature  ", ">", "30"));
 
-        List<RuleDto.Condition> candidates = FixStrategyUtils.extractCandidateConditions(
+        List<RuleDto.Condition> candidates = extractForRuleAlone(
                 spec, rule, deviceMap, 5);
 
         assertEquals(1, candidates.size());
@@ -393,7 +300,7 @@ class FixStrategyUtilsTest {
         SpecificationDto spec = buildSpec(
                 buildSpecCond("sensor", "mode", "default", "=", "on"));
 
-        List<RuleDto.Condition> candidates = FixStrategyUtils.extractCandidateConditions(
+        List<RuleDto.Condition> candidates = extractForRuleAlone(
                 spec, rule, deviceMap, 5);
 
         assertEquals(1, candidates.size());
@@ -431,13 +338,13 @@ class FixStrategyUtilsTest {
                 .command(RuleDto.Command.builder().deviceName("camera").action("take photo").build())
                 .build();
 
-        List<RuleDto.Condition> postcondition = FixStrategyUtils.extractCandidateConditions(
+        List<RuleDto.Condition> postcondition = extractForRuleAlone(
                 buildSpec(buildSpecCond("camera", "state", null, "=", "taking photo")),
                 rule, deviceMap, 5);
         assertTrue(postcondition.isEmpty(),
                 "a command's own EndState must not become the rule's trigger condition");
 
-        List<RuleDto.Condition> realPrecondition = FixStrategyUtils.extractCandidateConditions(
+        List<RuleDto.Condition> realPrecondition = extractForRuleAlone(
                 buildSpec(buildSpecCond("camera", "state", null, "=", "on")),
                 RuleDto.builder()
                         .conditions(new ArrayList<>())
@@ -451,26 +358,26 @@ class FixStrategyUtilsTest {
                 .conditions(new ArrayList<>())
                 .command(RuleDto.Command.builder().deviceName("camera").action("take photo").build())
                 .build();
-        List<RuleDto.Condition> contradictoryPrecondition = FixStrategyUtils.extractCandidateConditions(
+        List<RuleDto.Condition> contradictoryPrecondition = extractForRuleAlone(
                 buildSpec(buildSpecCond("camera", "state", null, "=", "off")),
                 commandOnly, deviceMap, 5);
         assertTrue(contradictoryPrecondition.isEmpty(),
                 "a condition that contradicts the API StartState would make the command unreachable");
 
-        List<RuleDto.Condition> contradictoryNegativePrecondition = FixStrategyUtils.extractCandidateConditions(
+        List<RuleDto.Condition> contradictoryNegativePrecondition = extractForRuleAlone(
                 buildSpec(buildSpecCond("camera", "state", null, "!=", "on")),
                 commandOnly, deviceMap, 5);
         assertTrue(contradictoryNegativePrecondition.isEmpty(),
                 "negative conditions that are false in the API StartState are also unreachable");
 
-        List<RuleDto.Condition> compatibleNegativePrecondition = FixStrategyUtils.extractCandidateConditions(
+        List<RuleDto.Condition> compatibleNegativePrecondition = extractForRuleAlone(
                 buildSpec(buildSpecCond("camera", "state", null, "!=", "taking photo")),
                 commandOnly, deviceMap, 5);
         assertEquals(1, compatibleNegativePrecondition.size(),
                 "a negative guard that is true in the API StartState remains eligible");
 
         camera.getManifest().getApis().get(0).setStartState("_");
-        List<RuleDto.Condition> wildcardStartCandidate = FixStrategyUtils.extractCandidateConditions(
+        List<RuleDto.Condition> wildcardStartCandidate = extractForRuleAlone(
                 buildSpec(buildSpecCond("camera", "state", null, "=", "off")),
                 commandOnly, deviceMap, 5);
         assertEquals(1, wildcardStartCandidate.size(),
@@ -486,7 +393,7 @@ class FixStrategyUtilsTest {
         cond.setDeviceLabel("LivingRoomAC");
         SpecificationDto spec = buildSpec(cond);
 
-        List<RuleDto.Condition> candidates = FixStrategyUtils.extractCandidateConditions(
+        List<RuleDto.Condition> candidates = extractForRuleAlone(
                 spec, rule, deviceMap, 5);
 
         assertTrue(candidates.isEmpty(),
@@ -507,7 +414,7 @@ class FixStrategyUtilsTest {
                 buildSpecCond("sensor", "trust", "mode", "=", "trusted"),
                 buildSpecCond("sensor", "privacy", "mode", "=", "public"));
 
-        List<RuleDto.Condition> candidates = FixStrategyUtils.extractCandidateConditions(
+        List<RuleDto.Condition> candidates = extractForRuleAlone(
                 spec, rule, deviceMap, 5);
 
         assertEquals(1, candidates.size());
@@ -535,7 +442,7 @@ class FixStrategyUtilsTest {
         spec.setIfConditions(new ArrayList<>());
         spec.setThenConditions(new ArrayList<>());
 
-        List<RuleDto.Condition> candidates = FixStrategyUtils.extractCandidateConditions(
+        List<RuleDto.Condition> candidates = extractForRuleAlone(
                 spec, rule, deviceMap, 3);
 
         assertEquals(3, candidates.size());
@@ -554,7 +461,7 @@ class FixStrategyUtilsTest {
         SpecificationDto spec = buildSpec(
                 buildSpecCond("sensor", "variable", "temperature", ">", "30"));
 
-        List<RuleDto.Condition> candidates = FixStrategyUtils.extractCandidateConditions(
+        List<RuleDto.Condition> candidates = extractForRuleAlone(
                 spec, rule, deviceMap, 5);
 
         assertTrue(candidates.isEmpty(), "duplicate should be filtered");
@@ -574,7 +481,7 @@ class FixStrategyUtilsTest {
         spec.setIfConditions(List.of(buildSpecCond("sensor", "variable", "temperature", ">", "30")));
         spec.setThenConditions(new ArrayList<>());
 
-        List<RuleDto.Condition> candidates = FixStrategyUtils.extractCandidateConditions(
+        List<RuleDto.Condition> candidates = extractForRuleAlone(
                 spec, rule, deviceMap, 5);
 
         assertEquals(1, candidates.size(), "dedup should produce only 1 candidate");
@@ -588,7 +495,7 @@ class FixStrategyUtilsTest {
                 buildSpecCond("sensor", "variable", "temperature", ">", "30"),
                 buildSpecCond("sensor", "variable", "temperature", ">", "40"));
 
-        List<RuleDto.Condition> candidates = FixStrategyUtils.extractCandidateConditions(
+        List<RuleDto.Condition> candidates = extractForRuleAlone(
                 spec, rule, deviceMap, 5);
 
         assertEquals(1, candidates.size(),
@@ -602,7 +509,7 @@ class FixStrategyUtilsTest {
                 .deviceName("sensor").targetType("variable").attribute("temperature")
                 .relation(">").value("35").build())).build();
 
-        List<RuleDto.Condition> candidates = FixStrategyUtils.extractCandidateConditions(
+        List<RuleDto.Condition> candidates = extractForRuleAlone(
                 buildSpec(buildSpecCond("sensor", "variable", "temperature", ">", "30")),
                 rule, deviceMap, 5);
 
@@ -629,7 +536,7 @@ class FixStrategyUtilsTest {
                 .command(RuleDto.Command.builder().deviceName("camera").action("turn on").build())
                 .build();
 
-        List<RuleDto.Condition> candidates = FixStrategyUtils.extractCandidateConditions(
+        List<RuleDto.Condition> candidates = extractForRuleAlone(
                 buildSpec(buildSpecCond("camera", "mode", "default", "=", "on")),
                 rule, deviceMap, 5);
 
@@ -637,14 +544,76 @@ class FixStrategyUtilsTest {
                 "a single unsafe policy literal must not discard the entire free-Y candidate");
         ParameterizationConfig.ConditionValueInfo valueInfo =
                 FixStrategyUtils.candidateConditionValueInfo(
-                        candidates.get(0), rule, deviceMap, "condition_value_r0_c1");
+                        candidates.get(0), rule, CommandEffects.of(rule, List.of(rule), deviceMap),
+                        deviceMap, "condition_value_r0_c1");
         assertNotNull(valueInfo);
         assertEquals(List.of("off", "takingphoto"), valueInfo.getValues());
     }
 
     @Test
-    void extractCandidateConditions_nullSpec_returnsEmpty() {
+    void extractCandidateConditions_skipsWhatTheRuleCausesThroughTheRulesItTriggers() {
+        Map<String, DeviceSmvData> deviceMap = buildLampCameraHubMap();
+        RuleDto lightTheWay = commandRule("lamp", "on", stateIs("bed", "=", "off"));
+        // Listed before the rule that triggers it, so the closure needs a second pass to reach it.
+        RuleDto sendPhoto = commandRule("hub", "send photo", apiEvent("camera", "take photo"));
+        RuleDto takePhoto = commandRule("camera", "take photo", apiEvent("lamp", "on"));
+        List<RuleDto> board = List.of(lightTheWay, sendPhoto, takePhoto);
+        SpecificationDto spec = buildSpec(
+                buildSpecCond("camera", "state", null, "=", "taking photo"),
+                buildSpecCond("camera", "api", "take photo", "=", "TRUE"),
+                buildSpecCond("hub", "api", "send photo", "=", "TRUE"),
+                buildSpecCond("camera", "state", null, "!=", "taking photo"),
+                buildSpecCond("bed", "state", null, "=", "on"));
+
         List<RuleDto.Condition> candidates = FixStrategyUtils.extractCandidateConditions(
+                spec, lightTheWay, CommandEffects.of(lightTheWay, board, deviceMap), deviceMap, 10);
+
+        assertEquals(List.of("camera state != taking photo", "bed state = on"),
+                candidates.stream().map(c -> c.getDeviceName() + " " + c.getAttribute() + " "
+                        + c.getRelation() + " " + c.getValue()).toList(),
+                "a guard that holds only once the rule's own action has run is not a precondition; "
+                        + "negative guards and unrelated devices stay");
+        assertEquals(5, extractForRuleAlone(spec, lightTheWay, deviceMap, 10).size(),
+                "without the triggered rules, nothing links the lamp rule to the camera or the hub");
+    }
+
+    @Test
+    void candidateConditionValueInfo_prunesStatesReachedThroughTriggeredRules() {
+        Map<String, DeviceSmvData> deviceMap = buildLampCameraHubMap();
+        RuleDto lightTheWay = commandRule("lamp", "on");
+        RuleDto takePhoto = commandRule("camera", "take photo", stateIs("lamp", "=", "on"));
+        RuleDto.Condition cameraMode = RuleDto.Condition.builder()
+                .deviceName("camera").targetType("mode").attribute("MachineState").relation("=").value("on").build();
+
+        ParameterizationConfig.ConditionValueInfo valueInfo = FixStrategyUtils.candidateConditionValueInfo(
+                cameraMode, lightTheWay, CommandEffects.of(lightTheWay, List.of(lightTheWay, takePhoto), deviceMap),
+                deviceMap, "condition_value_r0_c0");
+
+        assertNotNull(valueInfo);
+        assertEquals(List.of("off", "on"), valueInfo.getValues());
+    }
+
+    @Test
+    void commandEffects_followOnlyConditionsTheEffectMakesTrue() {
+        Map<String, DeviceSmvData> deviceMap = buildLampCameraHubMap();
+        RuleDto lightTheWay = commandRule("lamp", "on");
+        RuleDto photoWhenDark = commandRule("camera", "take photo", stateIs("lamp", "!=", "on"));
+        RuleDto photoOnFalseEvent = commandRule("camera", "take photo", RuleDto.Condition.builder()
+                .deviceName("lamp").targetType("api").attribute("on").relation("=").value("FALSE").build());
+
+        CommandEffects effects = CommandEffects.of(
+                lightTheWay, List.of(lightTheWay, photoWhenDark, photoOnFalseEvent), deviceMap);
+
+        assertTrue(effects.establishes(stateIs("lamp", "in", "on,off")));
+        assertTrue(effects.establishes(RuleDto.Condition.builder()
+                .deviceName("lamp").targetType("api").attribute("on").relation("!=").value("FALSE").build()));
+        assertFalse(effects.establishes(stateIs("camera", "=", "taking photo")),
+                "neither camera rule is triggered by the lamp turning on");
+    }
+
+    @Test
+    void extractCandidateConditions_nullSpec_returnsEmpty() {
+        List<RuleDto.Condition> candidates = extractForRuleAlone(
                 null, RuleDto.builder().build(), Map.of(), 5);
 
         assertTrue(candidates.isEmpty());
@@ -1079,7 +1048,7 @@ class FixStrategyUtilsTest {
         SpecificationDto spec = buildSpec(
                 buildSpecCond("sensor", "variable", "temperature", ">", "30"));
 
-        List<RuleDto.Condition> candidates = FixStrategyUtils.extractCandidateConditions(
+        List<RuleDto.Condition> candidates = extractForRuleAlone(
                 spec, rule, deviceMap, 0);
 
         assertTrue(candidates.isEmpty(), "maxCandidatesPerRule=0 should return empty");

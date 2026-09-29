@@ -461,7 +461,8 @@ class NusmvRequestValidatorSemanticTest {
      */
     @Test
     void validateMainNamespace_rejectsDeviceNameReservedByTheFixGenerator() {
-        for (String reserved : List.of("param_abc", "lambda_r0_c1", "condition_value_r0_c1")) {
+        for (String reserved : List.of("param_abc", "lambda_r0_c1", "condition_value_r0_c1",
+                SmvConstants.GUARD_PROBE_PREFIX + "0")) {
             Map<String, String> errors = NusmvRequestValidator.newErrors();
             DeviceSmvData smv = smv();
             smv.setVarName(reserved);

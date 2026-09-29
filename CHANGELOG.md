@@ -15,6 +15,127 @@ history into a technical spec. The spec content itself now lives under
 
 ## [Unreleased]
 
+### 2026-09-27 (automatic fix)
+
+#### Changed
+
+- **Each strategy lists every minimal repair it verifies, and the user chooses.** Forward verification
+  proves the specifications, not unstated preferences, so which guard to add or which redundant rule to
+  remove was decided by search order. A strategy now returns up to five verified repairs, smallest change
+  set first. A repair that contains a listed one is never listed, and the search excludes such supersets.
+  Moving the same thresholds to other values counts as one repair. After its first repair a strategy
+  looks for others for as long again as that repair took (at least ten seconds), and never for more
+  than an equal share of the remaining time, so a single requested strategy does not keep the user
+  waiting minutes after it found an answer and later strategies are not starved.
+  The new `FixStrategyAttemptDto.alternativesComplete` (on `VERIFIED` only) says whether the list is every
+  minimal repair of that kind. The fix dialog shows the options as one choice, each with its own
+  pre-existing violations, and says when the list may be incomplete. The assistant is told to present
+  every option rather than pick one. Because several alternatives now share a strategy, the client accepts an
+  apply response only when its `appliedSuggestion` is the alternative the user submitted.
+- **A strategy that finds no repair now says whether none exists, and the dialog stops offering retries
+  that cannot change the answer.** `NO_VERIFIED_SUGGESTION` covered three different outcomes, and the dialog
+  offered "try this strategy again" under each. But the fix works on the trace's frozen snapshot, so the
+  same input returns the same answer. On trace 834, parameter adjustment proved in three NuSMV calls that no
+  threshold value avoids the counterexample, then still showed a retry button and a range editor. The status
+  is split into `NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE` (no allowed edit prevents the pinned counterexample)
+  and `ALL_CANDIDATES_REJECTED` (every edit that does was rejected), which are both proofs over the searched
+  space, and `INCONCLUSIVE` (ended without that proof). The dialog now names the proof and its scope. It
+  offers retry only when a retry can change the outcome, or for parameter adjustment once a range differs
+  from the last request. After a proof over the template ranges it hides the range rows. Otherwise it offers
+  the next strategy not yet tried.
+- **Condition adjustment learns from each candidate it rejects.** A candidate that avoided the pinned
+  counterexample but failed forward verification used to exclude only its own assignment, so the search went
+  on to check, one full-model verification each, assignments that the same violating path already refuted.
+  The forward-verification model now reports each scoped rule's guard along that path. The search then
+  excludes every assignment whose guards agree with the rejected one's wherever the rule could fire, and
+  when that is every assignment the search is exhausted at once. Learning changes how many
+  candidates are checked, not which repairs are listed. Paths of specifications that read trust or privacy
+  labels teach nothing. The probes are named `iot_verify_guard_probe_<n>`, so a device id may no longer start
+  with that prefix, just as it may not start with `param_`, `lambda_` or `condition_value_`.
+
+#### Fixed
+
+- **No repair could ever be accepted on a Board with a second, unrelated violation.** Forward verification
+  required every specification to pass, so a candidate that repaired the counterexample's property was
+  rejected because some other property had been violated all along (trace 196: two of the Board's
+  specifications were already false). A candidate is now accepted when the violated property holds and every
+  property still false was already false for the original rules. Those are checked on the same model the
+  first time a candidate needs the comparison, and the verdict is reused for the rest of the request; a run
+  refused for capacity is retried and one cut off by the deadline is not kept. A candidate that breaks a
+  property the original rules satisfied is still rejected. The suggestion lists what it leaves violated as
+  `preexistingViolations[]`, and the fix dialog shows them beside it, so a verified suggestion never hides a
+  broken property. When verdicts cannot be attributed to specification ids, or the original rules cannot be
+  re-checked, only a candidate under which every specification passes is accepted; any other is left
+  unjudged rather than rejected, so the listing is not reported complete.
+- **Condition adjustment could guard a rule on something the rule itself causes.** The candidate filter
+  dropped a condition that the rule's own command establishes, but not one reached through the rules that
+  command triggers. On trace 196 it offered "Hallway Camera is taking a photo" for "light the way", yet the
+  camera takes that photo only because the lamp turned on. The guard passed the safety property by keeping
+  the rule from ever firing. The filter now follows the chain: a state, mode or API event established by
+  the rule's command, or by any rule such an effect triggers, is not offered as a condition, nor as a value
+  of a free one.
+- **A backend test deleted files from the system temp directory.** `FixContextCancellationTest` created its
+  model with `Files.createTempFile`, and the strategy's cleanup removes every file in the model's directory.
+  It now uses a JUnit temporary directory.
+- **One failing fix-dialog test could fail the tests after it.** `vi.clearAllMocks()` keeps queued
+  `mockResolvedValueOnce` responses, so a test that stopped early handed its leftovers to the next one. The
+  dialog spec now resets those mocks before each test.
+- **Parameter adjustment timed out on a counterexample it could have settled in one solve.** The search
+  parameterized every threshold of every rule sharing a device with the property, including rules that
+  cannot reach it, then probed boundary hints and coordinated values with a full-model forward verification
+  each (15–83 s apiece on the reported board). The `¬ρ` solve that would have answered the question was
+  killed by the 300 s deadline and reported as a NuSMV failure next to the timeout. The search is now
+  solve-first as in Salus §5.1: one `¬ρ` check per threshold, then a joint solve, and only a solver-returned
+  value pays for forward verification. The per-threshold checks are skipped when a preferred range excludes
+  some threshold's original value, since holding it there would list repairs outside the requested range.
+  The boundary-hint and same-command coordination probes are removed. Refinement no longer re-verifies the
+  counterexample's own board, and a failed refinement solve ends that threshold's refinement with the value
+  already accepted instead of retrying the identical model up to three times.
+- **All three strategies searched rules that cannot influence the violated property.** A new rule-level
+  cone of influence (`RuleInfluenceScope`) defines the repair scope once in `RuleFixer`: fault rules are the
+  fired rules inside the cone, followed by its dormant rules. It replaces the per-strategy
+  `expandRuleIndices`, which followed shared devices but not what a relevant rule reads. A fired rule
+  outside the cone is no longer listed as a fault rule, in `/fault-rules` or `/fix`. The skip reasons now
+  tell "no rule fired" apart from "the rules that fired cannot influence the property".
+- **A joint threshold solve could outlast the NuSMV timeout on a three-device scene.** Repair models leave
+  their search `FROZENVAR`s free at init, and NuSMV's default reachable-state pass enumerated every
+  combination. Every automatic-fix NuSMV run (search solves, forward verification, and the original-rules
+  check) now passes `-df`, with or without a deadline; no `FAIRNESS` is generated, so verdicts are unchanged.
+- **A failed parameter or condition search run was repeated until the deadline.** A failed run excludes
+  nothing, so the retry rebuilt the identical model. The joint parameter solve and the joint condition
+  search now stop with `FAILED_SOLVER_EXECUTION`; a failed single-threshold solve or pinned condition
+  configuration moves on to the next one. A condition run whose output lacks part of the solved assignment
+  counts as a failed run.
+- **A NuSMV run refused by the concurrency cap was treated as a failure.** A refused permit says nothing
+  about the model, yet a forward verification refused one could leave a valid repair unjudged. Search
+  solves now retry it within their attempt budget, and forward verification and the original-rules check
+  retry it until the deadline.
+- **A deadline-killed NuSMV run was reported as a solver failure**, and the "strategies not attempted"
+  warning appeared when the only requested strategy had run. A proof a strategy reached before the deadline
+  passed now keeps its status instead of turning into `TIMED_OUT`.
+- **The fix dialog stated one outcome three times, with three names for the same check.** The strategy
+  tab repeated the attempt status under its description, the suggestion card repeated that description, and
+  an unverified card repeated its own title; "forward verification", "forward check" and "review" all meant
+  the recheck. Each fact now appears once, under one name, and the verified card states the acceptance rule.
+  A condition adjustment's `ruleDescription` also arrived pre-quoted, so the dialog showed it double-quoted.
+
+#### Removed
+
+- The `NOT_VERIFIED` strategy status, unverified suggestions and `FixSuggestionDto.verified`. A candidate
+  forward verification did not accept is not a repair, so it is no longer returned, and a flag that could
+  only ever be `true` said nothing; the signed `suggestionToken`, which only listed suggestions carry, is
+  what apply checks. The assistant's `apply_fix` suggestion schema drops the field too. The dialog's
+  "Other Strategies" panel, which repeated the strategy tabs, is removed as well.
+- `FixStrategyAttemptDto.attemptsUsed` / `attemptLimit`. The Board's "main search 11/20" counted
+  heterogeneous checks (solves, full verifications, refinements) under one number, and the status already
+  says whether a search finished.
+- The `NO_VERIFIED_SUGGESTION` strategy status (split as described under Changed). The client rejects a
+  response that still carries it.
+- The fix dialog's "Run with preferences" button and per-suggestion "prefer / lock" buttons. It
+  duplicated the footer retry, and "use current suggestion" wrongly marked a verified suggestion stale. It
+  is replaced by one fixed search-range row per parameter target: a row at template bounds means no
+  preference, only narrowed rows are sent, and "Keep original" pins a value.
+
 ### 2026-08-17 (review pass)
 
 #### Fixed

@@ -2,7 +2,8 @@
 
 When verification finds a violation, the fix system localizes potentially responsible
 rules. Callers choose which repair strategy to try; REST/AI callers that omit the list use
-the three-strategy default order. Each offered candidate is re-verified against all specs.
+the three-strategy default order. Each offered candidate is re-verified against all specs:
+the violated one must hold and none the original rules satisfied may break.
 
 A suggestion is only advisory until the user chooses to **apply** it; applying writes the
 repaired rules back to the board (see [Applying a suggestion](#applying-a-suggestion-fixstrategyapplier)).
@@ -10,9 +11,9 @@ repaired rules back to the board (see [Applying a suggestion](#applying-a-sugges
 API contract (`fault-rules`, `fix`, `fix/apply`) → [../api/verification.md](../api/verification.md).
 Spec formulas → [spec-templates.md](spec-templates.md).
 
-Verified against code on 2026-07-25. Source: `component/nusmv/fixer/` — `RuleFixer`,
-`localize/FaultLocalizer`, `strategy/{ParameterAdjustStrategy, ConditionAdjustStrategy,
-RemoveRulesFixStrategy, FixStrategyUtils, FixStrategyApplier}`, `BoardSemanticFingerprint`,
+Verified against code on 2026-09-29. Source: `component/nusmv/fixer/` — `RuleFixer`,
+`localize/{FaultLocalizer, RuleInfluenceScope}`, `strategy/{ParameterAdjustStrategy, ConditionAdjustStrategy,
+RemoveRulesFixStrategy, FixAlternatives, FixStrategyUtils, FixStrategyApplier}`, `BoardSemanticFingerprint`,
 `parameterize/{ParameterExtractor, CounterexampleInitialStateConstraints}`;
 `service/impl/FixServiceImpl` (apply flow),
 `component/aitool/verification/ApplyFixTool` (conversational adapter), and
@@ -33,15 +34,27 @@ RemoveRulesFixStrategy, FixStrategyUtils, FixStrategyApplier}`, `BoardSemanticFi
    resolved only to describe the recorded transition and detect simultaneous commands that
    write different target values to at least one shared device mode. Commands that update
    disjoint modes are independent and are not labeled as conflicts.
-2. **Strategy attempts**: run the requested strategies in order. The default order is
+2. **Repair scope** (`localize/RuleInfluenceScope`): a rule-level cone of influence of the
+   violated property. The property's devices are relevant; a device brings every environment
+   domain it declares, and a domain brings every device that declares an impact on it; a rule
+   whose command targets a relevant device is relevant, and everything it reads (condition
+   devices, content device) becomes relevant; repeat to a fixpoint. The cone deliberately
+   over-approximates, because missing a relevant rule would make a strategy report "no repair"
+   for a repairable model. Fault rules are the fired rules inside the cone; a fired rule outside
+   it cannot change the property's truth value, so it is neither reported nor searched. If no
+   fired rule is in the cone, every strategy is `SKIPPED_NO_FAULT_RULES`. The repair scope that
+   all three strategies search is the fault rules first, then the cone's dormant rules (a
+   dormant backup automation can take over once the fired one is changed). When the property
+   references no modeled device, the scope is unknown and the fired rules are kept unfiltered.
+3. **Strategy attempts**: run the requested strategies in order. The default order is
    `parameter → condition → remove`: the first two implement Salus §5.1/§5.2, while
    `remove` is an IoT-Verify destructive fallback. A caller may override the list and order via
    `FixRequestDto.strategies`.
-3. Each strategy produces at most one **verified** `FixSuggestionDto` (see forward
-   verification below). Results accumulate into `FixResultDto`; `strategyAttempts`
+4. Each strategy lists the minimal **verified** `FixSuggestionDto`s it finds (see
+   [listing alternatives](#listing-alternatives-fixalternatives) and forward verification
+   below), and the user chooses one. Results accumulate into `FixResultDto`; `strategyAttempts`
    records a status and reason for every requested strategy, including those skipped
-   before execution. A strategy that starts its main candidate search also reports
-   `attemptsUsed` and `attemptLimit`.
+   before execution.
 
 Before strategy search, `FixServiceImpl` checks the counterexample's source-generation
 metadata. If any rule or specification was omitted, no strategy is run: the result has
@@ -73,27 +86,86 @@ available; `remove` does not require it
 before the fixer runs (`FixRequestDto` `@Pattern`, `FixServiceImpl.SUPPORTED_FIX_STRATEGIES`), so
 `SKIPPED_UNSUPPORTED` is unreachable in practice.
 NuSMV process failures and incomplete or unparseable result sets are reported as
-`FAILED_SOLVER_EXECUTION`, rather than as a completed no-result search. A finite candidate
-limit that leaves unchecked assignments is `SEARCH_BUDGET_EXHAUSTED`; this is independent
-of the wall-clock timeout.
+`FAILED_SOLVER_EXECUTION`, rather than as a completed no-result search. A failed search run excludes
+nothing, so the next run would be the identical model and could only repeat the failure; each
+strategy below says how its search moves past one instead of retrying it. The one exception is a
+run the NuSMV concurrency cap (`NUSMV_MAX_CONCURRENT`) refused a permit, which says nothing about the
+model. A search solve retries it within its attempt budget; forward verification and the
+original-rules check retry it until the deadline. A NuSMV run killed by
+the deadline or by cancellation is not a solver failure: it is part of `TIMED_OUT` and adds no
+separate diagnostic, so one event is never reported with two contradictory causes. A finite candidate
+limit that leaves unchecked assignments before anything was listed is `SEARCH_BUDGET_EXHAUSTED`;
+this is independent of the wall-clock timeout. A proof a strategy reached before the deadline passed
+keeps its status; which recorded outcome is reported when several apply is defined with the
+statuses in [../api/verification.md](../api/verification.md).
+
+## Listing alternatives (`FixAlternatives`)
+
+Forward verification proves the submitted specifications, not an unstated preference such as
+"keep this event trigger", so several formally equivalent repairs can differ in what the user
+actually wants. A strategy therefore lists every minimal repair it verifies, up to five, smallest
+change first, instead of returning whichever one its search order reached first.
+
+- **Identity.** A repair is identified by its change set: the thresholds it moves, the conditions
+  it removes or adds, or the rules it removes. The same thresholds at other values, or an added
+  guard with another free value `Y`, are variants of one repair, not alternatives.
+- **Minimality.** A repair whose change set contains a listed one edits more of the board without
+  being needed. It is never listed. Each strategy also excludes every superset of a listed change
+  set from its further search, so the budget goes to genuinely different repairs.
+- **Completeness.** `strategyAttempts[].alternativesComplete` is `true` only when the strategy
+  exhausted its search space and every candidate whose forward verification was inconclusive is
+  covered by a listed repair; such a candidate might have been a repair. The listing limit, the
+  attempt budget, the time share, or an error make it `false`.
+- **Time share.** Once a strategy has its first repair, it looks for further alternatives for as
+  long again as that repair took, but at least ten seconds, so the wait for the others stays
+  proportional to the wait for the first answer. It never gets more than an equal share of the
+  remaining `FIX_TIMEOUT_MS` among itself and the strategies still to run, so enumerating
+  alternatives cannot starve a later strategy.
+  A strategy stopped by its share with something listed is `VERIFIED`; only one that listed nothing
+  is `TIMED_OUT`.
+- **Pre-existing violations** are computed per repair, so alternatives can differ in them.
 
 ---
 
 ## Strategy 1 — parameter adjustment (`ParameterAdjustStrategy`)
 
 Turns a rule's numeric threshold conditions into `FROZENVAR` parameters, then uses
-NuSMV to solve `¬ρ` (the negated spec) for corrected values. When multiple thresholds
-are in scope, the strategy first searches the smaller repair class in which exactly one
-localized threshold changes. It checks policy-boundary hints and then values nearer to
-the original. If redundant rules issue the same command and cannot be repaired one at a
-time, it next moves their matching policy-boundary thresholds together and resolves any
-exact-rule collision by continuing in the trigger-tightening direction. Only then does it
-fall back to joint tuple solving. A discovered joint solution is also refined toward the
-original values. These are bounded preferences, not a proof of a globally minimum edit if
-the attempt or time budget expires.
-Same-command coordination uses the complete persisted command identity: resolved target
-device, action, resolved content device, and content value. Rules that share an actuator and
-action but display or transmit different content are not coordinated as one policy.
+NuSMV to solve `¬ρ` (the negated spec) for corrected values. Targets are the bounded
+thresholds of the repair-scope rules, fault rules first. The search phases are solve-first:
+every NuSMV call in them is one `¬ρ` check on the pinned counterexample, and only a value the
+solver returns pays for a complete-model forward verification.
+
+1. **One threshold at a time** (multi-threshold scope only, at most half of
+   `FIX_MAX_ATTEMPTS`): each threshold becomes the only `FROZENVAR` while the others keep their
+   original values. `¬ρ` holding (UNSAT) settles that threshold in one call; a returned value
+   that fails forward verification is excluded and the threshold is solved again. Once a
+   threshold is listed, the search moves to the next one, since its other values are only
+   variants. One-value edits come first because they are the easiest for a user to judge. A
+   [failed solve](#pipeline-rulefixer) moves on to the next threshold; the joint solve still
+   covers it. The phase is skipped when a preferred range excludes some threshold's original
+   value: that threshold must move, and holding it at its original would list repairs outside
+   the range the user asked for.
+2. **Joint solve**: all thresholds are `FROZENVAR`s together, which redundant rules need
+   (moving either alone leaves the other able to reproduce the violation). A returned tuple
+   that fails forward verification is excluded exactly, and a listed repair by an `INVAR`
+   forbidding every tuple that moves at least its thresholds; the search then solves again.
+   UNSAT means no tuple in the searched ranges is left that avoids the pinned counterexample, so
+   the search is exhausted; the listing is complete unless a tuple forward verification could not
+   judge is still uncovered ([completeness](#listing-alternatives-fixalternatives)). With nothing
+   listed, a complete search is `ALL_CANDIDATES_REJECTED` if forward verification rejected some
+   solved value, and `NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE` if the solver never returned one: no
+   threshold values in the searched ranges avoid the pinned counterexample. A failed solve ends
+   the search as `FAILED_SOLVER_EXECUTION`.
+3. **Refinement toward the original** (`FIX_MAX_REFINE_ATTEMPTS`, a separate budget for each
+   listed repair): each changed value is narrowed toward its original by `¬ρ` solves over a
+   shrinking window. The original value itself is tried only when another threshold moved;
+   otherwise it would rebuild the counterexample board and spend a full verification
+   re-proving a violation that is already on record. A threshold refined back to its original
+   value is no longer part of that repair. A failed solve ends that threshold's refinement, and
+   the value already accepted is listed as it stands.
+
+Refinement is a bounded preference for values close to the original, not a proof of the
+closest verified value when its budget or the time share expires.
 
 Eligibility is deliberately narrower than the paper's abstract value-substitution step:
 the persisted condition must use `>`, `>=`, `<`, or `<=`, contain an integer value, and
@@ -106,12 +178,16 @@ The parameterized discovery model uses the candidate-only replay and fail-closed
 contract defined by the [NuSMV model](nusmv-model.md). Candidate generation also rejects
 any model that disables a rule or skips a specification.
 
-- `ParameterExtractor` reads solved numeric values. Policy-boundary hints are accepted only
-  from the same resolved device or the same declared shared-environment domain; a same-named
-  attribute on an unrelated device cannot consume the bounded search budget. For an integer
-  boundary `N`, the bounded single-parameter phase probes `N-1`, `N`, and `N+1`; this covers
-  strict/non-strict boundary differences and one-transition environment movement before the
-  more expensive joint solver is used.
+- `ParameterExtractor` reads solved numeric values from the `¬ρ` counterexample. A solver
+  error is not an UNSAT: it never ends the search with "no repair exists".
+- Every automatic-fix NuSMV run (`NusmvExecutor.executeRepairSearch`) passes `-df`, with or
+  without a request deadline: search solves, forward verification, and the original-rules check.
+  Search `FROZENVAR`s are unconstrained at init, so NuSMV's default forward reachable-state
+  computation enumerates all their combinations; a joint solve over three 0..100 thresholds
+  stalled past `NUSMV_TIMEOUT_MS` with it and finishes in about 2 s without it, with the same
+  witness. The generated models declare no `FAIRNESS`, so that set is an optimisation only:
+  verdicts are unchanged, though a printed counterexample may follow a different, equally valid
+  path. Board verification does not use the flag.
 - Every eligible condition is returned independently in `FixResultDto.parameterTargets`,
   even when no candidate passes forward verification. Each target is `{ targetId, attribute,
   relation, originalValue, lowerBound, upperBound, description }`, so clients can offer a
@@ -130,18 +206,23 @@ any model that disables a rule or skips a specification.
   no parameterizable condition and one whose range does not intersect the device's own limits —
   the latter was never tested, so calling it honoured would tell the user a constraint held when
   nothing exercised it; an accompanying diagnostic names the conflicting bounds.
-  The Board UI labels each choice with the fault rule text, condition context, attribute,
-  and relation so users do not type or infer internal parameter locators.
-  It can turn a parameter into an explicit no-change constraint by locking its preferred
-  range to `[originalValue, originalValue]`.
-- Bounded by `FIX_MAX_ATTEMPTS` (main solve attempts), `FIX_MAX_REFINE_ATTEMPTS`
-  (refinement iterations), `FIX_MAX_CANDIDATES_PER_RULE`, and the overall
-  `FIX_TIMEOUT_MS` deadline. For a multi-threshold search, at most half of the main
-  candidate budget is initially reserved for one-threshold probes. The remaining budget
-  is shared by one bounded same-command coordinated boundary probe, when applicable, and
-  joint tuple solving. `attemptsUsed` reports this main budget only; the separate closest-value
-  refinement budget is not added to it. Distance and refinement-window arithmetic uses `long`
-  intermediates so the full signed 32-bit manifest domain cannot overflow.
+  The Board shows one fixed search-range row per target, labelled with the rule text,
+  condition context, attribute, and relation, so users never type internal locators. A row
+  starts at the target's template bounds, which means "no preference", and only rows the user
+  narrowed are sent. "Keep original" narrows a row to `[originalValue, originalValue]`,
+  an explicit no-change constraint. A verified suggestion stays current until a row is
+  actually narrowed; the footer's retry then runs the search with the narrowed rows.
+  A settled outcome (a proof, an exhausted budget, or a `SKIPPED_*` precondition) offers no
+  retry for the same input, because the fix works on the trace's frozen snapshot and would
+  return the same answer. For parameter adjustment the retry comes back once a range row
+  differs from the last request. A proof over the template ranges also hides the range rows,
+  because narrowing cannot turn "no value works" into a repair. A proof within narrowed rows
+  keeps them and says the values outside them were not checked. When the current strategy has
+  nothing to apply or retry, the footer offers the next strategy that has not been tried yet.
+- Bounded by `FIX_MAX_ATTEMPTS` (`¬ρ` solves in phases 1–2), `FIX_MAX_REFINE_ATTEMPTS`
+  (refinement iterations per listed repair), and the overall `FIX_TIMEOUT_MS` deadline. Distance and
+  refinement-window arithmetic uses `long` intermediates so the full signed 32-bit manifest
+  domain cannot overflow.
 - Emits API-facing `ParameterAdjustment` entries: `{ targetId, attribute, relation,
   originalValue, newValue, lowerBound, upperBound, description }`. Internal rule and
   condition positions remain inside the fixer and are not serialized to REST or AI callers.
@@ -149,10 +230,9 @@ any model that disables a rule or skips a specification.
   explicitly in the Board. Non-strict `>= upperBound` and `<= lowerBound` results still match
   one domain value and are not described as disabled.
 - A candidate must also satisfy the Board's exact-duplicate rule invariant before it can be
-  certified. Parameter and condition edits use the same `RuleSemanticSignature` as persistence;
-  a formally passing edit that would duplicate another automation is rejected during search.
-  A structurally rejected boundary does not consume a NuSMV attempt, and parameter search
-  continues in the relation's trigger-tightening direction to find the next persistable value.
+  certified. Forward verification uses the same `RuleSemanticSignature` as persistence and
+  rejects, without running NuSMV, an edit that would duplicate another automation; the
+  parameter search then excludes that value and solves again.
 - Witness extraction is covered by a real NuSMV 2.7.1 smoke test on minimal false
   EF/EG CTL models. CI must install NuSMV 2.7.1 for this check; local runs without
   NuSMV skip the smoke test. This confirms the core `FROZENVAR` output behavior for
@@ -169,8 +249,7 @@ ruleDescription, deviceLabel, relation, value }`. Internal rule/condition positi
 the model device reference needed for an add operation are retained inside the signed
 suggestion token and restored only after the server verifies that token during apply.
 
-The lambda scope contains localized fault rules plus rules sharing a device or an
-environmental domain with the violated specification. Candidate additions may be state,
+The lambda scope is the [repair scope](#pipeline-rulefixer). Candidate additions may be state,
 mode, variable, or positive API-event conditions taken from the specification. For mode
 and variable candidates with a declared enum or integer range, the policy supplies the
 clause shape while an additional `FROZENVAR` supplies Salus §5.2's free value `Y`; the
@@ -187,8 +266,17 @@ redundant rules issuing the same command, it also tries adding the same candidat
 shape to those rules together; this handles a dormant backup rule without asking NuSMV to
 enumerate the full lambda product. Expanded-rule single additions remain available after
 those higher-value probes. Each selected free guard may still solve over its declared `Y`
-domain. Only after those configurations are unsatisfiable or fail complete-model forward
-verification does the strategy search unrestricted joint add/remove combinations. This
+domain. A configuration that contains a listed repair is skipped, since it can only yield
+supersets of it. Only after those configurations are unsatisfiable, fail complete-model forward
+verification, or are covered does the strategy search unrestricted joint add/remove
+combinations, where each listed repair adds an `INVAR` forbidding every assignment that makes
+at least its changes. An unsatisfiable joint solve exhausts the search, which makes the listing
+complete unless an assignment forward verification could not judge is still uncovered. With
+nothing listed, a complete search is `ALL_CANDIDATES_REJECTED` when some assignment was solved and
+then rejected, and `NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE` when none was. A
+[failed run](#pipeline-rulefixer), including output that lacks part of the solved assignment, on a
+deterministic configuration moves on to the next one, since the joint search still covers it; a
+failed joint run ends the search as `FAILED_SOLVER_EXECUTION`. This
 prioritized phase receives at most half of `FIX_MAX_ATTEMPTS`; the remaining budget stays
 available to joint search, and removal probes that would necessarily empty a one-condition
 rule are not generated. As in parameter coordination, command equality includes target,
@@ -200,12 +288,33 @@ are semantic: when a candidate lambda is `FALSE`, its unused `Y` value is omitte
 excluded assignment, preventing the attempt budget from being spent on equivalent disabled
 candidates. Command `EndState` and incompatible concrete `StartState` values are removed
 from a free candidate's domain; one unsafe policy literal therefore does not discard other
-valid values for the same clause shape.
+valid values for the same clause shape. Values that a rule the command triggers establishes are
+removed the same way.
 
-The candidate filter rejects a positive condition that is already satisfied by the same rule
-command's declared API `EndState` on the command target. That would be a postcondition
-masquerading as a trigger (for example, `camera.state = taking_photo -> camera.take_photo`)
-and can make the useful automation unreachable while still making a safety property pass. A
+A candidate that forward verification rejects excludes more than itself (`CounterexampleLemma`).
+Its forward-verification model carries [guard probes](nusmv-model.md#rule-semantics) reporting,
+in every state of the rejecting path, each scoped rule's guard and each search condition. The
+rejecting path is the target's own, or that of the first specification the candidate newly broke,
+never a pre-existing violation. Another assignment whose scoped guards take the same values
+wherever the rule could otherwise fire follows the same path, so forward verification would reject
+it on the same specification. The strategy adds an `INVAR` excluding every such assignment; when
+that is every assignment, the search space is exhausted, exactly as an unsatisfiable joint solve
+exhausts it. The argument does not cover
+trust and privacy labels, whose propagation reads the conditions themselves, so nothing is learned
+from a specification that reads one (or from template `7`), nor from a path whose probes are
+missing, non-boolean, contradict the reported guard, or report an operand that is not a single
+literal. Only the exact assignment is excluded then. Learning changes how many candidates are
+checked, never which repairs are listed.
+
+The candidate filter rejects a condition that the rule itself brings about. That is a positive
+state or mode condition satisfied by the declared API `EndState`, or an API condition asserting
+the event, of the rule's own command, or of any rule that such an effect triggers, transitively.
+That would be a consequence masquerading as a trigger (directly, `camera.state = taking_photo ->
+camera.take_photo`; through a chain, `camera.state = taking_photo` on a rule that turns on the
+lamp whose `on` event makes the camera take a photo) and can make the useful automation
+unreachable while still making a safety property pass. The chain over-approximates: a rule counts
+as triggered when one of its conditions is established, whatever its other conditions and
+priority. Negative conditions and internal variables are never established. A
 candidate on the command target is also rejected when it is provably false under every concrete
 state allowed by the API `StartState`; wildcard start-state segments remain eligible instead of
 being treated as contradictions. A rule with no meaningful condition adjustment is reported as
@@ -224,52 +333,87 @@ automation, and therefore has a separate destructive confirmation and search str
 The implementation follows Salus §5 for fault-localized parameter/condition solving,
 fixed-counterexample candidate discovery, exclusion of tried assignments, user-preferred
 numeric ranges, and forward verification without the candidate search's counterexample-only
-initial-state constraints. It deliberately exposes one
-verified suggestion per requested strategy and API call. Re-running parameter adjustment
-with a different range can request a different solution, but the service does not persist
-an exclusion history across calls to enumerate the next solution from the same strategy.
+initial-state constraints. Within one API call a strategy enumerates minimal repairs by
+excluding the supersets of each listed one, up to the [listing limit](#listing-alternatives-fixalternatives).
+Condition adjustment's generalization of a rejected assignment from its violating path is an
+extension beyond the paper, which excludes only the tried assignment itself.
+Two further points go beyond the paper. The paper parametrizes the rules that share devices or
+domains with the violated policy together with the rules on the violating transitions; the
+[repair scope](#pipeline-rulefixer) follows command targets instead, so a fired rule that writes
+nothing the property depends on is left out, and a dormant rule is searched only when it can reach
+the property. The paper re-verifies a solved configuration against the violated policy under every
+initial state; [forward verification](#forward-verification-fixstrategyutilsforwardverify) also
+checks every other submitted specification and separates the ones the original rules already
+violated.
+The service does not persist an exclusion history across calls: re-running parameter
+adjustment with a different range searches afresh rather than continuing the previous list.
 
-The UI can protect an individual numeric parameter by locking its range to the original
-value. A general "do not modify this app rule" constraint is not currently part of the
+The UI can protect an individual numeric parameter with "Keep original", which narrows its
+range to the original value. A general "do not modify this app rule" constraint is not currently part of the
 fix request contract; users can avoid the destructive strategy, review the exact signed
 condition edits before apply, or edit the rule manually. This is a product boundary rather
 than a claimed implementation of the paper's full rule-protection control.
 
 Forward verification proves only the submitted formal specifications. It does not infer an
 unstated preference such as "retain this event trigger" or "do not broaden this automation."
-When several equal-size condition edits satisfy the complete model, deterministic search order
-may return any one of them; a formally verified edit can therefore still be undesirable under
-an unmodeled user intent. Acceptance scenarios for condition adjustment must assert the concrete
-edit, not merely `verified=true`, and users must review that signed edit before apply.
+That is why several equal-size edits that satisfy the complete model are all listed, and the
+user chooses between them; a formally verified edit can still be undesirable under an
+unmodeled user intent. Acceptance scenarios must select the concrete edit they expect from the
+listed options rather than take the first one, and users must review that signed edit before
+apply.
 
 ## Strategy 3 — permanent rule removal (`RemoveRulesFixStrategy`)
 
-Destructive fallback. Finds a minimal set of rules to remove: for each candidate set, it
-regenerates the model without those rules and re-verifies. Emits readable
+Destructive fallback. Lists the minimal sets of rules to remove: it checks candidate sets
+smallest first, in lexicographic order, regenerating the model without those rules and
+re-verifying each. A set containing a listed one is never checked. Emits readable
 `removedRuleDescriptions` so a user can review what will be permanently deleted;
 internal rule positions are not part of the external contract. The product has no
 persisted enabled/disabled rule state, so this action must never be described as
-"disable" or imply that it can later be re-enabled. When the violated specification is
-available, the candidate scope includes both localized rules and rules sharing a referenced
-device or environment domain. This is necessary because a lower-priority automation may be
-dormant in the selected trace and take over only after the executed rule is removed. With an
-unresolved specification, removal retains its fault-only fallback. Under an exact attack
+"disable" or imply that it can later be re-enabled. The candidate rules are the
+[repair scope](#pipeline-rulefixer), fault rules first; its dormant rules are needed because a
+lower-priority automation may take over only after the executed rule is removed. Under an exact attack
 scenario, the strategy skips every removal set that would remove a selected automation-link
 point or make a selected device cease to be behavior-changing. Request validation and every
 fix candidate use the same exact-point-versus-attack-surface validator, so deleting the last
 rule targeting a selected actuator cannot silently disable that actuator's attack variable.
-The strategy compares the attempted count with the complete non-empty combination space;
-reaching `FIX_MAX_ATTEMPTS` is reported as budget exhaustion only when combinations remain.
+Reaching `FIX_MAX_ATTEMPTS` while combinations remain is reported as budget exhaustion when
+nothing was listed, and as an incomplete listing otherwise. Every combination is judged by forward
+verification or the attack-scenario check, and no pinned-counterexample step rules any out
+earlier. A complete search that listed nothing is therefore `ALL_CANDIDATES_REJECTED`.
 
 ---
 
 ## Forward verification (`FixStrategyUtils.forwardVerify`)
 
 Every candidate fix — a modified rule set — is turned back into an SMV model and
-re-checked against **all** specs before it is accepted. Forward verification rejects
-the candidate if generation disables any rule, skips any specification, emits a
-different number of properties, parses a different number of results, or reports a
-false property. This is why `FixSuggestionDto.verified=true` means the proposal passed
+re-checked against **all** specs before it is accepted. A candidate that would change the
+fixed attack scenario is rejected. If generation disables any rule or skips any specification
+(`FAILED_MODEL_GENERATION`), or NuSMV emits or returns a different number of results
+(`FAILED_SOLVER_EXECUTION`), nothing was checked, so the candidate is left unjudged: it is
+neither listed nor counted as rejected, and the listing cannot be
+[complete](#listing-alternatives-fixalternatives) while it is uncovered.
+
+A candidate is accepted when every specification holds, or when the **violated (target)
+specification holds and every specification still false was already false for the original
+rules**. A fix repairs one counterexample; requiring an unrelated, already-broken property to pass
+as well would reject every candidate on a Board with more than one violation. So the original
+rules are checked on the same forward-verification model the first time a candidate repairs the
+target while other specifications still fail, that verdict is reused for the rest of the request,
+and a candidate that breaks a property they satisfied is rejected. The remaining pre-existing
+violations travel with the suggestion as `preexistingViolations[]` and are shown beside it
+([response shape](../api/verification.md)), so "verified" never hides a broken property.
+
+The relaxed rule applies only when every verdict is attributable to a specification id: NuSMV
+results are matched to emitted specifications by expression. With any positional guess, blank,
+placeholder, or duplicate id, an unidentifiable target, or a failed baseline check, only a
+candidate under which every specification holds is accepted, and any other is left unjudged
+rather than rejected. A failed baseline is not retried and adds a diagnostic saying so. Two
+baseline outcomes are not failures and are not kept: a capacity refusal, which is retried, and a
+run cut off by the deadline or a cancellation, which is reported through the strategy's
+`TIMED_OUT` status and which a later strategy's time may still complete.
+
+This is why a returned `FixSuggestionDto` means the proposal passed
 the complete generated model used by that fix attempt; it remains a model-level result,
 not a guarantee about unmodelled physical behavior. The ordinary UI therefore presents
 this state as **passed recomputation in the current complete formal model**, rather than
@@ -287,23 +431,8 @@ automation-link rule id still occurs exactly once.
 
 ## Result shape
 
-`FixResultDto` = `{ traceId, violatedSpecId, faultRules: FaultRuleDto[],
-suggestions: FixSuggestionDto[], strategyAttempts: FixStrategyAttemptDto[], fixable,
-sourceModelComplete, sourceDisabledRuleCount, sourceSkippedSpecCount,
-sourceGenerationIssues[], templateSnapshotComparison, summary, warnings[], parameterTargets[],
-unusedPreferredRangeSelections[] }`.
-
-`FixSuggestionDto` = `{ suggestionToken, strategy, description, parameterAdjustments[],
-conditionAdjustments[], removedRuleDescriptions[], verified }`.
-
-Each `strategyAttempts[]` item states whether that strategy found a verified proposal,
-found none, failed to generate a complete candidate model, failed to complete reliable
-NuSMV solving/result parsing, exhausted a bounded candidate search, or was skipped (timeout,
-unsupported name, missing violated spec, no fault
-rules, no parameterizable numeric value, or incomplete source model). Ordinary UI localizes limitations from those stable
-statuses, source-model completeness fields, itemized generation-issue codes, and
-`templateSnapshotComparison`. The English `summary` and `warnings` remain technical
-diagnostics for the AI/tool or advanced-details layer. Full field tables are in
+`FixResultDto`, `FixSuggestionDto` and the `strategyAttempts[]` statuses, including which
+fields ordinary UI localizes and which are English diagnostics, are owned by
 [../api/verification.md](../api/verification.md).
 
 ---
@@ -401,8 +530,9 @@ conditions is rejected — and `ConditionAdjustStrategy` already excludes such s
 during the search, since an empty-condition rule is fail-closed in NuSMV (never fires) and
 so could otherwise verify yet be un-appliable (`RuleDto.conditions` is `@NotEmpty`).
 Parameter and condition searches generate NuSMV-only FROZENVARs such as `param_r0_c0`
-and `lambda_r0_c0`. Their prefixes — `param_`, `lambda_`, `condition_value_` — are
-reserved: a device id may not start with one. Refused at board admission
+and `lambda_r0_c0`, and condition adjustment's forward verification defines guard probes
+(`iot_verify_guard_probe_<n>`). These prefixes are
+[reserved device-id prefixes](data-authority-model.md#environment-pool): a device id may not start with one. Refused at board admission
 (`validateGeneratedMainNamespace`) and again per request
 (`NusmvRequestValidator.rejectFixGeneratedPrefix`), so the clash surfaces when the board is
 saved rather than when a fix is later requested. During
@@ -419,8 +549,9 @@ not returned as a user-facing validation error.
 The response (`FixApplyResultDto`) returns the signed `appliedSuggestion`,
 `verificationEvidenceReused=true`, before/after rule counts, the full persisted rule list, and
 `canUndo`/`canRedo`. Apply never repeats the strategy search, so reused evidence is the only basis it
-can report; the client rejects the whole response unless `verificationEvidenceReused` is `true` and
-`canUndo`/`canRedo` are exactly `true`/`false`.
+can report; the client rejects the whole response unless `verificationEvidenceReused` is `true`,
+`canUndo`/`canRedo` are exactly `true`/`false`, and `appliedSuggestion` is the alternative the user
+submitted, compared field by field without its token.
 The localized UI derives its success explanation from these structured fields instead
 of displaying the backend's English `message`; it states both the all-submitted-spec
 scope and the unmodelled-real-world limitation.

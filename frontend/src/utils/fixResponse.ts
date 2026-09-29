@@ -28,8 +28,9 @@ class FixResponseContractError extends Error {
 const STRATEGIES = new Set<FixStrategyName>(['parameter', 'condition', 'remove'])
 const ATTEMPT_STATUSES = new Set<FixStrategyAttemptStatus>([
   'VERIFIED',
-  'NOT_VERIFIED',
-  'NO_VERIFIED_SUGGESTION',
+  'NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE',
+  'ALL_CANDIDATES_REJECTED',
+  'INCONCLUSIVE',
   'FAILED_MODEL_GENERATION',
   'FAILED_SOLVER_EXECUTION',
   'SEARCH_BUDGET_EXHAUSTED',
@@ -247,7 +248,7 @@ export const validateFixSuggestion = (
   value: unknown,
   context: string,
   expectedStrategy?: FixStrategyName,
-  requireVerifiedToken = false
+  requireSuggestionToken = false
 ): FixSuggestion => {
   const suggestion = record(value, context, 'suggestion')
   if (!STRATEGIES.has(suggestion.strategy)) {
@@ -257,8 +258,7 @@ export const validateFixSuggestion = (
     throw new FixResponseContractError(context, 'suggestion strategy does not match the request')
   }
   text(suggestion, 'description', context)
-  const verified = bool(suggestion, 'verified', context)
-  if (requireVerifiedToken && verified) {
+  if (requireSuggestionToken) {
     text(suggestion, 'suggestionToken', context)
   }
   const parameters = array(suggestion, 'parameterAdjustments', context).map(
@@ -274,6 +274,13 @@ export const validateFixSuggestion = (
   if (detailCount === 0) {
     throw new FixResponseContractError(context, `${suggestion.strategy} suggestion has no concrete changes`)
   }
+  const preexisting = array(suggestion, 'preexistingViolations', context)
+  preexisting.forEach((item: unknown, index: number) => {
+    const row = record(item, context, `preexistingViolations[${index}]`)
+    for (const field of ['specId', 'templateId', 'formulaPreview']) {
+      text(row, field, context)
+    }
+  })
   return suggestion as FixSuggestion
 }
 
@@ -286,23 +293,12 @@ const validateAttempt = (value: unknown, context: string, index: number): FixStr
     throw new FixResponseContractError(context, `strategyAttempts[${index}].status is invalid`)
   }
   text(attempt, 'reason', context)
-  const hasAttemptsUsed = attempt.attemptsUsed !== undefined && attempt.attemptsUsed !== null
-  const hasAttemptLimit = attempt.attemptLimit !== undefined && attempt.attemptLimit !== null
-  if (hasAttemptsUsed !== hasAttemptLimit) {
+  // Completeness describes a listing, so only a strategy that listed suggestions can state it.
+  if (attempt.status === 'VERIFIED') {
+    bool(attempt, 'alternativesComplete', context)
+  } else if (attempt.alternativesComplete !== null && attempt.alternativesComplete !== undefined) {
     throw new FixResponseContractError(
-      context,
-      `strategyAttempts[${index}] must provide attemptsUsed and attemptLimit together`
-    )
-  }
-  if (hasAttemptsUsed) {
-    const used = integer(attempt, 'attemptsUsed', context)
-    const limit = integer(attempt, 'attemptLimit', context, 1)
-    if (used > limit) {
-      throw new FixResponseContractError(
-        context,
-        `strategyAttempts[${index}].attemptsUsed must not exceed attemptLimit`
-      )
-    }
+      context, `strategyAttempts[${index}].alternativesComplete is only meaningful on VERIFIED`)
   }
   return attempt as FixStrategyAttempt
 }
@@ -352,16 +348,13 @@ export const validateFixResult = (
       || expected.some(strategy => attempts.filter(attempt => attempt.strategy === strategy).length !== 1)) {
     throw new FixResponseContractError(context, 'strategyAttempts must explain every requested strategy exactly once')
   }
+  // A strategy may list several alternative suggestions; each must belong to a VERIFIED attempt.
   const suggestionStrategies = new Set<FixStrategyName>()
   suggestions.forEach(suggestion => {
-    if (suggestionStrategies.has(suggestion.strategy)) {
-      throw new FixResponseContractError(context, 'suggestions contains duplicate strategies')
-    }
     suggestionStrategies.add(suggestion.strategy)
     const attempt = attempts.find(item => item.strategy === suggestion.strategy)
-    const expectedStatus = suggestion.verified ? 'VERIFIED' : 'NOT_VERIFIED'
-    if (!attempt || attempt.status !== expectedStatus) {
-      throw new FixResponseContractError(context, 'suggestion verification contradicts its strategy attempt')
+    if (!attempt || attempt.status !== 'VERIFIED') {
+      throw new FixResponseContractError(context, 'a suggestion needs a VERIFIED strategy attempt')
     }
   })
   // The reciprocal direction. Without it a VERIFIED attempt with no suggestion passes, because
@@ -375,8 +368,8 @@ export const validateFixResult = (
     }
   })
   const fixable = bool(result, 'fixable', context)
-  if (fixable !== suggestions.some(suggestion => suggestion.verified)) {
-    throw new FixResponseContractError(context, 'fixable must match verified suggestions')
+  if (fixable !== suggestions.length > 0) {
+    throw new FixResponseContractError(context, 'fixable must match the listed suggestions')
   }
   if (!result.sourceModelComplete) {
     if (fixable || suggestions.length !== 0

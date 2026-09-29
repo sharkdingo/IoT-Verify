@@ -6,13 +6,16 @@ import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvGenerator;
 import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.File;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -31,6 +34,13 @@ import static org.mockito.Mockito.when;
  * whose response had already been sent, starving concurrent verification of solver capacity.
  */
 class FixContextCancellationTest {
+
+    /*
+     * Not `Files.createTempFile`: forwardVerify's cleanup deletes every file in the model's parent
+     * directory, which for a bare temp file is the system temp directory itself.
+     */
+    @TempDir
+    Path tempDir;
 
     @AfterEach
     void clearInterrupt() {
@@ -102,14 +112,13 @@ class FixContextCancellationTest {
     void aCancelledForwardVerificationLeavesTheSearchAskedToStop() throws Exception {
         SmvGenerator smvGenerator = mock(SmvGenerator.class);
         NusmvExecutor nusmvExecutor = mock(NusmvExecutor.class);
-        File smvFile = Files.createTempFile("fix-cancel", ".smv").toFile();
-        smvFile.deleteOnExit();
+        File smvFile = Files.createFile(tempDir.resolve("fix-cancel.smv")).toFile();
 
         when(smvGenerator.generateWithResolvedDeviceModel(
-                any(), any(), any(), any(), any(), any(), anyBoolean(), any(), any(), any()))
+                any(), any(), any(), any(), any(), any(), anyBoolean(), any(), any(), any(), any()))
                 .thenReturn(new SmvGenerator.GenerateResult(smvFile, Map.of()));
         // What the shared NuSMV semaphore throws once the worker has been cancelled.
-        when(nusmvExecutor.execute(any(File.class), anyLong()))
+        when(nusmvExecutor.executeRepairSearch(any(File.class), anyLong()))
                 .thenThrow(new InterruptedException("cancelled"));
 
         FixContext ctx = FixContext.builder()
@@ -120,10 +129,13 @@ class FixContextCancellationTest {
                 .attackScenario(AttackScenarioDto.builder().build())
                 .build();
 
-        boolean verified = FixStrategyUtils.forwardVerify(
+        FixStrategyUtils.Verification verification = FixStrategyUtils.forwardVerify(
                 smvGenerator, nusmvExecutor, ctx, List.of(), "PARAMETER_ADJUST");
 
-        assertFalse(verified, "a cancelled candidate must never be reported as verified");
+        // Inconclusive, not rejected: a cancelled check says nothing about the candidate, so a
+        // strategy must not count it towards proving that no repair exists.
+        assertEquals(FixStrategyUtils.Verdict.INCONCLUSIVE, verification.verdict(),
+                "a cancelled candidate must never be reported as verified or as rejected");
         assertTrue(Thread.currentThread().isInterrupted(),
                 "the interrupt must survive the broad catch, or the search keeps taking NuSMV "
                         + "permits for a request whose response was already sent");

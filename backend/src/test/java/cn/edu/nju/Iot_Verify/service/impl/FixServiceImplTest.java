@@ -263,7 +263,7 @@ class FixServiceImplTest {
                     smv.setModelTokenSource(input.getModelTokenSource());
                     return Map.of(smv.getVarName(), smv);
                 }).when(smvGenerator).buildDeviceSmvMapFromTemplateSnapshots(anyList(), anyMap());
-        lenient().when(ruleFixer.localizeFaults(any(), anyList(), anyMap()))
+        lenient().when(ruleFixer.localizeFaults(any(), anyList(), any(), any(), anyMap()))
                 .thenReturn(List.of(FaultRuleDto.builder()
                         .ruleString("Rule")
                         .transitionNumber(1)
@@ -351,7 +351,7 @@ class FixServiceImplTest {
         traceDto.setStates(List.of());
         traceDto.setGenerationIssues(List.of(issue));
         when(traceMapper.toDto(po)).thenReturn(traceDto);
-        when(ruleFixer.localizeFaults(anyList(), anyList(), anyMap())).thenReturn(List.of());
+        when(ruleFixer.localizeFaults(anyList(), anyList(), any(), any(), anyMap())).thenReturn(List.of());
 
         FaultLocalizationResultDto localization = fixService.localizeFault(1L, 1L);
         FixResultDto result = fixService.fix(1L, 1L, null, null);
@@ -394,7 +394,7 @@ class FixServiceImplTest {
         traceDto.setStates(List.of());
         traceDto.setModelComplete(false);
         when(traceMapper.toDto(po)).thenReturn(traceDto);
-        when(ruleFixer.localizeFaults(anyList(), anyList(), anyMap())).thenReturn(List.of());
+        when(ruleFixer.localizeFaults(anyList(), anyList(), any(), any(), anyMap())).thenReturn(List.of());
 
         String targetId = "param_abcdefghijklmnopqrstuvwx";
         // Lower == upper is the "lock this threshold exactly" case, the one worst served by
@@ -646,7 +646,6 @@ class FixServiceImplTest {
     private FixSuggestionDto verifiedParameterSuggestion(String newValue) {
         return FixSuggestionDto.builder()
                 .strategy("parameter")
-                .verified(true)
                 .parameterAdjustments(List.of(ParameterAdjustment.builder()
                         .ruleIndex(0).conditionIndex(0).attribute("temperature")
                         .relation(">").originalValue("30").newValue(newValue).build()))
@@ -777,7 +776,7 @@ class FixServiceImplTest {
     void applyFix_remove_permanentlyRemovesFlaggedRule() {
         setupApplyContextSingleRule();
         FixSuggestionDto remove = FixSuggestionDto.builder()
-                .strategy("remove").verified(true)
+                .strategy("remove")
                 .removedRuleIndices(List.of(0))
                 .build();
         stubUpdateRules(new java.util.ArrayList<>(List.of(boardRuleMatchingSnapshot())));
@@ -906,7 +905,7 @@ class FixServiceImplTest {
         currentSpecs = List.of();
 
         FixSuggestionDto remove = FixSuggestionDto.builder()
-                .strategy("remove").verified(true).removedRuleIndices(List.of(0)).build();
+                .strategy("remove").removedRuleIndices(List.of(0)).build();
         // Persisted board rule uses the raw digit-leading node id.
         RuleDto boardRule = RuleDto.builder()
                 .id(7L)
@@ -952,7 +951,6 @@ class FixServiceImplTest {
 
         FixSuggestionDto addCondition = FixSuggestionDto.builder()
                 .strategy("condition")
-                .verified(true)
                 .conditionAdjustments(List.of(ConditionAdjustment.builder()
                         .ruleIndex(0)
                         .conditionIndex(1)

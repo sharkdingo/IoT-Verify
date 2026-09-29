@@ -2,6 +2,8 @@ package cn.edu.nju.Iot_Verify.component.nusmv.fixer;
 
 import cn.edu.nju.Iot_Verify.dto.fix.FixSuggestionDto;
 
+import java.util.List;
+
 /**
  * Common interface for fix strategies (OCP — Open/Closed Principle).
  *
@@ -27,9 +29,27 @@ public interface FixStrategy {
     }
 
     /**
-     * Attempt to produce a fix suggestion for the violation described in {@code ctx}.
-     *
-     * @return a suggestion, or {@code null} if this strategy cannot fix the violation
+     * Search for forward-verified repairs of the violation described in {@code ctx}. Why no repair
+     * was found is recorded on the context, not returned.
      */
-    FixSuggestionDto tryFix(FixContext ctx);
+    StrategyOutcome tryFix(FixContext ctx);
+
+    /**
+     * @param suggestions          the verified, minimal alternatives this strategy found, smallest
+     *                             change first; empty when it found none
+     * @param alternativesComplete {@code true} when the search space was exhausted, so no other
+     *                             minimal repair of this kind exists; {@code false} when the listing
+     *                             limit, the attempt budget or the time share cut it short, or a
+     *                             candidate could not be checked
+     */
+    record StrategyOutcome(List<FixSuggestionDto> suggestions, boolean alternativesComplete) {
+        public StrategyOutcome {
+            suggestions = List.copyOf(suggestions);
+        }
+
+        /** Nothing found; the context records why. */
+        public static StrategyOutcome none() {
+            return new StrategyOutcome(List.of(), false);
+        }
+    }
 }

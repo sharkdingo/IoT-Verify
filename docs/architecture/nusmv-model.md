@@ -519,6 +519,14 @@ duplicate or absent rule ids cannot make another rule appear to have executed. M
 duplicate, negative, or out-of-range indexes are malformed evidence and fail closed;
 execution is never reconstructed heuristically from conditions or state changes.
 
+Condition adjustment's forward-verification models also carry `iot_verify_guard_probe_<n>`
+`DEFINE`s: the parts of a scoped rule's guard (its start-state and delivery terms, its trigger
+conditions, each search condition, and a chosen-value condition's operand), rendered by the same
+code that renders the guard. They exist only in that model and are read from a rejected
+candidate's violating path to [learn which other assignments it refutes](auto-fix.md#strategy-2--condition-adjustment-conditionadjuststrategy).
+A probe that cannot be rendered is omitted rather than defined as a constant, so its reader treats
+the value as unknown.
+
 ## Specification semantics
 
 The persisted `SpecificationDto.formula` is a display preview/cache. Verification does

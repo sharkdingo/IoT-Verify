@@ -1231,7 +1231,7 @@ test.describe('authority model full-stack audit', () => {
     })
     const fixProbe = await unwrap<any>(fixProbeResponse)
     expect(fixProbe.fixable).toBe(true)
-    expect(fixProbe.suggestions.some((suggestion: any) => suggestion.strategy === 'remove' && suggestion.verified)).toBeTruthy()
+    expect(fixProbe.suggestions.some((suggestion: any) => suggestion.strategy === 'remove')).toBeTruthy()
 
     await openHistoryPanel(page)
     await page.getByTestId('history-layer-results').click()
@@ -1651,7 +1651,7 @@ test.describe('authority model full-stack audit', () => {
     })
     const fixProbe = await unwrap<any>(fixProbeResponse)
     expect(fixProbe.fixable).toBe(true)
-    expect(fixProbe.suggestions.some((suggestion: any) => suggestion.strategy === 'remove' && suggestion.verified)).toBeTruthy()
+    expect(fixProbe.suggestions.some((suggestion: any) => suggestion.strategy === 'remove')).toBeTruthy()
 
     await openHistoryPanel(page)
     await page.getByTestId('history-layer-results').click()

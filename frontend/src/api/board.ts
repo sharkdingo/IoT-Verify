@@ -53,7 +53,6 @@ import type {
     FixRequest,
     FixResult,
     FixSuggestion,
-    FixStrategyName,
     PreferredRangeSelection
 } from '@/types/fix'
 import {
@@ -2210,11 +2209,18 @@ const validateDefaultTemplateResetResult = (
     return result as DefaultTemplateResetResult
 }
 
+/** A suggestion as the user reviewed it; the token authorizes it but is not part of what they chose. */
+const visibleSuggestionKey = (suggestion: FixSuggestion): string => {
+    const { suggestionToken: _token, ...visible } = suggestion
+    return JSON.stringify(visible)
+}
+
 const validateFixApplyResult = (
     value: unknown,
-    expectedStrategy: FixStrategyName
+    submitted: FixSuggestion
 ): Omit<FixApplyResult, 'rules'> & { rules: BackendRuleDto[] } => {
     const context = 'Automatic fix apply'
+    const expectedStrategy = submitted.strategy
     const result = requireResponseRecord(value, context)
     if (result.applied !== true || result.verificationEvidenceReused !== true) {
         throw new BoardResponseContractError(
@@ -2225,13 +2231,11 @@ const validateFixApplyResult = (
     if (result.strategy !== expectedStrategy) {
         throw new BoardResponseContractError(context, 'strategy does not match the requested strategy')
     }
-    const appliedSuggestion = validateFixSuggestion(
-        result.appliedSuggestion,
-        context,
-        expectedStrategy
-    )
-    if (!appliedSuggestion.verified) {
-        throw new BoardResponseContractError(context, 'appliedSuggestion must identify the verified fix actually written')
+    // A strategy can list several alternatives, so a well-formed suggestion is not enough: it must be
+    // the one the user picked. Both sides are the server's own serialization of the same DTO.
+    const applied = validateFixSuggestion(result.appliedSuggestion, context, expectedStrategy)
+    if (visibleSuggestionKey(applied) !== visibleSuggestionKey(submitted)) {
+        throw new BoardResponseContractError(context, 'appliedSuggestion is not the suggestion that was submitted')
     }
     const rules = requireResponseArray<BackendRuleDto>(result, context, 'rules')
         .map((rule, index) => validateBackendRuleResult(rule, `${context}.rules[${index}]`))
@@ -3031,7 +3035,7 @@ export default {
             unpack<unknown>(await api.post(
                 `/verify/traces/${traceId}/fix/apply`, payload, SERVER_BOUNDED_REQUEST
             )),
-            suggestion.strategy
+            suggestion
         )
         return {
             ...result,

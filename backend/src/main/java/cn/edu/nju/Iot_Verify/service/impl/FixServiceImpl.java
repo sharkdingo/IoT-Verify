@@ -90,14 +90,16 @@ public class FixServiceImpl implements FixService {
         ModelBoundaryInput modelInput = modelBoundaryInput(
                 ctx.request, ctx.templateManifests, ctx.modelTokenSourcesByDeviceId);
         List<FaultRuleDto> faultRules = ruleFixer.localizeFaults(
-                ctx.trace.getStates(), ctx.request.getRules(), modelInput.deviceSmvMap());
+                ctx.trace.getStates(), ctx.request.getRules(), ctx.trace.getViolatedSpecId(),
+                ctx.request.getSpecs(), modelInput.deviceSmvMap());
         attachModelTokenSources(faultRules, modelInput.deviceSmvMap());
         boolean modelComplete = sourceModelComplete(ctx.trace);
         String summary = faultRules.isEmpty()
-                ? "No user-defined automation rule was localized in the counterexample transitions. "
-                    + "The violation may instead depend on device or environment evolution."
-                : faultRules.size() + " automation rule(s) were involved in counterexample transitions. "
-                    + "This narrows review but does not prove that every listed rule independently caused the violation.";
+                ? "No automation rule that fired in the counterexample can influence the violated property. "
+                    + "The violation depends on device or environment evolution."
+                : faultRules.size() + " automation rule(s) fired in the counterexample and can influence the "
+                    + "violated property. This narrows review but does not prove that every listed rule "
+                    + "independently caused the violation.";
         List<String> warnings = modelComplete
                 ? List.of()
                 : List.of(incompleteSourceModelWarning(ctx.trace));
@@ -172,7 +174,6 @@ public class FixServiceImpl implements FixService {
         if (result.getSuggestions() != null) {
             result.getSuggestions().stream()
                     .filter(Objects::nonNull)
-                    .filter(FixSuggestionDto::isVerified)
                     .forEach(suggestion -> suggestion.setSuggestionToken(
                             fixSuggestionTokenService.issue(
                                     userId, traceId, suggestion, preferredRanges)));
@@ -192,11 +193,10 @@ public class FixServiceImpl implements FixService {
                     || !validatedStrategy.equals(suggestion.getStrategy())) {
                 throw new BadRequestException("The submitted suggestion does not match the selected strategy.");
             }
+            // The token is issued only for suggestions the fixer listed, and it lists only suggestions
+            // that forward verification accepted; a valid token is therefore the proof of verification.
             FixSuggestionDto trusted = fixSuggestionTokenService.verify(
                     userId, traceId, validatedStrategy, suggestion, suggestionToken, preferredRanges);
-            if (!trusted.isVerified()) {
-                throw new BadRequestException("Only a verified fix suggestion can be applied.");
-            }
             return applyFixInternal(userId, traceId, validatedStrategy, trusted, preferredRanges);
         });
     }
@@ -588,7 +588,8 @@ public class FixServiceImpl implements FixService {
                         .build())
                 .toList();
         List<FaultRuleDto> faultRules = ruleFixer.localizeFaults(
-                ctx.trace.getStates(), ctx.request.getRules(), deviceSmvMap);
+                ctx.trace.getStates(), ctx.request.getRules(), ctx.trace.getViolatedSpecId(),
+                ctx.request.getSpecs(), deviceSmvMap);
         attachModelTokenSources(faultRules, deviceSmvMap);
         return FixResultDto.builder()
                 .traceId(traceId)

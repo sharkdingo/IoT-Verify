@@ -1,6 +1,7 @@
 /**
  * Fix 功能相关类型定义
- * 对应后端 DTO: FaultRuleDto, FixResultDto, FixSuggestionDto, ParameterAdjustment, ConditionAdjustment
+ * 对应后端 DTO: FaultRuleDto, FixResultDto, FixSuggestionDto, PreexistingViolationDto, ParameterAdjustment,
+ * ConditionAdjustment
  */
 
 import type { RuleForm, RuleSourceItemType } from './rule'
@@ -85,7 +86,14 @@ export interface ConditionAdjustment {
   modelTokenSource: ModelTokenSource
 }
 
-// 修复建议
+// 原规则就已违反、该建议也未改变的规格（验收只要求目标规格通过且不破坏原本满足的规格）
+export interface PreexistingViolation {
+  specId: string
+  templateId: string
+  formulaPreview: string
+}
+
+// 修复建议。服务端只返回通过前向验证的方案，因此建议本身就是已验证的，不再单独携带标记。
 export interface FixSuggestion {
   suggestionToken?: string
   strategy: FixStrategyName
@@ -93,13 +101,14 @@ export interface FixSuggestion {
   parameterAdjustments: ParameterAdjustment[]
   conditionAdjustments: ConditionAdjustment[]
   removedRuleDescriptions: string[]
-  verified: boolean
+  preexistingViolations: PreexistingViolation[]
 }
 
 export type FixStrategyAttemptStatus =
   | 'VERIFIED'
-  | 'NOT_VERIFIED'
-  | 'NO_VERIFIED_SUGGESTION'
+  | 'NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE'
+  | 'ALL_CANDIDATES_REJECTED'
+  | 'INCONCLUSIVE'
   | 'FAILED_MODEL_GENERATION'
   | 'FAILED_SOLVER_EXECUTION'
   | 'SEARCH_BUDGET_EXHAUSTED'
@@ -115,8 +124,11 @@ export interface FixStrategyAttempt {
   strategy: FixStrategyName
   status: FixStrategyAttemptStatus
   reason: string
-  attemptsUsed?: number | null
-  attemptLimit?: number | null
+  /**
+   * Only on VERIFIED: true when the strategy checked every candidate, so its listed suggestions are every
+   * minimal repair of that kind; false when the listing limit, the budget or the time share stopped it first.
+   */
+  alternativesComplete?: boolean | null
 }
 
 export type TemplateSnapshotComparison = 'NOT_CHECKED' | 'UNCHANGED' | 'CHANGED' | 'UNAVAILABLE'

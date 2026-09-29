@@ -32,6 +32,10 @@ public class FixSuggestionDto {
     /** Human-readable rules that would be permanently removed from the active board. */
     @Builder.Default
     private List<String> removedRuleDescriptions = List.of();
-    /** Whether the fix was re-verified with NuSMV. */
-    private boolean verified;
+    /**
+     * Specifications this suggestion leaves violated because the original rules already violated them.
+     * Empty when the suggestion satisfies every specification.
+     */
+    @Builder.Default
+    private List<PreexistingViolationDto> preexistingViolations = List.of();
 }

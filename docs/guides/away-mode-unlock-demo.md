@@ -170,7 +170,7 @@ three candidates to one repair is the next step's job, not localization's.
 | Strategy | Result |
 | :--- | :--- |
 | Parameter adjustment | `SKIPPED_NO_PARAMETERIZABLE_VALUES` — nothing numeric to move |
-| Condition adjustment | `NO_VERIFIED_SUGGESTION` — no added guard survived re-checking |
+| Condition adjustment | `NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE` — no condition change prevents this counterexample |
 | Permanent removal | **Verified**: delete the convenience-unlock rule |
 
 This is the most honest minute of the demo, so do not rush it. Two strategies decline, and
@@ -178,8 +178,8 @@ both decline for a *reason the tool states*. Parameter tuning has no threshold t
 because the scene is entirely enum-valued. Condition tightening genuinely cannot repair this
 property: occupancy evolves freely, so any guard permitting an unlock while someone is home
 is still followed by a step where they leave — and nothing re-locks the door. Adding "only
-unlock when someone is home" really does not fix it, and the tool refuses to claim otherwise
-instead of offering a plausible-looking guard that fails on re-check.
+unlock when someone is home" really does not fix it. The tool proves this over every allowed
+condition change and says so, rather than offering a guard that only looks plausible.
 
 The verified repair is the destructive one: remove the convenience-unlock rule. Every
 candidate was re-checked against **all six** properties on the complete model before being
@@ -202,9 +202,10 @@ each property:
   the situation it talks about can no longer arise. It passes while telling you nothing.
 
 That asymmetry is the single most useful thing this scene teaches, and it is not a tool defect: a
-green forward verification means "no submitted property is violated", never "every property is still
-meaningful". An implication property whose antecedent a repair removes is reported as verified. (The
-three shapes this takes, and why the boundary sits there, are in
+green forward verification means "the target property holds and no property the original rules
+satisfied is violated", never "every property is still meaningful". An implication property whose
+antecedent a repair removes is reported as verified. (The three shapes this takes, and why the
+boundary sits there, are in
 [../architecture/theory-sources.md](../architecture/theory-sources.md).)
 Saying "one removal repaired both properties" without this distinction is the one place this demo
 could fairly be called dishonest — and it sets up the closing note below, where a different repair

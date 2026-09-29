@@ -23,7 +23,8 @@ public class FixConfig {
      * Each iteration = 1 NuSMV ¬ρ solve + up to 1 forward-verify (≤ 2 NuSMV calls).
      * The try-original step runs outside this budget (extra cost ≤ param count, typically 1-3).
      * Total NuSMV calls for refinement ≤ paramCount + maxRefineAttempts × 2.
-     * Shared across all parameters in a single ParameterAdjustStrategy.tryFix() call.
+     * Shared across the thresholds of one listed parameter alternative; each alternative the
+     * strategy lists is refined with a budget of its own.
      */
     @Min(1)
     private int maxRefineAttempts = 10;

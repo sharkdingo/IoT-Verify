@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useModalAccessibility } from '@/composables/useModalAccessibility'
 import boardApi from '@/api/board'
@@ -9,6 +9,7 @@ import { localizedErrorMessage, localizedTextOrFallback } from '@/utils/userMess
 import { requestInteractiveCancellation } from '@/utils/interactiveCancellation'
 import { formatModelTokenBySource } from '@/utils/modelTokenDisplay'
 import { useAuth } from '@/stores/auth'
+import { specTemplateDetails } from '@/assets/config/specTemplates'
 import type {
   FaultLocalizationResult,
   FaultRule,
@@ -25,7 +26,6 @@ import type {
 } from '@/types/fix'
 import type { InteractiveOperationStage } from '@/types/task'
 import { confirmDestructive, notifyBlocked, notifyError, notifySuccess } from '@/utils/feedback'
-import HintTooltip from '@/components/common/HintTooltip.vue'
 
 const props = defineProps<{
   visible: boolean
@@ -76,6 +76,9 @@ let lastResolvedFixRequest: {
 const strategyErrors = ref<Partial<Record<FixStrategyName, string>>>({})
 const strategyWarnings = ref<Partial<Record<FixStrategyName, string[]>>>({})
 const fixResult = ref<FixResult | null>(null)
+// Which listed alternative each strategy's Apply acts on; absent means the first, the smallest change.
+// A strategy's list is only ever replaced through invalidateStrategyResult, which clears its entry.
+const selectedAlternativeIndex = ref<Partial<Record<FixStrategyName, number>>>({})
 const faultLocalization = ref<FaultLocalizationResult | null>(null)
 const faultRules = ref<FaultRule[]>([])
 const selectedStrategy = ref<FixStrategyName>('parameter')
@@ -85,8 +88,9 @@ const lastParameterRequestFingerprint = ref<string | null>(null)
 // 记录本次 /fix 用的参数偏好选择，apply 时原样回传，保证后端重算复现同一建议。
 const lastPreferredRangeSelections = ref<PreferredRangeSelection[] | undefined>(undefined)
 
+// One row per adjustable threshold. A row left at the template bounds expresses no preference and is
+// not sent; only a narrowed row becomes a preferred-range selection.
 type PreferredRangeRow = {
-  id: string
   targetId: string
   lower: number | null
   upper: number | null
@@ -225,6 +229,9 @@ const localizedFixLimitations = computed(() => {
       specs: source.sourceSkippedSpecCount
     }))
   }
+  // While an option is listed, the footer states this beside the Apply it blocks (`applyBlockedReason`);
+  // saying it here as well would give one fact two homes.
+  if (currentSuggestion.value) return Array.from(new Set(messages))
   if (fixResult.value?.templateSnapshotComparison === 'CHANGED') {
     messages.push(t('app.fixTemplateSnapshotChangedLimitation'))
   } else if (fixResult.value?.templateSnapshotComparison === 'UNAVAILABLE') {
@@ -241,28 +248,18 @@ const currentStrategyLoading = computed(() => strategyLoading.value === selected
 const anotherStrategyLoading = computed(() => strategyLoading.value !== null && !currentStrategyLoading.value)
 const hasAttemptResults = computed(() => (fixResult.value?.strategyAttempts?.length ?? 0) > 0)
 
+// Static while a search runs: the loading panel in the body owns progress, and the header icon spins.
 const headerStatus = computed(() => {
-  if (strategyLoading.value) {
-    return t('app.tryingFixStrategy', { strategy: strategyLabels.value[strategyLoading.value] })
-  }
   if (verifiedCount.value > 0) {
     return t('app.verifiedSolutionsCount', { count: verifiedCount.value })
   }
   if (fixResult.value?.strategyAttempts?.length) {
-    return t('app.noVerifiedSolutionsYet')
+    return noAttemptLeftToChangeTheOutcome.value ? t('app.noVerifiedOptions') : t('app.noVerifiedSolutionsYet')
   }
   return t('app.selectFixStrategyPrompt')
 })
 
 const preferredRangeRows = ref<PreferredRangeRow[]>([])
-
-const newRangeRowId = () => `${Date.now()}-${Math.random().toString(36).slice(2)}`
-
-const parameterAdjustments = computed(() => {
-  return parameterTargetCatalog.value
-})
-
-const preferredRangeTargetId = (adjustment: ParameterTarget) => adjustment.targetId
 
 const formatModelToken = (value: unknown, source: ModelTokenSource) => {
   return formatModelTokenBySource(source, value, t)
@@ -304,37 +301,64 @@ const formatPreferredRangeTarget = (adjustment: ParameterTarget) => t('app.prefe
   })
 })
 
-const preferredRangeTargetOptions = computed(() => parameterAdjustments.value.map(adjustment => ({
-  value: preferredRangeTargetId(adjustment),
-  label: formatPreferredRangeTarget(adjustment),
-  adjustment
-})).filter(option => option.value))
-
 const parameterAdjustmentByTargetId = computed(() => {
   const byTargetId = new Map<string, ParameterTarget>()
-  parameterAdjustments.value.forEach(adjustment => {
-    const targetId = preferredRangeTargetId(adjustment)
-    if (targetId) byTargetId.set(targetId, adjustment)
+  parameterTargetCatalog.value.forEach(adjustment => {
+    if (adjustment.targetId) byTargetId.set(adjustment.targetId, adjustment)
   })
   return byTargetId
 })
 
-const preferredRangeTargetLabel = (targetId: string) =>
-  preferredRangeTargetOptions.value.find(option => option.value === targetId)?.label || t('app.unknownPreferredRangeTarget')
+/**
+ * Rows paired with their target and input problem, in catalog order. Rows are only ever created from
+ * the catalog. The row renders its problem beside the offending input.
+ */
+const preferredRangeRowViews = computed(() => preferredRangeRows.value.flatMap(row => {
+  const target = parameterAdjustmentByTargetId.value.get(row.targetId)
+  return target ? [{ row, target, issue: preferredRangeIssueOf(row, target) }] : []
+}))
+
+const rowNarrowsTarget = (row: PreferredRangeRow, target: ParameterTarget) =>
+  row.lower !== target.lowerBound || row.upper !== target.upperBound
+
+const narrowedPreferredRangeRows = computed(() => preferredRangeRowViews.value
+  .filter(({ row, target }) => rowNarrowsTarget(row, target))
+  .map(({ row }) => row))
+
+/**
+ * Keep one row per catalog target. A re-run returns the catalog again; bounds the user already typed for
+ * a surviving target are kept, a new target starts at its template bounds, and a vanished target's row
+ * goes (the backend reports its selection under unusedPreferredRangeSelections).
+ */
+const syncPreferredRangeRows = () => {
+  const existing = new Map(preferredRangeRows.value.map(row => [row.targetId, row]))
+  preferredRangeRows.value = parameterTargetCatalog.value
+    .filter(target => target.targetId)
+    .map(target => existing.get(target.targetId) ?? {
+      targetId: target.targetId,
+      lower: target.lowerBound,
+      upper: target.upperBound
+    })
+}
 
 const activePreferredRangeCount = computed(() => {
   return lastPreferredRangeSelections.value?.length ?? 0
 })
 
-const parameterPreferenceFingerprint = () => JSON.stringify(preferredRangeRows.value.map(row => ({
+// Only narrowed rows are part of the request, so only they can make a returned suggestion stale.
+const parameterPreferenceFingerprint = () => JSON.stringify(narrowedPreferredRangeRows.value.map(row => ({
   targetId: row.targetId,
   lower: row.lower,
   upper: row.upper
 })))
 
+// The on-screen ranges differ from the ones the last parameter search ran with.
+const parameterRangesEditedSinceLastRequest = computed(() =>
+  lastParameterRequestFingerprint.value !== parameterPreferenceFingerprint())
+
 const parameterPreferencesChanged = computed(() => {
   if (!fixResult.value?.suggestions.some(item => item.strategy === 'parameter')) return false
-  return lastParameterRequestFingerprint.value !== parameterPreferenceFingerprint()
+  return parameterRangesEditedSinceLastRequest.value
 })
 
 const suggestionIsCurrent = (suggestion: FixSuggestion) =>
@@ -344,133 +368,100 @@ const templateSnapshotAllowsApply = computed(() =>
   fixResult.value?.templateSnapshotComparison === 'UNCHANGED')
 
 /**
- * Why Apply cannot proceed, as a standing precondition. Empty string means nothing blocks it.
+ * Why the listed option cannot be applied, or '' when nothing blocks it or no option is listed.
  *
  * A disabled submit has to say why inline, and both the disabled state and the `aria-describedby`
- * target derive from this one value so they cannot disagree. Deliberately excludes in-flight work:
- * the button already renders "Applying…" with a spinner, and repeating that as an explanation would
- * be duplicate feedback for a state the user cannot act on. `applyDisabled` owns the union.
+ * target derive from this one value so they cannot disagree. Rendered only beside an Apply button:
+ * with no option there is nothing to apply, and the Limitations list owns the snapshot fact instead.
+ * NOT_CHECKED only accompanies a refused incomplete-source search, which lists no option, so it
+ * never reaches here. Excludes the apply request itself: the button already renders "Applying…"
+ * with a spinner, and repeating that as an explanation would be duplicate feedback.
  */
 const applyBlockedReason = computed(() => {
+  if (!currentSuggestion.value) return ''
   if (fixResult.value?.templateSnapshotComparison === 'CHANGED') {
     return t('app.fixTemplateSnapshotChangedLimitation')
   }
   if (!templateSnapshotAllowsApply.value) return t('app.fixTemplateSnapshotUnavailableLimitation')
+  // Apply and a search are one request slot; a listed option is never the one being searched for,
+  // because starting a search withdraws that strategy's options.
+  if (strategyLoading.value !== null && !applyingFix.value) {
+    return t('app.fixApplyWaitsForSearch', { strategy: strategyLabels.value[strategyLoading.value] })
+  }
   return ''
 })
 
-/** Apply is unavailable while a precondition blocks it or while any fix request is in flight. */
-const applyDisabled = computed(() =>
-  Boolean(applyBlockedReason.value) || applyingFix.value || strategyLoading.value !== null)
+/** Apply is unavailable while a precondition blocks it or while the apply request is in flight. */
+const applyDisabled = computed(() => Boolean(applyBlockedReason.value) || applyingFix.value)
 
 const isBlank = (value: unknown) => value === null || value === undefined || value === ''
 
-const buildPreferredRangeSelections = (showWarnings = false): PreferredRangeSelection[] | undefined | null => {
-  const selections: PreferredRangeSelection[] = []
-  const seen = new Set<string>()
+type PreferredRangeIssue = {
+  message: string
+  lowerInvalid: boolean
+  upperInvalid: boolean
+}
 
-  for (const row of preferredRangeRows.value) {
-    const values = [row.targetId, row.lower, row.upper]
-    if (values.every(isBlank)) {
-      continue
+// Only a narrowed row is sent, so only a narrowed row can block the search.
+const preferredRangeIssueOf = (row: PreferredRangeRow, target: ParameterTarget): PreferredRangeIssue | null => {
+  if (!rowNarrowsTarget(row, target)) return null
+  if (isBlank(row.lower) || isBlank(row.upper)) {
+    return {
+      message: t('app.preferredRangeCompleteFields'),
+      lowerInvalid: isBlank(row.lower),
+      upperInvalid: isBlank(row.upper)
     }
-    if (values.some(isBlank)) {
-      if (showWarnings) notifyBlocked(t('app.preferredRangeCompleteFields'))
-      return null
-    }
-
-    const targetId = String(row.targetId)
-    const lower = Number(row.lower)
-    const upper = Number(row.upper)
-
-    const adjustment = parameterAdjustmentByTargetId.value.get(targetId)
-    if (!adjustment) {
-      if (showWarnings) notifyBlocked(t('app.preferredRangeSelectTarget'))
-      return null
-    }
-    if (!Number.isFinite(lower) || !Number.isFinite(upper) || !Number.isInteger(lower) || !Number.isInteger(upper)) {
-      if (showWarnings) notifyBlocked(t('app.preferredRangeIntegerBounds'))
-      return null
-    }
-    if (lower > upper) {
-      if (showWarnings) notifyBlocked(t('app.preferredRangeLowerBeforeUpper'))
-      return null
-    }
-
-    if (seen.has(targetId)) {
-      if (showWarnings) notifyBlocked(t('app.duplicatePreferredRange', { key: preferredRangeTargetLabel(targetId) }))
-      return null
-    }
-    seen.add(targetId)
-    selections.push({
-      targetId,
-      lower,
-      upper
-    })
   }
+  const lowerIsInteger = Number.isInteger(Number(row.lower))
+  const upperIsInteger = Number.isInteger(Number(row.upper))
+  if (!lowerIsInteger || !upperIsInteger) {
+    return {
+      message: t('app.preferredRangeIntegerBounds'),
+      lowerInvalid: !lowerIsInteger,
+      upperInvalid: !upperIsInteger
+    }
+  }
+  if (Number(row.lower) > Number(row.upper)) {
+    return { message: t('app.preferredRangeLowerBeforeUpper'), lowerInvalid: true, upperInvalid: true }
+  }
+  return null
+}
 
+const preferredRangeHasIssue = computed(() => preferredRangeRowViews.value.some(view => view.issue))
+
+/**
+ * The ids of the row messages that block a parameter search, or '' when the ranges can be sent.
+ * The messages sit beside the inputs they describe; the disabled Try points at them rather than
+ * repeating them in the footer.
+ */
+const rangeBlockedReasonIds = computed(() => selectedStrategy.value === 'parameter'
+  ? preferredRangeRowViews.value
+    .filter(view => view.issue)
+    .map(view => `fix-range-issue-${view.row.targetId}`)
+    .join(' ')
+  : '')
+
+// Callers check `preferredRangeHasIssue` first, so every narrowed row here holds two ordered integers.
+const buildPreferredRangeSelections = (): PreferredRangeSelection[] | undefined => {
+  const selections = narrowedPreferredRangeRows.value.map(row => ({
+    targetId: row.targetId,
+    lower: Number(row.lower),
+    upper: Number(row.upper)
+  }))
   return selections.length > 0 ? selections : undefined
 }
 
-const addPreferenceRow = (adjustment?: ParameterTarget) => {
-  const nextAdjustment = adjustment ?? parameterAdjustments.value.find(adj => {
-    const targetId = preferredRangeTargetId(adj)
-    return targetId && !preferredRangeRows.value.some(row => row.targetId === targetId)
-  })
-  if (!nextAdjustment) {
-    notifyBlocked(t('app.noParameterPreferenceTargets'))
-    return
-  }
-  preferredRangeRows.value.push({
-    id: newRangeRowId(),
-    targetId: preferredRangeTargetId(nextAdjustment),
-    lower: nextAdjustment?.lowerBound ?? null,
-    upper: nextAdjustment?.upperBound ?? null
-  })
-}
+// The backend only registers targets whose original value is an in-bounds integer.
+const originalValueOf = (target: ParameterTarget) => Number(target.originalValue)
 
-const useAdjustmentAsPreference = (adjustment: ParameterAdjustment) => {
-  const targetId = preferredRangeTargetId(adjustment)
-  const existing = preferredRangeRows.value.find(row => row.targetId === targetId)
+const rowKeepsOriginal = (row: PreferredRangeRow, target: ParameterTarget) =>
+  row.lower === originalValueOf(target) && row.upper === originalValueOf(target)
 
-  if (existing) {
-    existing.lower = adjustment.lowerBound
-    existing.upper = adjustment.upperBound
-  } else {
-    addPreferenceRow(adjustment)
-  }
-}
-
-const lockAdjustmentAtOriginal = (adjustment: ParameterAdjustment) => {
-  const original = Number(adjustment.originalValue)
-  if (!Number.isInteger(original)) {
-    notifyBlocked(t('app.preferredRangeIntegerBounds'))
-    return
-  }
-  useAdjustmentAsPreference(adjustment)
-  const row = preferredRangeRows.value.find(item => item.targetId === preferredRangeTargetId(adjustment))
-  if (row) {
-    row.lower = original
-    row.upper = original
-  }
-}
-
-const seedPreferenceRowsFromSuggestion = () => {
-  const adjustments = parameterAdjustments.value.filter(adjustment => preferredRangeTargetId(adjustment))
-  if (adjustments.length === 0) {
-    notifyBlocked(t('app.noParameterPreferenceTargets'))
-    return
-  }
-  preferredRangeRows.value = adjustments.map(adj => ({
-    id: newRangeRowId(),
-    targetId: preferredRangeTargetId(adj),
-    lower: adj.lowerBound,
-    upper: adj.upperBound
-  }))
-}
-
-const removePreferenceRow = (rowId: string) => {
-  preferredRangeRows.value = preferredRangeRows.value.filter(row => row.id !== rowId)
+/** Pin a threshold at its current value for the next search, or release it back to the full range. */
+const toggleKeepOriginal = (row: PreferredRangeRow, target: ParameterTarget) => {
+  const keep = !rowKeepsOriginal(row, target)
+  row.lower = keep ? originalValueOf(target) : target.lowerBound
+  row.upper = keep ? originalValueOf(target) : target.upperBound
 }
 
 // Fetch fault localization
@@ -521,7 +512,7 @@ const mergeFixResult = (current: FixResult | null, incoming: FixResult): FixResu
     faultRules: incoming.faultRules?.length ? incoming.faultRules : current.faultRules,
     suggestions,
     strategyAttempts,
-    fixable: suggestions.some(suggestion => suggestion.verified),
+    fixable: suggestions.length > 0,
     warnings: Array.from(new Set(strategyOrder.flatMap(strategy => strategyWarnings.value[strategy] || []))),
     unusedPreferredRangeSelections: incomingStrategies.has('parameter')
       ? incoming.unusedPreferredRangeSelections
@@ -533,13 +524,15 @@ const mergeFixResult = (current: FixResult | null, incoming: FixResult): FixResu
 }
 
 const invalidateStrategyResult = (strategy: FixStrategyName) => {
+  // A new search lists new alternatives; an index into the old list would pick an arbitrary one.
+  delete selectedAlternativeIndex.value[strategy]
   if (!fixResult.value) return
   const suggestions = fixResult.value.suggestions.filter(item => item.strategy !== strategy)
   fixResult.value = {
     ...fixResult.value,
     suggestions,
     strategyAttempts: fixResult.value.strategyAttempts.filter(item => item.strategy !== strategy),
-    fixable: suggestions.some(item => item.verified),
+    fixable: suggestions.length > 0,
     warnings: Array.from(new Set(strategyOrder.flatMap(item => strategyWarnings.value[item] || []))),
     unusedPreferredRangeSelections: strategy === 'parameter'
       ? []
@@ -547,15 +540,23 @@ const invalidateStrategyResult = (strategy: FixStrategyName) => {
   }
 }
 
+// The selected strategy shows its failure inline, so a toast would state it twice; one the user has
+// switched away from would otherwise fail unseen.
+const reportStrategyError = (strategy: FixStrategyName, message: string) => {
+  strategyErrors.value[strategy] = message
+  if (selectedStrategy.value !== strategy) notifyError(message)
+}
+
 const fetchFixSuggestions = async (strategy: FixStrategyName = selectedStrategy.value) => {
   if (!props.traceId || strategyLoading.value || activeFixRequestId.value || unresolvedFixRequestId.value) return
 
   const authToken = getToken()
   if (!authToken) {
-    strategyErrors.value[strategy] = t('app.fixAuthenticationRequired')
-    notifyError(strategyErrors.value[strategy])
+    reportStrategyError(strategy, t('app.fixAuthenticationRequired'))
     return
   }
+  // Try is disabled while a row has an issue, and its row states why; never send unvalidated bounds.
+  if (strategy === 'parameter' && preferredRangeHasIssue.value) return
 
   const traceId = props.traceId
   const requestVersion = dialogRequestVersion
@@ -563,7 +564,6 @@ const fetchFixSuggestions = async (strategy: FixStrategyName = selectedStrategy.
   const preferredRangeSelections = strategy === 'parameter'
     ? buildPreferredRangeSelections()
     : undefined
-  if (preferredRangeSelections === null) return
   delete strategyWarnings.value[strategy]
   invalidateStrategyResult(strategy)
   strategyLoading.value = strategy
@@ -606,6 +606,7 @@ const fetchFixSuggestions = async (strategy: FixStrategyName = selectedStrategy.
     if (strategy === 'parameter') {
       lastParameterRequestFingerprint.value = requestFingerprint
       parameterTargetCatalog.value = result.parameterTargets || []
+      syncPreferredRangeRows()
     }
     fixResult.value = mergeFixResult(fixResult.value, result)
     if (result.faultRules?.length) faultRules.value = result.faultRules
@@ -618,8 +619,7 @@ const fetchFixSuggestions = async (strategy: FixStrategyName = selectedStrategy.
     if (requestVersion !== dialogRequestVersion || traceId !== props.traceId || !props.visible) return
     if (error?.name === 'CanceledError' || error?.code === 'ERR_CANCELED') return
     console.error('Failed to fetch fix suggestions:', error)
-    strategyErrors.value[strategy] = fixResponseErrorMessage(error, t('app.failedToLoadFixSuggestions'))
-    notifyError(strategyErrors.value[strategy])
+    reportStrategyError(strategy, fixResponseErrorMessage(error, t('app.failedToLoadFixSuggestions')))
   } finally {
     if (postSettledWithTerminalEvidence && activeFixRequestId.value === requestId) {
       clearActiveFixTracking(requestId, 'post-terminal')
@@ -641,30 +641,23 @@ const fetchFixSuggestions = async (strategy: FixStrategyName = selectedStrategy.
   }
 }
 
-const refreshWithPreferences = async () => {
-  if (preferenceActionBlockedReason.value) return
-  if (buildPreferredRangeSelections(true) === null) return
-  await fetchFixSuggestions('parameter')
-}
-
 /**
- * Why the preference actions are unavailable, or '' when they are usable.
+ * Why the search ranges are read-only, or '' when they are editable.
  *
- * One computed drives both the disabled state and the visible reason, so the button and the message
- * cannot disagree. Reset previously cleared the rows *before* `fetchFixSuggestions` silently
- * returned, so a click during an in-flight search destroyed the user's typed bounds and issued no
- * re-run — and the returning result was then hidden behind "preferences changed, re-run".
+ * One computed drives both the disabled state and the visible reason, so the controls and the message
+ * cannot disagree. Ranges edited while a search runs would not match the request that search answers,
+ * and a Reset during a search used to wipe the user's typed bounds without re-running anything.
  */
-const preferenceActionBlockedReason = computed(() => {
-  if (strategyLoading.value) return t('app.fixSearchInProgress')
-  if (activeFixRequestId.value || unresolvedFixRequestId.value) return t('app.fixSearchInProgress')
-  return ''
-})
+const preferenceActionBlockedReason = computed(() =>
+  strategyLoading.value || activeFixRequestId.value || unresolvedFixRequestId.value
+    ? t('app.fixSearchInProgress')
+    : '')
 
-const clearPreferenceRows = async () => {
+/** Back to the template bounds. The next "retry" searches without preferences; nothing runs here. */
+const resetPreferenceRows = () => {
   if (preferenceActionBlockedReason.value) return
   preferredRangeRows.value = []
-  await fetchFixSuggestions('parameter')
+  syncPreferredRangeRows()
 }
 
 let dialogRequestVersion = 0
@@ -692,6 +685,7 @@ const handleOpen = () => {
   parameterTargetCatalog.value = []
   lastParameterRequestFingerprint.value = null
   lastPreferredRangeSelections.value = undefined
+  selectedAlternativeIndex.value = {}
   selectedStrategy.value = 'parameter'
   void fetchFaultRules()
 }
@@ -706,10 +700,6 @@ const trySelectedStrategy = () => fetchFixSuggestions(selectedStrategy.value)
 // Apply the exact signed suggestion after the server checks the complete formal-model snapshot.
 const applyFix = async (suggestion: FixSuggestion) => {
   if (!props.traceId) return
-  if (!suggestion.verified) {
-    notifyBlocked(t('app.unverifiedFixCannotApply'))
-    return
-  }
   if (!templateSnapshotAllowsApply.value) {
     notifyBlocked(fixResult.value?.templateSnapshotComparison === 'CHANGED'
       ? t('app.fixTemplateSnapshotChangedLimitation')
@@ -754,16 +744,50 @@ const applyFix = async (suggestion: FixSuggestion) => {
   }
 }
 
-// Current strategy suggestion
-const currentSuggestion = computed(() => {
-  if (!fixResult.value) return null
-  const suggestion = fixResult.value.suggestions.find(s => s.strategy === selectedStrategy.value)
-  return suggestion && suggestionIsCurrent(suggestion) ? suggestion : null
-})
+// The selected strategy's verified alternatives, smallest change first as the server orders them.
+const currentAlternatives = computed(() =>
+  (fixResult.value?.suggestions ?? []).filter(suggestion =>
+    suggestion.strategy === selectedStrategy.value && suggestionIsCurrent(suggestion)))
 
+const currentAlternativeIndex = computed(() => selectedAlternativeIndex.value[selectedStrategy.value] ?? 0)
+
+/** The alternative Apply acts on. */
+const currentSuggestion = computed(() => currentAlternatives.value[currentAlternativeIndex.value] ?? null)
+
+const selectAlternative = (index: number) => {
+  if (applyingFix.value) return
+  selectedAlternativeIndex.value[selectedStrategy.value] = index
+}
+
+const preexistingViolationLabel = (templateId: string) => {
+  const detail = specTemplateDetails.find(template => template.id === templateId)
+  return detail?.labelKey ? t(detail.labelKey) : detail?.label || templateId
+}
+
+/**
+ * Skips the backend decides before choosing a strategy, so every strategy of the trace gets the same
+ * one: no fired rule can influence the violated property, or the source model is incomplete. Either
+ * outcome settles the whole dialog, not just the strategy that happened to be asked.
+ */
+const DIALOG_WIDE_SKIP_STATUSES = new Set<FixStrategyAttemptStatus>([
+  'SKIPPED_NO_FAULT_RULES',
+  'SKIPPED_INCOMPLETE_SOURCE_MODEL'
+])
+
+const dialogWideSkipAttempt = computed(() =>
+  fixResult.value?.strategyAttempts?.find(attempt => DIALOG_WIDE_SKIP_STATUSES.has(attempt.status)) ?? null)
+
+// A strategy not asked yet shows the dialog-wide skip too: asking it would only return the same skip.
 const currentStrategyAttempt = computed(() =>
-  fixResult.value?.strategyAttempts?.find(attempt => attempt.strategy === selectedStrategy.value) ?? null
+  fixResult.value?.strategyAttempts?.find(attempt => attempt.strategy === selectedStrategy.value)
+    ?? dialogWideSkipAttempt.value
 )
+
+// A choice exists only with two or more options; a single one is shown without selection chrome.
+const hasAlternatives = computed(() => currentAlternatives.value.length > 1)
+
+// Only an explicit false means the listing was cut short; the validator guarantees a boolean on VERIFIED.
+const alternativesIncomplete = computed(() => currentStrategyAttempt.value?.alternativesComplete === false)
 
 const localizedFaultLocalizationSummary = computed(() => {
   if (!faultLocalization.value) return ''
@@ -772,25 +796,7 @@ const localizedFaultLocalizationSummary = computed(() => {
     : t('app.faultLocalizationNoRuleCaveat')
 })
 
-const strategyAttemptStatusLabel = (status?: FixStrategyAttemptStatus) => {
-  if (!status) return ''
-  return t(`app.fixAttemptStatus.${status}`)
-}
-
-const strategyAttemptReasonLabel = (status?: FixStrategyAttemptStatus) => {
-  if (!status) return ''
-  return t(`app.fixAttemptReason.${status}`)
-}
-
-const strategyAttemptProgress = (attempt: FixStrategyAttempt | null) => {
-  if (!attempt || !Number.isInteger(attempt.attemptsUsed) || !Number.isInteger(attempt.attemptLimit)) {
-    return ''
-  }
-  return t('app.fixAttemptProgress', {
-    used: attempt.attemptsUsed,
-    limit: attempt.attemptLimit
-  })
-}
+const strategyAttemptReasonLabel = (status: FixStrategyAttemptStatus) => t(`app.fixAttemptReason.${status}`)
 
 const parameterAdjustmentMakesRuleUnreachable = (adjustment: ParameterAdjustment) => {
   const relation = adjustment.relation.trim().toLowerCase()
@@ -800,39 +806,177 @@ const parameterAdjustmentMakesRuleUnreachable = (adjustment: ParameterAdjustment
     || (['<', 'lt'].includes(relation) && newValue === adjustment.lowerBound)
 }
 
+/**
+ * Outcomes the same request reproduces exactly. The fix runs on the trace's frozen snapshot, so
+ * offering a retry for these would only repeat the answer; parameter ranges are the one input
+ * the user can change, which `currentAttemptSettled` accounts for.
+ */
+const SETTLED_ATTEMPT_STATUSES = new Set<FixStrategyAttemptStatus>([
+  'NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE',
+  'ALL_CANDIDATES_REJECTED',
+  'SEARCH_BUDGET_EXHAUSTED',
+  'SKIPPED_NO_SPEC',
+  'SKIPPED_NO_PARAMETERIZABLE_VALUES',
+  'SKIPPED_NO_FAULT_RULES',
+  'SKIPPED_UNSUPPORTED',
+  'SKIPPED_INCOMPLETE_SOURCE_MODEL'
+])
+
+// The search settled every candidate in its space: a proof that this strategy cannot repair it.
+const PROOF_ATTEMPT_STATUSES = new Set<FixStrategyAttemptStatus>([
+  'NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE',
+  'ALL_CANDIDATES_REJECTED'
+])
+
+// Only reachable strategy/status pairs; any other pair reads the generic `fixAttemptReason` text.
+// Removal never pins a counterexample step, so it cannot report NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE.
+const OUTCOME_DETAIL_KEYS: Partial<Record<FixStrategyAttemptStatus, Partial<Record<FixStrategyName, string>>>> = {
+  NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE: {
+    parameter: 'app.fixParameterNoCandidateDetail',
+    condition: 'app.fixConditionNoCandidateDetail'
+  },
+  ALL_CANDIDATES_REJECTED: {
+    parameter: 'app.fixParameterAllRejectedDetail',
+    condition: 'app.fixConditionAllRejectedDetail',
+    remove: 'app.fixRemoveAllRejectedDetail'
+  },
+  SEARCH_BUDGET_EXHAUSTED: {
+    parameter: 'app.fixParameterBudgetExhaustedDetail'
+  }
+}
+
+// A parameter proof covers only the ranges it searched; a narrowed one says nothing outside them.
+const attemptSearchedNarrowedRanges = (attempt: FixStrategyAttempt) =>
+  attempt.strategy === 'parameter' && activePreferredRangeCount.value > 0
+
+const attemptIsProof = (attempt: FixStrategyAttempt | null) =>
+  Boolean(attempt && PROOF_ATTEMPT_STATUSES.has(attempt.status))
+
 // A completed strategy with no verified proposal is different from a strategy
 // that was never run. Keep the empty state explicit so users do not read it as
 // a loading or transport failure.
-const strategyAttemptOutcomeTitle = (attempt: FixStrategyAttempt | null) => {
-  if (!attempt) return t('app.noFixSuggestionsForStrategy')
-  if (attempt.status === 'NO_VERIFIED_SUGGESTION') {
-    return attempt.strategy === 'condition'
-      ? t('app.conditionFixNoVerifiedSuggestion')
-      : t('app.noVerifiedFixSuggestion')
+// The title is the verdict; the detail below carries its consequence and what to do next.
+const strategyAttemptOutcomeTitle = (attempt: FixStrategyAttempt) => {
+  if (attemptIsProof(attempt)) {
+    return attemptSearchedNarrowedRanges(attempt)
+      ? t('app.fixParameterCannotRepairInRangesTitle')
+      : t('app.fixStrategyCannotRepairTitle', { strategy: strategyLabels.value[attempt.strategy] })
   }
-  if (attempt.status === 'NOT_VERIFIED') return t('app.fixSuggestionNotVerifiedTitle')
+  if (attempt.status === 'INCONCLUSIVE') return t('app.fixStrategyInconclusiveTitle')
   if (attempt.status === 'FAILED_MODEL_GENERATION') return t('app.fixStrategyGenerationFailedTitle')
   if (attempt.status === 'FAILED_SOLVER_EXECUTION') return t('app.fixStrategySolverFailedTitle')
   if (attempt.status === 'SEARCH_BUDGET_EXHAUSTED') return t('app.fixStrategyBudgetExhaustedTitle')
-  if (attempt.status === 'TIMED_OUT' || attempt.status === 'SKIPPED_TIMEOUT') {
-    return t('app.fixStrategyTimedOutTitle')
-  }
+  if (attempt.status === 'TIMED_OUT') return t('app.fixStrategyTimedOutTitle')
+  // SKIPPED_TIMEOUT included: the time limit ran out before this strategy started, so it never ran.
   if (attempt.status.startsWith('SKIPPED_')) return t('app.fixStrategyNotRunTitle')
-  return t('app.noFixSuggestionsForStrategy')
+  // VERIFIED: the option list renders instead of this outcome, since a verified attempt always carries one.
+  return t('app.verifiedSolution')
 }
 
-const strategyAttemptOutcomeDetail = (attempt: FixStrategyAttempt | null) => {
-  if (!attempt) return ''
-  if (attempt.strategy === 'condition' && attempt.status === 'NO_VERIFIED_SUGGESTION') {
-    return t('app.conditionFixNoVerifiedSuggestionDetail')
+const strategyAttemptOutcomeDetail = (attempt: FixStrategyAttempt) => {
+  const key = OUTCOME_DETAIL_KEYS[attempt.status]?.[attempt.strategy]
+  return key ? t(key) : strategyAttemptReasonLabel(attempt.status)
+}
+
+/** Why a proof is final, or what a narrowed one leaves open. Empty for outcomes that are not proofs. */
+const strategyAttemptOutcomeNote = (attempt: FixStrategyAttempt) => {
+  if (!attemptIsProof(attempt)) return ''
+  return attemptSearchedNarrowedRanges(attempt)
+    ? t('app.fixProofNarrowedRangesNote')
+    : t('app.fixProofCompleteNote')
+}
+
+// Retrying a settled outcome repeats it, unless the user changed the parameter ranges it was searched with.
+const currentAttemptSettled = computed(() => {
+  const attempt = currentStrategyAttempt.value
+  if (!attempt || !SETTLED_ATTEMPT_STATUSES.has(attempt.status)) return false
+  return !(attempt.strategy === 'parameter' && parameterRangesEditedSinceLastRequest.value)
+})
+
+// After a settled parameter search over the full template ranges, no narrower range can find more.
+const parameterRangesSettledOverTemplate = computed(() => {
+  const attempt = currentStrategyAttempt.value
+  return attempt?.strategy === 'parameter'
+    && attemptIsProof(attempt)
+    && !attemptSearchedNarrowedRanges(attempt)
+})
+
+// A strategy with neither a result nor an error has not been tried in this dialog yet. After a
+// dialog-wide skip none is worth offering: it would return the same skip.
+const nextUntriedStrategy = computed(() => dialogWideSkipAttempt.value ? null : strategyOrder.find(strategy =>
+  strategy !== selectedStrategy.value
+  && !fixResult.value?.strategyAttempts?.some(attempt => attempt.strategy === strategy)
+  && !strategyErrors.value[strategy]) ?? null)
+
+// Skips that are facts about the frozen snapshot, as final as a proof: the strategy has nothing to
+// search here, so no retry and no range can change the answer.
+const INAPPLICABLE_ATTEMPT_STATUSES = new Set<FixStrategyAttemptStatus>([
+  'SKIPPED_NO_PARAMETERIZABLE_VALUES',
+  'SKIPPED_NO_SPEC',
+  'SKIPPED_UNSUPPORTED'
+])
+
+// Nothing left in this dialog could turn up an option: a dialog-wide skip, or every strategy either
+// proved it cannot repair the violation over its whole search space or does not apply to this model.
+// Budget and timeout outcomes do not count; they say how far a search got, not that nothing exists.
+const noAttemptLeftToChangeTheOutcome = computed(() => Boolean(dialogWideSkipAttempt.value)
+  || strategyOrder.every(strategy => {
+    const attempt = fixResult.value?.strategyAttempts?.find(item => item.strategy === strategy)
+    if (!attempt) return false
+    if (INAPPLICABLE_ATTEMPT_STATUSES.has(attempt.status)) return true
+    return attemptIsProof(attempt) && !attemptSearchedNarrowedRanges(attempt)
+  }))
+
+const tryNextStrategy = () => {
+  const strategy = nextUntriedStrategy.value
+  if (!strategy) return
+  switchStrategy(strategy)
+  void fetchFixSuggestions(strategy)
+}
+
+// Verified suggestions still valid for the current search ranges, across every strategy.
+const verifiedCount = computed(() =>
+  (fixResult.value?.suggestions ?? []).filter(suggestionIsCurrent).length)
+
+/**
+ * The selected strategy's search state for the polite live region: the headline of whichever panel
+ * the body shows, in the body's order. A search can run for minutes, and neither the loading panel
+ * nor the outcome that replaces it is itself a live region, so without this a screen-reader user
+ * hears neither.
+ */
+const searchAnnouncement = computed(() => {
+  if (currentStrategyLoading.value) {
+    return t('app.tryingFixStrategy', { strategy: strategyLabels.value[selectedStrategy.value] })
   }
-  return strategyAttemptReasonLabel(attempt.status)
-}
+  if (currentSuggestion.value) {
+    return hasAlternatives.value
+      ? t('app.fixAlternativesTitle', { count: currentAlternatives.value.length })
+      : t('app.verifiedSolution')
+  }
+  const error = strategyErrors.value[selectedStrategy.value]
+  if (error) return error
+  if (selectedStrategy.value === 'parameter' && parameterPreferencesChanged.value) {
+    return t('app.parameterPreferencesChanged')
+  }
+  return currentStrategyAttempt.value ? strategyAttemptOutcomeTitle(currentStrategyAttempt.value) : ''
+})
 
-// Get verified strategies count
-const verifiedCount = computed(() => {
-  if (!fixResult.value) return 0
-  return fixResult.value.suggestions.filter(s => s.verified && suggestionIsCurrent(s)).length
+const footerActionsRef = ref<HTMLElement | null>(null)
+
+// When a search settles, the footer swaps Try for Apply or for nothing, and the focused button goes
+// with it. Hand focus to the replacement action, or to the dialog when there is none.
+watch(strategyLoading, async (loading, previous) => {
+  if (loading !== null || previous === null || !props.visible) return
+  await nextTick()
+  const actions = footerActionsRef.value
+  const dialog = actions?.closest<HTMLElement>('[role="dialog"]')
+  if (!actions || !dialog) return
+  const active = document.activeElement
+  const focusLost = !active || active === document.body || !active.isConnected
+    || (actions.contains(active) && active instanceof HTMLButtonElement && active.disabled)
+  if (!focusLost) return
+  const primary = actions.querySelector<HTMLButtonElement>('button:not([disabled])')
+  ;(primary ?? dialog).focus()
 })
 
 const getFaultRuleReason = (rule: FaultRule) => {
@@ -1194,27 +1338,28 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
                     {{ option.icon }}
                   </span>
                   {{ option.label }}
-                  <span
-                    v-if="fixResult?.suggestions.some(s => s.strategy === option.value && s.verified && suggestionIsCurrent(s))"
-                    class="material-symbols-outlined text-sm"
-                  >verified</span>
+                  <template v-if="fixResult?.suggestions.some(s => s.strategy === option.value && suggestionIsCurrent(s))">
+                    <span class="material-symbols-outlined text-sm" aria-hidden="true">verified</span>
+                    <span class="sr-only" data-testid="fix-strategy-verified">{{ t('app.fixStrategyHasVerifiedOption') }}</span>
+                  </template>
                 </button>
               </div>
 
               <!-- Strategy Description -->
+              <!-- The attempt outcome is stated once, by the suggestion card or the outcome
+                   empty state below; repeating it here also showed stale text beside the
+                   "search ranges changed" notice. -->
               <div class="text-sm text-slate-500 mb-4 pl-1 dark:text-slate-300">
                 {{ strategyDescriptions[selectedStrategy] }}
-                <div
-                  v-if="currentStrategyAttempt"
-                  class="mt-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
-                >
-                  <span class="font-bold">{{ strategyAttemptStatusLabel(currentStrategyAttempt.status) }}</span>
-                  <span class="ml-1">{{ strategyAttemptReasonLabel(currentStrategyAttempt.status) }}</span>
-                  <span v-if="strategyAttemptProgress(currentStrategyAttempt)" class="ml-1 font-semibold">
-                    {{ strategyAttemptProgress(currentStrategyAttempt) }}
-                  </span>
-                </div>
               </div>
+
+              <!-- Always rendered, so a screen reader registers the region before its text changes. -->
+              <p
+                data-testid="fix-search-announcement"
+                class="sr-only"
+                role="status"
+                aria-live="polite"
+              >{{ searchAnnouncement }}</p>
 
               <div
                 v-if="currentStrategyLoading"
@@ -1225,14 +1370,16 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
                   <span class="material-symbols-outlined animate-spin text-lg" aria-hidden="true">progress_activity</span>
                   {{ t('app.tryingFixStrategy', { strategy: strategyLabels[selectedStrategy] }) }}
                 </div>
-                <p class="mt-1 text-xs board-text-info">{{ t('app.fixAttemptDoesNotApply') }}</p>
                 <p class="mt-1 text-xs font-semibold board-text-info">{{ fixProgressStageLabel }}</p>
                 <p class="mt-1 text-xs board-text-info">
                   {{ t('app.fixSearchProgress', { seconds: fixSearchElapsedSeconds }) }}
                 </p>
               </div>
+              <!-- With an option listed, the footer says this beside the Apply it disables. -->
               <div
-                v-else-if="anotherStrategyLoading"
+                v-else-if="anotherStrategyLoading && !currentSuggestion"
+                id="fix-another-strategy-running"
+                data-testid="fix-another-strategy-running"
                 class="mb-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
               >
                 {{ t('app.anotherFixStrategyRunning', { strategy: strategyLabels[strategyLoading!] }) }}
@@ -1240,73 +1387,82 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
 
               <!-- Preferred Ranges -->
               <div
-                v-if="selectedStrategy === 'parameter' && parameterAdjustments.length"
+                v-if="selectedStrategy === 'parameter' && parameterTargetCatalog.length && !parameterRangesSettledOverTemplate"
+                data-testid="fix-parameter-ranges"
                 class="border border-slate-200 rounded-lg overflow-hidden mb-4 dark:border-slate-700"
               >
                 <div class="bg-slate-50 px-3 py-2 border-b border-slate-200 flex items-center gap-2 dark:border-slate-700 dark:bg-slate-800">
                   <span class="material-symbols-outlined text-slate-600 text-lg dark:text-slate-300">speed</span>
-                  <span class="font-bold text-sm text-slate-800 dark:text-slate-100">{{ t('app.parameterPreferences') }}</span>
+                  <span class="font-bold text-sm text-slate-800 dark:text-slate-100">{{ t('app.parameterSearchRanges') }}</span>
                   <span
                     v-if="activePreferredRangeCount"
                     class="ml-auto px-2 py-0.5 board-chip-info text-xs rounded-full"
-                  >{{ activePreferredRangeCount }} {{ t('app.active') }}</span>
+                  >{{ t('app.parameterSearchRangesActive', { count: activePreferredRangeCount }) }}</span>
                 </div>
                 <div class="p-3 space-y-3">
-                  <div v-if="preferredRangeRows.length" class="space-y-2">
+                  <p class="text-xs text-slate-500 dark:text-slate-400">{{ t('app.parameterSearchRangesHint') }}</p>
+                  <div class="space-y-2">
+                    <!-- Every row repeats the same bound and button labels, so each control is named
+                         with its row's target first; otherwise a screen reader hears identical names. -->
                     <div
-                      v-for="row in preferredRangeRows"
-                      :key="row.id"
-                      class="grid grid-cols-1 sm:grid-cols-[minmax(0,1.6fr)_1fr_1fr_36px] gap-2 items-end"
+                      v-for="{ row, target, issue } in preferredRangeRowViews"
+                      :key="row.targetId"
+                      data-testid="fix-parameter-range-row"
+                      class="grid grid-cols-1 sm:grid-cols-[minmax(0,1.6fr)_1fr_1fr_auto] gap-2 items-end"
                     >
+                      <p class="min-w-0 text-sm text-slate-800 dark:text-slate-100">
+                        <span :id="`fix-range-target-${row.targetId}`" class="block truncate font-medium" :title="formatPreferredRangeTarget(target)">{{ formatPreferredRangeTarget(target) }}</span>
+                        <span class="text-xs text-slate-500 dark:text-slate-400">{{ t('app.parameterTemplateRange', { lower: target.lowerBound, upper: target.upperBound }) }}</span>
+                      </p>
                       <label class="text-xs font-medium text-slate-600 dark:text-slate-300">
-                        {{ t('app.preferredRangeTarget') }}
-                        <select
-                          v-model="row.targetId"
-                          class="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-800 focus:border-[color:var(--accent-border)] focus:outline-none dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
-                        >
-                          <option value="" disabled>{{ t('app.selectPreferredRangeTarget') }}</option>
-                          <option
-                            v-for="option in preferredRangeTargetOptions"
-                            :key="option.value"
-                            :value="option.value"
-                          >
-                            {{ option.label }}
-                          </option>
-                        </select>
-                      </label>
-                      <label class="text-xs font-medium text-slate-600 dark:text-slate-300">
-                        {{ t('app.lowerBound') }}
+                        <span :id="`fix-range-lower-${row.targetId}`">{{ t('app.lowerBound') }}</span>
                         <input
                           v-model.number="row.lower"
                           type="number"
-                          class="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-800 focus:border-[color:var(--accent-border)] focus:outline-none dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
+                          :aria-labelledby="`fix-range-target-${row.targetId} fix-range-lower-${row.targetId}`"
+                          :aria-invalid="issue?.lowerInvalid ? 'true' : undefined"
+                          :aria-describedby="issue?.lowerInvalid ? `fix-range-issue-${row.targetId}` : undefined"
+                          :disabled="Boolean(preferenceActionBlockedReason)"
+                          class="mt-1 w-full rounded-md border bg-white px-2 py-1.5 text-sm text-slate-800 focus:border-[color:var(--accent-border)] focus:outline-none disabled:cursor-not-allowed dark:bg-slate-950 dark:text-slate-100"
+                          :class="issue?.lowerInvalid ? 'border-[color:var(--danger-border)]' : 'border-slate-300 dark:border-slate-600'"
                         />
                       </label>
                       <label class="text-xs font-medium text-slate-600 dark:text-slate-300">
-                        {{ t('app.upperBound') }}
+                        <span :id="`fix-range-upper-${row.targetId}`">{{ t('app.upperBound') }}</span>
                         <input
                           v-model.number="row.upper"
                           type="number"
-                          class="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-800 focus:border-[color:var(--accent-border)] focus:outline-none dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
+                          :aria-labelledby="`fix-range-target-${row.targetId} fix-range-upper-${row.targetId}`"
+                          :aria-invalid="issue?.upperInvalid ? 'true' : undefined"
+                          :aria-describedby="issue?.upperInvalid ? `fix-range-issue-${row.targetId}` : undefined"
+                          :disabled="Boolean(preferenceActionBlockedReason)"
+                          class="mt-1 w-full rounded-md border bg-white px-2 py-1.5 text-sm text-slate-800 focus:border-[color:var(--accent-border)] focus:outline-none disabled:cursor-not-allowed dark:bg-slate-950 dark:text-slate-100"
+                          :class="issue?.upperInvalid ? 'border-[color:var(--danger-border)]' : 'border-slate-300 dark:border-slate-600'"
                         />
                       </label>
-                      <HintTooltip :content="t('app.removePreference')">
-                        <button
-                          type="button"
-                          :aria-label="t('app.removePreference')"
-                          @click="removePreferenceRow(row.id)"
-                          class="w-9 h-9 rounded-md bg-slate-100 hover:board-chip-danger text-slate-500 hover:board-text-danger flex items-center justify-center transition-colors dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-[color:var(--danger-surface)]/60 dark:hover:board-text-danger"
-                        >
-                          <span class="material-symbols-outlined text-lg" aria-hidden="true">delete</span>
-                        </button>
-                      </HintTooltip>
+                      <button
+                        type="button"
+                        data-testid="fix-keep-original"
+                        :aria-pressed="rowKeepsOriginal(row, target)"
+                        :aria-labelledby="`fix-range-target-${row.targetId} fix-range-keep-${row.targetId}`"
+                        :disabled="Boolean(preferenceActionBlockedReason)"
+                        @click="toggleKeepOriginal(row, target)"
+                        class="h-9 rounded-md px-3 text-sm font-medium flex items-center gap-1 transition-colors disabled:cursor-not-allowed"
+                        :class="rowKeepsOriginal(row, target)
+                          ? 'board-chip-info'
+                          : 'board-chip-neutral hover:board-control-hover hover:board-text-strong'"
+                      >
+                        <span class="material-symbols-outlined text-base" aria-hidden="true">lock</span>
+                        <span :id="`fix-range-keep-${row.targetId}`">{{ t('app.keepOriginalValue', { value: target.originalValue }) }}</span>
+                      </button>
+                      <p
+                        v-if="issue"
+                        :id="`fix-range-issue-${row.targetId}`"
+                        data-testid="fix-range-issue"
+                        role="alert"
+                        class="sm:col-span-4 text-[length:var(--iot-font-min)] font-semibold board-text-danger"
+                      >{{ issue.message }}</p>
                     </div>
-                  </div>
-                  <div
-                    v-else-if="preferredRangeTargetOptions.length === 0"
-                    class="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
-                  >
-                    {{ t('app.noParameterPreferenceTargets') }}
                   </div>
 
                   <div
@@ -1316,48 +1472,17 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
                     {{ t('app.unusedPreferencesDetail', { count: fixResult.unusedPreferredRangeSelections.length }) }}
                   </div>
 
-                  <div class="flex flex-wrap gap-2">
+                  <div v-if="narrowedPreferredRangeRows.length" class="flex flex-wrap gap-2">
                     <button
                       type="button"
-                      data-testid="fix-use-current-preferences"
-                      @click="seedPreferenceRowsFromSuggestion"
-                      :disabled="preferredRangeTargetOptions.length === 0"
-                      class="px-3 py-2 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium flex items-center gap-1 transition-colors disabled:cursor-not-allowed disabled:opacity-50 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
-                    >
-                      <span class="material-symbols-outlined text-base">playlist_add</span>
-                      {{ t('app.useCurrent') }}
-                    </button>
-                    <button
-                      type="button"
-                      @click="addPreferenceRow()"
-                      :disabled="preferredRangeTargetOptions.length === 0"
-                      class="px-3 py-2 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium flex items-center gap-1 transition-colors disabled:cursor-not-allowed disabled:opacity-50 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
-                    >
-                      <span class="material-symbols-outlined text-base">add</span>
-                      {{ t('app.add') }}
-                    </button>
-                    <button
-                      type="button"
-                      data-testid="fix-run-with-preferences"
+                      data-testid="fix-reset-ranges"
                       :disabled="Boolean(preferenceActionBlockedReason)"
                       :aria-describedby="preferenceActionBlockedReason ? 'fix-preference-blocked' : undefined"
-                      @click="refreshWithPreferences"
-                      class="board-action-inline text-sm"
+                      @click="resetPreferenceRows"
+                      class="px-3 py-2 rounded-md board-chip-neutral hover:board-control-hover hover:board-text-strong text-sm font-medium flex items-center gap-1 transition-colors disabled:cursor-not-allowed"
                     >
-                      <span class="material-symbols-outlined text-base">refresh</span>
-                      {{ t('app.runWithPreferences') }}
-                    </button>
-                    <button
-                      v-if="preferredRangeRows.length || activePreferredRangeCount"
-                      type="button"
-                      data-testid="fix-clear-preferences"
-                      :disabled="Boolean(preferenceActionBlockedReason)"
-                      :aria-describedby="preferenceActionBlockedReason ? 'fix-preference-blocked' : undefined"
-                      @click="clearPreferenceRows"
-                      class="px-3 py-2 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium flex items-center gap-1 transition-colors disabled:cursor-not-allowed disabled:opacity-60 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
-                    >
-                      <span class="material-symbols-outlined text-base">restart_alt</span>
-                      {{ t('app.reset') }}
+                      <span class="material-symbols-outlined text-base" aria-hidden="true">restart_alt</span>
+                      {{ t('app.resetParameterSearchRanges') }}
                     </button>
                   </div>
                   <p
@@ -1369,149 +1494,188 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
                 </div>
               </div>
 
-              <!-- Current Suggestion -->
+              <!-- Verified alternatives: every one passed the same check, so the verdict is stated once. -->
               <div v-if="currentSuggestion">
-                
-                <!-- Status Card -->
-                <div class="p-4 rounded-xl mb-4" :class="currentSuggestion.verified 
-                  ? 'bg-gradient-to-r bg-[color:var(--success-surface)] bg-[color:var(--success-surface)] border border-[color:var(--success-border)]'
-                  : 'bg-gradient-to-r from-[color:var(--danger-surface)] to-[color:var(--warning-surface)] border board-border-subtle'">
+                <div class="p-4 rounded-xl mb-4 bg-[color:var(--success-surface)] border border-[color:var(--success-border)]">
                   <div class="flex items-center gap-3">
-                    <div class="w-10 h-10 rounded-xl flex items-center justify-center" :class="currentSuggestion.verified ? 'board-chip-success' : 'board-chip-danger'">
-                      <span class="material-symbols-outlined" :class="currentSuggestion.verified ? 'board-text-success' : 'board-text-danger'">
-                        {{ currentSuggestion.verified ? 'verified' : 'cancel' }}
-                      </span>
+                    <div class="w-10 h-10 rounded-xl flex items-center justify-center board-chip-success">
+                      <span class="material-symbols-outlined board-text-success" aria-hidden="true">verified</span>
                     </div>
                     <div class="flex-1">
-                      <span class="font-bold" :class="currentSuggestion.verified ? 'board-text-success' : 'board-text-danger'">
-                        {{ currentSuggestion.verified ? t('app.verifiedSolution') : t('app.notVerified') }}
-                      </span>
-                      <p class="text-sm" :class="currentSuggestion.verified ? 'board-text-success' : 'board-text-danger'">
-                        {{ strategyDescriptions[currentSuggestion.strategy] }}
-                      </p>
+                      <span class="font-bold board-text-success">{{ t('app.verifiedSolution') }}</span>
+                      <p class="text-sm board-text-success">{{ strategyAttemptReasonLabel('VERIFIED') }}</p>
                     </div>
                   </div>
                 </div>
 
-                <!-- Parameter Adjustments -->
-                <div v-if="currentSuggestion.parameterAdjustments?.length" class="mb-4">
-                  <div class="flex items-center gap-2 mb-2 text-sm font-bold text-slate-700 dark:text-slate-200">
-                    <span class="material-symbols-outlined board-text-info">tune</span>
-                    {{ t('app.parameterAdjustments') }} ({{ currentSuggestion.parameterAdjustments.length }})
-                  </div>
-                  <div class="space-y-2">
-                    <div
-                      v-for="(adj, idx) in currentSuggestion.parameterAdjustments"
-                      :key="idx"
-                      class="board-surface-info rounded-lg p-3"
+                <p
+                  v-if="hasAlternatives"
+                  id="fix-alternatives-title"
+                  class="mb-2 text-sm font-bold text-slate-700 dark:text-slate-200"
+                >{{ t('app.fixAlternativesTitle', { count: currentAlternatives.length }) }}</p>
+                <div
+                  :role="hasAlternatives ? 'radiogroup' : undefined"
+                  :aria-labelledby="hasAlternatives ? 'fix-alternatives-title' : undefined"
+                  class="space-y-3"
+                >
+                  <div
+                    v-for="(alternative, alternativeIndex) in currentAlternatives"
+                    :key="alternativeIndex"
+                    :data-testid="hasAlternatives ? 'fix-alternative' : undefined"
+                    :class="hasAlternatives
+                      ? ['rounded-lg border-2 p-3 cursor-pointer', alternativeIndex === currentAlternativeIndex
+                        ? 'border-[color:var(--accent-border)]'
+                        : 'border-slate-200 dark:border-slate-700']
+                      : undefined"
+                    @click="hasAlternatives && selectAlternative(alternativeIndex)"
+                  >
+                    <label
+                      v-if="hasAlternatives"
+                      class="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-800 cursor-pointer dark:text-slate-100"
                     >
-                      <div class="flex items-center justify-between">
-                        <div class="min-w-0 flex items-center gap-2">
-                          <span
-                            class="max-w-[14rem] truncate px-2 py-0.5 bg-[color:var(--accent-fill)] text-white text-xs rounded font-bold"
-                            :title="formatPreferredRangeTarget(adj)"
-                          >{{ formatPreferredRangeTarget(adj) }}</span>
-                          <code class="min-w-0 truncate text-sm font-mono text-slate-700 dark:text-slate-200" :title="`${formatModelToken(adj.attribute, adj.modelTokenSource)} ${adj.relation}`">{{ formatModelToken(adj.attribute, adj.modelTokenSource) }} {{ adj.relation }}</code>
+                      <input
+                        type="radio"
+                        name="fix-alternative"
+                        class="accent-[color:var(--accent)]"
+                        :checked="alternativeIndex === currentAlternativeIndex"
+                        :disabled="applyingFix"
+                        @change="selectAlternative(alternativeIndex)"
+                      />
+                      {{ t('app.fixAlternativeLabel', { number: alternativeIndex + 1 }) }}
+                    </label>
+                    <div class="space-y-4">
+                      <!-- Parameter Adjustments -->
+                      <div v-if="alternative.parameterAdjustments?.length">
+                        <div class="flex items-center gap-2 mb-2 text-sm font-bold text-slate-700 dark:text-slate-200">
+                          <span class="material-symbols-outlined board-text-info">tune</span>
+                          {{ t('app.parameterAdjustments') }} ({{ alternative.parameterAdjustments.length }})
                         </div>
-                        <div class="flex items-center gap-2">
-                          <span class="text-xs text-slate-500 dark:text-slate-300">{{ t('app.rangeLabel') }}: [{{ adj.lowerBound }}, {{ adj.upperBound }}]</span>
-                          <button
-                            type="button"
-                            @click="useAdjustmentAsPreference(adj)"
-                            class="px-2 py-1 rounded bg-white board-text-info hover:board-chip-info text-xs font-medium transition-colors dark:bg-slate-900 dark:hover:bg-[color:var(--accent-strong)]/60"
+                        <div class="space-y-2">
+                          <div
+                            v-for="(adj, idx) in alternative.parameterAdjustments"
+                            :key="idx"
+                            class="board-surface-info rounded-lg p-3"
                           >
-                            {{ t('app.prefer') }}
-                          </button>
-                          <HintTooltip :content="t('app.lockOriginalValue')">
-                            <button
-                              type="button"
-                              data-testid="fix-lock-original"
-                              :aria-label="t('app.lockOriginalValue')"
-                              @click="lockAdjustmentAtOriginal(adj)"
-                              class="flex h-7 w-7 items-center justify-center rounded bg-white board-text-info transition-colors hover:board-chip-info dark:bg-slate-900 dark:hover:bg-[color:var(--accent-strong)]/60"
+                            <div class="flex items-center justify-between">
+                              <div class="min-w-0 flex items-center gap-2">
+                                <span
+                                  class="max-w-[14rem] truncate px-2 py-0.5 bg-[color:var(--accent-fill)] text-white text-xs rounded font-bold"
+                                  :title="formatPreferredRangeTarget(adj)"
+                                >{{ formatPreferredRangeTarget(adj) }}</span>
+                                <code class="min-w-0 truncate text-sm font-mono text-slate-700 dark:text-slate-200" :title="`${formatModelToken(adj.attribute, adj.modelTokenSource)} ${adj.relation}`">{{ formatModelToken(adj.attribute, adj.modelTokenSource) }} {{ adj.relation }}</code>
+                              </div>
+                              <span class="text-xs text-slate-500 dark:text-slate-300">{{ t('app.rangeLabel') }}: [{{ adj.lowerBound }}, {{ adj.upperBound }}]</span>
+                            </div>
+                            <div class="flex items-center gap-2 mt-2">
+                              <span class="px-2 py-1 board-chip-danger rounded font-mono text-sm line-through">{{ adj.originalValue }}</span>
+                              <span class="material-symbols-outlined text-slate-500 dark:text-slate-500">arrow_forward</span>
+                              <span class="px-2 py-1 board-chip-success rounded font-mono text-sm">{{ adj.newValue }}</span>
+                            </div>
+                            <p
+                              v-if="parameterAdjustmentMakesRuleUnreachable(adj)"
+                              data-testid="fix-parameter-unreachable-warning"
+                              class="mt-2 text-xs font-semibold board-text-warning"
                             >
-                              <span class="material-symbols-outlined text-base" aria-hidden="true">lock</span>
-                            </button>
-                          </HintTooltip>
+                              {{ t('app.fixParameterMakesRuleUnreachable') }}
+                            </p>
+                          </div>
                         </div>
                       </div>
-                      <div class="flex items-center gap-2 mt-2">
-                        <span class="px-2 py-1 board-chip-danger rounded font-mono text-sm line-through">{{ adj.originalValue }}</span>
-                        <span class="material-symbols-outlined text-slate-500 dark:text-slate-500">arrow_forward</span>
-                        <span class="px-2 py-1 board-chip-success rounded font-mono text-sm">{{ adj.newValue }}</span>
+
+                      <!-- Condition Adjustments -->
+                      <div v-if="alternative.conditionAdjustments?.length">
+                        <div class="flex items-center gap-2 mb-2 text-sm font-bold text-slate-700 dark:text-slate-200">
+                          <span class="material-symbols-outlined board-text-success">checklist</span>
+                          {{ t('app.conditionAdjustments') }} ({{ alternative.conditionAdjustments.length }})
+                        </div>
+                        <div class="space-y-2">
+                          <div
+                            v-for="(adj, idx) in alternative.conditionAdjustments"
+                            :key="idx"
+                            class="board-surface-success rounded-lg p-3 flex items-center gap-3"
+                          >
+                            <div
+                              class="w-8 h-8 rounded-lg flex items-center justify-center"
+                              :class="adj.action === 'remove' ? 'board-chip-danger' : adj.action === 'add' ? 'board-chip-success' : 'bg-slate-100 dark:bg-slate-700'"
+                            >
+                              <span class="material-symbols-outlined text-sm" :class="adj.action === 'remove' ? 'board-text-danger' : adj.action === 'add' ? 'board-text-success' : 'text-slate-600 dark:text-slate-200'" aria-hidden="true">
+                                {{ adj.action === 'remove' ? 'remove' : adj.action === 'add' ? 'add' : 'check' }}
+                              </span>
+                            </div>
+                            <div class="flex-1">
+                              <span class="text-sm font-medium text-slate-700 dark:text-slate-200">{{ formatConditionAdjustment(adj) }}</span>
+                            </div>
+                            <span
+                              class="px-2 py-0.5 rounded text-xs font-medium"
+                              :class="adj.action === 'remove' ? 'board-chip-danger board-text-danger' : adj.action === 'add' ? 'board-chip-success board-text-success' : 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-200'"
+                            >
+                              {{ getConditionActionLabel(adj.action) }}
+                            </span>
+                          </div>
+                        </div>
                       </div>
-                      <p
-                        v-if="parameterAdjustmentMakesRuleUnreachable(adj)"
-                        data-testid="fix-parameter-unreachable-warning"
-                        class="mt-2 text-xs font-semibold board-text-warning"
+
+                      <!-- Disabled Rules -->
+                      <div v-if="alternative.removedRuleDescriptions?.length">
+                        <div class="flex items-center gap-2 mb-2 text-sm font-bold text-slate-700 dark:text-slate-200">
+                          <span class="material-symbols-outlined board-text-warning">block</span>
+                          {{ t('app.rulesToRemove') }} ({{ alternative.removedRuleDescriptions.length }})
+                        </div>
+                        <div class="board-surface-warning rounded-lg p-3">
+                          <div class="space-y-2">
+                            <span
+                              v-for="(description, index) in alternative.removedRuleDescriptions"
+                              :key="`${index}-${description}`"
+                              data-testid="fix-removed-rule"
+                              class="block rounded-lg bg-[color:var(--warning-fill)] px-3 py-1 text-sm font-medium text-white"
+                            >
+                              {{ description }}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <!-- Accepted because the target holds and nothing that held broke; these were already violated.
+                           Forward verification computes this per candidate, so each option states its own. -->
+                      <div
+                        v-if="alternative.preexistingViolations.length"
+                        data-testid="fix-preexisting-violations"
+                        class="board-surface-warning rounded-lg p-3"
                       >
-                        {{ t('app.fixParameterMakesRuleUnreachable') }}
-                      </p>
+                        <div class="flex items-start gap-2">
+                          <span class="material-symbols-outlined text-lg board-text-warning" aria-hidden="true">report</span>
+                          <div class="min-w-0 flex-1">
+                            <p class="text-sm font-semibold">
+                              {{ t('app.fixPreexistingViolationsTitle', { count: alternative.preexistingViolations.length }) }}
+                            </p>
+                            <p class="mt-1 text-xs">{{ t('app.fixPreexistingViolationsDetail') }}</p>
+                            <ul class="mt-2 space-y-1">
+                              <li
+                                v-for="violation in alternative.preexistingViolations"
+                                :key="violation.specId"
+                                data-testid="fix-preexisting-violation"
+                                class="text-xs"
+                              >
+                                <span class="font-semibold">{{ preexistingViolationLabel(violation.templateId) }}</span>
+                                <code class="ml-2 break-all font-mono">{{ violation.formulaPreview }}</code>
+                              </li>
+                            </ul>
+                          </div>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
 
-                <!-- Condition Adjustments -->
-                <div v-if="currentSuggestion.conditionAdjustments?.length" class="mb-4">
-                  <div class="flex items-center gap-2 mb-2 text-sm font-bold text-slate-700 dark:text-slate-200">
-                    <span class="material-symbols-outlined board-text-success">checklist</span>
-                    {{ t('app.conditionAdjustments') }} ({{ currentSuggestion.conditionAdjustments.length }})
-                  </div>
-                  <div class="space-y-2">
-                    <div
-                      v-for="(adj, idx) in currentSuggestion.conditionAdjustments"
-                      :key="idx"
-                      class="board-surface-success rounded-lg p-3 flex items-center gap-3"
-                    >
-                      <div 
-                        class="w-8 h-8 rounded-lg flex items-center justify-center"
-                        :class="adj.action === 'remove' ? 'board-chip-danger' : adj.action === 'add' ? 'board-chip-success' : 'bg-slate-100 dark:bg-slate-700'"
-                      >
-                        <span class="material-symbols-outlined text-sm" :class="adj.action === 'remove' ? 'board-text-danger' : adj.action === 'add' ? 'board-text-success' : 'text-slate-600 dark:text-slate-200'" aria-hidden="true">
-                          {{ adj.action === 'remove' ? 'remove' : adj.action === 'add' ? 'add' : 'check' }}
-                        </span>
-                      </div>
-                      <div class="flex-1">
-                        <span class="text-sm font-medium text-slate-700 dark:text-slate-200">{{ formatConditionAdjustment(adj) }}</span>
-                      </div>
-                      <span 
-                        class="px-2 py-0.5 rounded text-xs font-medium"
-                        :class="adj.action === 'remove' ? 'board-chip-danger board-text-danger' : adj.action === 'add' ? 'board-chip-success board-text-success' : 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-200'"
-                      >
-                        {{ getConditionActionLabel(adj.action) }}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                <!-- Disabled Rules -->
-                <div v-if="currentSuggestion.removedRuleDescriptions?.length" class="mb-4">
-                  <div class="flex items-center gap-2 mb-2 text-sm font-bold text-slate-700 dark:text-slate-200">
-                    <span class="material-symbols-outlined board-text-warning">block</span>
-                    {{ t('app.rulesToRemove') }} ({{ currentSuggestion.removedRuleDescriptions.length }})
-                  </div>
-                  <div class="board-surface-warning rounded-lg p-3">
-                    <div class="space-y-2">
-                      <span
-                        v-for="(description, index) in currentSuggestion.removedRuleDescriptions"
-                        :key="`${index}-${description}`"
-                        data-testid="fix-removed-rule"
-                        class="block rounded-lg bg-[color:var(--warning-fill)] px-3 py-1 text-sm font-medium text-white"
-                      >
-                        {{ description }}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                <!-- Apply lives in the footer; this only explains an unverified suggestion. -->
-                <div v-if="!currentSuggestion.verified" class="pt-4 border-t border-slate-200 text-center dark:border-slate-700">
-                  <div class="flex items-center justify-center gap-2 board-text-danger">
-                    <span class="material-symbols-outlined">info</span>
-                    <span class="font-medium">{{ t('app.solutionNotVerified') }}</span>
-                  </div>
-                  <p class="text-xs board-text-danger mt-1">{{ t('app.tryAnotherStrategy') }}</p>
-                </div>
+                <!-- Holds with a single listed option too: the list is complete only if the search said so. -->
+                <p
+                  v-if="alternativesIncomplete"
+                  data-testid="fix-alternatives-incomplete"
+                  class="mt-3 flex items-start gap-2 text-xs text-slate-500 dark:text-slate-400"
+                >
+                  <span class="material-symbols-outlined text-sm" aria-hidden="true">info</span>
+                  {{ t('app.fixAlternativesIncomplete') }}
+                </p>
               </div>
 
               <div v-else-if="strategyErrors[selectedStrategy]" class="board-surface-danger rounded-lg px-4 py-4">
@@ -1538,24 +1702,30 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
                 </div>
               </div>
 
-              <div v-else-if="currentStrategyAttempt" class="text-center py-8 text-slate-500 dark:text-slate-300">
-                <span class="material-symbols-outlined text-4xl mb-2 block">help</span>
-                <p>{{ strategyAttemptOutcomeTitle(currentStrategyAttempt) }}</p>
+              <div
+                v-else-if="currentStrategyAttempt"
+                data-testid="fix-attempt-outcome"
+                class="text-center py-8 text-slate-500 dark:text-slate-300"
+              >
+                <span class="material-symbols-outlined text-4xl mb-2 block" aria-hidden="true">
+                  {{ attemptIsProof(currentStrategyAttempt) ? 'search_off' : 'help' }}
+                </span>
+                <p class="font-semibold text-slate-700 dark:text-slate-200">{{ strategyAttemptOutcomeTitle(currentStrategyAttempt) }}</p>
                 <p class="mx-auto mt-2 max-w-lg text-xs text-slate-500 dark:text-slate-400">
                   {{ strategyAttemptOutcomeDetail(currentStrategyAttempt) }}
                 </p>
                 <p
-                  v-if="strategyAttemptProgress(currentStrategyAttempt)"
-                  class="mx-auto mt-2 max-w-lg text-xs font-semibold text-slate-600 dark:text-slate-300"
+                  v-if="strategyAttemptOutcomeNote(currentStrategyAttempt)"
+                  data-testid="fix-attempt-outcome-note"
+                  class="mx-auto mt-2 max-w-lg text-xs text-slate-500 dark:text-slate-400"
                 >
-                  {{ strategyAttemptProgress(currentStrategyAttempt) }}
+                  {{ strategyAttemptOutcomeNote(currentStrategyAttempt) }}
                 </p>
               </div>
 
               <div v-else-if="!currentStrategyLoading" class="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-5 text-center text-slate-600 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300">
                 <span class="material-symbols-outlined mb-2 block text-3xl text-slate-400 dark:text-slate-500" aria-hidden="true">science</span>
                 <p class="font-semibold">{{ t('app.fixStrategyNotTried') }}</p>
-                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ t('app.fixAttemptDoesNotApply') }}</p>
               </div>
 
             </div>
@@ -1617,39 +1787,15 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
             </div>
           </div>
 
-          <!-- Other Strategies -->
-          <div v-if="(fixResult?.suggestions.length || 0) > 1" class="border border-slate-200 rounded-xl p-4 dark:border-slate-700">
-            <div class="text-sm font-bold text-slate-700 mb-3 flex items-center gap-2 dark:text-slate-200">
-              <span class="material-symbols-outlined text-slate-600 dark:text-slate-300">layers</span>
-              {{ t('app.otherAvailableStrategies') }}
-            </div>
-            <div class="flex flex-wrap gap-2">
-              <button
-                v-for="s in fixResult?.suggestions || []"
-                :key="s.strategy"
-                v-show="s.strategy !== selectedStrategy"
-                @click="switchStrategy(s.strategy)"
-                class="px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
-                :class="s.verified && suggestionIsCurrent(s)
-                  ? 'board-surface-success board-text-success hover:bg-[color:var(--success-surface)] dark:hover:bg-[color:var(--success-surface)]'
-                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200 border border-slate-300 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700'"
-              >
-                <span class="material-symbols-outlined text-sm">
-                  {{ strategyIcons[s.strategy] }}
-                </span>
-                {{ strategyLabels[s.strategy] }}
-                <span v-if="s.verified && suggestionIsCurrent(s)" class="material-symbols-outlined board-text-success text-xs">verified</span>
-              </button>
-            </div>
-          </div>
-
         </div>
       </div>
 
       <!-- Footer: dismiss on the left, the one primary action on the right.
-           Try and Apply are mutually exclusive (Try while unverified, Apply once verified), so
-           exactly one shows here. Both used to sit at the end of the scroll body, where the
-           strategy detail is routinely ~300px taller than the fold: the action landed 19px past
+           At most one of Apply, Try and "try another strategy" shows: Try until the strategy lists an
+           option, then Apply the selected one. A settled outcome would only repeat on retry, so it
+           offers the next untried strategy instead, or nothing once all were tried. Apply and Try
+           used to sit at the end of the scroll body, where the strategy detail is routinely ~300px
+           taller than the fold: the action landed 19px past
            the visible edge and read as a broken, half-drawn control in both themes. An action the
            user must reach to make progress does not belong behind a scroll. Matches the
            dismiss-left / primary-right footer RuleBuilderDialog already establishes. -->
@@ -1664,7 +1810,7 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
           {{ t('app.close') }}
         </button>
 
-        <div class="ml-auto flex min-w-0 flex-col items-end gap-2">
+        <div ref="footerActionsRef" class="ml-auto flex min-w-0 flex-col items-end gap-2">
           <p
             v-if="applyBlockedReason"
             id="fix-apply-readiness"
@@ -1676,7 +1822,7 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
           </p>
 
           <button
-            v-if="currentSuggestion?.verified"
+            v-if="currentSuggestion"
             type="button"
             data-testid="fix-apply-current"
             class="iot-dialog-btn"
@@ -1697,10 +1843,12 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
           </button>
 
           <button
-            v-else
+            v-else-if="!currentAttemptSettled"
             type="button"
             data-testid="fix-try-current"
-            :disabled="strategyLoading !== null"
+            :disabled="strategyLoading !== null || Boolean(rangeBlockedReasonIds)"
+            :aria-describedby="[anotherStrategyLoading ? 'fix-another-strategy-running' : '', rangeBlockedReasonIds]
+              .filter(Boolean).join(' ') || undefined"
             @click="trySelectedStrategy"
             class="iot-dialog-btn iot-dialog-btn--primary"
           >
@@ -1708,6 +1856,19 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
             {{ currentStrategyAttempt || strategyErrors[selectedStrategy]
               ? t('app.retryFixStrategy')
               : t('app.tryFixStrategy') }}
+          </button>
+
+          <button
+            v-else-if="nextUntriedStrategy"
+            type="button"
+            data-testid="fix-try-next-strategy"
+            :disabled="strategyLoading !== null"
+            :aria-describedby="anotherStrategyLoading ? 'fix-another-strategy-running' : undefined"
+            @click="tryNextStrategy"
+            class="iot-dialog-btn iot-dialog-btn--primary"
+          >
+            <span class="material-symbols-outlined" aria-hidden="true">{{ strategyIcons[nextUntriedStrategy] }}</span>
+            {{ t('app.fixTryNextStrategy', { strategy: strategyLabels[nextUntriedStrategy] }) }}
           </button>
         </div>
       </div>

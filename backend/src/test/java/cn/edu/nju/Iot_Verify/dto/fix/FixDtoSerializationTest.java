@@ -3,12 +3,15 @@ package cn.edu.nju.Iot_Verify.dto.fix;
 import cn.edu.nju.Iot_Verify.dto.model.ModelTokenSource;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.exc.UnrecognizedPropertyException;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class FixDtoSerializationTest {
@@ -101,7 +104,6 @@ class FixDtoSerializationTest {
                 .conditionAdjustments(List.of(condition))
                 .removedRuleIndices(List.of(9))
                 .removedRuleDescriptions(List.of("IF kitchen.motion = active THEN kitchen.light.turnOn"))
-                .verified(true)
                 .build();
 
         String json = objectMapper.writeValueAsString(FixResultDto.builder()
@@ -126,12 +128,51 @@ class FixDtoSerializationTest {
         assertTrue(json.contains("\"modelTokenSource\":\"CUSTOM\""));
     }
 
+    /*
+     * Every listed suggestion is a verified one, so `verified` was deleted rather than kept at a constant true;
+     * the attempt counter was deleted because one number could not mean the same thing across strategies. A
+     * client still sending `verified` must fail loudly under the strict mapper instead of having it ignored.
+     */
+    @Test
+    void fixAttemptsAndSuggestionsCarryOnlyTheCurrentVerdictFields() throws Exception {
+        JsonNode root = objectMapper.readTree(objectMapper.writeValueAsString(FixResultDto.builder()
+                .suggestions(List.of(FixSuggestionDto.builder()
+                        .strategy("remove")
+                        .description("Remove the conflicting rule")
+                        .removedRuleDescriptions(List.of("Old rule"))
+                        .build()))
+                .strategyAttempts(List.of(
+                        FixStrategyAttemptDto.builder()
+                                .strategy("remove").status("VERIFIED").reason("listed")
+                                .alternativesComplete(true).build(),
+                        FixStrategyAttemptDto.builder()
+                                .strategy("parameter").status("TIMED_OUT").reason("deadline").build()))
+                .build()));
+
+        JsonNode verified = root.path("strategyAttempts").path(0);
+        assertEquals(List.of("strategy", "status", "reason", "alternativesComplete"), fieldNames(verified));
+        assertTrue(verified.path("alternativesComplete").booleanValue());
+        JsonNode timedOut = root.path("strategyAttempts").path(1);
+        assertTrue(timedOut.has("alternativesComplete") && timedOut.path("alternativesComplete").isNull(),
+                "completeness describes a listing, so an attempt that listed nothing sends an explicit null");
+        assertFalse(root.path("suggestions").path(0).has("verified"));
+
+        String staleSuggestion = "{\"strategy\":\"remove\",\"description\":\"d\",\"verified\":true}";
+        assertThrows(UnrecognizedPropertyException.class,
+                () -> objectMapper.readValue(staleSuggestion, FixSuggestionDto.class));
+    }
+
+    private static List<String> fieldNames(JsonNode node) {
+        List<String> names = new ArrayList<>();
+        node.fieldNames().forEachRemaining(names::add);
+        return names;
+    }
+
     @Test
     void nonApplicableFixCollectionsSerializeAsEmptyArrays() throws Exception {
         FixSuggestionDto suggestion = FixSuggestionDto.builder()
                 .strategy("remove")
-                .description("No verified removal was found")
-                .verified(false)
+                .description("Remove the conflicting rule")
                 .build();
 
         JsonNode root = objectMapper.readTree(objectMapper.writeValueAsString(
@@ -141,6 +182,8 @@ class FixDtoSerializationTest {
         assertEquals(0, suggestionJson.path("parameterAdjustments").size());
         assertEquals(0, suggestionJson.path("conditionAdjustments").size());
         assertEquals(0, suggestionJson.path("removedRuleDescriptions").size());
+        assertTrue(suggestionJson.path("preexistingViolations").isArray());
+        assertEquals(0, suggestionJson.path("preexistingViolations").size());
         assertEquals(0, root.path("faultRules").size());
         assertEquals(0, root.path("strategyAttempts").size());
         assertEquals("NOT_CHECKED", root.path("templateSnapshotComparison").asText());

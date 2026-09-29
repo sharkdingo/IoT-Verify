@@ -17,6 +17,15 @@ const authHeaders = (auth: AuthUser) => ({
 const fixRequestUrl = (traceId: number) =>
   `${apiBaseURL}/api/verify/traces/${traceId}/fix?requestId=${crypto.randomUUID()}`
 
+// A strategy lists every minimal repair it verified, so a scenario names the repair it expects instead
+// of taking whichever option the search happened to reach first.
+const listedRepair = (fix: any, strategy: string, isExpected: (suggestion: any) => boolean) => {
+  const options = fix.suggestions.filter((suggestion: any) => suggestion.strategy === strategy)
+  const repair = options.find(isExpected)
+  expect(repair, `expected repair not among the ${strategy} options: ${JSON.stringify(options)}`).toBeTruthy()
+  return repair
+}
+
 const unwrap = async <T>(response: Awaited<ReturnType<APIRequestContext['get']>>): Promise<T> => {
   expect(response.ok(), await response.text()).toBeTruthy()
   const body = await response.json()
@@ -416,12 +425,11 @@ test.describe('board full-stack NuSMV user flow', () => {
           }]
         }]
       },
-      assertSuggestion: (suggestion: any, fix: any) => {
+      assertFix: (fix: any) => {
         expect(fix.parameterTargets.length).toBeGreaterThan(0)
-        expect(suggestion.parameterAdjustments).toEqual(expect.arrayContaining([
-          expect.objectContaining({ attribute: 'temperature', originalValue: '28', newValue: '35' })
-        ]))
-      }
+      },
+      isExpectedRepair: (suggestion: any) => suggestion.parameterAdjustments.some((adjustment: any) =>
+        adjustment.attribute === 'temperature' && adjustment.originalValue === '28' && adjustment.newValue === '35')
     },
     {
       name: 'unoccupied-room heating safety',
@@ -453,18 +461,15 @@ test.describe('board full-stack NuSMV user flow', () => {
           thenConditions: []
         }]
       },
-      assertSuggestion: (suggestion: any, fix: any) => {
+      assertFix: (fix: any) => {
         expect(fix.parameterTargets).toEqual([])
-        expect(suggestion.conditionAdjustments).toEqual(expect.arrayContaining([
-          expect.objectContaining({
-            action: 'add',
-            attribute: 'occupied',
-            targetType: 'variable',
-            relation: '=',
-            value: 'present'
-          })
-        ]))
-      }
+      },
+      isExpectedRepair: (suggestion: any) => suggestion.conditionAdjustments.some((adjustment: any) =>
+        adjustment.action === 'add'
+          && adjustment.attribute === 'occupied'
+          && adjustment.targetType === 'variable'
+          && adjustment.relation === '='
+          && adjustment.value === 'present')
     }
   ] as const
 
@@ -472,32 +477,26 @@ test.describe('board full-stack NuSMV user flow', () => {
     {
       strategy: 'parameter',
       repairedRuleCount: 3,
-      assertSuggestion: (suggestion: any) => {
-        expect(suggestion.parameterAdjustments).toHaveLength(2)
-        expect(suggestion.parameterAdjustments.every((adjustment: any) =>
-          adjustment.attribute === 'temperature' && Number(adjustment.newValue) >= 36)).toBe(true)
-      }
+      isExpectedRepair: (suggestion: any) => suggestion.parameterAdjustments.length === 2
+        && suggestion.parameterAdjustments.every((adjustment: any) =>
+          adjustment.attribute === 'temperature' && Number(adjustment.newValue) >= 36)
     },
     {
       strategy: 'condition',
       repairedRuleCount: 3,
-      assertSuggestion: (suggestion: any) => {
-        expect(suggestion.conditionAdjustments).toHaveLength(2)
-        expect(suggestion.conditionAdjustments.every((adjustment: any) =>
+      isExpectedRepair: (suggestion: any) => suggestion.conditionAdjustments.length === 2
+        && suggestion.conditionAdjustments.every((adjustment: any) =>
           adjustment.action === 'add'
             && adjustment.attribute === 'occupied'
-            && adjustment.value === 'present')).toBe(true)
-      }
+            && adjustment.value === 'present')
     },
     {
       strategy: 'remove',
       repairedRuleCount: 1,
-      assertSuggestion: (suggestion: any) => {
-        expect(suggestion.removedRuleDescriptions).toEqual([
-          'Unsafe primary heating rule',
-          'Unsafe redundant secondary heating rule'
-        ])
-      }
+      isExpectedRepair: (suggestion: any) => JSON.stringify(suggestion.removedRuleDescriptions) === JSON.stringify([
+        'Unsafe primary heating rule',
+        'Unsafe redundant secondary heating rule'
+      ])
     }
   ] as const
 
@@ -584,7 +583,6 @@ test.describe('board full-stack NuSMV user flow', () => {
           const fix = await unwrap<any>(fixResponse)
           const removal = fix.suggestions?.find((suggestion: any) =>
             suggestion.strategy === 'remove'
-              && suggestion.verified === true
               && suggestion.removedRuleDescriptions?.includes(scenario.removedRule))
           if (removal) {
             selectedTrace = trace
@@ -687,10 +685,8 @@ test.describe('board full-stack NuSMV user flow', () => {
         sourceSkippedSpecCount: 0,
         strategyAttempts: [{ strategy: scenario.strategy, status: 'VERIFIED' }]
       })
-      const suggestion = fix.suggestions.find((candidate: any) =>
-        candidate.strategy === scenario.strategy && candidate.verified === true)
-      expect(suggestion).toBeTruthy()
-      scenario.assertSuggestion(suggestion, fix)
+      scenario.assertFix(fix)
+      const suggestion = listedRepair(fix, scenario.strategy, scenario.isExpectedRepair)
 
       const applyResponse = await request.post(
         `${apiBaseURL}/api/verify/traces/${trace.id}/fix/apply`,
@@ -792,10 +788,7 @@ test.describe('board full-stack NuSMV user flow', () => {
         sourceModelComplete: true,
         strategyAttempts: [{ strategy: scenario.strategy, status: 'VERIFIED' }]
       })
-      const suggestion = fix.suggestions.find((candidate: any) =>
-        candidate.strategy === scenario.strategy && candidate.verified === true)
-      expect(suggestion).toBeTruthy()
-      scenario.assertSuggestion(suggestion)
+      const suggestion = listedRepair(fix, scenario.strategy, scenario.isExpectedRepair)
 
       const applyResponse = await request.post(
         `${apiBaseURL}/api/verify/traces/${trace.id}/fix/apply`,
@@ -816,7 +809,8 @@ test.describe('board full-stack NuSMV user flow', () => {
         previousRuleCount: 3,
         currentRuleCount: scenario.repairedRuleCount
       })
-      scenario.assertSuggestion(applied.appliedSuggestion)
+      expect(scenario.isExpectedRepair(applied.appliedSuggestion), JSON.stringify(applied.appliedSuggestion))
+        .toBe(true)
 
       await waitForApi<any[]>(request, auth, '/api/board/rules',
         rows => rows.length === scenario.repairedRuleCount)
@@ -953,18 +947,12 @@ test.describe('board full-stack NuSMV user flow', () => {
     })
     expect(fix.strategyAttempts).toEqual(strategies.map(strategy =>
       expect.objectContaining({ strategy, status: 'VERIFIED' })))
-    expect(fix.suggestions).toHaveLength(3)
-
-    const parameter = fix.suggestions.find((suggestion: any) => suggestion.strategy === 'parameter')
-    const condition = fix.suggestions.find((suggestion: any) => suggestion.strategy === 'condition')
-    const removal = fix.suggestions.find((suggestion: any) => suggestion.strategy === 'remove')
-    expect(parameter.parameterAdjustments).toEqual(expect.arrayContaining([
-      expect.objectContaining({ originalValue: '28', newValue: '37' })
-    ]))
-    expect(condition.conditionAdjustments).toEqual(expect.arrayContaining([
-      expect.objectContaining({ action: 'add', attribute: 'occupied', value: 'present' })
-    ]))
-    expect(removal.removedRuleDescriptions).toEqual(['Unsafe early heat rule'])
+    const parameter = listedRepair(fix, 'parameter', suggestion => suggestion.parameterAdjustments.some(
+      (adjustment: any) => adjustment.originalValue === '28' && adjustment.newValue === '37'))
+    listedRepair(fix, 'condition', suggestion => suggestion.conditionAdjustments.some((adjustment: any) =>
+      adjustment.action === 'add' && adjustment.attribute === 'occupied' && adjustment.value === 'present'))
+    listedRepair(fix, 'remove', suggestion =>
+      JSON.stringify(suggestion.removedRuleDescriptions) === JSON.stringify(['Unsafe early heat rule']))
 
     const applyResponse = await request.post(
       `${apiBaseURL}/api/verify/traces/${neverTrace.id}/fix/apply`,
@@ -1930,11 +1918,8 @@ test.describe('board full-stack NuSMV user flow', () => {
       data: { strategies: ['remove'] }
     })
     const fix = await unwrap<any>(fixResponse)
-    const removal = fix.suggestions.find((suggestion: any) =>
-      suggestion.strategy === 'remove' && suggestion.verified === true)
-    expect(removal.removedRuleDescriptions).toEqual([
-      'When hall motion is active, take a camera photo'
-    ])
+    const removal = listedRepair(fix, 'remove', suggestion => JSON.stringify(suggestion.removedRuleDescriptions)
+      === JSON.stringify(['When hall motion is active, take a camera photo']))
 
     const applyResponse = await request.post(
       `${apiBaseURL}/api/verify/traces/${baselineTrace.id}/fix/apply`,
@@ -2091,11 +2076,8 @@ test.describe('board full-stack NuSMV user flow', () => {
       }
     )
     const fix = await unwrap<any>(fixResponse)
-    const removal = fix.suggestions.find((suggestion: any) =>
-      suggestion.strategy === 'remove' && suggestion.verified === true)
-    expect(removal.removedRuleDescriptions).toEqual([
-      'When an untrusted hall motion signal is active, take a camera photo'
-    ])
+    const removal = listedRepair(fix, 'remove', suggestion => JSON.stringify(suggestion.removedRuleDescriptions)
+      === JSON.stringify(['When an untrusted hall motion signal is active, take a camera photo']))
 
     const applyResponse = await request.post(
       `${apiBaseURL}/api/verify/traces/${cameraNeverTrace.id}/fix/apply`,
@@ -2229,7 +2211,7 @@ test.describe('board full-stack NuSMV user flow', () => {
     expect(Array.isArray(fix.faultRules)).toBeTruthy()
     expect(fix.faultRules.length).toBeGreaterThanOrEqual(1)
     expect(Array.isArray(fix.suggestions)).toBeTruthy()
-    expect(fix.suggestions.some((suggestion: any) => suggestion.verified === true)).toBeTruthy()
+    expect(fix.suggestions.length).toBeGreaterThanOrEqual(1)
 
     const asyncSimulationResponsePromise = page.waitForResponse(response =>
       response.request().method() === 'POST'
