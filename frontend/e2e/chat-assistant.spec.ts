@@ -699,8 +699,38 @@ test('a rule_list refresh command makes the workspace re-read undo availability'
   // collide — the second got a 409, its stream never delivered REFRESH_DATA, and the failure looked
   // like a broken refresh rather than a colliding fixture.
   const sessionId = `assistant-undo-session-${auth.userId}`
+  const result = (data: unknown) => JSON.stringify({ code: 200, message: 'ok', data })
+  // A COMPLETED terminal must be backed by a paired usable tool result — the client rejects an
+  // unproven completion, and the backend's own `hasCompletedToolEvidence` guarantees it never sends
+  // one. So the mock carries the execution/result pair a real rule deletion would report, in the
+  // stream and in the persisted history alike.
+  const toolTrace = [
+    { stage: 'CONTEXT_READY' },
+    { stage: 'TOOL_EXECUTION', toolName: 'manage_rule', round: 1 },
+    { stage: 'TOOL_RESULT', toolName: 'manage_rule', round: 1, outcome: 'USABLE' }
+  ]
+  // Set once the stream is served: history read before it is an empty session, read after it holds
+  // the persisted turn.
+  let streamedTurnId: string | null = null
+  // After the stream, the chat panel settles it: it polls `/activity` until idle, reloads history
+  // and requires the turn's terminal record, then re-reads `/confirmation` — each validated against
+  // its DTO. `/activity` and `/confirmation` used to get the session-list answer and history had no
+  // terminal record, so settlement always failed and raised a warning toast over the header. In the
+  // run where that toast was still sliding over the undo button, the click below completed without
+  // an undo request and the rules never came back. Each sub-resource now answers in its own shape,
+  // so settlement succeeds as it does against a real server.
   await page.route('**/api/chat/sessions**', async route => {
-    if (route.request().method() === 'POST') {
+    const requestUrl = new URL(route.request().url())
+    const method = route.request().method()
+    if (method === 'POST' && requestUrl.pathname.endsWith(`/${sessionId}/seen`)) {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json; charset=UTF-8',
+        body: result(null)
+      })
+      return
+    }
+    if (method === 'POST' && requestUrl.pathname.endsWith('/api/chat/sessions')) {
       await route.fulfill({
         status: 200,
         contentType: 'application/json; charset=UTF-8',
@@ -724,30 +754,60 @@ test('a rule_list refresh command makes the workspace re-read undo availability'
       })
       return
     }
-    if (route.request().url().includes('/messages')) {
+    if (requestUrl.pathname.endsWith(`/${sessionId}/messages`)) {
+      const createdAt = new Date().toISOString()
+      const messages = streamedTurnId === null ? [] : [
+        { id: 1, sessionId, role: 'user', content: 'Delete one rule.', turnId: streamedTurnId, createdAt },
+        {
+          id: 2,
+          sessionId,
+          role: 'assistant',
+          content: 'Removed one rule.',
+          turnId: streamedTurnId,
+          createdAt,
+          executionStatus: 'COMPLETED',
+          executionTrace: toolTrace
+        }
+      ]
       await route.fulfill({
         status: 200,
         contentType: 'application/json; charset=UTF-8',
-        body: JSON.stringify({ code: 200, data: { messages: [], nextBeforeId: null, hasMore: false } })
+        body: result({ messages, nextBeforeId: null, hasMore: false })
       })
       return
     }
-    // GET /api/chat/sessions — the list, which must also be a well-formed session array.
-    await route.fulfill({
-      status: 200,
-      contentType: 'application/json; charset=UTF-8',
-      body: JSON.stringify({ code: 200, data: [] })
-    })
+    if (requestUrl.pathname.endsWith(`/${sessionId}/activity`)) {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json; charset=UTF-8',
+        body: result({ sessionId, active: false })
+      })
+      return
+    }
+    if (requestUrl.pathname.endsWith(`/${sessionId}/confirmation`)) {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json; charset=UTF-8',
+        body: result({ sessionId, kinds: [] })
+      })
+      return
+    }
+    if (method === 'GET' && requestUrl.pathname.endsWith('/api/chat/sessions')) {
+      // The list, which must also be a well-formed session array.
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json; charset=UTF-8',
+        body: result([])
+      })
+      return
+    }
+    await route.fallback()
   })
   await page.route('**/api/chat/completions', async route => {
     const { turnId } = route.request().postDataJSON() as { turnId: string }
-    // A COMPLETED terminal must be backed by a paired usable tool result — the client rejects an
-    // unproven completion, and the backend's own `hasCompletedToolEvidence` guarantees it never sends
-    // one. So the mock carries the execution/result pair a real rule deletion would report.
+    streamedTurnId = turnId
     const frames = [
-      { progress: { stage: 'CONTEXT_READY' } },
-      { progress: { stage: 'TOOL_EXECUTION', toolName: 'manage_rule', round: 1 } },
-      { progress: { stage: 'TOOL_RESULT', toolName: 'manage_rule', round: 1, outcome: 'USABLE' } },
+      ...toolTrace.map(progress => ({ progress })),
       { command: { type: 'REFRESH_DATA', payload: { target: 'rule_list' } } },
       { content: 'Removed one rule.' },
       { terminal: { turnId, executionStatus: 'COMPLETED' } }

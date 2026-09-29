@@ -297,6 +297,12 @@ CI runs with `--fail-on-flaky-tests`, so one retry-passing test still fails the 
   made session creation throw, so the turn never sent, so a `REFRESH_DATA` command never arrived, and
   the test failed on an unrelated undo-button assertion. When an E2E failure makes no sense, read the
   browser console in the Playwright trace (`--trace=retain-on-failure`) before theorising.
+  Mock **every** request the flow makes, not just the ones the assertion needs: a catch-all branch
+  answers the rest with the wrong shape, and the product's recovery path becomes part of the test.
+  The same spec's `/activity` and `/confirmation` fell through to the session-list answer, so every
+  stream settlement failed and raised a warning toast over the header. It passed 29 Full CI runs, then
+  run 36566356407 caught the toast still sliding over `board-undo`: the click completed, no undo
+  request followed, and the rules never came back.
 
 ---
 
