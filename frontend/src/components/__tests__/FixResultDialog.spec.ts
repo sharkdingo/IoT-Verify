@@ -7,6 +7,7 @@ import FixResultDialog from '../FixResultDialog.vue'
 import type { FixResult, FixStrategyAttemptStatus } from '@/types/fix'
 import { useAuth } from '@/stores/auth'
 import { FIX_RESPONSE_INCOMPLETE_CODE } from '@/utils/fixResponse'
+import { openModalDepth, registerModalSurface } from '@/composables/useBodyScrollLock'
 
 const elementPlus = vi.hoisted(() => ({
   confirm: vi.fn(),
@@ -1731,6 +1732,39 @@ describe('FixResultDialog strategy workflow', () => {
       strategy: 'parameter',
       currentRuleCount: 1
     })
+  })
+
+  it.each([0, 1])('reports signed evidence after closing its dialog with %i underlying modals', async (underlyingModals) => {
+    const releaseUnderlyingModal = underlyingModals ? registerModalSurface() : () => {}
+    const result = parameterResult()
+    const applied = parameterApplied(result.suggestions[0]!)
+    boardApi.fixTrace.mockResolvedValueOnce(result)
+    boardApi.applyFix.mockResolvedValueOnce(applied)
+    const wrapper = mountPersistentDialogHost()
+
+    try {
+      await flush()
+      await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+      await flush()
+      expect(openModalDepth.value).toBe(underlyingModals + 1)
+      const dialog = wrapper.findComponent(FixResultDialog)
+      const observations: unknown[] = []
+      elementPlus.success.mockImplementationOnce(() => observations.push({
+        depth: openModalDepth.value,
+        visible: wrapper.find('[data-testid="fix-result-dialog"]').exists(),
+        applied: dialog.emitted('applied')?.[0]?.[0]
+      }))
+
+      await wrapper.get('[data-testid="fix-apply-current"]').trigger('click')
+      await flush()
+
+      expect(elementPlus.success).toHaveBeenCalledWith('fixAppliedWithSignedEvidence')
+      expect(observations).toEqual([{ depth: underlyingModals, visible: false, applied }])
+      expect(dialog.emitted('update:visible')).toEqual([[false]])
+    } finally {
+      releaseUnderlyingModal()
+      elementPlus.success.mockReset()
+    }
   })
 
   it('requires confirmation before permanently removing rules', async () => {

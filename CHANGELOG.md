@@ -15,6 +15,48 @@ history into a technical spec. The spec content itself now lives under
 
 ## [Unreleased]
 
+### 2026-09-30 (canvas geometry and playback cost)
+
+#### Fixed
+
+- **Self-loop connections now follow a held node drag.** The visible path, arrow, hitarea,
+  playback flow and connection labels share preview coordinates with ordinary connections.
+  Cancelling, losing pointer capture or locking interaction restores the original geometry;
+  release commits one layout edit. Dragging no longer rewrites edge endpoints from stale,
+  committed coordinates on every animation frame.
+
+#### Changed
+
+- **Canvas lookup cost scales with the graph and trace data.** Connection labels reuse the node
+  index; playback resolves all rule connections in one pass over connections and selected-step
+  rule evidence, preserving multi-source rules and rejecting ambiguous identities. Device playback
+  indexes current/previous sparse snapshots and compromise evidence together rather than scanning
+  history for every node. Trace membership is indexed independently of the selected step.
+
+### 2026-09-30 (task leases and completion feedback)
+
+#### Fixed
+
+- **Lease expiry after row-lock waits.** Verification, simulation and counterexample exploration
+  acquire the task row lock before sampling the database clock for start and progress updates.
+  A worker waiting past expiry cannot revive the task or advance stale progress; existing owner,
+  cancellation and monotonic lease-confirmation checks remain in force.
+- **Consistent completion feedback.** Visible device/rule/spec edits and successful authentication
+  use the resulting UI as confirmation. Contextual template/fix receipts and unconfirmed-outcome
+  warnings follow dialog closure; account-deletion feedback follows navigation. Persistent board
+  loading, failed-load and unavailable-link notices stack vertically, with independently reachable
+  Retry/dismiss controls and no duplicate retry toast.
+- **Toasts no longer cover the header or catch clicks.** Element Plus puts a toast 16px from the top of
+  the viewport, inside the board's fixed nav, and a centred toast covered undo and redo. That is where the
+  user goes right after the action the toast reports. Toasts now appear 16px below the board nav or the
+  public header. While a modal is open they stay at the top of the viewport, because the header is
+  unreachable behind the scrim and a centred dialog can reach nearly to the top. The 2026-08-01 fix for
+  toasts swallowing clicks was also incomplete: it handed pointer events back to the toast's children for a
+  close button that no toast here has. One of those children is the text paragraph, which is most of the
+  toast, and it was the element the original CI trace named as intercepting the click on undo. The whole
+  toast is now click-through. It no longer pauses when hovered, which needs pointer events. Toasts carry
+  nothing the user has to act on.
+
 ### 2026-09-27 (automatic fix)
 
 #### Changed

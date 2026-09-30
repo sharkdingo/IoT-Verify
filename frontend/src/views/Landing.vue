@@ -7,7 +7,6 @@ import { authApi } from '@/api/auth'
 import { useAuth } from '@/stores/auth'
 import { localizedErrorMessage, localizedTextOrFallback } from '@/utils/userMessage'
 import { isValidNormalizedUsername, normalizeAccountIdentifier } from '@/utils/accountIdentifier'
-import { notifySuccess } from '@/utils/feedback'
 import { CREDENTIAL_LIMITS } from '@/constants/requestLimits'
 import HintTooltip from '@/components/common/HintTooltip.vue'
 
@@ -246,8 +245,8 @@ const handleLogin = async () => {
         phone: res.data.phone,
         username: res.data.username
       })
-      notifySuccess(t('auth.loginSuccess'))
-      await router.push(redirectTarget.value)    } else {
+      await router.push(redirectTarget.value)
+    } else {
       requestError.value = localizedTextOrFallback(res.message, t('auth.loginFailed'), locale.value)
       await focusRequestError()
     }
@@ -280,7 +279,6 @@ const handleRegister = async () => {
         phone: res.data.phone,
         username: res.data.username
       })
-      notifySuccess(t('auth.registerSuccess'))
       await router.push(redirectTarget.value)
     } else {
       requestError.value = localizedTextOrFallback(res.message, t('auth.registerFailed'), locale.value)

@@ -3,6 +3,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { i18n } from '@/assets/i18n'
+import { openModalDepth } from '@/composables/useBodyScrollLock'
 import ControlCenter from '../ControlCenter.vue'
 
 const boardApiMocks = vi.hoisted(() => ({
@@ -104,6 +105,77 @@ afterEach(() => {
 })
 
 describe('ControlCenter template authority recovery', () => {
+  it.each([
+    ['reset', 'confirmed'],
+    ['reset', 'reconciled'],
+    ['delete', 'confirmed'],
+    ['delete', 'reconciled'],
+    ['delete', 'malformed conflict with failed refresh'],
+    ['delete', 'malformed conflict with existing template']
+  ] as const)('releases the %s confirmation before reporting %s', async (action, outcome) => {
+    boardApiMocks.previewDefaultTemplateReset.mockResolvedValue(resetPreview)
+    boardApiMocks.previewDeviceTemplateDeletion.mockResolvedValue(deletionPreview)
+    boardApiMocks.getEnvironment.mockResolvedValue([])
+    const mutation = action === 'reset'
+      ? boardApiMocks.resetDefaultTemplates
+      : boardApiMocks.deleteDeviceTemplate
+    if (outcome === 'confirmed') {
+      mutation.mockResolvedValue(action === 'reset'
+        ? { ...resetPreview, operation: 'reset' }
+        : { ...deletionPreview, operation: 'deleted', deletedTemplate: template, currentTemplates: [] })
+    } else {
+      mutation.mockRejectedValue(outcome.startsWith('malformed conflict')
+        ? deletionConflict('TEMPLATE_DELETION_PREVIEW_STALE', null)
+        : new Error('response lost'))
+      if (outcome === 'malformed conflict with failed refresh') {
+        boardApiMocks.getDeviceTemplates.mockRejectedValue(new Error('refresh failed'))
+      } else {
+        boardApiMocks.getDeviceTemplates.mockResolvedValue(
+          action === 'reset' || outcome === 'malformed conflict with existing template' ? [template] : []
+        )
+      }
+    }
+    const feedback = outcome === 'confirmed' ? messageMocks.success
+      : outcome === 'malformed conflict with existing template' ? messageMocks.error
+        : messageMocks.warning
+    const reportedDepths: number[] = []
+    feedback.mockImplementation(() => reportedDepths.push(openModalDepth.value))
+    const wrapper = mountTemplates()
+
+    try {
+      await wrapper.get(action === 'reset'
+        ? '[data-testid="reset-default-templates"]' : '.template-card__action--danger').trigger('click')
+      await flushPromises()
+      expect(openModalDepth.value).toBe(1)
+      await wrapper.get(action === 'reset'
+        ? '[data-testid="default-template-reset-confirm"]'
+        : '[data-testid="template-delete-confirm"]').trigger('click')
+      await flushPromises()
+
+      expect(reportedDepths).toEqual([0])
+      expect(wrapper.find(action === 'reset'
+        ? '.template-reset-dialog' : '[data-testid="template-delete-dialog"]').exists()).toBe(false)
+      if (outcome === 'confirmed') {
+        expect(messageMocks.warning).not.toHaveBeenCalled()
+        expect(messageMocks.error).not.toHaveBeenCalled()
+      } else {
+        expect(messageMocks.success).not.toHaveBeenCalled()
+        expect(wrapper.emitted('edit-history-cleared')).toBeUndefined()
+      }
+      if (outcome === 'reconciled') {
+        expect(messageMocks.warning).toHaveBeenCalledWith(action === 'reset'
+          ? i18n.global.t('app.templateResetOutcomeRefreshed')
+          : i18n.global.t('app.templateDeleteOutcomeRefreshed', { name: template.name }))
+      } else if (outcome === 'malformed conflict with failed refresh') {
+        expect(messageMocks.warning).toHaveBeenCalledWith(
+          i18n.global.t('app.templateMutationOutcomeUnknownRefreshFailed'))
+        expect(wrapper.emitted('authoritative-state-unavailable')).toEqual([[['templates']]])
+      }
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it('shows the exact undo-history impact before template reset and deletion', async () => {
     boardApiMocks.previewDefaultTemplateReset.mockResolvedValue(resetPreview)
     boardApiMocks.previewDeviceTemplateDeletion.mockResolvedValue(deletionPreview)
@@ -171,6 +243,10 @@ describe('ControlCenter template authority recovery', () => {
 
     expect(wrapper.emitted('authoritative-state-unavailable'))
       .toEqual([[['templates', 'environment']]])
+    expect(wrapper.find('.template-reset-dialog').exists()).toBe(true)
+    expect(messageMocks.success).not.toHaveBeenCalled()
+    expect(messageMocks.warning).toHaveBeenCalledWith(
+      i18n.global.t('app.templateMutationOutcomeUnknownRefreshFailed'))
     wrapper.unmount()
   })
 
@@ -186,6 +262,10 @@ describe('ControlCenter template authority recovery', () => {
     await flushPromises()
 
     expect(wrapper.emitted('authoritative-state-unavailable')).toEqual([[['templates']]])
+    expect(wrapper.find('[data-testid="template-delete-dialog"]').exists()).toBe(true)
+    expect(messageMocks.success).not.toHaveBeenCalled()
+    expect(messageMocks.warning).toHaveBeenCalledWith(
+      i18n.global.t('app.templateMutationOutcomeUnknownRefreshFailed'))
     wrapper.unmount()
   })
 

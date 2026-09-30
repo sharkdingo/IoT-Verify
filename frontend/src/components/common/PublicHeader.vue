@@ -60,6 +60,7 @@ const navigateTo = (target?: string) => {
       { 'public-header--dark': theme === 'dark' }
     ]"
     :aria-label="t('app.title')"
+    data-toast-anchor
   >
     <button type="button" class="public-header__brand" @click="goHome">
       <span class="public-header__brand-mark">IoT-Verify</span>

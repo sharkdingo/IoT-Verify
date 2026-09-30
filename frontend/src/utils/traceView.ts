@@ -102,18 +102,20 @@ export const normalizePlaybackDeviceId = (value: unknown): string =>
   normalizeNuSmvDeviceName(String(value ?? '').trim()).toLowerCase()
 
 /**
- * Whether a current Board device is represented anywhere in the saved model trace.
- * A false result must not fall back to the device's live Board state during playback.
+ * All device identities represented anywhere in the saved model trace, independent of the selected step.
+ * An absent identity must not fall back to the device's live Board state during playback.
  */
-export const isDeviceRepresentedInPlayback = (
-  states: Array<{ devices?: Array<{ deviceId?: string | null }> }> | null | undefined,
-  deviceId: string
-): boolean => {
-  const normalizedId = normalizePlaybackDeviceId(deviceId)
-  if (!normalizedId || !Array.isArray(states)) return false
-  return states.some(state => (state.devices || []).some(device =>
-    normalizePlaybackDeviceId(device.deviceId) === normalizedId
-  ))
+export const collectPlaybackDeviceIds = (
+  states: Array<{ devices?: Array<{ deviceId?: string | null }> }> | null | undefined
+): Set<string> => {
+  const ids = new Set<string>()
+  for (const state of states || []) {
+    for (const device of state.devices || []) {
+      const id = normalizePlaybackDeviceId(device.deviceId)
+      if (id) ids.add(id)
+    }
+  }
+  return ids
 }
 
 export const isPlaybackDeviceAttacked = (device: PlaybackDevice): boolean =>

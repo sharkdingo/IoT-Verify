@@ -1,8 +1,135 @@
 import { mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
+import { nextTick, reactive } from 'vue'
 
 import CanvasBoard from '@/components/CanvasBoard.vue'
 import { i18n } from '@/assets/i18n'
+import { getLinkPoints, getSelfLoopPath } from '@/utils/rule'
+
+const pointerEvent = (type: string, x: number, y: number) => {
+  const event = new MouseEvent(type, { bubbles: true, clientX: x, clientY: y, button: 0 })
+  Object.defineProperties(event, {
+    pointerId: { value: 1 },
+    isPrimary: { value: true }
+  })
+  return event
+}
+
+describe('CanvasBoard live edge geometry', () => {
+  for (const corner of ['tl', 'tr', 'bl', 'br']) {
+    it(`updates the self-loop path and hitarea during ${corner} resizing and restores them on cancel`, async () => {
+      const node = reactive({
+        id: 'light-1', templateName: 'Light', label: 'Hall light',
+        position: { x: 40, y: 50 }, state: 'off', width: 176, height: 128
+      })
+      const wrapper = mount(CanvasBoard, {
+        props: {
+          nodes: [node], edges: [{
+            id: 'self', from: node.id, to: node.id, fromLabel: node.label, toLabel: node.label,
+            fromPos: node.position, toPos: node.position
+          }], pan: { x: 0, y: 0 }, zoom: 1.5,
+          getNodeIcon: () => '', hasNodeStateMachine: () => true,
+          getNodeEffectiveState: current => current.state
+        },
+        global: { plugins: [i18n] }
+      })
+      try {
+        const originalPath = getSelfLoopPath(node)
+        wrapper.get(`.resize-handle.${corner}`).element.dispatchEvent(pointerEvent('pointerdown', 100, 100))
+        window.dispatchEvent(pointerEvent('pointermove', 130, 115))
+        await nextTick()
+        expect(wrapper.get('path.edge-base-line').attributes('d')).not.toBe(originalPath)
+        expect(wrapper.get('path.edge-base-line').attributes('d')).toBe(getSelfLoopPath(node))
+        expect(wrapper.get('path.edge-hitarea').attributes('d')).toBe(getSelfLoopPath(node))
+        window.dispatchEvent(pointerEvent('pointercancel', 130, 115))
+        await nextTick()
+        expect(wrapper.get('path.edge-base-line').attributes('d')).toBe(originalPath)
+        expect(node).toMatchObject({ position: { x: 40, y: 50 }, width: 176, height: 128 })
+        expect(wrapper.emitted('node-moved-or-resized')).toBeUndefined()
+      } finally {
+        wrapper.unmount()
+      }
+    })
+  }
+
+  for (const zoom of [0.4, 1.5]) {
+    for (const finish of ['pointerup', 'pointercancel', 'lostpointercapture', 'lock'] as const) {
+      it(`moves every self-loop layer and both edge labels before ${finish} at zoom ${zoom}`, async () => {
+        const source = reactive({
+          id: 'light-1', templateName: 'Light', label: 'Hall light',
+          position: { x: 40, y: 50 }, state: 'off', width: 176, height: 128
+        })
+        const target = reactive({
+          ...source, id: 'light-2', label: 'Other light', position: { x: 420, y: 220 }
+        })
+        const edges = [source, target].map((node, index) => ({
+          id: `edge-${index}`, from: source.id, to: node.id,
+          fromLabel: source.label, toLabel: node.label,
+          fromPos: source.position, toPos: node.position,
+          ruleId: `rule-${index}`, ruleIndex: index, toApi: 'turn on'
+        }))
+        const wrapper = mount(CanvasBoard, {
+          props: {
+            nodes: [source, target], edges, pan: { x: 35, y: -20 }, zoom,
+            highlightedTrace: { selectedStateIndex: 0, states: [{
+              devices: [], triggeredRules: [{ ruleId: 'rule-0', ruleIndex: 0 }]
+            }] },
+            getNodeIcon: () => '', hasNodeStateMachine: () => true,
+            getNodeEffectiveState: node => node.state || 'off'
+          },
+          global: { plugins: [i18n] }
+        })
+        try {
+          const nodeElement = wrapper.get('[data-node-id="light-1"]')
+          const loopHitarea = wrapper.get('path.edge-hitarea')
+          await loopHitarea.trigger('focus')
+          await wrapper.get('line.edge-hitarea').trigger('pointerenter')
+          const originalPath = getSelfLoopPath(source)
+          expect(wrapper.get('path.edge-base-line').attributes('d')).toBe(originalPath)
+          nodeElement.element.dispatchEvent(pointerEvent('pointerdown', 100, 100))
+          window.dispatchEvent(pointerEvent('pointermove', 112, 108))
+          await nextTick()
+          window.dispatchEvent(pointerEvent('pointermove', 140, 120))
+          await nextTick()
+
+          const visualNode = { ...source, position: { x: 40 + 40 / zoom, y: 50 + 20 / zoom } }
+          for (const selector of ['path.edge-base-line', 'path.edge-hitarea', 'path.particle-line']) {
+            expect(wrapper.get(selector).attributes('d')).toBe(getSelfLoopPath(visualNode))
+          }
+          const points = getLinkPoints(visualNode, target)
+          expect(Number(wrapper.get('line.edge-base-line').attributes('x1'))).toBe(points.fromPoint.x)
+          expect(Number(wrapper.get('line.edge-base-line').attributes('y1'))).toBe(points.fromPoint.y)
+          const labels = wrapper.findAll('.edge-label')
+          expect(labels[0].attributes('transform')).toBe(
+            `translate(${visualNode.position.x + source.width / 2} ${visualNode.position.y - 16})`
+          )
+          expect(labels[1].attributes('transform')).toBe(
+            `translate(${(points.fromPoint.x + points.toPoint.x) / 2} ${(points.fromPoint.y + points.toPoint.y) / 2 - 10})`
+          )
+          // Rendering a preview must not persist intermediate coordinates or create undo entries.
+          expect(source.position).toEqual({ x: 40, y: 50 })
+          expect(wrapper.emitted('node-moved-or-resized')).toBeUndefined()
+
+          if (finish === 'lock') await wrapper.setProps({ interactionLocked: true })
+          else if (finish === 'lostpointercapture') nodeElement.element.dispatchEvent(pointerEvent(finish, 140, 120))
+          else window.dispatchEvent(pointerEvent(finish, 140, 120))
+          await nextTick()
+          if (finish === 'pointerup') {
+            expect(source.position).toEqual(visualNode.position)
+            expect(wrapper.emitted('node-moved-or-resized')).toEqual([[source.id]])
+          } else {
+            expect(source.position).toEqual({ x: 40, y: 50 })
+            expect(wrapper.get('path.edge-base-line').attributes('d')).toBe(originalPath)
+            expect(wrapper.emitted('node-moved-or-resized')).toBeUndefined()
+          }
+          expect(wrapper.emitted('node-layout-interaction-end')).toEqual([[source.id]])
+        } finally {
+          wrapper.unmount()
+        }
+      })
+    }
+  }
+})
 
 describe('CanvasBoard device context actions', () => {
   it('opens the custom device menu on mouse right-click', async () => {

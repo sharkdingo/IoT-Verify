@@ -2381,12 +2381,12 @@ const confirmResetDefaultTemplates = async () => {
         const successMessageKey = defaultTemplateResetChangesBoardModel(result)
           ? 'app.defaultTemplatesResetSuccessReverificationRequired'
           : 'app.defaultTemplatesResetSuccess'
+        closeResetDefaultsConfirm(true)
         notifySuccess(t(successMessageKey, {
             types: result.templateChanges.length,
             devices: result.affectedDevices.length,
             variables: result.environmentChanges.length
           }))
-        closeResetDefaultsConfirm(true)
       } catch (error: any) {
         console.error('Failed to reset default templates:', error)
         if (!isDefinitiveTemplateMutationRejection(error)) {
@@ -2396,8 +2396,8 @@ const confirmResetDefaultTemplates = async () => {
               boardApi.getEnvironment()
             ])
             emit('replace-template-state', { templates, environmentVariables })
-            notifyBlocked(t('app.templateResetOutcomeRefreshed'))
             closeResetDefaultsConfirm(true)
+            notifyBlocked(t('app.templateResetOutcomeRefreshed'))
           } catch (refreshError) {
             console.error('Failed to reconcile default template reset:', refreshError)
             emit('authoritative-state-unavailable', ['templates', 'environment'])
@@ -2522,8 +2522,8 @@ const confirmDeleteTemplate = async () => {
       )
       emit('replace-template-catalog', result.currentTemplates)
       emit('edit-history-cleared')
-      notifySuccess(t('app.templateDeleted', { name: result.deletedTemplate?.name || templateName }))
       closeTemplateDeleteConfirm(true)
+      notifySuccess(t('app.templateDeleted', { name: result.deletedTemplate?.name || templateName }))
     } catch (error: any) {
       console.error('Failed to delete template:', error)
       const conflict = readTemplateDeletionConflictPreview(error, templateId)
@@ -2537,15 +2537,15 @@ const confirmDeleteTemplate = async () => {
         const current = await refreshTemplateCatalogForReconciliation()
         if (!current) {
           emit('authoritative-state-unavailable', ['templates'])
-          notifyBlocked(t('app.templateMutationOutcomeUnknownRefreshFailed'))
           if (conflict.conflictPayload) closeTemplateDeleteConfirm(true)
+          notifyBlocked(t('app.templateMutationOutcomeUnknownRefreshFailed'))
         } else if (!current.some(template => Number(template.id) === templateId)) {
-          notifyBlocked(t('app.templateDeleteOutcomeRefreshed', { name: templateName }))
           closeTemplateDeleteConfirm(true)
+          notifyBlocked(t('app.templateDeleteOutcomeRefreshed', { name: templateName }))
         } else if (conflict.conflictPayload) {
           const errorMessage = t('app.boardMutationResponseIncomplete')
-          notifyError(t('app.deleteFailedWithReason', { reason: errorMessage }))
           closeTemplateDeleteConfirm(true)
+          notifyError(t('app.deleteFailedWithReason', { reason: errorMessage }))
         } else {
           notifyBlocked(t('app.templateDeleteOutcomeUnconfirmedAfterRefresh'))
         }

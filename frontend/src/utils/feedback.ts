@@ -2,7 +2,7 @@ import type { VNode } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { i18n } from '@/assets/i18n'
-import { registerModalSurface } from '@/composables/useBodyScrollLock'
+import { openModalDepth, registerModalSurface } from '@/composables/useBodyScrollLock'
 
 /**
  * The one place user feedback is produced.
@@ -20,12 +20,34 @@ const t = (key: string, named?: Record<string, unknown>) =>
 /** Toast durations: long enough to read, short enough not to sit over the canvas. */
 const DURATION = { short: 2600, normal: 3600, long: 5200 } as const
 
+/** Element Plus's own gap: its default first offset, and the space it puts between stacked toasts. */
+const TOAST_GAP = 16
+
+/**
+ * Where a toast's top edge goes: just below the top chrome the user can currently reach.
+ *
+ * Element Plus pins the first toast 16px from the viewport top, which is inside the board's fixed nav,
+ * and a centred toast up to 26rem wide covers the undo and redo buttons there -- exactly when the user
+ * wants them, right after the action the toast reports. Top chrome opts in with `data-toast-anchor`:
+ * the headers, and the board's persistent alerts, which a transient toast must not hide. The lowest
+ * one wins. Under an open modal that chrome is inert behind the scrim, while the dialog is centred and
+ * can reach near the top, so the toast keeps the viewport-top slot rather than dropping onto the dialog.
+ */
+const toastOffset = (): number => {
+  if (openModalDepth.value > 0) return TOAST_GAP
+  let anchorBottom = 0
+  for (const anchor of document.querySelectorAll('[data-toast-anchor]')) {
+    anchorBottom = Math.max(anchorBottom, anchor.getBoundingClientRect().bottom)
+  }
+  return anchorBottom + TOAST_GAP
+}
+
 export const notifySuccess = (message: string) => {
-  ElMessage.success({ message, duration: DURATION.short })
+  ElMessage.success({ message, duration: DURATION.short, offset: toastOffset() })
 }
 
 export const notifyInfo = (message: string) => {
-  ElMessage.info({ message, duration: DURATION.short })
+  ElMessage.info({ message, duration: DURATION.short, offset: toastOffset() })
 }
 
 /**
@@ -33,13 +55,13 @@ export const notifyInfo = (message: string) => {
  * in flight). Tells the user what to close, so it is a warning rather than an error.
  */
 export const notifyBlocked = (message: string) => {
-  ElMessage.warning({ message, duration: DURATION.normal })
+  ElMessage.warning({ message, duration: DURATION.normal, offset: toastOffset() })
 }
 
 export const notifyError = (message: string) => {
   // Background reconciliation and a user-triggered refresh can report the same failure together.
   // Keep the repeat count without stacking identical errors over the working surface.
-  ElMessage.error({ message, duration: DURATION.long, grouping: true })
+  ElMessage.error({ message, duration: DURATION.long, grouping: true, offset: toastOffset() })
 }
 
 /**

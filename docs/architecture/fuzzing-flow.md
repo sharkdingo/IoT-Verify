@@ -4,7 +4,7 @@ Architecture and semantic boundary for the HAFuzz-inspired bounded search module
 API fields and endpoints are owned by [../api/fuzzing.md](../api/fuzzing.md); formal
 model semantics remain owned by [nusmv-model.md](nusmv-model.md).
 
-Verified against code on 2026-07-31. Source: `component/fuzz/`,
+Verified against code on 2026-09-30. Source: `component/fuzz/`,
 `service/impl/FuzzServiceImpl.java`, `po/FuzzTaskPo.java`, and
 `po/FuzzFindingPo.java`.
 
@@ -67,7 +67,9 @@ Canvas coordinates and dimensions do not invalidate a semantic preview.
    before dispatch to the dedicated `fuzzTaskExecutor`; the owner renews queued and
    executing tasks, while any instance may fail only an expired lease — including one whose
    expiry equals the sampled instant, on the same boundary as the verification and simulation
-   sweeps ([verification-flow.md](verification-flow.md#sync-async-and-simulation)). A queued command
+   sweeps. Start, progress, renewal, and terminal transitions use the shared
+   [row-lock-before-clock ownership boundary](verification-flow.md#sync-async-and-simulation).
+   A queued command
    captures only task identity; the worker reconstructs its engine input from the persisted
    frozen snapshot after it starts, so queued tasks do not retain duplicate multi-megabyte
    object graphs in heap. Local execution handles bind task IDs to cancellable Futures and

@@ -1,4 +1,4 @@
-import { type Page } from '@playwright/test'
+import { type Page, type Route } from '@playwright/test'
 import { expect, test, type AuthUser } from './support/auth'
 
 /**
@@ -314,4 +314,140 @@ test.describe('responsive boundaries', () => {
     })
     expect(padding).toBe('16px')
   })
+})
+
+test.describe('board top chrome', () => {
+  /**
+   * Status surfaces that hang from the nav must start below it and let clicks through. The loading strip was
+   * `top-14` (56px) under a 69px nav and took pointer events, so for as long as the snapshot loaded it covered
+   * the nav's lower edge and ate clicks on the side-panel and dock headers beneath it. The alerts were
+   * `top-16` (64px), also inside the nav. The nav is 3.8125rem below 640px, so both widths are measured.
+   */
+  const VIEWPORTS = [{ width: 1280, height: 720 }, { width: 375, height: 812 }]
+
+  const measure = (page: Page, testId: string) => page.getByTestId(testId).evaluate(surface => {
+    const nav = document.querySelector('.board-nav-bar')!.getBoundingClientRect()
+    const box = surface.getBoundingClientRect()
+    const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)
+    return { gap: Math.round(box.top - nav.bottom), catchesPointer: Boolean(hit && surface.contains(hit)) }
+  })
+
+  for (const viewport of VIEWPORTS) {
+    test(`keeps the loading strip under the nav and click-through at ${viewport.width}px`, async ({ page, sharedReadOnlyAccount: auth }) => {
+      await page.setViewportSize(viewport)
+      // Hold the snapshot so the strip stays up long enough to measure, then let it finish.
+      let release!: () => Promise<void>
+      await page.route(/\/api\/board\/snapshot(\?|$)/, route => {
+        release = () => route.continue()
+      })
+      await openBoard(page, auth)
+      await expect(page.getByTestId('board-data-loading')).toBeVisible()
+
+      expect(await measure(page, 'board-data-loading')).toEqual({ gap: 0, catchesPointer: false })
+      await release()
+      await expect(page.getByTestId('board-data-loading')).toHaveCount(0, { timeout: 60_000 })
+    })
+
+    test(`hangs the unavailable-link alert below the nav at ${viewport.width}px`, async ({ page, sharedReadOnlyAccount: auth }) => {
+      await page.setViewportSize(viewport)
+      await seedSession(page, auth, { iot_verify_theme: 'light' })
+      await page.goto('/#/board?run=verification:999999')
+      await expect(page.getByTestId('board-deep-link-unavailable')).toBeVisible({ timeout: 60_000 })
+
+      const { gap, catchesPointer } = await measure(page, 'board-deep-link-unavailable')
+      // `--board-floating-gap` is clamp(0.75rem, 2vw, 1rem): 16px at 1280, 12px at 375.
+      expect(gap).toBe(viewport.width >= 800 ? 16 : 12)
+      // Only its dismiss button takes pointer events; the message itself lets clicks through.
+      expect(catchesPointer).toBe(false)
+    })
+
+    test(`keeps an unavailable run and failed refresh readable with keyboard Retry at ${viewport.width}px`, async ({ page, sharedReadOnlyAccount: auth }) => {
+      await page.setViewportSize(viewport)
+      const theme = viewport.width === 375 ? 'dark' : 'light'
+      await seedSession(page, auth, { iot_verify_theme: theme })
+      await page.route('**/api/verify/runs/999999', route => route.fulfill({
+        status: 404,
+        contentType: 'application/json',
+        body: JSON.stringify({ code: 404, message: 'Verification run not found', data: null })
+      }))
+      await page.goto('/#/board?run=verification:999999')
+      const unavailableRun = page.getByTestId('board-deep-link-unavailable')
+      await expect(unavailableRun).toBeVisible({ timeout: 60_000 })
+      await expect(page.getByTestId('scene-import')).toBeEnabled()
+      await expect(page.locator('html')).toHaveAttribute('data-theme', theme)
+
+      const refreshState: { held: Route | null } = { held: null }
+      let holdNextRefresh = true
+      let unavailable = true
+      await page.route(/\/api\/board\/snapshot(\?|$)/, async route => {
+        if (holdNextRefresh) {
+          holdNextRefresh = false
+          refreshState.held = route
+          return
+        }
+        if (unavailable) {
+          await route.fulfill({
+            status: 500,
+            contentType: 'application/json',
+            body: JSON.stringify({ code: 500, message: 'Snapshot unavailable', data: null })
+          })
+          return
+        }
+        await route.continue()
+      })
+
+      const expectSeparatedFromRunAlert = async (upperTestId: string) => {
+        await expect.poll(() => page.evaluate(testId => {
+          const upper = document.querySelector(`[data-testid="${testId}"]`)!.getBoundingClientRect()
+          const lower = document.querySelector('[data-testid="board-deep-link-unavailable"]')!.getBoundingClientRect()
+          const nav = document.querySelector('.board-nav-bar')!.getBoundingClientRect()
+          return {
+            belowNav: upper.top >= nav.bottom,
+            separated: upper.bottom < lower.top,
+            insideViewport: upper.left >= 0 && lower.left >= 0
+              && upper.right <= window.innerWidth && lower.right <= window.innerWidth
+              && lower.bottom <= window.innerHeight
+          }
+        }, upperTestId)).toEqual({ belowNav: true, separated: true, insideViewport: true })
+      }
+
+      try {
+        // Foreground refresh is a read, so the shared account's Board remains untouched.
+        await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+        await expect(page.getByTestId('board-data-loading')).toBeVisible()
+        await expect(unavailableRun).toBeVisible()
+        await expectSeparatedFromRunAlert('board-data-loading')
+        await expect.poll(() => refreshState.held !== null).toBe(true)
+        const refresh = refreshState.held!
+        refreshState.held = null
+        await refresh.fulfill({
+          status: 500,
+          contentType: 'application/json',
+          body: JSON.stringify({ code: 500, message: 'Snapshot unavailable', data: null })
+        })
+
+        const loadError = page.getByTestId('board-data-load-error')
+        await expect(loadError).toBeVisible()
+        await expect(unavailableRun).toBeVisible()
+        await expectSeparatedFromRunAlert('board-data-load-error')
+        const retry = loadError.getByRole('button', { name: /Retry/ })
+        expect(await retry.evaluate(button => {
+          const box = button.getBoundingClientRect()
+          const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)
+          return !!hit && button.contains(hit)
+        })).toBe(true)
+        await retry.focus()
+        await expect(retry).toBeFocused()
+        unavailable = false
+        await page.keyboard.press('Enter')
+        await expect(loadError).toHaveCount(0, { timeout: 60_000 })
+        await expect(page.getByTestId('scene-import')).toBeEnabled()
+        await expect(unavailableRun).toBeVisible()
+        await page.getByTestId('dismiss-deep-link-unavailable').click()
+        await expect(unavailableRun).toHaveCount(0)
+      } finally {
+        if (refreshState.held) await refreshState.held.continue()
+      }
+    })
+  }
 })

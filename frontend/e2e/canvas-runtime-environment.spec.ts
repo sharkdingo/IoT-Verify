@@ -18,14 +18,15 @@ const unwrap = async <T>(response: Awaited<ReturnType<APIRequestContext['get']>>
   return body.data as T
 }
 
-const openWorkspace = async (page: Page, auth: AuthUser) => {
-  await page.addInitScript(({ token, user }) => {
+const openWorkspace = async (page: Page, auth: AuthUser, theme: 'light' | 'dark' = 'light') => {
+  await page.addInitScript(({ token, user, theme }) => {
     window.localStorage.setItem('iot_verify_token', token)
     window.localStorage.setItem('iot_verify_user', JSON.stringify(user))
-    window.localStorage.setItem('iot_verify_theme', 'light')
+    window.localStorage.setItem('iot_verify_theme', theme)
     window.localStorage.setItem('locale', 'en')
   }, {
     token: auth.token,
+    theme,
     user: {
       userId: auth.userId,
       phone: auth.phone,
@@ -46,6 +47,92 @@ const addNodes = async (
   headers: authHeaders(auth),
   data: { devices, environmentVariablePatches }
 }))
+
+for (const { viewport, theme, zoom } of [
+  { viewport: { width: 1280, height: 720 }, theme: 'light', zoom: 1.25 },
+  { viewport: { width: 375, height: 812 }, theme: 'dark', zoom: 0.4 }
+] as const) {
+  test(`self-loop follows a held drag, persists once and survives undo at ${viewport.width}px in ${theme}`, async ({ page, request }) => {
+    const auth = await createAuthenticatedUser(request)
+    await page.setViewportSize(viewport)
+    const source = {
+      id: 'loop_light', templateName: 'Light', label: 'Loop light',
+      position: { x: 100, y: 140 }, state: 'off', width: 176, height: 128
+    }
+    await addNodes(request, auth, [source, { ...source,
+      id: 'other_light', label: 'Other light', position: { x: 420, y: 200 }
+    }])
+    for (const targetId of ['loop_light', 'other_light']) {
+      await unwrap(await request.post(`${apiBaseURL}/api/board/rules`, {
+        headers: authHeaders(auth), data: {
+          ruleString: `Light to ${targetId}`,
+          conditions: [{ deviceName: source.id, targetType: 'state', attribute: 'state', relation: '=', value: 'off' }],
+          command: { deviceName: targetId, action: 'on' }
+        }
+      }))
+    }
+    await unwrap(await request.post(`${apiBaseURL}/api/board/layout`, {
+      headers: authHeaders(auth), data: {
+        canvasPan: { x: 20, y: 30 }, canvasZoom: zoom,
+        panels: {
+          control: { collapsed: true, width: 320, activeSection: 'templates' },
+          inspector: { collapsed: true, width: 320, activeSection: 'devices' }
+        }
+      }
+    }))
+    await openWorkspace(page, auth, theme)
+    await expect(page.locator('html')).toHaveAttribute('data-theme', theme)
+    const node = page.locator('[data-node-id="loop_light"]')
+    const loop = page.locator('path.edge-base-line')
+    const hitarea = page.locator('path.edge-hitarea')
+    await expect(loop).toBeVisible()
+    await hitarea.focus()
+    await expect(page.locator('.edge-label')).toBeVisible()
+    const originalPath = await loop.getAttribute('d')
+    const numbers = (path: string) => path.match(/-?\d+(?:\.\d+)?(?:e[+-]?\d+)?/gi)!.map(Number)
+    const initialCoordinates = numbers(originalPath!)
+    const rulesBefore = await unwrap<any[]>(await request.get(`${apiBaseURL}/api/board/rules`, { headers: authHeaders(auth) }))
+    const savedPosition = async () => {
+      const nodes = await unwrap<Array<typeof source>>(await request.get(`${apiBaseURL}/api/board/nodes`, { headers: authHeaders(auth) }))
+      return nodes.find(node => node.id === source.id)!.position
+    }
+    let layoutWrites = 0
+    page.on('request', outgoing => {
+      if (outgoing.method() === 'PUT' && outgoing.url().endsWith('/api/board/nodes/loop_light/layout')) layoutWrites++
+    })
+    const box = await node.boundingBox()
+    expect(box).not.toBeNull()
+    const start = { x: box!.x + box!.width / 2, y: box!.y + box!.height / 2 }
+    await page.mouse.move(start.x, start.y)
+    await page.mouse.down()
+    try {
+      for (const [dx, dy] of [[12, 8], [24, 16]]) {
+        await page.mouse.move(start.x + dx, start.y + dy)
+        await expect.poll(async () => numbers((await loop.getAttribute('d'))!).map(value => Math.round(value * 1e6))).toEqual(
+          initialCoordinates.map((value, index) => Math.round((value + (index % 2 === 0 ? dx : dy) / zoom) * 1e6))
+        )
+        expect(await hitarea.getAttribute('d')).toBe(await loop.getAttribute('d'))
+      }
+      // Node dragging takes focus; re-focus the edge to reveal its label at the preview position.
+      await hitarea.focus()
+      await expect(page.locator('.edge-label')).toHaveAttribute('transform',
+        `translate(${source.position.x + 24 / zoom + source.width / 2} ${source.position.y + 16 / zoom - 16})`)
+      expect(await savedPosition()).toEqual(source.position)
+      expect(layoutWrites).toBe(0)
+    } finally {
+      await page.mouse.up()
+    }
+    await expect.poll(savedPosition).toEqual({ x: source.position.x + 24 / zoom, y: source.position.y + 16 / zoom })
+    expect(layoutWrites).toBe(1)
+    expect(await unwrap(await request.get(`${apiBaseURL}/api/board/rules`, { headers: authHeaders(auth) }))).toEqual(rulesBefore)
+    const finalPath = await loop.getAttribute('d')
+    await page.reload()
+    await expect(loop).toHaveAttribute('d', finalPath!)
+    await page.getByTestId('board-undo').click()
+    await expect.poll(savedPosition).toEqual(source.position)
+    await expect(loop).toHaveAttribute('d', originalPath!)
+  })
+}
 
 test('opening canvas node details preserves the viewport while inspector focus remains explicit', async ({ page, request }) => {
   const auth = await createAuthenticatedUser(request)

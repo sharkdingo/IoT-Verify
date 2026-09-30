@@ -13,21 +13,27 @@ import { apiBaseURL, createAuthenticatedUser, expect, test, type AuthUser } from
 test.describe.configure({ mode: 'serial' })
 test.setTimeout(180_000)
 
-const seedSession = async (page: Page, auth: AuthUser) => {
-  await page.addInitScript(({ token, user }) => {
+const seedSession = async (page: Page, auth: AuthUser, theme: 'light' | 'dark' = 'light') => {
+  await page.addInitScript(({ token, user, theme }) => {
     window.localStorage.setItem('iot_verify_token', token)
     window.localStorage.setItem('iot_verify_user', JSON.stringify(user))
     window.localStorage.setItem('locale', 'en')
-    window.localStorage.setItem('iot_verify_theme', 'light')
+    window.localStorage.setItem('iot_verify_theme', theme)
   }, {
     token: auth.token,
-    user: { userId: auth.userId, phone: auth.phone, username: auth.username }
+    user: { userId: auth.userId, phone: auth.phone, username: auth.username },
+    theme
   })
 }
 
 /** Imports a scene so there are real, device-referencing rules to delete and restore. */
-const openBoardWithScene = async (page: Page, request: APIRequestContext, auth: AuthUser) => {
-  await seedSession(page, auth)
+const openBoardWithScene = async (
+  page: Page,
+  request: APIRequestContext,
+  auth: AuthUser,
+  theme: 'light' | 'dark' = 'light'
+) => {
+  await seedSession(page, auth, theme)
   await page.goto('/#/board')
   await expect(page.locator('.iot-board')).toBeVisible({ timeout: 60_000 })
 
@@ -50,7 +56,7 @@ const ruleIds = async (request: APIRequestContext, auth: AuthUser): Promise<numb
 }
 
 type RawBoardSnapshot = {
-  nodes: Array<{ id: string }>
+  nodes: Array<{ id: string; label: string }>
   environmentVariables: Array<{ name: string; value: string; trust: string; privacy: string }>
   rules: Array<{ id: number }>
   specifications: Array<{ id: string }>
@@ -104,6 +110,60 @@ const deleteFirstRule = async (page: Page) => {
 }
 
 test.describe('board edit undo and redo', () => {
+  for (const { viewport, theme } of [
+    { viewport: { width: 1280, height: 720 }, theme: 'light' },
+    { viewport: { width: 375, height: 812 }, theme: 'dark' }
+  ] as const) {
+    test(`renames from the keyboard without a duplicate toast and undoes at ${viewport.width}px in ${theme}`, async ({ page, request }) => {
+      const auth = await createAuthenticatedUser(request)
+      await page.setViewportSize(viewport)
+      await openBoardWithScene(page, request, auth, theme)
+      await expect(page.locator('html')).toHaveAttribute('data-theme', theme)
+
+      const originalLabel = 'Living-room Air Conditioner'
+      const renamedLabel = 'Renamed living-room air conditioner'
+      const inspector = page.getByTestId('system-inspector')
+      if (await inspector.getByRole('button', { name: 'Expand', exact: true }).isVisible()) {
+        await inspector.getByRole('button', { name: 'Expand', exact: true }).click()
+      }
+      await page.getByTestId('inspector-tab-devices').click()
+      await inspector.locator('[data-device-id="ac_1"]')
+        .getByRole('button', { name: originalLabel, exact: true }).click()
+      await inspector.getByRole('button', { name: 'Collapse', exact: true }).click()
+
+      const node = page.locator('[data-node-id="ac_1"]')
+      await node.click()
+      await page.getByTestId('device-dialog').getByTestId('device-rename').click()
+      const renameDialog = page.getByRole('dialog', { name: 'Rename device' })
+      await renameDialog.getByPlaceholder('Enter device name').fill(renamedLabel)
+      await page.keyboard.press('Enter')
+
+      await expect(renameDialog).toHaveCount(0)
+      // An auto-retrying absence assertion would wait for the redundant toast to expire and pass.
+      expect(await page.locator('.el-message').filter({ hasText: 'Renamed successfully' }).count()).toBe(0)
+      await expect(node).toContainText(renamedLabel)
+      await expect.poll(async () => (await boardSnapshot(request, auth)).nodes
+        .find(candidate => candidate.id === 'ac_1')?.label).toBe(renamedLabel)
+      await expect.poll(() => page.evaluate(() => {
+        const focused = document.activeElement as HTMLElement | null
+        if (!focused || focused === document.body) return false
+        const box = focused.getBoundingClientRect()
+        const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)
+        return box.width > 0 && box.height > 0
+          && box.left >= 0 && box.top >= 0
+          && box.right <= window.innerWidth && box.bottom <= window.innerHeight
+          && !!hit && focused.contains(hit)
+      })).toBe(true)
+
+      await expect(undoButton(page)).toBeEnabled()
+      await undoButton(page).click()
+      await expect(node).toContainText(originalLabel)
+      await expect.poll(async () => (await boardSnapshot(request, auth)).nodes
+        .find(candidate => candidate.id === 'ac_1')?.label).toBe(originalLabel)
+      await expect(redoButton(page)).toBeEnabled()
+    })
+  }
+
   test('restores a deleted rule, redoes it, and survives a refresh', async ({ page, request }) => {
     const auth = await createAuthenticatedUser(request)
     await openBoardWithScene(page, request, auth)
@@ -211,9 +271,22 @@ test.describe('board edit undo and redo', () => {
     const confirmation = page.getByRole('dialog', { name: 'Delete device' })
     await confirmation.getByRole('button', { name: 'Delete Device', exact: true }).click()
 
-    await expect(page.locator('.el-message').filter({
+    const deletedToast = page.locator('.el-message').filter({
       hasText: /Deleted .*Living-room Air Conditioner/
-    })).toBeVisible()
+    })
+    await expect(deletedToast).toBeVisible()
+    // The toast reports the very edit undo reverses, so it must neither sit over the nav nor catch a click.
+    // The original defect was the second one: its text paragraph kept pointer events and swallowed the
+    // click on board-undo. Polled because the toast slides in from above its resting place.
+    await expect.poll(() => deletedToast.evaluate(toast => {
+      const nav = document.querySelector('.board-nav-bar')!.getBoundingClientRect()
+      const text = toast.querySelector('.el-message__content')!.getBoundingClientRect()
+      const hit = document.elementFromPoint(text.left + text.width / 2, text.top + text.height / 2)
+      return {
+        belowNav: toast.getBoundingClientRect().top >= nav.bottom,
+        catchesPointer: Boolean(hit?.closest('.el-message'))
+      }
+    })).toEqual({ belowNav: true, catchesPointer: false })
     await expect(page.locator('.el-message').filter({
       hasText: 'The device change also removed from the Environment Pool:'
     })).toHaveCount(0)

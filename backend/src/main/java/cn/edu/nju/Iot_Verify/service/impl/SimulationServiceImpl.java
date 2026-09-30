@@ -719,29 +719,30 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
             // Atomically transition PENDING → RUNNING to close the cancel-vs-start race window.
             // A plain findById + save was vulnerable to TOCTOU: a concurrent cancel could set
             // CANCELLED between the read and the save, and the save would overwrite it back to RUNNING.
-            long startConfirmationNanos = TaskLeaseRenewal.monotonicNow();
-            LocalDateTime currentTime = databaseNow();
-            LocalDateTime startedAt = currentTime;
             String startCheckLogs = serializeCheckLogs(List.of("Task started"));
-            int updated = simulationTaskRepository.startTaskIfStillPending(
-                    taskId,
-                    SimulationTaskPo.TaskStatus.RUNNING,
-                    startedAt, 0, startCheckLogs,
-                    SimulationTaskPo.TaskStatus.PENDING,
-                    workerId,
-                    currentTime,
-                    currentTime.plus(TASK_LEASE_DURATION));
-            if (updated == 0) {
+            TaskLeaseRenewal.LeaseUpdateResult start = TaskLeaseRenewal.updateWithConfirmation(
+                    transactionTemplate,
+                    () -> simulationTaskRepository.findByIdForUpdate(taskId),
+                    this::databaseNow,
+                    (lockedTask, currentTime) -> simulationTaskRepository.startTaskIfStillPending(
+                            taskId,
+                            SimulationTaskPo.TaskStatus.RUNNING,
+                            currentTime, 0, startCheckLogs,
+                            SimulationTaskPo.TaskStatus.PENDING,
+                            workerId,
+                            currentTime,
+                            currentTime.plus(TASK_LEASE_DURATION)));
+            if (start.updated() == 0) {
                 log.info("Simulation task {} is no longer PENDING (cancelled or already started), aborting", taskId);
                 return;
             }
-            if (!TaskLeaseRenewal.completedBeforeTtl(startConfirmationNanos, TASK_LEASE_DURATION)) {
+            if (!TaskLeaseRenewal.completedBeforeTtl(start.confirmationStartedNanos(), TASK_LEASE_DURATION)) {
                 log.warn("Simulation task {} lease expired before its start was committed", taskId);
                 return;
             }
             LocalSimulationExecution localExecution = localExecutions.get(taskId);
             if (localExecution != null) {
-                localExecution.leaseConfirmation.confirmAt(startConfirmationNanos);
+                localExecution.leaseConfirmation.confirmAt(start.confirmationStartedNanos());
             }
 
             // Load entity for subsequent use (failTask/completeTask only need id and startedAt).
@@ -1453,8 +1454,12 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
 
     @Override
     protected int atomicUpdateProgress(Long taskId, int progress, TaskProgressStage stage) {
-        return simulationTaskRepository.updateProgressIfActive(
-                taskId, progress, stage, workerId, databaseNow());
+        return TaskLeaseRenewal.updateWithConfirmation(
+                transactionTemplate,
+                () -> simulationTaskRepository.findByIdForUpdate(taskId),
+                this::databaseNow,
+                (lockedTask, currentTime) -> simulationTaskRepository.updateProgressIfActive(
+                        taskId, progress, stage, workerId, currentTime)).updated();
     }
 
     @Override

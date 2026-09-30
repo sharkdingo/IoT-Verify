@@ -494,30 +494,30 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
             updateTaskProgress(taskId, 0, TaskProgressStage.STARTING);
             if (isTaskCancelled(taskId)) return;
 
-            long startConfirmationNanos = TaskLeaseRenewal.monotonicNow();
-            LocalDateTime currentTime = databaseNow();
-            LocalDateTime startedAt = currentTime;
-            LocalDateTime leaseExpiresAt = currentTime.plus(TASK_LEASE_DURATION);
-            int started = taskRepository.startTaskIfStillPending(
-                    taskId,
-                    FuzzTaskPo.TaskStatus.RUNNING,
-                    startedAt,
-                    workerId,
-                    currentTime,
-                    leaseExpiresAt,
-                    serializeCheckLogs(List.of("Counterexample search task started")),
-                    FuzzTaskPo.TaskStatus.PENDING);
-            if (started == 0) {
+            TaskLeaseRenewal.LeaseUpdateResult start = TaskLeaseRenewal.updateWithConfirmation(
+                    transactionTemplate,
+                    () -> taskRepository.findByIdForUpdate(taskId),
+                    this::databaseNow,
+                    (lockedTask, currentTime) -> taskRepository.startTaskIfStillPending(
+                            taskId,
+                            FuzzTaskPo.TaskStatus.RUNNING,
+                            currentTime,
+                            workerId,
+                            currentTime,
+                            currentTime.plus(TASK_LEASE_DURATION),
+                            serializeCheckLogs(List.of("Counterexample search task started")),
+                            FuzzTaskPo.TaskStatus.PENDING));
+            if (start.updated() == 0) {
                 log.info("Fuzz task {} is no longer pending; skipping execution", taskId);
                 return;
             }
-            if (!TaskLeaseRenewal.completedBeforeTtl(startConfirmationNanos, TASK_LEASE_DURATION)) {
+            if (!TaskLeaseRenewal.completedBeforeTtl(start.confirmationStartedNanos(), TASK_LEASE_DURATION)) {
                 log.warn("Fuzz task {} lease expired before its start was committed", taskId);
                 return;
             }
             LocalFuzzExecution localExecution = localExecutions.get(taskId);
             if (localExecution != null) {
-                localExecution.leaseConfirmation.confirmAt(startConfirmationNanos);
+                localExecution.leaseConfirmation.confirmAt(start.confirmationStartedNanos());
             }
             task = taskRepository.findById(taskId).orElse(null);
             if (task == null) {
@@ -1773,7 +1773,12 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
 
     @Override
     protected int atomicUpdateProgress(Long taskId, int progress, TaskProgressStage stage) {
-        return taskRepository.updateProgressIfActive(taskId, progress, stage, workerId, databaseNow());
+        return TaskLeaseRenewal.updateWithConfirmation(
+                transactionTemplate,
+                () -> taskRepository.findByIdForUpdate(taskId),
+                this::databaseNow,
+                (lockedTask, currentTime) -> taskRepository.updateProgressIfActive(
+                        taskId, progress, stage, workerId, currentTime)).updated();
     }
 
     @Override

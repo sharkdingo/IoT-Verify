@@ -87,6 +87,78 @@ describe('toast severities', () => {
   })
 })
 
+describe('toast placement', () => {
+  /*
+   * Element Plus pins the first toast 16px from the viewport top, inside the board's fixed nav, where a
+   * centred toast covered undo and redo right after the action it reported. jsdom lays nothing out, so each
+   * case states the header geometry it depends on.
+   */
+  const addAnchor = (bottom: number) => {
+    const header = document.createElement('nav')
+    header.setAttribute('data-toast-anchor', '')
+    vi.spyOn(header, 'getBoundingClientRect').mockReturnValue({ bottom } as DOMRect)
+    document.body.append(header)
+  }
+
+  const offsets = () => {
+    notifySuccess('saved')
+    notifyInfo('noted')
+    notifyBlocked('close playback first')
+    notifyError('request failed')
+    return [
+      elementPlus.message.success,
+      elementPlus.message.info,
+      elementPlus.message.warning,
+      elementPlus.message.error
+    ].map(call => (call.mock.calls[0][0] as { offset?: number }).offset)
+  }
+
+  afterEach(() => {
+    document.body.replaceChildren()
+  })
+
+  it('puts every severity below the fixed header, not over it', () => {
+    // 69px is the board nav at its desktop height.
+    addAnchor(69)
+    expect(offsets()).toEqual([85, 85, 85, 85])
+  })
+
+  it('goes below a persistent alert under the header, whichever comes first in the DOM', () => {
+    // The board's load-failure alert hangs below the nav; a toast over it would hide the Retry reason.
+    addAnchor(133)
+    addAnchor(69)
+    expect(offsets()).toEqual([149, 149, 149, 149])
+  })
+
+  it('keeps the viewport-top slot on a page without a header', () => {
+    expect(offsets()).toEqual([16, 16, 16, 16])
+  })
+
+  it('ignores a header that has scrolled out of view', () => {
+    // The public header is `position: absolute`, so a scrolled landing page puts its bottom above the viewport.
+    addAnchor(-40)
+    expect(offsets()).toEqual([16, 16, 16, 16])
+  })
+
+  it('stays at the viewport top while a modal covers the header', async () => {
+    // The header is inert behind the scrim, and a centred dialog can reach near the top, so dropping the toast
+    // below the header would put it over the dialog instead.
+    addAnchor(69)
+    let settle!: () => void
+    elementPlus.box.confirm.mockImplementationOnce(() => new Promise<void>(resolve => {
+      settle = resolve
+    }))
+    const pending = confirmChoice({ title: 'Proceed', message: 'Sure?' })
+    try {
+      expect(offsets()).toEqual([16, 16, 16, 16])
+    } finally {
+      // Settle even on failure: a leaked modal count would redden every modal-depth case after this one.
+      settle()
+      await pending
+    }
+  })
+})
+
 describe('confirmDestructive', () => {
   it('reports confirmation as true and cancellation as false, never throwing', async () => {
     elementPlus.box.confirm.mockResolvedValueOnce('confirm')

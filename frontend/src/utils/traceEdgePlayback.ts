@@ -46,6 +46,33 @@ export const toTraceDeviceId = (nodeId: string): string =>
 export const traceDeviceMatchesId = (device: { deviceId?: string | null }, nodeId: string): boolean =>
   !!device.deviceId && device.deviceId.toLowerCase() === toTraceDeviceId(nodeId)
 
+/** Index sparse device snapshots once, preserving the latest record and sticky compromise evidence. */
+export const buildTraceDevicePlaybackIndex = <T extends TraceDeviceLike>(
+  states: Array<{ devices?: T[] }> | undefined,
+  selectedIndex: number | undefined
+) => {
+  const current = new Map<string, T>()
+  const previous = new Map<string, T>()
+  const compromised = new Set<string>()
+  if (!states?.length) return { current, previous, compromised }
+  const endIndex = Math.min(Math.max(selectedIndex || 0, 0), states.length - 1)
+  const previousIndex = selectedIndex !== undefined && selectedIndex > 0
+    ? Math.min(selectedIndex - 1, states.length - 1) : -1
+  for (let index = endIndex; index >= 0; index--) {
+    const seenInState = new Set<string>()
+    for (const device of states[index]?.devices || []) {
+      const id = device.deviceId?.toLowerCase()
+      // The original per-state lookup selected the first record, including in malformed duplicate input.
+      if (!id || seenInState.has(id)) continue
+      seenInState.add(id)
+      if (!current.has(id)) current.set(id, device)
+      if (index <= previousIndex && !previous.has(id)) previous.set(id, device)
+      if (selectedIndex !== undefined && selectedIndex >= 0 && device.compromised === true) compromised.add(id)
+    }
+  }
+  return { current, previous, compromised }
+}
+
 export const normalizeTraceComparable = (value: unknown) =>
   String(value ?? '').trim()
 
@@ -282,78 +309,54 @@ type FrozenRuleIdentity = {
   ruleId?: string | null
 }
 
-const edgeMatchesFrozenRule = (
-  edge: DeviceEdge,
-  allEdges: DeviceEdge[],
-  frozenRule: FrozenRuleIdentity
-): boolean => {
-  if (!Number.isSafeInteger(edge.ruleIndex)) return false
-
-  /*
-   * An id-less rule matches on position instead.
-   *
-   * `TraceTriggeredRuleDto.ruleId` is documented nullable — "stable persisted rule identity **when the
-   * submitted rule had one**" — and `playbackScene.ts:30` sets the edge's `ruleId` to `undefined` for
-   * the same rules. So both sides lose the id together, and requiring it meant no edge ever lit for
-   * such a rule: the chip named a rule the canvas ignored, while the on-screen explanation
-   * (`playbackTriggeredRuleWithoutCurrentEdge`) blamed board drift — which is false, because the frozen
-   * scene does contain that rule.
-   *
-   * Position is sound here, not a guess: `ruleIndex` on both sides is an index into the same submitted
-   * rule list. The backend field is "zero-based position in the immutable rule list submitted for this
-   * run", and the scene's rules come from `ModelPlaybackSceneSnapshot.copyRules`, which `.map`s that
-   * list one-to-one and never filters — so index i denotes the same rule on both sides.
-   *
-   * Only used when BOTH ids are absent. A present-but-different id still means "not this rule", and an
-   * id on one side only means the two snapshots disagree about identity, where matching on position
-   * would be a coincidence rather than evidence.
-   */
-  if (edge.ruleId == null && frozenRule.ruleId == null) {
-    return edge.ruleIndex === frozenRule.ruleIndex
+const indexFrozenRules = (rules: FrozenRuleIdentity[] | undefined) => {
+  const ids = new Set<string>()
+  const positions = new Set<number>()
+  for (const rule of rules || []) {
+    if (rule.ruleId == null) positions.add(rule.ruleIndex)
+    else ids.add(String(rule.ruleId))
   }
-
-  if (!edge.ruleId || frozenRule.ruleId == null) return false
-  if (String(edge.ruleId) !== String(frozenRule.ruleId)) return false
-
-  const currentIndexes = new Set<number>()
-  for (const candidate of allEdges) {
-    if (candidate.ruleId == null || String(candidate.ruleId) !== String(edge.ruleId)) continue
-    if (!Number.isSafeInteger(candidate.ruleIndex)) return false
-    currentIndexes.add(candidate.ruleIndex as number)
-  }
-  return currentIndexes.size === 1 && currentIndexes.has(edge.ruleIndex as number)
+  return { ids, positions }
 }
 
-export const isEdgeActiveInTrace = (
-  edge: DeviceEdge,
-  allEdges: DeviceEdge[],
-  trace: TracePlaybackLike
-): boolean => {
-  if (!trace?.states || trace.selectedStateIndex === undefined || trace.selectedStateIndex < 0) return false
-  const triggeredRules = trace.states[trace.selectedStateIndex]?.triggeredRules
-  if (!Array.isArray(triggeredRules)) return false
-  return triggeredRules.some(rule => edgeMatchesFrozenRule(edge, allEdges, rule))
+export type TraceEdgePlaybackState = {
+  traceActive: boolean
+  linkCompromised: boolean
+  shouldAnimate: boolean
 }
 
-export const isEdgeCompromisedInTrace = (
-  edge: DeviceEdge,
+/** Resolve all connections in O(E + T + C), including multi-source and ambiguous rule identities. */
+export const buildTraceEdgePlaybackStates = (
   allEdges: DeviceEdge[],
   trace: TracePlaybackLike
-): boolean => {
-  if (!trace?.states || trace.selectedStateIndex === undefined || trace.selectedStateIndex < 0) return false
-  const compromisedLinks = trace.states[trace.selectedStateIndex]?.compromisedAutomationLinks
-  if (!Array.isArray(compromisedLinks)) return false
-  return compromisedLinks.some(rule => edgeMatchesFrozenRule(edge, allEdges, rule))
-}
-
-export const shouldAnimateEdgeFlow = (
-  edge: DeviceEdge,
-  allEdges: DeviceEdge[],
-  trace: TracePlaybackLike
-): boolean => {
-  if (!trace?.states || trace.selectedStateIndex === undefined || trace.selectedStateIndex < 0) {
-    return false
+): Map<DeviceEdge, TraceEdgePlaybackState> => {
+  const selectedIndex = trace?.selectedStateIndex
+  const state = selectedIndex !== undefined && selectedIndex >= 0 ? trace?.states?.[selectedIndex] : undefined
+  const triggered = indexFrozenRules(state?.triggeredRules)
+  const compromised = indexFrozenRules(state?.compromisedAutomationLinks)
+  const ruleIndexes = new Map<string, number | null>()
+  for (const edge of allEdges) {
+    if (edge.ruleId == null) continue
+    const id = String(edge.ruleId)
+    const index = Number.isSafeInteger(edge.ruleIndex) ? edge.ruleIndex as number : null
+    if (!ruleIndexes.has(id)) ruleIndexes.set(id, index)
+    else if (ruleIndexes.get(id) !== index) ruleIndexes.set(id, null)
   }
-  return isEdgeActiveInTrace(edge, allEdges, trace)
-    && !isEdgeCompromisedInTrace(edge, allEdges, trace)
+
+  const result = new Map<DeviceEdge, TraceEdgePlaybackState>()
+  for (const edge of allEdges) {
+    const validIndex = Number.isSafeInteger(edge.ruleIndex)
+    const id = edge.ruleId == null ? null : String(edge.ruleId)
+    // A stable id must denote one rule position; several sources at that position are legitimate.
+    // Id-less matching requires both sides to lack an id and address the same frozen rule list.
+    const uniqueId = Boolean(id && ruleIndexes.get(id) === edge.ruleIndex)
+    const traceActive = validIndex && (id === null
+      ? triggered.positions.has(edge.ruleIndex as number)
+      : uniqueId && triggered.ids.has(id))
+    const linkCompromised = validIndex && (id === null
+      ? compromised.positions.has(edge.ruleIndex as number)
+      : uniqueId && compromised.ids.has(id))
+    result.set(edge, { traceActive, linkCompromised, shouldAnimate: traceActive && !linkCompromised })
+  }
+  return result
 }

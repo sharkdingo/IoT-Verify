@@ -722,9 +722,11 @@ const applyFix = async (suggestion: FixSuggestion) => {
       notifyBlocked(localizedTextOrFallback(result.message, t('app.failedToApplyFix'), locale.value))
       return
     }
-    notifySuccess(t('app.fixAppliedWithSignedEvidence'))
     emit('applied', result)
     emit('update:visible', false)
+    // The parent-controlled visibility prop releases this dialog's modal depth on render.
+    await nextTick()
+    notifySuccess(t('app.fixAppliedWithSignedEvidence'))
   } catch (error: any) {
     console.error('Failed to apply fix:', error)
     const status = Number(error?.response?.status)

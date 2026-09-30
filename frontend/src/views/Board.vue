@@ -675,7 +675,7 @@ import {
   type PlaybackDeviceChange,
   type PlaybackEnvironmentChange
 } from '@/utils/traceView'
-import { isEdgeActiveInTrace, isEdgeCompromisedInTrace } from '@/utils/traceEdgePlayback'
+import { buildTraceEdgePlaybackStates } from '@/utils/traceEdgePlayback'
 import {
   buildSimulationRequestPayload,
   buildLocalSceneFingerprint,
@@ -1004,8 +1004,9 @@ const handleDeleteAccountConfirm = async (payload: { password: string; confirmat
     trackedFuzzTaskIds.value = []
     if (logoutIfTokenMatches(requestToken)) {
       showDeleteAccountDialog.value = false
-      notifySuccess(t('app.deleteAccountSuccess'))
       await router.replace({ path: '/', query: { mode: 'register' } })
+      await nextTick()
+      notifySuccess(t('app.deleteAccountSuccess'))
     }
   } catch (error: any) {
     if (isAccountDeletionOutcomeUncertain(error)) {
@@ -1014,8 +1015,9 @@ const handleDeleteAccountConfirm = async (payload: { password: string; confirmat
       trackedFuzzTaskIds.value = []
       if (logoutIfTokenMatches(requestToken)) {
         showDeleteAccountDialog.value = false
-        notifyBlocked(t('app.deleteAccountOutcomeUnknown'))
         await router.replace({ path: '/', query: { mode: 'login' } })
+        await nextTick()
+        notifyBlocked(t('app.deleteAccountOutcomeUnknown'))
       }
     } else if (getToken() === requestToken) {
       const message = localizedErrorMessage(error, t('app.deleteAccountFailed'), locale.value)
@@ -2691,11 +2693,10 @@ const createDeviceInstanceAt = async (
         specs: mutation.currentSpecifications,
         availability: mutation
       })
-      reportEnvironmentChanges(mutation.environmentChanges)
       const created = mutation.affectedDevices[0]
       notifyConfirmedCreate()
       await focusCreatedDeviceNode(created)
-      return { device: created, responseConfirmed: true }
+      return { device: created, responseConfirmed: true, environmentChanges: mutation.environmentChanges }
     } catch (error: any) {
       if (!isDefinitiveMutationRejection(error)) {
         const [nodesRefreshed, environmentRefreshed] = await Promise.all([
@@ -2707,8 +2708,7 @@ const createDeviceInstanceAt = async (
         if (nodesRefreshed && environmentRefreshed && created) {
           notifyConfirmedCreate()
           await focusCreatedDeviceNode(created)
-          notifyBlocked(t('app.deviceCreateOutcomeRefreshed', { name: created.label }))
-          return { device: created, responseConfirmed: false }
+          return { device: created, responseConfirmed: false, environmentChanges: [] }
         }
       }
       notifyError(localizedErrorMessage(error, t('app.saveNodesFailed'), locale.value))
@@ -2770,16 +2770,17 @@ const confirmTemplateInstanceCreate = async () => {
   try {
     const outcome = await createDeviceInstanceAt(tpl, templateInstanceDialogData.position, availableName, runtime)
     const created = outcome.device
-    if (created.label !== availableName) {
-      notifyBlocked(t('app.deviceNameAdjustedToAvoidConflict', { name: created.label }))
-    }
-    if (outcome.responseConfirmed) {
-      notifySuccess(t('app.deviceAddedWithName', { name: created.label }))
-    }
     templateInstanceDialogVisible.value = false
     templateInstanceDialogData.template = null
     templateInstanceDialogData.name = ''
     resetTemplateInstanceRuntime(null)
+    reportEnvironmentChanges(outcome.environmentChanges)
+    if (!outcome.responseConfirmed) {
+      notifyBlocked(t('app.deviceCreateOutcomeRefreshed', { name: created.label }))
+    }
+    if (created.label !== availableName) {
+      notifyBlocked(t('app.deviceNameAdjustedToAvoidConflict', { name: created.label }))
+    }
   } catch { /* 已回滚并提示 */ }
   finally {
     templateInstanceSaving.value = false
@@ -2881,6 +2882,7 @@ const handleAddRule = async (request: {
     return
   }
   let saved = false
+  let outcomeRefreshed = false
   let attemptedRule: RuleForm | null = null
   try {
     await enqueueBoardMutation(async () => {
@@ -2910,7 +2912,6 @@ const handleAddRule = async (request: {
         if (mutation.affectedItem?.id) {
           await focusRuleOnCanvas(mutation.affectedItem.id)
         }
-        notifySuccess(t('app.addRuleSuccess'))
         saved = true
       } catch (error: any) {
         console.error('addRule error', error)
@@ -2918,7 +2919,7 @@ const handleAddRule = async (request: {
           const refreshed = await refreshRules()
           await reloadUndoAvailability()
           if (refreshed && ruleExists(attemptedRule)) {
-            notifyBlocked(t('app.ruleCreateOutcomeRefreshed'))
+            outcomeRefreshed = true
             saved = true
             return
           }
@@ -2928,6 +2929,10 @@ const handleAddRule = async (request: {
     })
   } finally {
     request.complete(saved)
+    if (outcomeRefreshed) {
+      await nextTick()
+      notifyBlocked(t('app.ruleCreateOutcomeRefreshed'))
+    }
   }
 }
 
@@ -3364,7 +3369,7 @@ const handleRenameDevice = async (
   nodeId: string,
   newLabel: string,
   expectedLabel: string
-): Promise<boolean> => {
+): Promise<false | { responseConfirmed: boolean; environmentChanges: EnvironmentVariableChange[] }> => {
   if (!ensurePlaybackClosedForMutation()) return false
   if (!ensureBoardDataReady(['nodes', 'specs'])) return false
   return enqueueBoardMutation(async () => {
@@ -3384,9 +3389,7 @@ const handleRenameDevice = async (
         specs: mutation.currentSpecifications,
         availability: mutation
       })
-      reportEnvironmentChanges(mutation.environmentChanges)
-      notifySuccess(t('app.renameSuccess'))
-      return true
+      return { responseConfirmed: true, environmentChanges: mutation.environmentChanges }
     } catch (error: any) {
       if (error?.response?.status === 409) {
         const [nodesRefreshed, specsRefreshed, environmentRefreshed] = await Promise.all([
@@ -3398,8 +3401,7 @@ const handleRenameDevice = async (
         const currentNode = nodes.value.find(candidate => candidate.id === nodeId)
         if (nodesRefreshed && specsRefreshed && environmentRefreshed && currentNode) {
           if (currentNode.label === newLabel) {
-            notifyBlocked(t('app.deviceRenameOutcomeRefreshed', { name: newLabel }))
-            return true
+            return { responseConfirmed: false, environmentChanges: [] }
           }
           if (renameDialogVisible.value && renameDialogData.node?.id === nodeId) {
             renameDialogData.node = currentNode
@@ -3420,8 +3422,7 @@ const handleRenameDevice = async (
         await reloadUndoAvailability()
         const renamed = nodes.value.find(candidate => candidate.id === nodeId && candidate.label === newLabel)
         if (nodesRefreshed && specsRefreshed && environmentRefreshed && renamed) {
-          notifyBlocked(t('app.deviceRenameOutcomeRefreshed', { name: newLabel }))
-          return true
+          return { responseConfirmed: false, environmentChanges: [] }
         }
       }
       notifyError(extractApiErrorMessage(error, t('app.saveNodesFailed')))
@@ -3781,9 +3782,10 @@ const confirmRename = async () => {
 
   renameDialogSubmitting.value = true
   try {
+    const newLabel = renameDialogData.newName.trim()
     const saved = await handleRenameDevice(
       renameDialogData.node.id,
-      renameDialogData.newName.trim(),
+      newLabel,
       renameDialogData.originalLabel
     )
     if (!saved) return
@@ -3791,6 +3793,10 @@ const confirmRename = async () => {
     renameDialogData.node = null
     renameDialogData.newName = ''
     renameDialogData.originalLabel = ''
+    reportEnvironmentChanges(saved.environmentChanges)
+    if (!saved.responseConfirmed) {
+      notifyBlocked(t('app.deviceRenameOutcomeRefreshed', { name: newLabel }))
+    }
   } finally {
     renameDialogSubmitting.value = false
     reconcileRenameDialogWithBoard()
@@ -5384,11 +5390,6 @@ const refreshSpecifications = async (): Promise<boolean> => {
 
 const retryBoardDataLoad = async () => {
   await requestBoardSnapshotRefresh({ force: true })
-  if (isBoardDataReady.value) {
-    notifySuccess(t('app.boardDataReloaded'))
-  } else {
-    notifyError(t('app.boardDataLoadFailed'))
-  }
 }
 
 watch([nodes, rules], syncRuleDerivedEdges)
@@ -6013,6 +6014,8 @@ const handleCreateDevice = async (data: {
   return enqueueBoardMutation(async () => {
     let saved = false
     let requestedNode: DeviceNode | null = null
+    let environmentChanges: EnvironmentVariableChange[] = []
+    let refreshedDeviceLabel: string | null = null
     try {
       const { template, customName, runtime } = data
       if (!ensureDeviceRuntimeCapacity(runtime)) return
@@ -6040,10 +6043,9 @@ const handleCreateDevice = async (data: {
         specs: mutation.currentSpecifications,
         availability: mutation
       })
-      reportEnvironmentChanges(mutation.environmentChanges)
+      environmentChanges = mutation.environmentChanges
       const created = mutation.affectedDevices[0]
       await focusCreatedDeviceNode(created)
-      notifySuccess(t('app.deviceAddedWithName', { name: created.label }))
       saved = true
     } catch (error: any) {
       if (!isDefinitiveMutationRejection(error) && requestedNode) {
@@ -6055,7 +6057,7 @@ const handleCreateDevice = async (data: {
         const created = nodes.value.find(candidate => candidate.id === requestedNode?.id)
         if (nodesRefreshed && environmentRefreshed && created) {
           await focusCreatedDeviceNode(created)
-          notifyBlocked(t('app.deviceCreateOutcomeRefreshed', { name: created.label }))
+          refreshedDeviceLabel = created.label
           saved = true
           return
         }
@@ -6063,6 +6065,13 @@ const handleCreateDevice = async (data: {
       notifyError(localizedErrorMessage(error, t('app.saveNodesFailed'), locale.value))
     } finally {
       data.complete(saved)
+      if (saved) {
+        await nextTick()
+        reportEnvironmentChanges(environmentChanges)
+        if (refreshedDeviceLabel !== null) {
+          notifyBlocked(t('app.deviceCreateOutcomeRefreshed', { name: refreshedDeviceLabel }))
+        }
+      }
     }
   })
 }
@@ -6082,6 +6091,8 @@ const handleCreateDevices = async (data: {
   }
   return enqueueBoardMutation(async () => {
     let savedSuccessfully = false
+    let outcomeRefreshed = false
+    let environmentChanges: EnvironmentVariableChange[] = []
     const items = Array.isArray(data.items) ? data.items : []
 
     if (items.length === 0) {
@@ -6145,10 +6156,9 @@ const handleCreateDevices = async (data: {
         specs: mutation.currentSpecifications,
         availability: mutation
       })
-      reportEnvironmentChanges(mutation.environmentChanges)
+      environmentChanges = mutation.environmentChanges
       const lastCreated = mutation.affectedDevices[mutation.affectedDevices.length - 1]
       await focusCreatedDeviceNode(lastCreated)
-      notifySuccess(t('app.devicesAddedWithCount', { count: createdNodes.length }))
       savedSuccessfully = true
     } catch (error: any) {
       console.error('Failed to batch-create devices or save environment variables', error)
@@ -6163,7 +6173,7 @@ const handleCreateDevices = async (data: {
         if (nodesRefreshed && environmentRefreshed && allPresent) {
           const lastCreated = nodes.value.find(candidate => candidate.id === createdNodes[createdNodes.length - 1].id)
           if (lastCreated) await focusCreatedDeviceNode(lastCreated)
-          notifyBlocked(t('app.devicesCreateOutcomeRefreshed', { count: createdNodes.length }))
+          outcomeRefreshed = true
           savedSuccessfully = true
           return
         }
@@ -6174,6 +6184,15 @@ const handleCreateDevices = async (data: {
       notifyError(localizedErrorMessage(error, fallbackMessage, locale.value))
     } finally {
       data.complete(savedSuccessfully)
+      if (savedSuccessfully) {
+        await nextTick()
+        reportEnvironmentChanges(environmentChanges)
+        if (outcomeRefreshed) {
+          notifyBlocked(t('app.devicesCreateOutcomeRefreshed', { count: createdNodes.length }))
+        } else {
+          notifySuccess(t('app.devicesAddedWithCount', { count: createdNodes.length }))
+        }
+      }
     }
   })
 }
@@ -6198,6 +6217,7 @@ const handleAddSpec = async (data: {
     return
   }
   let saved = false
+  let outcomeRefreshed = false
   let attemptedSpec: Specification | null = null
   try {
     await enqueueBoardMutation(async () => {
@@ -6242,7 +6262,6 @@ const handleAddSpec = async (data: {
         commitSemanticScene({ specs: mutation.currentItems, availability: mutation })
         const createdSpec = mutation.affectedItem
         await focusSpecInInspector(createdSpec?.id)
-        notifySuccess(t('app.specificationAddedSuccessfully'))
         saved = true
       } catch (error: any) {
         console.error('[Board] Failed to add specification:', error)
@@ -6250,7 +6269,7 @@ const handleAddSpec = async (data: {
           const refreshed = await refreshSpecifications()
           await reloadUndoAvailability()
           if (refreshed && specifications.value.some(spec => isSameSpecification(spec, attemptedSpec!))) {
-            notifyBlocked(t('app.specCreateOutcomeRefreshed'))
+            outcomeRefreshed = true
             saved = true
             return
           }
@@ -6260,6 +6279,10 @@ const handleAddSpec = async (data: {
     })
   } finally {
     data.complete(saved)
+    if (outcomeRefreshed) {
+      await nextTick()
+      notifyBlocked(t('app.specCreateOutcomeRefreshed'))
+    }
   }
 }
 
@@ -8426,8 +8449,11 @@ const applyDeviceRecommendation = async (recommendation: DeviceRecommendation, i
       && requestSceneGeneration === recommendationSceneGeneration) {
       appliedDeviceRecommendations.value.add(index)
     }
+    reportEnvironmentChanges(outcome.environmentChanges)
     if (outcome.responseConfirmed) {
       notifySuccess(t('app.deviceAddedWithName', { name: outcome.device.label }))
+    } else {
+      notifyBlocked(t('app.deviceCreateOutcomeRefreshed', { name: outcome.device.label }))
     }
   } catch {
     // createDeviceInstanceAt already displayed the server failure.
@@ -12252,13 +12278,17 @@ const activeFuzzingStepInputEvents = computed<Array<FuzzingInputEvent & { target
 const activePlaybackCompromisedLinks = computed<TraceTriggeredRule[]>(() =>
   activePlaybackStates.value[activePlaybackStateIndex.value]?.compromisedAutomationLinks || [])
 
-const activePlaybackAnimatedEdgeCount = computed(() => allEdges.value.filter(edge => {
-  return isEdgeActiveInTrace(edge, allEdges.value, highlightedTrace.value)
-    && !isEdgeCompromisedInTrace(edge, allEdges.value, highlightedTrace.value)
-}).length)
-
-const activePlaybackCompromisedEdgeCount = computed(() => allEdges.value.filter(edge =>
-  isEdgeCompromisedInTrace(edge, allEdges.value, highlightedTrace.value)).length)
+const activePlaybackEdgeCounts = computed(() => {
+  let animated = 0
+  let compromised = 0
+  for (const state of buildTraceEdgePlaybackStates(allEdges.value, highlightedTrace.value).values()) {
+    if (state.shouldAnimate) animated++
+    if (state.linkCompromised) compromised++
+  }
+  return { animated, compromised }
+})
+const activePlaybackAnimatedEdgeCount = computed(() => activePlaybackEdgeCounts.value.animated)
+const activePlaybackCompromisedEdgeCount = computed(() => activePlaybackEdgeCounts.value.compromised)
 
 const activePlaybackChangeKey = computed(() => {
   if (!activePlaybackKind.value || activePlaybackStates.value.length === 0) return null
@@ -14689,7 +14719,7 @@ const counterexampleTraceHelpText = computed(() => {
     @focusin="handleBoardFocusIn"
   >
     <!-- Navigation Bar - 与首页风格一致 -->
-    <nav class="board-nav-bar" :aria-label="t('app.title')">
+    <nav class="board-nav-bar" :aria-label="t('app.title')" data-toast-anchor>
       <div class="nav-content">
         <h1 class="board-title">
           <button
@@ -14899,59 +14929,66 @@ const counterexampleTraceHelpText = computed(() => {
     </nav>
 
     <div
-      v-if="!isBoardDataReady && failedBoardDataKeys.length === 0"
-      class="board-surface-info board-text-info fixed inset-x-0 top-14 z-[var(--z-board-banner)] flex h-9 items-center justify-center gap-2 border-x-0 border-t-0 text-xs font-semibold"
-      role="status"
-      aria-live="polite"
-      data-testid="board-data-loading"
+      v-if="!isBoardDataReady || staleDeepLink"
+      class="pointer-events-none fixed inset-x-0 top-[var(--board-nav-height)] z-[var(--z-board-alert)] flex flex-col items-center"
+      data-testid="board-status-stack"
+      data-toast-anchor
     >
-      <span class="material-symbols-outlined board-text-progress animate-spin text-base" aria-hidden="true">progress_activity</span>
-      {{ t('app.boardSnapshotLoading') }}
-    </div>
-
-    <div
-      v-if="failedBoardDataKeys.length > 0"
-      class="pointer-events-none fixed left-1/2 top-16 z-[var(--z-board-alert)] flex w-[min(92vw,720px)] -translate-x-1/2 items-center gap-3 rounded-md board-surface-danger px-4 py-3 text-sm board-text-danger shadow-lg"
-      role="alert"
-      data-testid="board-data-load-error"
-    >
-      <span class="material-symbols-outlined shrink-0" aria-hidden="true">sync_problem</span>
-      <span class="min-w-0 flex-1 break-words">
-        {{ t('app.boardDataLoadFailedWithCollections', {
-          collections: failedBoardDataKeys.map(boardDataKeyLabel).join(', ')
-        }) }}
-      </span>
-      <button
-        type="button"
-        class="pointer-events-auto inline-flex shrink-0 items-center gap-1 rounded-md px-2.5 py-1.5 font-semibold hover:board-chip-danger dark:hover:bg-[color:var(--danger-surface)]"
-        @click="retryBoardDataLoad"
+      <div
+        v-if="!isBoardDataReady && failedBoardDataKeys.length === 0"
+        class="board-surface-info board-text-info flex h-9 w-full items-center justify-center gap-2 border-x-0 border-t-0 text-xs font-semibold"
+        role="status"
+        aria-live="polite"
+        data-testid="board-data-loading"
       >
-        <span class="material-symbols-outlined text-base" aria-hidden="true">refresh</span>
-        {{ t('app.retry') }}
-      </button>
-    </div>
+        <span class="material-symbols-outlined board-text-progress animate-spin text-base" aria-hidden="true">progress_activity</span>
+        {{ t('app.boardSnapshotLoading') }}
+      </div>
 
-    <!-- A shared link naming a run that is gone or not ours: persistent and dismissible,
-         because a toast disappears before the user can read why the board looks empty. -->
-    <div
-      v-if="staleDeepLink"
-      class="pointer-events-none fixed left-1/2 top-16 z-[var(--z-board-alert)] flex w-[min(92vw,720px)] -translate-x-1/2 items-center gap-3 rounded-md board-surface-warning px-4 py-3 text-sm board-text-warning shadow-lg"
-      role="alert"
-      data-testid="board-deep-link-unavailable"
-    >
-      <span class="material-symbols-outlined shrink-0" aria-hidden="true">link_off</span>
-      <span class="min-w-0 flex-1 break-words">{{ t('app.deepLinkUnavailable') }}</span>
-      <HintTooltip :content="t('app.deepLinkUnavailableDismiss')">
+      <div
+        v-if="failedBoardDataKeys.length > 0"
+        class="mt-[var(--board-floating-gap)] flex w-[min(92vw,720px)] items-center gap-3 rounded-md board-surface-danger px-4 py-3 text-sm board-text-danger shadow-lg"
+        role="alert"
+        data-testid="board-data-load-error"
+      >
+        <span class="material-symbols-outlined shrink-0" aria-hidden="true">sync_problem</span>
+        <span class="min-w-0 flex-1 break-words">
+          {{ t('app.boardDataLoadFailedWithCollections', {
+            collections: failedBoardDataKeys.map(boardDataKeyLabel).join(', ')
+          }) }}
+        </span>
         <button
           type="button"
-          class="pointer-events-auto inline-flex shrink-0 items-center justify-center rounded-md p-1.5 hover:board-chip-warning dark:hover:bg-[color:var(--warning-surface)]"
-          :aria-label="t('app.deepLinkUnavailableDismiss')"
-          data-testid="dismiss-deep-link-unavailable"
-          @click="dismissStaleDeepLink"
+          class="pointer-events-auto inline-flex shrink-0 items-center gap-1 rounded-md px-2.5 py-1.5 font-semibold hover:board-chip-danger dark:hover:bg-[color:var(--danger-surface)]"
+          @click="retryBoardDataLoad"
         >
-          <span class="material-symbols-outlined text-base" aria-hidden="true">close</span>
+          <span class="material-symbols-outlined text-base" aria-hidden="true">refresh</span>
+          {{ t('app.retry') }}
         </button>
-      </HintTooltip>
+      </div>
+
+      <!-- A shared link naming a run that is gone or not ours: persistent and dismissible,
+           because a toast disappears before the user can read why the board looks empty. -->
+      <div
+        v-if="staleDeepLink"
+        class="mt-[var(--board-floating-gap)] flex w-[min(92vw,720px)] items-center gap-3 rounded-md board-surface-warning px-4 py-3 text-sm board-text-warning shadow-lg"
+        role="alert"
+        data-testid="board-deep-link-unavailable"
+      >
+        <span class="material-symbols-outlined shrink-0" aria-hidden="true">link_off</span>
+        <span class="min-w-0 flex-1 break-words">{{ t('app.deepLinkUnavailable') }}</span>
+        <HintTooltip :content="t('app.deepLinkUnavailableDismiss')">
+          <button
+            type="button"
+            class="pointer-events-auto inline-flex shrink-0 items-center justify-center rounded-md p-1.5 hover:board-chip-warning dark:hover:bg-[color:var(--warning-surface)]"
+            :aria-label="t('app.deepLinkUnavailableDismiss')"
+            data-testid="dismiss-deep-link-unavailable"
+            @click="dismissStaleDeepLink"
+          >
+            <span class="material-symbols-outlined text-base" aria-hidden="true">close</span>
+          </button>
+        </HintTooltip>
+      </div>
     </div>
 
     <!-- Logout Confirmation Dialog -->

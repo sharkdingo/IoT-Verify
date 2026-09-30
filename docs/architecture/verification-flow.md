@@ -5,7 +5,7 @@ counterexample, and optional fix attempt. Field-level contracts live in
 [../api/verification.md](../api/verification.md); model construction lives in
 [nusmv-model.md](nusmv-model.md).
 
-Verified against code on 2026-07-24. Primary sources:
+Verified against code on 2026-09-30. Primary sources:
 `VerificationController`, `SimulationController`, `VerificationServiceImpl`,
 `SimulationServiceImpl`, `SmvGenerator`, `NusmvExecutor`, and `SmvTraceParser`.
 
@@ -127,8 +127,12 @@ queued and running work. Renewal runs in a short transaction that first obtains 
 row's pessimistic write lock and only then samples the database clock, checks the persisted
 worker/status/unexpired lease, and flushes the extension. A time sampled before the lock,
 including SQL statement-start `CURRENT_TIMESTAMP`, must never confirm a heartbeat because
-the lease may expire while that statement waits. Atomic start and progress updates require
-the persisted worker id plus an unexpired lease. Worker success/failure uses that same
+the lease may expire while that statement waits. Atomic start and progress updates hold
+the same row lock before sampling database time and binding it to their persisted worker-id,
+status, and unexpired-lease predicates. Start confirmation is anchored to the monotonic time
+sampled after that lock, before the update and commit response; lock waiting cannot revive
+an expired original lease or consume a newly granted lease's confirmation budget.
+Worker success/failure uses that same
 ownership predicate, lease/start/terminal timestamps come from the database clock, and
 terminal transitions clear ownership. Maintenance on every instance renews only its local
 work and marks only expired active rows failed; it does not scan and fail all

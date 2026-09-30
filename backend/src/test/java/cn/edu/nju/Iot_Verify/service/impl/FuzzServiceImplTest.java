@@ -92,6 +92,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
@@ -144,6 +145,8 @@ class FuzzServiceImplTest {
                 .thenReturn(Optional.of(FuzzTaskPo.TaskStatus.PENDING));
         org.mockito.Mockito.lenient().when(taskRepository.currentDatabaseTime())
                 .thenAnswer(invocation -> LocalDateTime.now());
+        org.mockito.Mockito.lenient().when(taskRepository.findByIdForUpdate(anyLong())).thenAnswer(invocation -> Optional.of(
+                FuzzTaskPo.builder().id(invocation.getArgument(0)).build()));
     }
 
     private void rebuildService() {
@@ -741,6 +744,54 @@ class FuzzServiceImplTest {
         service.maintainTaskLeases();
 
         assertTrue(((Future<?>) submittedWorkers.get(0)).isCancelled());
+    }
+
+    @Test
+    void fuzzStartRejectsLeaseThatExpiredWhileWaitingForItsRowLock() {
+        Runnable worker = captureSubmittedWorker();
+        LocalDateTime beforeLock = LocalDateTime.of(2026, 9, 30, 10, 0);
+        LocalDateTime afterLock = beforeLock.plusSeconds(2);
+        LocalDateTime expiry = beforeLock.plusSeconds(1);
+        AtomicReference<LocalDateTime> databaseTime = new AtomicReference<>(beforeLock);
+        AtomicInteger locks = new AtomicInteger();
+        when(taskRepository.currentDatabaseTime()).thenAnswer(invocation -> databaseTime.get());
+        when(taskRepository.findByIdForUpdate(41L)).thenAnswer(invocation -> {
+            if (locks.incrementAndGet() == 2) databaseTime.set(afterLock);
+            return Optional.of(FuzzTaskPo.builder().id(41L).build());
+        });
+        when(taskRepository.updateProgressIfActive(eq(41L), anyInt(), any(), anyString(), any())).thenReturn(1);
+        when(taskRepository.startTaskIfStillPending(eq(41L), any(), any(), anyString(), any(), any(), anyString(), any()))
+                .thenAnswer(invocation -> invocation.<LocalDateTime>getArgument(4).isBefore(expiry) ? 1 : 0);
+
+        worker.run();
+
+        verify(taskRepository).startTaskIfStillPending(
+                eq(41L), any(), eq(afterLock), anyString(), eq(afterLock), eq(afterLock.plusMinutes(2)),
+                anyString(), any());
+        verifyNoInteractions(fuzzEngine);
+    }
+
+    @Test
+    void fuzzProgressRejectsLeaseThatExpiredWhileWaitingForItsRowLock() {
+        runTransactionsInline();
+        LocalDateTime beforeLock = LocalDateTime.of(2026, 9, 30, 10, 0);
+        LocalDateTime afterLock = beforeLock.plusSeconds(2);
+        AtomicReference<LocalDateTime> databaseTime = new AtomicReference<>(beforeLock);
+        when(taskRepository.currentDatabaseTime()).thenAnswer(invocation -> databaseTime.get());
+        when(taskRepository.findByIdForUpdate(202L)).thenAnswer(invocation -> {
+            databaseTime.set(afterLock);
+            return Optional.of(FuzzTaskPo.builder().id(202L).build());
+        });
+        when(taskRepository.updateProgressIfActive(eq(202L), eq(50), any(), anyString(), any()))
+                .thenAnswer(invocation -> invocation.<LocalDateTime>getArgument(4)
+                        .isBefore(beforeLock.plusSeconds(1)) ? 1 : 0);
+
+        assertEquals(0, service.atomicUpdateProgress(202L, 50, TaskProgressStage.EXPLORING_CANDIDATES));
+        InOrder clocks = inOrder(taskRepository);
+        clocks.verify(taskRepository).findByIdForUpdate(202L);
+        clocks.verify(taskRepository).currentDatabaseTime();
+        clocks.verify(taskRepository).updateProgressIfActive(
+                eq(202L), eq(50), eq(TaskProgressStage.EXPLORING_CANDIDATES), anyString(), eq(afterLock));
     }
 
     @Test
@@ -1759,6 +1810,7 @@ class FuzzServiceImplTest {
     @Test
     void workerInitializationFailureFailsByTaskIdAndReleasesItsLease() {
         Runnable worker = captureSubmittedWorker();
+        runVoidTransactionsInline();
         when(taskRepository.updateProgressIfActive(eq(41L), eq(0), eq(TaskProgressStage.STARTING),
                 anyString(), any(LocalDateTime.class)))
                 .thenThrow(new org.springframework.dao.DataAccessResourceFailureException("jdbc details"));
@@ -1781,6 +1833,7 @@ class FuzzServiceImplTest {
     @Test
     void failurePersistenceErrorStillReleasesLeaseForRecovery() {
         Runnable worker = captureSubmittedWorker();
+        runVoidTransactionsInline();
         when(taskRepository.updateProgressIfActive(eq(41L), eq(0), eq(TaskProgressStage.STARTING),
                 anyString(), any(LocalDateTime.class)))
                 .thenThrow(new org.springframework.dao.DataAccessResourceFailureException("progress failed"));
@@ -2042,6 +2095,15 @@ class FuzzServiceImplTest {
         }).when(transactionTemplate).execute(any(TransactionCallback.class));
     }
 
+    private void runVoidTransactionsInline() {
+        TransactionStatus transactionStatus = mock(TransactionStatus.class);
+        doAnswer(invocation -> {
+            java.util.function.Consumer<TransactionStatus> callback = invocation.getArgument(0);
+            callback.accept(transactionStatus);
+            return null;
+        }).when(transactionTemplate).executeWithoutResult(any());
+    }
+
     @SuppressWarnings({"rawtypes", "unchecked"})
     private Runnable captureSubmittedWorker() {
         ModelInputSnapshot snapshot = snapshot(List.of(specification("spec-1")));
@@ -2053,11 +2115,6 @@ class FuzzServiceImplTest {
             TransactionCallback callback = invocation.getArgument(0);
             return callback.doInTransaction(transactionStatus);
         }).when(transactionTemplate).execute(any(TransactionCallback.class));
-        doAnswer(invocation -> {
-            java.util.function.Consumer<TransactionStatus> callback = invocation.getArgument(0);
-            callback.accept(transactionStatus);
-            return null;
-        }).when(transactionTemplate).executeWithoutResult(any());
         when(taskRepository.save(any(FuzzTaskPo.class))).thenAnswer(invocation -> {
             FuzzTaskPo task = invocation.getArgument(0);
             task.setId(41L);

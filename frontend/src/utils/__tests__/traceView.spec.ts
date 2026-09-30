@@ -3,7 +3,7 @@ import {
   canOpenTracePlayback,
   deriveTraceContext,
   formatTraceSpec,
-  isDeviceRepresentedInPlayback,
+  collectPlaybackDeviceIds,
   isPlaybackDeviceAttacked,
   playbackDeviceChanged,
   playbackDeviceChangeDetails,
@@ -233,10 +233,8 @@ describe('playback device facts', () => {
       { devices: [{ deviceId: 'sensor_1' }] },
       { devices: [{ deviceId: 'LIGHT_1' }] }
     ]
-    expect(isDeviceRepresentedInPlayback(states, 'Sensor_1')).toBe(true)
-    expect(isDeviceRepresentedInPlayback(states, 'light_1')).toBe(true)
-    expect(isDeviceRepresentedInPlayback(states, 'light-1')).toBe(true)
-    expect(isDeviceRepresentedInPlayback(states, 'later_device')).toBe(false)
+    expect(collectPlaybackDeviceIds(states)).toEqual(new Set(['sensor_1', 'light_1']))
+    expect(collectPlaybackDeviceIds(undefined)).toEqual(new Set())
   })
 
   it('detects runtime attack and state changes from consecutive snapshots', () => {

@@ -4,6 +4,8 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { i18n } from '@/assets/i18n'
 import Landing from './Landing.vue'
+import { ElMessage } from 'element-plus'
+import { useAuth } from '@/stores/auth'
 
 const authApi = vi.hoisted(() => ({
   login: vi.fn(),
@@ -55,6 +57,7 @@ describe('Landing authentication usability', () => {
   beforeEach(() => {
     authApi.login.mockReset()
     authApi.register.mockReset()
+    vi.mocked(ElMessage.success).mockClear()
     i18n.global.locale.value = 'zh-CN'
     Object.defineProperty(window, 'matchMedia', {
       configurable: true,
@@ -67,7 +70,32 @@ describe('Landing authentication usability', () => {
   })
 
   afterEach(() => {
+    useAuth().logout()
     document.body.innerHTML = ''
+  })
+
+  it.each(['login', 'register'] as const)('shows %s success through navigation without a duplicate toast', async mode => {
+    const session = { token: 'accepted-token', userId: 7, phone: '13800138000', username: 'alice' }
+    authApi[mode].mockResolvedValueOnce({ code: 200, data: session })
+    const { router, wrapper } = await mountLanding()
+    if (mode === 'register') {
+      await router.replace('/?mode=register')
+      await flushPromises()
+      await wrapper.get('input[autocomplete="tel"]').setValue(session.phone)
+      await wrapper.get('input[autocomplete="username"]').setValue(session.username)
+      const passwords = wrapper.findAll('input[autocomplete="new-password"]')
+      for (const password of passwords) await password.setValue('valid-password')
+    } else {
+      await wrapper.get('input[autocomplete="username"]').setValue(session.username)
+      await wrapper.get('input[autocomplete="current-password"]').setValue('valid-password')
+    }
+    await wrapper.get(`#${mode}-panel`).trigger('submit')
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/board')
+    expect(useAuth().state.isLoggedIn).toBe(true)
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    wrapper.unmount()
   })
 
   it('focuses the first invalid field and exposes validation messages as alerts', async () => {

@@ -5,7 +5,7 @@ colour roles, type scale, depth, CSS precedence, and replay. These are **rules, 
 when code and this document disagree, one of them is a bug. Keep them short; they exist to stop the
 same argument being re-litigated per PR, and each carries the measurement that settled it.
 
-Verified against code on 2026-08-13. Source: `frontend/src/styles/`, `frontend/src/composables/`,
+Verified against code on 2026-09-30. Source: `frontend/src/styles/`, `frontend/src/composables/`,
 `frontend/src/utils/feedback.ts`, and the spec files each rule names.
 
 ## 1. What belongs in the URL
@@ -124,13 +124,32 @@ user must act**.
 - **One mechanism per outcome.** Never a toast *and* a banner *and* an inline error for the
   same failure.
 - **Toasts are for what the UI cannot already show.** Before adding one, ask what changed
-  on screen.
+  on screen. Direct device creation/rename, rule/spec creation and successful sign-in/registration
+  use the updated canvas, inspector or destination page as their confirmation. Keep receipts that
+  add context, such as template-reset impact counts or the signed evidence used to apply a fix.
 - **Assistant agency is explicit.** Show one localized receipt only after the corresponding
   authoritative refresh succeeds. Preview, read-only, rejected, unchanged, and unaccepted
   cancellation results show no action receipt. Persisted run history labels assistant-originated
   work and unknown legacy provenance; direct user work needs no origin badge.
 - Identical error toasts are grouped with a repeat count; concurrent refresh paths must not
   stack the same message over the working surface.
+- **A toast sits below the header and never takes a click.** Element Plus's 16px default put
+  toasts inside the fixed board nav, over undo and redo, right when the user reached for them.
+  A fixed or top header therefore carries `data-toast-anchor`, and `feedback.ts` measures it
+  when each toast opens. It is measured in JS because a toast is teleported to `<body>` and
+  cannot read `--board-nav-height` (§7 has the same trap for fixed overlays). Under an open modal
+  the toast keeps the viewport top. Close the submitting dialog before notifying; for a controlled
+  `visible` prop, wait for the parent update with `nextTick`. Route-changing receipts follow the
+  completed navigation. Reconciled but unconfirmed mutations retain warning semantics after closure.
+  The whole toast subtree is `pointer-events: none`, so it no
+  longer pauses on hover. A message the user must act on is a banner or dialog, not a toast.
+  Pinned by `feedback.spec.ts`, `toastPointerTransparency.spec.ts`, `Landing.spec.ts`, the template/fix
+  component specs and `board-edit-undo.spec.ts`.
+- **Persistent board notices share one vertical stack below the nav.** Snapshot loading/failure
+  and an unavailable shared run can coexist; neither may cover the other's explanation, Retry or
+  dismiss control. The stack is a toast anchor and lets pointer events through except on its buttons.
+  A retry changes the persistent state itself, without a second toast for the same result. Geometry
+  and keyboard recovery are covered by `ui-contracts.spec.ts` at desktop and narrow widths.
 - Same semantic ⇒ same component, wording shape, icon, button order, focus behaviour.
 - Error text keeps what helps the user act; **no stack traces, no internal identifiers.**
   Raw backend diagnostics belong in Technical Details or the console.
@@ -792,3 +811,27 @@ not. The split that survived measurement:
   panel already on screen, beside it rather than instead of it, for the rest of the session. The dismissal state
   answers *did the user ever dismiss*; the button needs *is it hidden now*. Where two surfaces own the same
   control, bind both to the same computed rather than to two things that agree today.
+
+## 11. Canvas geometry and lookup ownership
+
+`CanvasBoard.vue` derives every connection layer and label position from the same visual node
+geometry. A held drag uses `nodeDragState.tempPosition`; ordinary connections, self-loops, SVG
+hitareas and playback flow must all follow it before release. Pointerup commits the node layout
+once. Cancellation, lost pointer capture and interaction locking discard the preview. Do not
+write committed edge coordinates during a drag: they describe the old position and needlessly
+invalidate parent scene watchers. Pointer resize and keyboard resize use the current node dimensions.
+`components/__tests__/CanvasBoard.spec.ts` covers these transitions at multiple zoom levels and
+`e2e/canvas-runtime-environment.spec.ts` covers held dragging, persisted layout, reload and undo
+against the real backend.
+
+Connection geometry and node lookup use cached indexes: O(N + E) when the node/connection sets
+change, O(E) for connection geometry during a drag. `utils/traceEdgePlayback.ts` resolves playback
+connections in O(E + T + C), where T/C are the selected step's triggered/compromised rule records.
+Stable rule ids must denote one position; multiple source connections at that position are valid.
+Id-less evidence matches only id-less connections at the same frozen rule position.
+
+Current/previous device records and cumulative compromise evidence share one O(S × D) historical
+index (S visited states, D device records per state), with O(1) node lookup. Membership anywhere in
+the full trace is indexed separately, so a future appearance never becomes a current reading.
+These bounds cover identity and geometry lookup, not variable formatting or Vue/SVG rendering.
+The owning unit tests count identity accesses rather than relying on machine-dependent timings.

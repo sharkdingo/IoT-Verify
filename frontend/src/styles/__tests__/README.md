@@ -26,6 +26,7 @@ Each was tested by injecting the violation it owns and confirming it goes red. R
 | `scopedWidthOverride` | yes | scoped `max-*` against a Tailwind cap |
 | `roleClassVariants` | yes | `hover:`/`disabled:` variants of hand-written classes |
 | `boardDockGeometry` | yes | dock rail widths and the injected gap |
+| `toastPointerTransparency` | yes | every `.css` file and `.vue` `<style>` block under `src/`, `@media`-nested rules included |
 
 ## Two traps that produced false findings while auditing them
 

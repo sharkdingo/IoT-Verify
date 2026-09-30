@@ -614,16 +614,19 @@
  * A toast announces something; it is not a control. It sits above everything, so leaving it
  * pointer-interactive let it swallow clicks aimed at whatever it happened to cover -- the
  * scene-import success message overlays the undo button, so a user clicking undo right after an
- * import hit the toast instead and nothing happened until it auto-dismissed. Its own children keep
- * pointer events so the close button still works.
+ * import hit the toast instead and nothing happened until it auto-dismissed.
+ *
+ * The whole subtree, not just the root: `pointer-events` is inherited, and an earlier
+ * `.el-message > * { pointer-events: auto }` handed it back to `.el-message__content` -- the very
+ * element the original CI trace named as intercepting `board-undo`, and most of the toast's area.
+ * That rule kept a close button working that no toast here has (`feedback.ts` never passes
+ * `showClose`). The cost is Element Plus's hover-to-pause, which needs pointer events; a toast
+ * carries nothing the user must act on, so that is the side this trades away. Placement is the
+ * other half: `feedback.ts` offsets toasts below the fixed header.
  */
 .el-message {
     z-index: var(--z-toast) !important;
     pointer-events: none;
-}
-
-.el-message > * {
-    pointer-events: auto;
 }
 
 :root[data-theme='dark'] .el-overlay.is-message-box {

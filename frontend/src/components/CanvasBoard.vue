@@ -8,28 +8,25 @@ import type { DeviceEdge } from '../types/edge'
 import type { CanvasPan } from '../types/canvas'
 import type { ModelTokenSource } from '../types/modelToken'
 
-import {
-  updateEdgesForNode,
-  getSelfLoopD
-} from '../utils/canvas/geometry'
+import { updateEdgesForNode } from '../utils/canvas/geometry'
 
-import { getLinkPoints } from '../utils/rule'
+import { getLinkPoints, getSelfLoopPath } from '../utils/rule'
 
 import {
   findTraceVariableAtOrBefore,
-  isEdgeActiveInTrace,
-  isEdgeCompromisedInTrace,
+  buildTraceDevicePlaybackIndex,
+  buildTraceEdgePlaybackStates,
   normalizeTraceComparable,
-  shouldAnimateEdgeFlow,
   toTraceDeviceId,
-  traceDeviceMatchesId,
   traceVariableMatchesName,
+  type TraceEdgePlaybackState,
   type TraceDeviceLike,
   type TraceVariableLike
 } from '../utils/traceEdgePlayback'
 import {
   formatPlaybackSecurityLabel,
-  isDeviceRepresentedInPlayback,
+  collectPlaybackDeviceIds,
+  normalizePlaybackDeviceId,
   playbackDeviceChanged,
   playbackDeviceSecurityFacts
 } from '../utils/traceView'
@@ -114,48 +111,12 @@ const handleImageError = (event: Event) => {
   img.src = svgDataUri(fallbackDeviceSvg)
 }
 
-// Check the user-facing compromise state returned by the trace API.
-// This is the expensive computation that walks trace states backward.
-const computeIsDeviceAttacked = (nodeId: string): boolean => {
-  if (!props.highlightedTrace?.states || props.highlightedTrace.selectedStateIndex === undefined) {
-    return false
-  }
+const traceDevicePlaybackIndex = computed(() => buildTraceDevicePlaybackIndex(
+  props.highlightedTrace?.states, props.highlightedTrace?.selectedStateIndex
+))
 
-  // 从当前选中状态向前查找，找到设备最近的状态
-  const currentIndex = props.highlightedTrace.selectedStateIndex
-  for (let i = currentIndex; i >= 0; i--) {
-    const state = props.highlightedTrace.states[i]
-    if (!state?.devices) continue
-
-    const device = state.devices.find(d => traceDeviceMatchesId(d, nodeId))
-
-    if (device?.compromised === true) return true
-  }
-
-  return false
-}
-
-/**
- * Memoized cache of attack state per node.
- * Recalculates when trace states or trace selection changes.
- * Eliminates redundant O(S×D) scans: the template calls isDeviceAttacked() 4 times per node,
- * but this computed ensures we only scan once per node per render.
- */
-const deviceAttackedCache = computed(() => {
-  const cache = new Map<string, boolean>()
-  for (const node of props.nodes) {
-    cache.set(node.id, computeIsDeviceAttacked(node.id))
-  }
-  return cache
-})
-
-/**
- * Get whether a device is attacked (memoized accessor).
- * Called 4 times per node in the template but only computes once per render.
- */
-const isDeviceAttacked = (nodeId: string): boolean => {
-  return deviceAttackedCache.value.get(nodeId) ?? false
-}
+const isDeviceAttacked = (nodeId: string): boolean =>
+  traceDevicePlaybackIndex.value.compromised.has(toTraceDeviceId(nodeId))
 
 // 获取节点的当前状态
 const getNodeState = (node: DeviceNode): string => {
@@ -328,6 +289,14 @@ const edgesWithAdjustedPoints = computed(() => {
     }
 
     const adjustedPoints = getAdjustedLinkPoints(fromNode, toNode, edge)
+    // Every edge layer and its label must share the node's preview geometry until pointerup commits it.
+    const selfLoopPath = edge.from === edge.to && fromNode ? getSelfLoopPath(fromNode) : ''
+    const labelPoint = edge.from === edge.to && fromNode
+      ? { x: fromNode.position.x + fromNode.width / 2, y: fromNode.position.y - 16 }
+      : {
+          x: (adjustedPoints.fromPoint.x + adjustedPoints.toPoint.x) / 2,
+          y: (adjustedPoints.fromPoint.y + adjustedPoints.toPoint.y) / 2 - 10
+        }
 
     // 预计算边的样式属性，避免重复查找节点
     const sourceNode = nodeMap.value.get(edge.from)
@@ -339,6 +308,8 @@ const edgesWithAdjustedPoints = computed(() => {
       fromNode: sourceNode,
       toNode: nodeMap.value.get(edge.to),
       adjustedPoints,
+      selfLoopPath,
+      labelPoint,
       index, // Pre-computed index to avoid O(E) indexOf() in template
       // 预计算样式
       particleColor: isInternal ? 'var(--text-muted)' :
@@ -383,43 +354,23 @@ const getPreviousTraceVariableForNode = (
   ) as PlaybackTraceVariable | null
 }
 
-const getLatestTraceDeviceForNodeAtOrBefore = (nodeId: string, endIndex: number): PlaybackTraceDevice | null => {
-  if (!props.highlightedTrace?.states) return null
-  const boundedIndex = Math.min(Math.max(endIndex, 0), props.highlightedTrace.states.length - 1)
-  for (let i = boundedIndex; i >= 0; i--) {
-    const state = props.highlightedTrace.states[i]
-    if (!state?.devices) continue
-    const device = state.devices.find(d => traceDeviceMatchesId(d, nodeId))
-    if (device) return device
-  }
-  return null
-}
-
 const getLatestTraceDeviceForNode = (nodeId: string): PlaybackTraceDevice | null =>
-  getLatestTraceDeviceForNodeAtOrBefore(nodeId, props.highlightedTrace?.selectedStateIndex || 0)
+  traceDevicePlaybackIndex.value.current.get(toTraceDeviceId(nodeId)) || null
 
-const getPreviousTraceDeviceForNode = (nodeId: string): PlaybackTraceDevice | null => {
-  const selectedIndex = props.highlightedTrace?.selectedStateIndex
-  if (selectedIndex === undefined || selectedIndex <= 0) return null
-  return getLatestTraceDeviceForNodeAtOrBefore(nodeId, selectedIndex - 1)
-}
+const getPreviousTraceDeviceForNode = (nodeId: string): PlaybackTraceDevice | null =>
+  traceDevicePlaybackIndex.value.previous.get(toTraceDeviceId(nodeId)) || null
 
-/**
- * Compute edge playback state for a single edge.
- * This is the expensive operation that calls isEdgeActiveInTrace and isEdgeCompromisedInTrace.
- * Use via `getEdgePlaybackClass()` which provides memoization.
- */
-const computeEdgePlaybackState = (edge: DeviceEdge) => {
-  const traceActive = isEdgeActiveInTrace(edge, props.edges, props.highlightedTrace)
-  const linkCompromised = isEdgeCompromisedInTrace(edge, props.edges, props.highlightedTrace)
+const computeEdgePlaybackState = (
+  edge: DeviceEdge,
+  { traceActive, linkCompromised, shouldAnimate }: TraceEdgePlaybackState
+) => {
   const ruleFocused = Boolean(props.focusedRuleId && edge.ruleId === props.focusedRuleId)
-  const shouldAnimate = !prefersReducedMotion.value && shouldAnimateEdgeFlow(edge, props.edges, props.highlightedTrace)
 
   return {
     traceActive,
     linkCompromised,
     ruleFocused,
-    shouldAnimate,
+    shouldAnimate: !prefersReducedMotion.value && shouldAnimate,
     classes: {
       'edge-line--active': traceActive,
       'edge-line--compromised': linkCompromised,
@@ -437,8 +388,8 @@ const computeEdgePlaybackState = (edge: DeviceEdge) => {
  */
 const edgePlaybackStateCache = computed(() => {
   const cache = new Map<DeviceEdge, ReturnType<typeof computeEdgePlaybackState>>()
-  for (const edge of props.edges) {
-    cache.set(edge, computeEdgePlaybackState(edge))
+  for (const [edge, state] of buildTraceEdgePlaybackStates(props.edges, props.highlightedTrace)) {
+    cache.set(edge, computeEdgePlaybackState(edge, state))
   }
   return cache
 })
@@ -504,8 +455,9 @@ watch(() => props.highlightedTrace?.selectedStateIndex, async (newIndex, oldInde
 const shouldAnimateTraceChange = (node: DeviceNode): boolean =>
   !!nodeAnimationTrigger.value[toTraceDeviceId(node.id)]
 
+const representedTraceDeviceIds = computed(() => collectPlaybackDeviceIds(props.highlightedTrace?.states))
 const isNodeRepresentedInTrace = (node: DeviceNode): boolean =>
-  isTraceActive.value && isDeviceRepresentedInPlayback(props.highlightedTrace?.states, node.id)
+  isTraceActive.value && representedTraceDeviceIds.value.has(normalizePlaybackDeviceId(node.id))
 
 // Whether the selected state (or a prior sparse state) has authoritative data for the node.
 const isNodeInTrace = (node: DeviceNode): boolean => {
@@ -614,27 +566,6 @@ const onNodePointerDown = (e: PointerEvent, node: DeviceNode) => {
   window.addEventListener('pointercancel', onNodePointerCancel)
 }
 
-let edgeUpdateFrameId: number | null = null
-let edgeUpdatePending = false
-
-const scheduleEdgeUpdate = (nodeId: string) => {
-  if (edgeUpdatePending) return
-  edgeUpdatePending = true
-  edgeUpdateFrameId = requestAnimationFrame(() => {
-    updateEdgesForNode(nodeId, props.nodes, props.edges)
-    edgeUpdatePending = false
-    edgeUpdateFrameId = null
-  })
-}
-
-const cancelScheduledEdgeUpdate = () => {
-  if (edgeUpdateFrameId !== null) {
-    cancelAnimationFrame(edgeUpdateFrameId)
-    edgeUpdateFrameId = null
-    edgeUpdatePending = false
-  }
-}
-
 const onNodePointerMove = (e: PointerEvent) => {
   if (e.pointerId !== activeDragPointerId) return
   if (!activeDragMoved && activeDragStartPoint) {
@@ -645,16 +576,11 @@ const onNodePointerMove = (e: PointerEvent) => {
     if (distance < NODE_DRAG_THRESHOLD_PX) return
     activeDragMoved = true
   }
-  const changed = updateNodeDrag(e, nodeDragState, props.zoom)
-  if (!changed || !nodeDragState.node) return
-
-  // 节点位置变了，使用 RAF 节流边更新以提升性能
-  scheduleEdgeUpdate(nodeDragState.node.id)
+  updateNodeDrag(e, nodeDragState, props.zoom)
 }
 
 const onNodePointerUp = (e: PointerEvent) => {
   if (e.pointerId !== activeDragPointerId) return
-  cancelScheduledEdgeUpdate()
   const movedEnough = activeDragMoved
   const moved = endNodeDrag(nodeDragState)
   if (moved) {
@@ -671,7 +597,6 @@ const onNodePointerUp = (e: PointerEvent) => {
 
 const onNodePointerCancel = (e: PointerEvent) => {
   if (e.pointerId !== activeDragPointerId) return
-  cancelScheduledEdgeUpdate()
   const restored = cancelNodeDrag(nodeDragState)
   if (restored) updateEdgesForNode(restored.id, props.nodes, props.edges)
   releaseDragPointer()
@@ -777,12 +702,6 @@ watch(
     releaseResizePointer()
   }
 )
-
-/* ====== 自环路径封装（调用 utils/canvas/geometry） ====== */
-
-const getSelfLoopPathD = (edge: DeviceEdge) => {
-  return getSelfLoopD(edge, props.nodes)
-}
 
 /**
  * Pre-computed set of bidirectional edge pairs.
@@ -1395,8 +1314,8 @@ const getNodeStateTitle = (node: DeviceNode) => {
 const getFullEdgeLabel = (edge: DeviceEdge) => {
   const sourceName = edge.fromLabel || edge.from
   const targetName = edge.toLabel || edge.to
-  const sourceNode = props.nodes.find(node => node.id === edge.from)
-  const targetNode = props.nodes.find(node => node.id === edge.to)
+  const sourceNode = nodeMap.value.get(edge.from)
+  const targetNode = nodeMap.value.get(edge.to)
   const relation = getRelationSymbol(edge.relation)
   const sourceSignal = edge.fromApi
     ? (sourceNode ? formatNodeModelToken(sourceNode, edge.fromApi) : edge.fromApi)
@@ -1429,22 +1348,6 @@ const shouldShowEdgeLabel = (edge: DeviceEdge) =>
 
 const setHoveredEdge = (edgeId: string | null) => {
   hoveredEdgeId.value = edgeId
-}
-
-const getEdgeLabelPoint = (edge: DeviceEdge) => {
-  const fromNode = props.nodes.find(n => n.id === edge.from)
-  const toNode = props.nodes.find(n => n.id === edge.to)
-  if (edge.from === edge.to && fromNode) {
-    return {
-      x: fromNode.position.x + fromNode.width / 2,
-      y: fromNode.position.y - 16
-    }
-  }
-  const { fromPoint, toPoint } = getAdjustedLinkPoints(fromNode, toNode, edge)
-  return {
-    x: (fromPoint.x + toPoint.x) / 2,
-    y: (fromPoint.y + toPoint.y) / 2 - 10
-  }
 }
 
 const onNodeContextInternal = (node: DeviceNode, e: MouseEvent) => {
@@ -1534,7 +1437,6 @@ const onNodeKeydown = (event: KeyboardEvent, node: DeviceNode) => {
 
 onBeforeUnmount(() => {
   if (nodeAnimationResetTimer) clearTimeout(nodeAnimationResetTimer)
-  cancelScheduledEdgeUpdate()
   const restoredDrag = cancelNodeDrag(nodeDragState)
   if (restoredDrag) updateEdgesForNode(restoredDrag.id, props.nodes, props.edges)
   releaseDragPointer()
@@ -1676,7 +1578,7 @@ onMounted(() => {
               v-if="edgeItem.edge.from === edgeItem.edge.to"
               class="edge-base-line"
               :class="getEdgePlaybackClass(edgeItem.edge)"
-              :d="getSelfLoopPathD(edgeItem.edge)"
+              :d="edgeItem.selfLoopPath"
               fill="none"
               :stroke="edgeItem.particleColor"
               :stroke-dasharray="isInternalVariableEdge(edgeItem.edge) ? '6,6' : ''"
@@ -1700,7 +1602,7 @@ onMounted(() => {
               v-if="edgeItem.edge.from === edgeItem.edge.to"
               class="edge-hitarea"
               :data-rule-id="edgeItem.edge.ruleId || undefined"
-              :d="getSelfLoopPathD(edgeItem.edge)"
+              :d="edgeItem.selfLoopPath"
               role="img"
               tabindex="0"
               :aria-label="getFullEdgeLabel(edgeItem.edge)"
@@ -1734,7 +1636,7 @@ onMounted(() => {
               class="edge-line particle-line"
               :data-playback-state="props.highlightedTrace?.selectedStateIndex"
               :class="[getParticleOpacity(edgeItem.index), getEdgePlaybackClass(edgeItem.edge)]"
-              :d="getSelfLoopPathD(edgeItem.edge)"
+              :d="edgeItem.selfLoopPath"
               fill="none"
               filter="url(#glow)"
               :stroke="edgeItem.particleColor"
@@ -1789,7 +1691,7 @@ onMounted(() => {
           <g
               v-if="shouldShowEdgeLabel(edgeItem.edge)"
               class="edge-label"
-              :transform="`translate(${getEdgeLabelPoint(edgeItem.edge).x} ${getEdgeLabelPoint(edgeItem.edge).y})`"
+              :transform="`translate(${edgeItem.labelPoint.x} ${edgeItem.labelPoint.y})`"
           >
             <title>{{ getFullEdgeLabel(edgeItem.edge) }}</title>
             <rect

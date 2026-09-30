@@ -30,6 +30,7 @@ import cn.edu.nju.Iot_Verify.dto.model.ModelGenerationIssueDto;
 import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
 import cn.edu.nju.Iot_Verify.dto.model.ModelTokenSource;
 import cn.edu.nju.Iot_Verify.dto.model.RunDeletionImpactDto;
+import cn.edu.nju.Iot_Verify.dto.model.TaskProgressStage;
 import cn.edu.nju.Iot_Verify.exception.SmvGenerationException;
 import cn.edu.nju.Iot_Verify.exception.AsyncTaskDispatchOutcomeUnknownException;
 import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
@@ -61,6 +62,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.springframework.data.domain.Pageable;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.core.task.TaskRejectedException;
@@ -87,6 +89,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -175,6 +178,8 @@ class VerificationServiceImplBuildResultTest {
                 verificationTaskExecutor, syncVerificationExecutor, transactionTemplate,
                 chatExecutionLeaseGuard, formalOperationAdmission, new AsyncTaskAdmissionConfig(), boardDataConverter);
         lenient().when(taskRepository.currentDatabaseTime()).thenAnswer(invocation -> LocalDateTime.now());
+        lenient().when(taskRepository.findByIdForUpdate(anyLong())).thenAnswer(invocation -> Optional.of(
+                VerificationTaskPo.builder().id(invocation.getArgument(0)).build()));
         lenient().when(taskRepository.updateProgressIfActive(anyLong(), anyInt(), any(), anyString(), any(LocalDateTime.class)))
                 .thenReturn(1);
         lenient().when(userRepository.findByIdForUpdate(anyLong())).thenReturn(Optional.of(new UserPo()));
@@ -1065,6 +1070,54 @@ class VerificationServiceImplBuildResultTest {
         assertEquals("testdevice", requestJson.path("rules").get(0).path("conditions").get(0).path("deviceName").asText());
         assertEquals("s1", requestJson.path("specs").get(0).path("id").asText());
         assertEquals("on", requestJson.path("specs").get(0).path("aConditions").get(0).path("value").asText());
+    }
+
+    @Test
+    void verificationStartRejectsLeaseThatExpiredWhileWaitingForItsRowLock() throws Exception {
+        LocalDateTime beforeLock = LocalDateTime.of(2026, 9, 30, 10, 0);
+        LocalDateTime afterLock = beforeLock.plusSeconds(2);
+        LocalDateTime expiry = beforeLock.plusSeconds(1);
+        AtomicReference<LocalDateTime> databaseTime = new AtomicReference<>(beforeLock);
+        AtomicInteger locks = new AtomicInteger();
+        when(taskRepository.currentDatabaseTime()).thenAnswer(invocation -> databaseTime.get());
+        when(taskRepository.findByIdForUpdate(201L)).thenAnswer(invocation -> {
+            if (locks.incrementAndGet() == 2) databaseTime.set(afterLock);
+            return Optional.of(VerificationTaskPo.builder().id(201L).build());
+        });
+        when(taskRepository.startTaskIfStillPending(
+                eq(201L), any(), any(), anyInt(), anyString(), any(), anyString(), any(), any()))
+                .thenAnswer(invocation -> invocation.<LocalDateTime>getArgument(7).isBefore(expiry) ? 1 : 0);
+
+        service.verifyAsync(1L, 201L, makeRequest(
+                singleDevice(), List.of(), List.of(makeEffectiveSpec("lease-spec")), false, 0, false));
+
+        verify(taskRepository).startTaskIfStillPending(
+                eq(201L), any(), eq(afterLock), anyInt(), anyString(), any(), anyString(),
+                eq(afterLock), eq(afterLock.plusMinutes(2)));
+        verify(smvGenerator, never()).generateWithResolvedDeviceModel(
+                anyLong(), anyList(), anyList(), anyList(), anyList(), any(), anyBoolean(), any(), any(), anyMap());
+    }
+
+    @Test
+    void verificationProgressRejectsLeaseThatExpiredWhileWaitingForItsRowLock() {
+        LocalDateTime beforeLock = LocalDateTime.of(2026, 9, 30, 10, 0);
+        LocalDateTime afterLock = beforeLock.plusSeconds(2);
+        AtomicReference<LocalDateTime> databaseTime = new AtomicReference<>(beforeLock);
+        when(taskRepository.currentDatabaseTime()).thenAnswer(invocation -> databaseTime.get());
+        when(taskRepository.findByIdForUpdate(202L)).thenAnswer(invocation -> {
+            databaseTime.set(afterLock);
+            return Optional.of(VerificationTaskPo.builder().id(202L).build());
+        });
+        when(taskRepository.updateProgressIfActive(eq(202L), eq(50), any(), anyString(), any()))
+                .thenAnswer(invocation -> invocation.<LocalDateTime>getArgument(4)
+                        .isBefore(beforeLock.plusSeconds(1)) ? 1 : 0);
+
+        assertEquals(0, service.atomicUpdateProgress(202L, 50, TaskProgressStage.EXECUTING_MODEL_CHECKER));
+        InOrder clocks = inOrder(taskRepository);
+        clocks.verify(taskRepository).findByIdForUpdate(202L);
+        clocks.verify(taskRepository).currentDatabaseTime();
+        clocks.verify(taskRepository).updateProgressIfActive(
+                eq(202L), eq(50), eq(TaskProgressStage.EXECUTING_MODEL_CHECKER), anyString(), eq(afterLock));
     }
 
     @Test

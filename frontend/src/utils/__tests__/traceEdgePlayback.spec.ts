@@ -3,11 +3,14 @@ import type { DeviceEdge } from '@/types/edge'
 import {
   formatRuleApiSignalName,
   getTraceValueForEdge,
-  isEdgeActiveInTrace,
-  isEdgeCompromisedInTrace,
+  buildTraceEdgePlaybackStates,
+  buildTraceDevicePlaybackIndex,
   isEdgeConditionSatisfied,
-  shouldAnimateEdgeFlow
+  type TracePlaybackLike
 } from '../traceEdgePlayback'
+
+const edgeState = (edge: DeviceEdge, edges: DeviceEdge[], trace: TracePlaybackLike) =>
+  buildTraceEdgePlaybackStates(edges, trace).get(edge)!
 
 const apiEdge = (overrides: Partial<DeviceEdge> = {}): DeviceEdge => ({
   id: 'edge-1',
@@ -28,7 +31,84 @@ const apiEdge = (overrides: Partial<DeviceEdge> = {}): DeviceEdge => ({
   ...overrides
 })
 
+describe('trace device playback index', () => {
+  const early = { deviceId: 'LIGHT_1', state: 'off', compromised: true }
+  const later = { deviceId: 'light_1', state: 'on', compromised: false }
+  const future = { deviceId: 'future_1', state: 'off', compromised: true }
+  const states = [{ devices: [early] }, {}, { devices: [later] }, { devices: [future] }]
+
+  it('carries sparse state forward, compares against the preceding step, and preserves compromise evidence', () => {
+    const index = buildTraceDevicePlaybackIndex(states, 2)
+    expect(index.current.get('light_1')).toBe(later)
+    expect(index.previous.get('light_1')).toBe(early)
+    expect(index.compromised).toEqual(new Set(['light_1']))
+    expect(index.current.has('future_1')).toBe(false)
+    const sparse = buildTraceDevicePlaybackIndex(states, 1)
+    expect(sparse.current.get('light_1')).toBe(early)
+    expect(sparse.previous.get('light_1')).toBe(early)
+  })
+
+  it('has no previous state at initialization and bounds selection to the available trace', () => {
+    expect(buildTraceDevicePlaybackIndex(states, 0).previous.size).toBe(0)
+    expect(buildTraceDevicePlaybackIndex(states, undefined).compromised.size).toBe(0)
+    expect(buildTraceDevicePlaybackIndex(states, -1).compromised.size).toBe(0)
+    const outOfRange = buildTraceDevicePlaybackIndex(states, 10)
+    expect(outOfRange.current.get('future_1')).toBe(future)
+    expect(outOfRange.previous.get('future_1')).toBe(future)
+    expect(buildTraceDevicePlaybackIndex(undefined, 0).current.size).toBe(0)
+  })
+
+  it('indexes each historical device once instead of scanning all devices for each node', () => {
+    let reads = 0
+    const devices = Array.from({ length: 200 }, (_, index) => ({
+      get deviceId() { reads++; return `light_${index}` }, state: 'on'
+    }))
+    const history = Array.from({ length: 50 }, () => ({ devices }))
+    const index = buildTraceDevicePlaybackIndex(history, 49)
+    expect(index.current.size).toBe(200)
+    expect(index.previous.size).toBe(200)
+    expect(reads).toBeLessThanOrEqual(200 * 50)
+  })
+})
+
 describe('trace edge playback', () => {
+  it('lights all sources of one rule but rejects a malformed sibling index', () => {
+    const first = apiEdge()
+    const second = apiEdge({ id: 'edge-2', sourceIndex: 1 })
+    const trace = { selectedStateIndex: 0, states: [{
+      triggeredRules: [{ ruleIndex: 5, ruleId: 'rule-1' }],
+      compromisedAutomationLinks: [{ ruleIndex: 5, ruleId: 'rule-1' }]
+    }] }
+    const states = buildTraceEdgePlaybackStates([first, second], trace)
+    for (const edge of [first, second]) {
+      expect(states.get(edge)).toEqual({ traceActive: true, linkCompromised: true, shouldAnimate: false })
+    }
+    const malformed = apiEdge({ id: 'bad-index', ruleIndex: undefined })
+    const invalidStates = buildTraceEdgePlaybackStates([first, malformed, second], trace)
+    expect([...invalidStates.values()].every(state => !state.traceActive && !state.linkCompromised)).toBe(true)
+  })
+
+  it('uses linear identity reads as the rule graph grows', () => {
+    const count = 400
+    let identityReads = 0
+    const edges = Array.from({ length: count }, (_, index) => {
+      const edge = apiEdge({ id: `edge-${index}`, ruleIndex: index })
+      Object.defineProperty(edge, 'ruleId', { get: () => {
+        identityReads++
+        return `rule-${index}`
+      } })
+      return edge
+    })
+    const rules = Array.from({ length: count }, (_, index) => ({ ruleId: `rule-${index}`, ruleIndex: index }))
+    const states = buildTraceEdgePlaybackStates(edges, {
+      selectedStateIndex: 0, states: [{ triggeredRules: rules, compromisedAutomationLinks: rules.slice(0, 200) }]
+    })
+    expect(states.size).toBe(count)
+    expect([...states.values()].filter(state => state.shouldAnimate)).toHaveLength(200)
+    // Count operations rather than time: a per-edge graph scan violates this bound on any machine.
+    expect(identityReads).toBeLessThanOrEqual(count * 6)
+  })
+
   it('uses NuSMV API signal variables when highlighting rule edges', () => {
     const edge = apiEdge()
     const trace = {
@@ -51,7 +131,7 @@ describe('trace edge playback', () => {
 
     expect(getTraceValueForEdge(edge, trace, 1)).toBe('TRUE')
     expect(isEdgeConditionSatisfied(edge, trace, 1)).toBe(true)
-    expect(isEdgeActiveInTrace(edge, [edge], trace)).toBe(true)
+    expect(edgeState(edge, [edge], trace).traceActive).toBe(true)
   })
 
   it('does not treat an API signal as active when the trace signal is false', () => {
@@ -75,7 +155,7 @@ describe('trace edge playback', () => {
     }
 
     expect(isEdgeConditionSatisfied(edge, trace, 1)).toBe(false)
-    expect(isEdgeActiveInTrace(edge, [edge], trace)).toBe(false)
+    expect(edgeState(edge, [edge], trace).traceActive).toBe(false)
   })
 
   it('does not infer a rule firing when the backend explicitly reports no triggered rules', () => {
@@ -89,7 +169,7 @@ describe('trace edge playback', () => {
     }
 
     expect(isEdgeConditionSatisfied(edge, trace, 0)).toBe(true)
-    expect(isEdgeActiveInTrace(edge, [edge], trace)).toBe(false)
+    expect(edgeState(edge, [edge], trace).traceActive).toBe(false)
   })
 
   it('matches historical playback by a unique stable rule id rather than current list position', () => {
@@ -102,7 +182,7 @@ describe('trace edge playback', () => {
       ]
     }
 
-    expect(isEdgeActiveInTrace(edge, [edge], trace)).toBe(true)
+    expect(edgeState(edge, [edge], trace).traceActive).toBe(true)
   })
 
   it('does not guess a current edge when historical rule ids are duplicated', () => {
@@ -116,8 +196,8 @@ describe('trace edge playback', () => {
       ]
     }
 
-    expect(isEdgeActiveInTrace(first, [first, second], trace)).toBe(false)
-    expect(isEdgeActiveInTrace(second, [first, second], trace)).toBe(false)
+    expect(edgeState(first, [first, second], trace).traceActive).toBe(false)
+    expect(edgeState(second, [first, second], trace).traceActive).toBe(false)
   })
 
   it('does not match when only one side has a rule id, because the snapshots disagree on identity', () => {
@@ -130,7 +210,7 @@ describe('trace edge playback', () => {
       states: [{ triggeredRules: [{ ruleIndex: 0, ruleId: null, ruleLabel: 'No id' }], devices: [] }]
     }
 
-    expect(isEdgeActiveInTrace(edge, [edge], trace)).toBe(false)
+    expect(edgeState(edge, [edge], trace).traceActive).toBe(false)
   })
 
   /*
@@ -155,7 +235,7 @@ describe('trace edge playback', () => {
       states: [{ triggeredRules: [{ ruleIndex: 2, ruleId: null, ruleLabel: 'Unnamed rule' }], devices: [] }]
     }
 
-    expect(isEdgeActiveInTrace(edge, [edge], trace)).toBe(true)
+    expect(edgeState(edge, [edge], trace).traceActive).toBe(true)
   })
 
   it('does not match an id-less rule at a different frozen position', () => {
@@ -165,7 +245,7 @@ describe('trace edge playback', () => {
       states: [{ triggeredRules: [{ ruleIndex: 5, ruleId: null, ruleLabel: 'Other rule' }], devices: [] }]
     }
 
-    expect(isEdgeActiveInTrace(edge, [edge], trace)).toBe(false)
+    expect(edgeState(edge, [edge], trace).traceActive).toBe(false)
   })
 
   it('animates only a delivered rule and stops a compromised link', () => {
@@ -183,20 +263,20 @@ describe('trace edge playback', () => {
       }]
     }
 
-    expect(isEdgeCompromisedInTrace(edge, [edge, other], trace)).toBe(true)
-    expect(isEdgeCompromisedInTrace(other, [edge, other], trace)).toBe(false)
-    expect(shouldAnimateEdgeFlow(edge, [edge, other], trace)).toBe(false)
-    expect(shouldAnimateEdgeFlow(other, [edge, other], trace)).toBe(true)
+    expect(edgeState(edge, [edge, other], trace).linkCompromised).toBe(true)
+    expect(edgeState(other, [edge, other], trace).linkCompromised).toBe(false)
+    expect(edgeState(edge, [edge, other], trace).shouldAnimate).toBe(false)
+    expect(edgeState(other, [edge, other], trace).shouldAnimate).toBe(true)
   })
 
   it('does not imply command delivery outside playback or for an idle rule', () => {
     const edge = apiEdge()
 
-    expect(shouldAnimateEdgeFlow(edge, [edge], null)).toBe(false)
-    expect(shouldAnimateEdgeFlow(edge, [edge], {
+    expect(edgeState(edge, [edge], null).shouldAnimate).toBe(false)
+    expect(edgeState(edge, [edge], {
       selectedStateIndex: 0,
       states: [{ triggeredRules: [], compromisedAutomationLinks: [], devices: [] }]
-    })).toBe(false)
+    }).shouldAnimate).toBe(false)
   })
 
   it('reads environment-pool variables for variable rule edges', () => {
