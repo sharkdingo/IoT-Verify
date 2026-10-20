@@ -163,8 +163,10 @@ class VerificationTraceAuthorityIntegrationTest {
     @Test
     void expiredOwnerCannotCommitEvidence() {
         VerificationTaskPo task = task(VerificationTaskPo.TaskStatus.RUNNING);
-        task.setLeaseExpiresAt(LocalDateTime.now().minusMinutes(1));
+        task.setLeaseExpiresAt(tasks.currentDatabaseTime().minusMinutes(1));
         tasks.saveAndFlush(task);
+        assertTrue(tasks.findById(task.getId()).orElseThrow().getLeaseExpiresAt()
+                .isBefore(tasks.currentDatabaseTime()));
 
         assertFalse(complete(task, List.of(trace("s1"))));
 
@@ -186,7 +188,7 @@ class VerificationTraceAuthorityIntegrationTest {
     }
 
     private VerificationTaskPo task(VerificationTaskPo.TaskStatus status) {
-        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime now = tasks.currentDatabaseTime();
         VerificationTaskPo task = tasks.saveAndFlush(VerificationTaskPo.builder().userId(user.getId()).status(status)
                 .createdAt(now).startedAt(now)
                 .workerId((String) ReflectionTestUtils.getField(service, "workerId"))
