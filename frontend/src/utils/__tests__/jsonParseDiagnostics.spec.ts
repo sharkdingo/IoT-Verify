@@ -3,12 +3,13 @@ import { describe, expect, it } from 'vitest'
 import { diagnoseJsonParseError } from '../jsonParseDiagnostics'
 
 describe('JSON parse diagnostics', () => {
-  it('locates the parser-reported offset across CRLF and UTF-16 text', () => {
+  it.each([
+    'Unexpected token [ in JSON at position 24',
+    "Expected ':' after property name in JSON at position 24 (line 2 column 10)"
+  ])('locates the explicit parser offset across CRLF and UTF-16 text: %s', reason => {
     const source = '{"Name":"😀",\r\n "Modes" []}'
-    let cause: unknown
-    try { JSON.parse(source) } catch (error) { cause = error }
-    const diagnostic = diagnoseJsonParseError(source, cause)
-    expect(diagnostic.reason).toBe((cause as SyntaxError).message)
+    const diagnostic = diagnoseJsonParseError(source, new SyntaxError(reason))
+    expect(diagnostic.reason).toBe(reason)
     expect(diagnostic).toMatchObject({ position: source.indexOf('['), line: 2, column: 10 })
   })
 
@@ -17,6 +18,9 @@ describe('JSON parse diagnostics', () => {
       .toEqual({ reason: 'Unexpected end of JSON input' })
     expect(diagnoseJsonParseError('{bad', new SyntaxError('Unexpected token b')))
       .toEqual({ reason: 'Unexpected token b' })
+    const source = '{"Name":"😀",\r\n "Modes" []}'
+    const reason = 'Unexpected token \'[\', ..."\n "Modes" []}" is not valid JSON'
+    expect(diagnoseJsonParseError(source, new SyntaxError(reason))).toEqual({ reason })
   })
 
   it('accepts explicit line and column diagnostics only within the source', () => {
