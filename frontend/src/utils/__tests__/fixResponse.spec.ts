@@ -23,6 +23,8 @@ const parameterSuggestion = {
   description: 'Change the temperature threshold from 30 to 25.',
   parameterAdjustments: [{
     targetId: 'param_abcdefghijklmnopqrstuvwx',
+    rulePosition: 1,
+    deviceLabel: 'Sensor',
     attribute: 'temperature',
     relation: '>',
     originalValue: '30',
@@ -94,6 +96,8 @@ const fixResult = () => ({
   warnings: [],
   parameterTargets: [{
     targetId: 'param_abcdefghijklmnopqrstuvwx',
+    rulePosition: 1,
+    deviceLabel: 'Sensor',
     attribute: 'temperature',
     relation: '>',
     originalValue: '30',
@@ -118,6 +122,15 @@ const fixResultFor = (suggestion: typeof parameterSuggestion | typeof conditionS
 })
 
 describe('automatic-fix response contracts', () => {
+  it('accepts an explicit initial-state blocker without inventing a repair', () => {
+    const result = {
+      ...fixResult(),
+      fixable: false,
+      suggestions: [],
+      strategyAttempts: [{ strategy: 'parameter', status: 'SKIPPED_INITIAL_STATE_VIOLATION', reason: 'Safety fails before any rule runs.' }]
+    }
+    expect(validateFixResult(result, 12, ['parameter'])).toEqual(result)
+  })
   it('rejects a VERIFIED attempt that produced no suggestion', () => {
     // The dialog renders the attempt's status and reason, so this payload claims a concrete
     // suggestion passed forward verification while showing the no-suggestion empty state and no
@@ -465,5 +478,26 @@ describe('a conflicting fault rule', () => {
   it('still requires the conflicting reason code', () => {
     expect(() => validateFaultLocalizationResult(
       withRule(conflictingRule({ reasonCode: 'TRIGGERED' })), 12)).toThrowError(/conflicting reason code/)
+  })
+})
+
+
+describe('frozen parameter display metadata', () => {
+  it('rejects missing or invalid rule order and device labels on targets and adjustments', () => {
+    for (const [field, values] of [['rulePosition', [undefined, 0, -1, 1.5, '1']], ['deviceLabel', [undefined, null, '', '  ']]] as const) {
+      for (const value of values) {
+        const result = structuredClone(fixResult())
+        for (const row of [result.parameterTargets[0]!, result.suggestions[0]!.parameterAdjustments[0]!]) {
+          Object.assign(row, { [field]: value })
+        }
+        expect(() => validateFixResult(result, 12, ['parameter'])).toThrow()
+      }
+    }
+  })
+
+  it.each(['rulePosition', 'deviceLabel'] as const)('rejects a different %s for the same target id', field => {
+    const result = structuredClone(fixResult())
+    Object.assign(result.suggestions[0]!.parameterAdjustments[0]!, { [field]: field === 'rulePosition' ? 2 : 'Other Sensor' })
+    expect(() => validateFixResult(result, 12, ['parameter'])).toThrow('does not match its frozen target')
   })
 })

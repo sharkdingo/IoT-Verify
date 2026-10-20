@@ -40,7 +40,7 @@ public class SimulationTracePo {
     @Column(name = "states_json", columnDefinition = "JSON", nullable = false)
     private String statesJson;
 
-    @Column(name = "state_count")
+    @Column(name = "state_count", nullable = false)
     private Integer stateCount;
 
     @Column(name = "logs_json", columnDefinition = "TEXT")

@@ -1,9 +1,13 @@
 package cn.edu.nju.Iot_Verify.service.impl;
 
 import cn.edu.nju.Iot_Verify.dto.auth.AuthResponseDto;
+import cn.edu.nju.Iot_Verify.dto.auth.AccountProfileDto;
+import cn.edu.nju.Iot_Verify.dto.auth.ChangePasswordRequestDto;
 import cn.edu.nju.Iot_Verify.dto.auth.DeleteAccountRequestDto;
 import cn.edu.nju.Iot_Verify.dto.auth.LoginRequestDto;
 import cn.edu.nju.Iot_Verify.dto.auth.RegisterRequestDto;
+import cn.edu.nju.Iot_Verify.dto.auth.UpdateUsernameRequestDto;
+import cn.edu.nju.Iot_Verify.exception.AccountChangeException;
 import cn.edu.nju.Iot_Verify.exception.BadRequestException;
 import cn.edu.nju.Iot_Verify.exception.InternalServerException;
 import cn.edu.nju.Iot_Verify.exception.UnauthorizedException;
@@ -44,6 +48,7 @@ import io.jsonwebtoken.JwtException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -103,7 +108,7 @@ public class AuthServiceImpl implements AuthService {
         }
         log.info("Loaded {} default templates for new user {}", count, user.getId());
 
-        String token = jwtUtil.generateToken(user.getId(), user.getPhone());
+        String token = jwtUtil.generateToken(user.getId(), user.getPhone(), user.getAuthVersion());
         return userMapper.toAuthResponseDto(user, token);
     }
 
@@ -112,7 +117,7 @@ public class AuthServiceImpl implements AuthService {
         String identifier = UsernameNormalizer.normalize(request.getIdentifier());
         UserPo user = resolveLoginUser(identifier, request.getPassword());
 
-        String token = jwtUtil.generateToken(user.getId(), user.getPhone());
+        String token = jwtUtil.generateToken(user.getId(), user.getPhone(), user.getAuthVersion());
         return userMapper.toAuthResponseDto(user, token);
     }
 
@@ -125,6 +130,76 @@ public class AuthServiceImpl implements AuthService {
             return candidate.get();
         }
         throw UnauthorizedException.invalidCredentials();
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public AccountProfileDto getAccount(Long userId) {
+        if (userId == null) throw UnauthorizedException.missingToken();
+        return accountProfile(userRepository.findById(userId)
+                .orElseThrow(UnauthorizedException::invalidToken));
+    }
+
+    @Override
+    @Transactional
+    public AccountProfileDto updateUsername(Long userId, UpdateUsernameRequestDto request) {
+        UserPo user = lockAccount(userId, request.getCurrentPassword());
+        if (!user.getUsername().equals(request.getExpectedUsername())) {
+            throw AccountChangeException.staleProfile(accountProfile(user));
+        }
+        String username = UsernameNormalizer.normalizeAndValidate(request.getUsername());
+        if (username.equals(user.getUsername())) return accountProfile(user);
+        if (userRepository.existsByUsername(username)) throw AccountChangeException.duplicateUsername();
+
+        user.setUsername(username);
+        try {
+            userRepository.saveAndFlush(user);
+        } catch (DataIntegrityViolationException conflict) {
+            // Only username changed on this locked row; a typed unique violation settles a concurrent claim.
+            Throwable cause = conflict;
+            while (cause != null) {
+                if (cause instanceof org.hibernate.exception.ConstraintViolationException constraint
+                        && constraint.getKind()
+                                == org.hibernate.exception.ConstraintViolationException.ConstraintKind.UNIQUE) {
+                    throw AccountChangeException.duplicateUsername();
+                }
+                cause = cause.getCause();
+            }
+            throw conflict;
+        }
+        return accountProfile(user);
+    }
+
+    @Override
+    @Transactional
+    public void changePassword(Long userId, ChangePasswordRequestDto request) {
+        UserPo user = lockAccount(userId, request.getCurrentPassword());
+        if (passwordEncoder.matches(request.getNewPassword(), user.getPassword())) {
+            throw AccountChangeException.unchangedPassword();
+        }
+        user.setPassword(passwordEncoder.encode(request.getNewPassword()));
+        // Credential authority is in the same row/transaction as the hash, independent of Redis.
+        user.setAuthVersion(Math.incrementExact(user.getAuthVersion()));
+        userRepository.saveAndFlush(user);
+    }
+
+    private UserPo lockAccount(Long userId, String currentPassword) {
+        if (userId == null) throw UnauthorizedException.missingToken();
+        UserPo user = userRepository.findByIdForUpdate(userId)
+                .orElseThrow(UnauthorizedException::invalidToken);
+        if (!passwordEncoder.matches(currentPassword, user.getPassword())) {
+            throw AccountChangeException.incorrectPassword();
+        }
+        return user;
+    }
+
+    private AccountProfileDto accountProfile(UserPo user) {
+        return AccountProfileDto.builder()
+                .userId(user.getId())
+                .phone(user.getPhone())
+                .username(user.getUsername())
+                .createdAt(user.getCreatedAt())
+                .build();
     }
 
     @Override

@@ -4,8 +4,9 @@ Contract for `/api/chat` — session management plus the streaming completion en
 Session endpoints use the standard `Result<T>` envelope ([overview.md](overview.md));
 the streaming endpoint does **not** — it is an SSE stream.
 
-Verified against code on 2026-08-01. Source: `controller/ChatController.java`,
-`service/impl/ChatServiceImpl.java`, `dto/chat/`.
+Verified against code on 2026-10-14. Source: `controller/ChatController.java`,
+`service/impl/ChatServiceImpl.java`, `dto/chat/`, `frontend/src/api/chat.ts`,
+`frontend/src/App.vue`, and `frontend/src/components/ChatView.vue`.
 
 ---
 
@@ -18,7 +19,7 @@ Verified against code on 2026-08-01. Source: `controller/ChatController.java`,
 | GET | `/api/chat/sessions/{sessionId}/messages?beforeId=&limit=50` | → `ChatHistoryPageDto` | Bounded message history, newest page first |
 | POST | `/api/chat/sessions/{sessionId}/seen` | `{ terminalMessageId: Long }` → `null` | Advance the session's seen cursor to the exact terminal assistant message rendered by the client |
 | GET | `/api/chat/sessions/{sessionId}/activity` | → `ChatSessionActivityDto { sessionId, active }` | Authoritative cross-instance check for whether a request is still active for the session |
-| GET | `/api/chat/sessions/{sessionId}/confirmation` | → `ChatPendingConfirmationDto { sessionId, kinds }` | Server-authoritative protected-action kinds waiting for an explicit UI decision |
+| GET | `/api/chat/sessions/{sessionId}/confirmation` | → `ChatPendingConfirmationDto { sessionId, actions }` | Server-authoritative protected actions waiting for an explicit UI decision |
 | POST | `/api/chat/sessions/{sessionId}/stop` | `{ turnId: String \| null }` → `null` | Stop the named local turn, or the reattached active response when its turn id is unavailable; already-started writes are not rolled back |
 | DELETE | `/api/chat/sessions/{sessionId}` | → `null` | Delete a session |
 
@@ -46,8 +47,12 @@ Before the chat panel is first mounted, `App` owns the periodic session projecti
 `ChatView` mounts, it becomes the sole owner even while hidden: it polls the complete list every
 five seconds while idle and every second while any session is active. This single-writer handoff
 prevents two reconcilers from clearing each other's pending state while still discovering work
-started in another tab. Both owners retain each session's active projection and latest terminal
-message id. A newly observed terminal id, or an active session becoming inactive without one,
+started in another tab. At lazy mount, `App` transfers its account-scoped active/terminal
+observation baseline and any in-flight reconciliation to `ChatView`. The first list response
+is compared against that baseline, so work finishing during component loading is still
+reconciled. The child waits for the prior reconciliation before taking over unresolved work;
+account changes discard the handoff. Both owners retain each session's active projection and
+latest terminal message id. A newly observed terminal id, or an active session becoming inactive without one,
 triggers a full Board and run-history reconciliation even if the entire turn completed between
 polls or no tab retained the original SSE stream. A failed reconciliation remains a distinct
 visible and blocking client state and is retried; it is never inferred as successful from the
@@ -108,9 +113,9 @@ another tool's success cannot recover it. `FAILED`, `RESULT_UNAVAILABLE`, and
 validator independently rejects a `COMPLETED` message without the same persisted usable-tool
 evidence, and the component renders such directly supplied data as unconfirmed rather than
 completed.
-When the model returns a conversational response without executing a platform tool, the
-server prefixes it with an authoritative notice that no current Board data was read and no
-platform operation was confirmed, even if model prose claims otherwise.
+The session-list summary has no execution trace, so its `PARTIAL` indicator says "View
+execution details" instead of guessing whether work partly completed. The message's trace
+still distinguishes a zero-tool reply from partly executed work.
 `AWAITING_CONFIRMATION` means a no-write preview is waiting for the user's decision.
 `STOPPED` means the user explicitly requested the response to stop. `DISCONNECTED` is reserved
 for a worker that loses durable execution ownership (for example lease or account cleanup),
@@ -219,24 +224,33 @@ Every non-blank message first runs model-driven planning with the complete regis
 tool catalog. The model may choose zero tools for ordinary conversation, or freely chain
 read, recommendation, mutation, verification, and status tools when the request spans
 domains. This decision is based on the message meaning and conversation context rather
-than a keyword or deterministic intent route. Tool calls and bounded tool results are
+than a keyword or deterministic intent route. Planning requests independent reads together
+when their arguments are known, while dependent calls wait for their input results.
+Tool calls and bounded tool results are
 persisted as internal chat messages but are not exposed as raw user-visible text. A result
 over `CHAT_MAX_TOOL_RESULT_BYTES` becomes a structured `TOOL_RESULT_TOO_LARGE` unavailable
 result before persistence or reuse as provider context.
 Structured progress frames expose the verifiable execution state and outcome of each
-step while it runs. After planning completes, the final assistant reply is generated
-through the streaming LLM path so tool-backed answers also arrive as incremental text
-chunks.
-If planning chooses no tool, the streamed and persisted answer begins with a deterministic
-server notice that the turn did not confirm current Board data or a completed platform
-operation. For every turn, the backend buffers each complete sentence before exposing it.
+step while it runs. Public text streams during tool-aware inference as described under
+[Stream frames](#stream-frames). For every turn, the backend buffers each
+complete sentence before exposing it.
+During a tool-aware round, a sentence that needs evidence not yet available is held with
+the following text until the complete tool decision and its executions finish. Ordinary
+explanations continue to stream immediately. Pending claims are then checked against the
+same current-turn evidence guard; a response returning no tools still cannot assert a
+current read or mutation. This prevents early narration from cancelling the inference
+before its read call can provide evidence.
+The reply prompt distinguishes guard overlap from different predicates and initial values,
+retains complete specification conditions and temporal operators, and requires trace
+explanations to follow observed state-index order.
 Explicit tool-result or current-platform completion/mutation claims are checked against
 the current turn's usable tool evidence. When the relevant read or mutation capability has
 an authoritative usable result, the model's natural-language summary is preserved; the
 deterministic `TOOL_RESULT` progress and action receipt remain the execution record. When no
-such evidence exists, the unsupported segment is replaced with a deterministic warning and
-all later provider prose is neither streamed nor persisted; earlier safe segments remain
-visible. A claim hidden without evidence downgrades an otherwise `COMPLETED` turn to `PARTIAL`. This
+such evidence exists, the unsupported segment is replaced with a deterministic warning.
+When confirmed results can replace it, later checked prose remains available. Otherwise,
+later provider prose is withheld; earlier safe segments remain visible. A claim hidden without
+evidence downgrades an otherwise `COMPLETED` turn to `PARTIAL`. This
 deliberately narrow check does not classify API documentation, historical descriptions, or
 sample/draft content as a platform operation. Closed ASCII/typographic quoted spans, inline
 backtick code, and backtick or tilde code fences are preserved, so explanations and translations
@@ -255,7 +269,10 @@ is complete or a confirmation, unavailable-result, no-progress, or emergency bou
 requires it to stop.
 
 Questions about the current scene, including device/rule/specification counts, are
-planned from `board_overview` rather than inferred from chat history. A request to extend
+planned from `board_overview` rather than inferred from chat history. This includes
+follow-ups about current links and specifications: read-only analysis permits read tools,
+and a previous turn's snapshot is not evidence of current state. Discussion limited to
+earlier findings must identify that historical scope. A request to extend
 or complete the current scene reads that overview first and may compose targeted device,
 environment, rule, and specification recommendation/mutation tools while preserving the
 existing scene. Before adding a device, the planner reads `list_templates` for the exact
@@ -279,7 +296,11 @@ stop before database commit, their short transactions lock and verify the sessio
 Long NuSMV computation never holds the chat row lock. There is no five-round product budget: planning
 continues while calls or results are changing. Two guards prevent runaway execution:
 consecutive rounds that repeat the exact same calls and results stop after
-`CHAT_MAX_STAGNANT_ROUNDS`, and `CHAT_MAX_TOOL_ROUNDS` is a high emergency ceiling rather
+`CHAT_MAX_STAGNANT_ROUNDS`. A round consisting entirely of usable task-status reads with
+matching task ids and authoritative `PENDING`/`RUNNING` status resets stagnancy: an active
+background job can legitimately remain at the same stage. Mixed rounds, failed or malformed
+reads, and repeated terminal snapshots remain subject to the no-progress guard.
+`CHAT_MAX_TOOL_ROUNDS` is a high emergency ceiling rather
 than a normal task limit. One planning response is additionally limited by
 `CHAT_MAX_TOOL_CALLS_PER_ROUND`; an oversized response executes none of its calls. These
 guards preserve earlier commits, emit a visible guard
@@ -327,9 +348,32 @@ restored to ascending id order; per-instance JVM timestamps never determine prot
 Incomplete, duplicate, malformed, or isolated internal tool blocks are omitted from the
 model context, while surrounding user-visible conversation remains available. This keeps
 corrupt internal protocol records from being represented as executed work. During the active
-request, blank or reused correlation ids returned by a
-compatible provider are replaced with unique internal ids before persistence or tool
-execution, and the same repaired ids are used for assistant calls and their results.
+request, blank or reused Chat Completions correlation ids are replaced with unique internal
+ids before persistence or tool execution, and the same repaired ids are used for assistant
+calls and their results. Responses rejects missing, whitespace-padded, or reused call ids
+before dispatch: rewriting them would break the original opaque continuation items.
+The planner explicitly treats the supplied conversation as a bounded recent window.
+Absence from that window does not mean an earlier recommendation, preview, or edit
+never happened. For conversation-wide operation audits it uses the paged
+[`read_conversation_activity` tool](ai-tools.md#conversation-activity), whose evidence
+comes from canonical stored operations rather than earlier assistant claims. An
+unfinished page traversal must be described as partial coverage. Historical receipts
+are not new mutation receipts and do not establish current Board state. Saved-run
+lookups and exact model-page reads have bounded factual progress summaries, so a
+guarded unsupported claim can be replaced by actual historical evidence rather than
+stopping the remaining read chain. Nominal phrases such as "已保存的正式验证" are not
+claims that this turn saved a result; actual unproven save/edit claims remain guarded.
+When an unsupported statement can be replaced with tool evidence, the notice is
+emitted after that reply round's remaining text as a separate paragraph. It is not
+inserted into an unfinished Markdown table cell or sentence. Streamed and persisted
+text use the same output path. Historical page progress separately identifies
+explicitly recorded saved drafts, confirmation previews, and past changes from
+available canonical entries; these counts are not new action receipts.
+Scene-replacement confirmation replies also include a server-generated summary of
+the environment inputs' declared control-source and privacy labels from the exact
+pending preview. This summary remains present when model prose omits those choices;
+it describes modeling assumptions, not a verified security conclusion.
+
 Pending destructive confirmation data is not recovered from that bounded history. On an
 explicit confirmation turn, the backend injects compact server-authoritative context for
 the pending tool, target, and opaque token, so a large preview cannot force the assistant
@@ -349,14 +393,39 @@ changed instructions may intervene without discarding the preview.
 
 Protected authority never comes from model interpretation of ordinary text. The client
 reads `GET /api/chat/sessions/{sessionId}/confirmation`, renders an explicit decision for
-each returned kind, and sends the selected `kind` plus `CONFIRM` or `CANCEL` in the next
-stream request's structured `confirmation` field. The accepted kinds are `DESTRUCTIVE`,
-`DEFAULT_TEMPLATE_RESET`, and `SCENE_REPLACEMENT`. The backend requires that exact kind to
+each returned `actions[]` item (`kind`, opaque `confirmationId`, `toolName`, and readable
+`target`), and sends that item's `kind` and `confirmationId` plus `CONFIRM` or `CANCEL` in
+the next stream request's structured `confirmation` field. The accepted kinds are `DESTRUCTIVE`,
+`DEFAULT_TEMPLATE_RESET`, and `SCENE_REPLACEMENT`. The backend requires that exact kind and identity to
 still be pending for the authenticated session; an invented, stale, or mismatched command
 authorizes no write. The client rejects a confirmation response with a mismatched session or
-any value outside this enum instead of rendering unknown authority. `DESTRUCTIVE` is the
+any value outside this enum, missing identities/targets, or duplicate kinds instead of
+rendering unknown authority. Replacing a pending preview invalidates old buttons, including
+old cancellation commands. The approved identity remains attached to the execution and is
+checked again when the tool consumes its pending action; the model cannot reuse a confirmed
+kind to authorize a new preview in that turn. `DESTRUCTIVE` is the
 existing wire-level group for an ordinary protected preview; the UI therefore labels it as
 the previewed protected action rather than claiming every member is a deletion.
+`target` is the readable label or description captured when that exact preview was issued.
+Device, rule, specification, and template previews use their display label or semantic
+description; saved-result and task previews include the saved timestamp and readable
+result details so equal-sized executions remain distinguishable. The internal
+stable target key remains server-side and is never replaced by this display text for
+authorization. Reading confirmation state, including after reconnecting, does not re-read
+the current object to change the previewed label. An obsolete pending payload without its
+display snapshot is rejected and requires a fresh preview.
+Semantically invalid protected-action records and scenario drafts grant no authority and are
+decoded without writes in the confirmation read transaction. A lapsed scenario replacement
+preview also grants no authority while its still-valid draft remains available for a fresh
+preview. Unusable rows stay bounded by the existing expiry cleanup or a later preview/draft
+write to the same session-scoped key.
+A stale, cancelled, expired, or replaced structured decision is a protected-confirmation
+conflict (`409` internally), including a cancellation whose exact identity was valid when
+read but expired or changed before the compare-and-delete. If detected after SSE admission,
+the stream reports a localized error telling the user to refresh and review the current
+preview, then persists/sends
+`FAILED`; it does not report a generic system failure, invoke the model or a platform tool,
+or consume the newer pending preview.
 Natural-language classification remains available only for
 non-destructive choice prompts and cannot create or consume protected authority.
 The token is valid for 15 minutes and is consumed once
@@ -389,7 +458,7 @@ from being presented as completely successful.
 | `content` | `String` | Required; ≤10000 characters and must contain at least one non-Unicode-whitespace code point |
 | `turnId` | `String` | Required non-blank value, ≤64 characters. The client generates a unique value used to associate the user message and terminal assistant record; omission is rejected with HTTP `400`. |
 | `locale` | `String` | Optional BCP 47 tag (`zh-CN` / `en`), ≤35 characters, naming the UI language the turn is read in. It selects the language of backend-authored status prose (execution notices, error and interruption messages). When absent, the backend falls back to inspecting `content` for Han characters — a guess that reports English for any message carrying none, so a client with a language setting should always send it. |
-| `confirmation` | `ChatConfirmationCommandDto` | Optional explicit protected-action decision: `{ action: "CONFIRM" | "CANCEL", kind: "DESTRUCTIVE" | "DEFAULT_TEMPLATE_RESET" | "SCENE_REPLACEMENT" }`. It is accepted only when that kind is currently pending for the session. |
+| `confirmation` | `ChatConfirmationCommandDto` | Optional explicit protected-action decision: `{ action: "CONFIRM" | "CANCEL", kind: "DESTRUCTIVE" | "DEFAULT_TEMPLATE_RESET" | "SCENE_REPLACEMENT", confirmationId: "opaque identity from the pending action" }`. `confirmationId` is required and non-blank. It is accepted only when that exact kind and identity are currently pending for the session. |
 
 An unknown session, a reused `turnId`, and other admission failures remain synchronous JSON
 errors with their documented HTTP status. If the chat thread pool is saturated, the request
@@ -397,9 +466,12 @@ is rejected with `503` (`ServiceUnavailableException`) only after its admitted r
 have been removed. Provider and processing failures after dispatch are reported as an SSE
 frame with an `error` field. The backend first persists the visible `FAILED` or
 `PARTIAL` terminal assistant row, sends the error frame, then sends its terminal
-acknowledgement as the final data frame. A browser-side transport failure does not cancel the
-worker: it still persists the provider/processing outcome as `FAILED` or `PARTIAL` and the
-client discovers it through the active-session poll and authoritative history. A durable
+acknowledgement as the final data frame. If a provider failure interrupts an answer after visible
+text has been sent, the terminal row retains that text followed by the error notice and has
+status `PARTIAL`; reloading history
+must not replace the partial answer with only an error message. A browser-side transport failure
+does not cancel the worker: it still persists the provider/processing outcome as `FAILED` or
+`PARTIAL` and the client discovers it through the active-session poll and authoritative history. A durable
 ownership loss may persist `DISCONNECTED`; the client reloads authoritative history after the
 backend reports the session idle, so that record remains visible even when its SSE frame could
 not arrive.
@@ -421,7 +493,7 @@ Each SSE `data:` frame carries a JSON-serialized `StreamResponseDto`:
 | `content` | `String` | A chunk of assistant text (streamed incrementally) |
 | `error` | `String` | A non-blank server error message. It is structurally distinct from model-authored `content` |
 | `command` | `CommandDto` | Optional front-end refresh command: `{ type: "REFRESH_DATA", payload: { target, assistantAction?, assistantSummary? } }`, where `target` is `device_list`, `environment_list`, `rule_list`, `spec_list`, `template_list`, `run_history`, or `board_state`. `assistantAction` is present only for a confirmed meaningful assistant action or an uncertain outcome that must be reconciled. A non-blank `assistantSummary` of at most 240 characters carries the backend's exact localized action summary when one is available. |
-| `progress` | `ProgressDto` | Optional live status `{ stage, toolName?, round?, outcome?, successfulSteps?, failedSteps?, unconfirmedSteps?, detail? }`; `detail` is a bounded task-resumption summary, model-authored reasoning summary, or operation-aware tool-result summary |
+| `progress` | `ProgressDto` | Optional live status `{ stage, toolName?, round?, outcome?, successfulSteps?, failedSteps?, unconfirmedSteps?, detail?, claimReview? }`; `detail` is a bounded task-resumption summary, model-authored reasoning summary, operation-aware tool-result summary, or localized reply-check reason |
 | `terminal` | `TerminalDto` | Persistence acknowledgement `{ turnId, executionStatus }` for the final assistant row. It must match the request `turnId`, use a documented execution status, occur exactly once, and be the final data frame |
 
 Progress stages and outcomes:
@@ -431,11 +503,32 @@ Progress stages and outcomes:
 | `CONTEXT_READY` | Request accepted; conversation and Board context are available | — |
 | `TASK_RESUMED` | A confirmed step is resuming the stored original objective; `detail` contains its bounded user-authored summary | — |
 | `PLANNING` | The model is choosing the next tool step for `round` | — |
-| `REASONING` | Before tool execution, `detail` carries the model's bounded, sanitized user-visible reasoning: the decomposed question, the observed board facts that constrain it, any alternative rejected and why, and the check of the outcome against what was expected. **Line structure is preserved** and the budget is larger than a tool status line, because this is the only frame carrying an argument rather than a status | — |
+| `REASONING` | Before tool execution, `detail` carries the model's bounded, sanitized public explanation of current evidence or the remaining question. Complete analysis, relevant alternatives, findings, and limitations follow the required tool results. **Line structure is preserved** and the budget is larger than a tool status line; a long pre-tool plan is not required | — |
 | `TOOL_EXECUTION` | `toolName` has started | — |
 | `TOOL_RESULT` | The tool returned and cumulative counters were updated | **Required:** `USABLE`, `PARTIAL`, `FAILED`, `RESULT_UNAVAILABLE`, or `CONFIRMATION_REQUIRED` |
 | `EXECUTION_GUARD` | Duplicate no-progress execution or the emergency runaway ceiling stopped further calls | **Required:** `NO_PROGRESS` or `EMERGENCY_LIMIT` |
-| `WRITING_RESPONSE` | Tool work ended and the visible final answer is streaming | — |
+| `CLAIM_REVIEW` | A public sentence was withheld because its current-turn evidence check did not pass; `claimReview` records the precise input and reason, without incrementing tool counters | **Required:** `REPLACED` (confirmed results replace the sentence) or `HIDDEN` (no replacement evidence) |
+| `WRITING_RESPONSE` | Public assistant text is being streamed; further tool work may follow | Optional round |
+
+Absent completed/saved run records, including empty history-query results, and explicit completion of analysis, review, or
+explanation are descriptions of evidence or assistant work, not claims of a new platform
+operation. Mixed sentences still check a later actual operation independently; saying that
+an analysis is complete does not authorize or prove a rule edit or formal verification.
+Visible replacement notices state the specific missing-evidence reason before listing any
+confirmed results. The execution details retain the original for inspection.
+
+`CLAIM_REVIEW.claimReview` contains exactly `reasonCode`, `originalText`, and
+`matchedText`. The original public sentence segment is retained verbatim, including whitespace;
+the matched text is an exact substring. Reasons are `MISSING_TOOL_EVIDENCE` (no usable tool
+result), `MISSING_BOARD_SNAPSHOT` (no successful current Board read), and
+`MISSING_OPERATION_RECEIPT` (no confirmed platform operation in this turn). A diagnostic
+records what the check decided; it does not prove that the language classifier was correct.
+Malformed diagnostics, unknown reasons, or diagnostics on another stage are rejected.
+The same record is streamed and saved in the owning assistant message's execution trace.
+Its original text is shown as a collapsed, escaped quotation under Reply check, separate
+from the answer. It is not private provider reasoning, a tool result, or an action receipt,
+and is excluded from server diagnostic strings. A `HIDDEN` review cannot support a
+`COMPLETED` history state.
 
 Frames are emitted with `MediaType.APPLICATION_JSON`. Notes on framing:
 
@@ -462,6 +555,96 @@ Frames are emitted with `MediaType.APPLICATION_JSON`. Notes on framing:
   Preview, list, rejected, unchanged, and unaccepted-cancellation results emit no action receipt.
   `OUTCOME_RECONCILED` means a mutation may have committed but the tool could not return a
   confirmed result; it must not be rendered as success.
+- Tool-aware inference streams public assistant text directly through the visible reply's evidence
+  guards, including brief explanations before tool calls. Hidden provider reasoning and tool arguments
+  are never sent as visible content. The adapter assembles text and
+  interleaved tool arguments with the SDK accumulator and waits for a completed choice or
+  Responses `response.completed` event before
+  returning calls to the executor. Missing finish markers, truncated or filtered responses, and
+  stream errors fail explicitly; partial arguments never authorize tool execution. When no tools remain,
+  the same inference response supplies the complete answer: a normal turn does not issue another model
+  request to regenerate it. Confirmation boundaries, runaway guards, unavailable results and a model
+  returning no text can still require a separate tool-free summary. That summary requires a normal `stop`
+  finish marker or completed Responses event; EOF alone, filtering, truncation, or unexpected tool calls are not completion.
+  Responses calls use stateless requests. The original completed reasoning, message, and function-call
+  items travel together with their matching tool results inside the current turn. Opaque encrypted
+  reasoning is excluded from API serialization, diagnostic strings, and persisted chat history.
+  Leading system messages become explicit Responses instructions, preventing a compatible relay
+  from substituting an unrelated default agent prompt. Later system reminders retain their position
+  beside the current tool evidence; no project instructions or available actions are removed.
+  Safe reasoning summaries remain separate from visible answer text. Protocol and reasoning selection
+  are owned by [LLM configuration](../getting-started/configuration.md#llm-ai).
+  Healthy completed requests can reuse their connection across tool rounds. Cancelling an
+  unfinished response closes it; its partial content cannot complete a later request.
+  Stop cancels the owning network call before closing the SDK stream, so a blocked reader
+  cannot delay cancellation or affect another user's request in the shared connection pool.
+  Request-scoped SDK clients borrow the provider's shared transport. Their cleanup cannot
+  shut down its dispatcher or pool; the provider owns shutdown of those shared resources.
+  Planning and tool-free replies both attach cancellation before response headers arrive.
+  They share the same streaming adapter, preserving normal-finish checks and rejecting unfinished
+  tool arguments. Connection setup and SDK retry policy are owned by
+  [LLM configuration](../getting-started/configuration.md#llm-ai).
+  The prompt asks for an immediate short public sentence, then tool work; complete analysis
+  belongs with the resulting evidence rather than a repeated pre-tool plan. Provider diagnostics
+  record connection protocol, reuse, setup time, first chunk, first public text, and total request
+  duration without recording prompts or upstream exception messages.
+  Tool-aware answers and separate summaries share the same presentation rules: requested
+  coverage stays complete, while each finding and shared limitation is explained once.
+  Repeated identical evidence replacements produce one notice; every unsupported segment
+  is still withheld. Statements that no completed/saved formal record exists describe
+  available evidence rather than claiming a new operation.
+  Replies address each explicitly named device, distinguish observed rules from suggested links,
+  and explain the evidence behind inspection priorities. They compare complete guards before calling
+  opposite actions a simultaneous conflict, and avoid repeating chains and priorities across sections.
+  Shared chain segments are grouped together with their conditions, gaps and inspection priorities;
+  follow-ups develop the requested distinction instead of retelling the topology.
+  Multi-device topology prompts favor one compact chain table and one inspection list. A cited
+  specification keeps its actual IF/THEN, rather than substituting a downstream automation state.
+  Later tool rounds explain only new evidence or the remaining question instead of repeating scope
+  and counts. Full formal cross-checks start with the outcome and use one rule/chain inventory,
+  one specification/result inventory, indexed counterexample tables and one prioritized list.
+  Shared-variable dependencies stay beside the related chain or check; an explicit variable inventory
+  is included when requested. Requested items and complete conditions remain present without prose
+  retellings of those inventories or another concluding checklist;
+  causal claims need the complete guard and relevant transition in that same trace. An initial-state
+  prohibition failure precedes automation. Complete generation with no omissions is distinct from
+  conservative abstractions, missing desired properties and actual violations.
+  Automation rules, configured specifications and verified properties remain distinct;
+  specification coverage must match the property's actual conditions and target. Applicable-specification
+  lists contain only tool-returned specifications; related automation rules are labelled separately,
+  and proposed properties are explicitly not yet configured.
+  After tool results, one current-evidence reminder is moved to the end of the model context, rather
+  than accumulated every round. It requires fresh evidence to override earlier assistant prose and
+  treats values first changing at the same state index as jointly observed, with no invented order.
+- A typed transient provider stream interruption permits one continuation request per user turn. It
+  preserves already emitted, evidence-checked text and completed tool results, discards unfinished text
+  and tool arguments, and asks the model to finish the remaining objective without repeating prior text
+  or completed actions. The continuation still receives the tool catalog and must return fully validated
+  calls before any new execution. A `PLANNING` event explains that the connection was interrupted and
+  the reply is resuming. Quota/configuration errors and malformed or abnormally finished responses are
+  not treated as recoverable interruptions. A second interruption remains an explicit error and partial
+  terminal record; an explicit Stop prevents continuation.
+  Upstream HTTP `502`, `503`, and `504` also enter this single continuation path, including before
+  response text arrives. They do not trigger SDK retries or a protocol change; other upstream
+  rejection statuses retain explicit failure semantics.
+  An actual HTTP/2 stream reset marks only that turn's later model calls for the alternative
+  HTTP/1 transport, retaining the same model, timeout, cancellation, and single-continuation
+  rules. Ordinary I/O, quota, parsing, and configuration failures do not switch protocols.
+  Schema discovery follows the [AI tool catalog contract](ai-tools.md). Attempted actions
+  retain their complete schemas, including after partial or failed results, so correcting
+  arguments does not require another preparation request. Only a validated preparation
+  result can add newly selected action schemas; confirmation and outcome guards still apply.
+  Existing-rule edits use the [rule tool contract](ai-tools.md#rules): a current baseline
+  is checked at the atomic write boundary, the rule keeps its identity and order, and the
+  result remains explicitly unverified until a new formal check completes. The same rule
+  refresh and mutation receipt path presents the edit without substituting a deletion preview.
+  Ordinary Board writes also follow the [pre-dispatch authorization contract](ai-tools.md):
+  asking for analysis or a repair search does not authorize temporary saved-rule edits.
+- While a local turn is active, a compact status line stays in the fixed composer beside Stop, even with
+  execution details collapsed or the answer scrolled. The inactive draft field yields its space during
+  streaming. It shows the current activity and elapsed time. After 15 seconds without text or progress,
+  it explains that the next update is pending and the user may stop; it does not invent a completion
+  percentage or claim the upstream model is progressing. A new update clears that wait hint.
 - A `recommend_scenario` result whose deterministic `objectiveStatus` is `PARTIAL` remains
   reviewable, but the final assistant row is `PARTIAL` and carries a server notice that
   missing core scene parts were not completed.
@@ -478,6 +661,16 @@ Frames are emitted with `MediaType.APPLICATION_JSON`. Notes on framing:
 - A usable result from a mutation-capable tool is not automatically mutation evidence. Read/list
   actions, previews, semantic no-ops, and rejected or unaccepted operations emit no action receipt;
   the final-response guard therefore cannot use them to support a claim that platform state changed.
+- Saved counterexample lists and repair analyses also supply authoritative progress details. Counts
+  are accepted only from consistent, typed result fields. These details identify saved-snapshot
+  records and unapplied suggestions; an empty trace history is not a passed verification. An
+  unsupported statement can therefore be replaced with the information actually read while later
+  repair work continues, instead of stopping solely because a successful read had no display detail.
+  Proposed numeric thresholds remain in the compact repair detail. Replacement replies keep
+  the most recent authoritative details, so earlier reads do not crowd out the final suggestion.
+- A valid `CONFIRMATION_REQUIRED` preview can likewise restore its actual no-write details
+  when an unsupported reply is replaced. It still supplies neither a mutation receipt nor
+  completed-operation evidence, and the turn remains awaiting the user's explicit confirmation.
 - Progress frames arrive before and between potentially slow model/tool calls. They let the UI
   show a full-width ReAct-style record of sanitized reasoning summaries, localized actions,
   observations, confirmation points, cumulative outcomes, and elapsed time. `REASONING` is
@@ -523,6 +716,12 @@ Frames are emitted with `MediaType.APPLICATION_JSON`. Notes on framing:
   or progress frames is `INCOMPLETE_STREAM`, not successful completion. The backend emits
   `terminal` only after the matching assistant row has been persisted. A transport reset after
   a valid terminal frame does not revoke that persisted outcome.
+- The frontend transport uses the caller's current request ownership before reporting an
+  error. Stop detaches that request before registering the durable stop and aborts it only
+  after the stop response. If SSE ends first, the old transport still rejects its typed
+  incomplete-stream error, but the detached view receives no duplicate error notification.
+  Stop settlement remains responsible for checking activity and reloading authoritative
+  history; an unexpected EOF on the current request still reports `INCOMPLETE_STREAM`.
 
 ### Consuming the stream (frontend)
 
@@ -560,8 +759,14 @@ another Stop is recorded; at most 64 live turn fences are retained per session. 
 fence therefore cannot cancel a later request that happens to reuse an old turn id. The owning
 backend immediately closes a blocked provider stream or cancels a pending
 planning future; another backend instance observes the durable stop flag during lease
-maintenance and closes its local provider request. Stop still cannot cancel or roll back a
-tool transaction already running on the server. A tool that has already returned is still classified and persisted before the
+maintenance and closes its local work handle. A synchronous `fix_violation` analysis binds
+that handle to its read-only worker, so Stop interrupts the search and releases its active
+native solver through the existing cancellation path. Its AI result reports explicit cancellation
+instead of presenting the interrupted search as a timeout or an unsuccessful completed search.
+Ending that scope disarms the callback
+before the thread can be reused. Waiting on an independent async task also stops promptly;
+the task itself requires its separate cancellation command. Stop cannot roll back a mutation
+transaction already running on the server. A tool that has already returned is still classified and persisted before the
 worker stops when the same execution still owns the lease, so committed writes and
 confirmation previews do not lose their audit result. A worker replaced by a newer execution
 cannot persist that result or a terminal assistant row. The terminal-message transaction locks
@@ -600,6 +805,11 @@ waits for settlement, and reconciles the Board. The application shell performs t
 when the lazy chat panel was never mounted. As a final server-side backstop, `/api/auth/logout`
 marks all currently active chat leases explicitly stopped before revoking the token. Closing only
 a panel, tab, or browser remains different and does not request Stop.
+The preparation sequence pins its initiating credential and view/account scope before its first
+await. An account change, credential replacement, or view teardown abandons the remaining steps;
+an old preparation cannot stop the replacement account's sessions or clear its reconciliation state.
+Message content is ordinary text in history, streaming, rendering, and copying. Execution progress
+uses structured frames; the client does not strip former prose prefixes or `CallEnd|>` markers.
 Terminal-confirmed completion also waits for `active=false` and reloads
 authoritative message history so persisted terminal status wins over locally inferred
 progress. That normal path replaces the local response only when the terminal row carries
@@ -669,6 +879,12 @@ confirmation previews, failed or result-unavailable tool steps, execution-guard 
 missing-reply fallbacks, and mapped stream errors. These deterministic notices remain
 visible and are persisted with the assistant reply; raw English control text is not
 prepended to an otherwise Chinese answer.
+Provider-unavailable notices recommend retrying and inspecting service logs if the failure persists;
+they do not infer an invalid endpoint from a transport or provider failure. The provider adapter logs
+HTTP status when available and a bounded chain of exception class names, without upstream exception
+messages, request headers, or response bodies.
+An unrecovered typed connection interruption instead states that the turn did not finish and asks
+the user to review completed steps before continuing. It remains an error/partial record, not success.
 
 Client-detected stream protocol failures use stable error kinds (`HTTP_ERROR`,
 `MISSING_BODY`, `INCOMPLETE_STREAM`, `INVALID_FRAME`, `SERVER_FRAME`) and are localized by

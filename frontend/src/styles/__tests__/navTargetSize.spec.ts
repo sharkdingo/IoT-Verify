@@ -10,8 +10,8 @@ import { describe, expect, it } from 'vitest'
  * from padding plus line-height rather than a floor, so each label length produced a slightly different button.
  *
  * This is not a generic accessibility sweep. The strip holds **undo and redo** — the affordance that makes
- * deleting a device recoverable — and the scene commands that clear or replace an entire board, and the logout
- * button that is the only route to account deletion. A user reaching for undo has just done something they want to
+ * deleting a device recoverable — and the scene commands that clear or replace an entire board, and the account
+ * button that leads to session and account management. A user reaching for undo has just done something they want to
  * take back, which is the worst moment to hand them a target smaller than the platform minimum.
  *
  * It had already been half-fixed: a `max-width: 1023.98px` query raised these to `2.75rem`, so **mobile was
@@ -23,16 +23,30 @@ const boardCss = () => readFileSync(join(__dirname, '../board.css'), 'utf8')
 
 /** The declaration block of a selector, up to its closing brace. */
 const ruleBody = (selector: string): string => {
-  const css = boardCss()
-  const at = css.indexOf(`${selector} {`)
-  expect(at, `${selector} should exist`).toBeGreaterThan(-1)
-  return css.slice(at, at + css.slice(at).indexOf('}'))
+  const css = boardCss().replace(/\/\*[\s\S]*?\*\//g, '')
+  const requested = selector.split(',').map(value => value.trim())
+  const rule = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].find(match => {
+    const declared = match[1].split(',').map(value => value.trim())
+    return requested.every(value => declared.includes(value))
+  })
+  expect(rule, `${selector} should exist`).toBeDefined()
+  return rule![2]
 }
 
-/** 2.75rem at a 16px root. Written as the rem value the codebase uses. */
-const MINIMUM = '2.75rem'
+const MINIMUM = 'var(--iot-target-min)'
+const targetValue = () => {
+  const base = readFileSync(join(__dirname, '../base.css'), 'utf8')
+  const value = /--iot-target-min:\s*([\d.]+)(rem|px);/.exec(base)
+  expect(value, 'the shared target must have a measurable size').not.toBeNull()
+  const px = Number(value![1]) * (value![2] === 'rem' ? 16 : 1)
+  expect(px).toBeGreaterThanOrEqual(44)
+  return `${value![1]}${value![2]}`
+}
 
 describe('board nav target size', () => {
+  it('resolves the shared target to at least 44px', () => {
+    targetValue()
+  })
   it('sizes undo and redo at the minimum in the base rule, not only on narrow screens', () => {
     const rule = ruleBody('.board-nav-bar .board-edit-history-btn')
     expect(rule).toContain(`width: ${MINIMUM}`)
@@ -41,9 +55,8 @@ describe('board nav target size', () => {
     expect(rule).not.toMatch(/(?:width|height):\s*40px/)
   })
 
-  it('sizes the logout control at the minimum', () => {
-    // Also the only route to account deletion.
-    const rule = ruleBody('.board-nav-bar .nav-logout-btn')
+  it('sizes the account control at the minimum in its shared base rule', () => {
+    const rule = ruleBody('.board-nav-bar .nav-account-btn')
     expect(rule).toContain(`width: ${MINIMUM}`)
     expect(rule).toContain(`height: ${MINIMUM}`)
     expect(rule).not.toMatch(/(?:width|height):\s*40px/)
@@ -59,7 +72,7 @@ describe('board nav target size', () => {
   it('keeps the narrow-viewport rules no smaller than the base', () => {
     // The inversion this audit found twice: a media query for a *smaller* screen granting a *larger* size, which
     // leaves the wide case as the unnoticed exception. Any narrow override must now match the base minimum.
-    const css = boardCss()
+    const css = boardCss().split(MINIMUM).join(targetValue())
     const narrowBlocks = css.match(/@media \(max-width: 1023\.98px\)[^{]*\{[\s\S]*?\n\}/g) || []
     /*
      * Both units, and the scan has to find something.

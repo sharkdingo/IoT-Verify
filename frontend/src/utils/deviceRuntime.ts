@@ -132,6 +132,33 @@ export const templateVariableUsesNumericBounds = (variable: InternalVariable) =>
   variable.LowerBound !== undefined && variable.LowerBound !== null
   && variable.UpperBound !== undefined && variable.UpperBound !== null
 
+export const validateTemplateVariableValue = (variable: InternalVariable, value: string, t: Translate): string => {
+  if (templateVariableHasEnumValues(variable)) {
+    return variable.Values!.map(String).includes(value) ? '' : t('app.variableValueEnumDomain')
+  }
+  if (!templateVariableUsesNumericBounds(variable)) return ''
+  const numericValue = Number(value)
+  // The model boundary parses integer text, not JavaScript numeric expressions.
+  if (!/^[+-]?\d+$/.test(value.trim()) || !Number.isInteger(numericValue)
+    || numericValue < -2147483648 || numericValue > 2147483647
+    || numericValue < variable.LowerBound! || numericValue > variable.UpperBound!) {
+    return t('app.variableValueIntegerDomain', { lower: variable.LowerBound, upper: variable.UpperBound })
+  }
+  return ''
+}
+
+export const validateNumericConditionValue = (
+  variable: InternalVariable, value: string, relation: string, t: Translate
+): string => {
+  if (!templateVariableUsesNumericBounds(variable)) return ''
+  const values = relation === 'in' || relation === 'not in'
+    ? value.split(/[,;|]/).map(part => part.trim()).filter(Boolean)
+    : [value.trim()]
+  if (!values.length || !values[0]) return t('app.enterValue')
+  // Rule and specification thresholds follow the same integer domain as persisted initial values.
+  return values.map(candidate => validateTemplateVariableValue(variable, candidate, t)).find(Boolean) || ''
+}
+
 /**
  * Rewrite every variable the given state constrains, in place.
  *
@@ -384,22 +411,8 @@ export const validateDeviceRuntimeConfig = (
     if (variable.trust && !TRUST_OPTIONS.includes(variable.trust as TrustValue)) {
       return t('app.deviceImportInvalidTrust', { value: variable.trust })
     }
-    if (templateVariableHasEnumValues(manifestVariable)
-      && !manifestVariable.Values!.map(String).includes(String(variable.value))) {
-      return t('app.deviceImportInvalidVariableValue', { name: variable.name, value: variable.value })
-    }
-    if (templateVariableUsesNumericBounds(manifestVariable)) {
-      const numericValue = Number(variable.value)
-      if (!Number.isFinite(numericValue)) {
-        return t('app.deviceImportInvalidVariableValue', { name: variable.name, value: variable.value })
-      }
-      if (manifestVariable.LowerBound !== undefined && numericValue < manifestVariable.LowerBound) {
-        return t('app.deviceImportInvalidVariableValue', { name: variable.name, value: variable.value })
-      }
-      if (manifestVariable.UpperBound !== undefined && numericValue > manifestVariable.UpperBound) {
-        return t('app.deviceImportInvalidVariableValue', { name: variable.name, value: variable.value })
-      }
-    }
+    const valueFailure = validateTemplateVariableValue(manifestVariable, String(variable.value), t)
+    if (valueFailure) return `${variable.name}: ${valueFailure}`
   }
 
   const seenPrivacies = new Set<string>()

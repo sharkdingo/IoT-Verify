@@ -3,7 +3,7 @@
 This project is in active development, so device identity is intentionally strict.
 There is no label/template fallback compatibility layer.
 
-Verified against code on 2026-07-11. Source: board storage, node creation,
+Verified against code on 2026-10-09. Source: board storage, node creation,
 scene recommendation/import, model request conversion, traces, and fix apply.
 
 For the full field-level contract across devices, rules, specs, traces, tasks, and
@@ -33,6 +33,17 @@ fix, see [Data authority model](data-authority-model.md).
   an omitted system-generated label may receive an automatic suffix.
 - Standard scene JSON preserves explicit ids exactly so export/import remains lossless;
   it never silently renames a conflicting id.
+- Device ids with leading or trailing Unicode `White_Space` or `U+FEFF` are rejected by
+  scene import, targeted requests, and direct Board writes. Internal whitespace is preserved.
+  Identity is never repaired by trimming; targeted device commands use the persisted id
+  exactly.
+- Targeted HTTP commands carry the id as query data rather than a URL path segment.
+  A slash, dot segment, percent sign, or other delimiter in a valid id remains part of
+  that identity. Clients pass the raw id to their query serializer; they do not pre-encode
+  or normalize it. The endpoint contract lives in [Board API](../api/board.md#canvas-storage).
+- AI device edits, deletion previews, rule/specification references, and device attack
+  points validate their raw identity fields before lookup or model-name conversion.
+  A malformed id is rejected instead of being trimmed into a different device reference.
 - Device ids must also be unique after NuSMV normalization; two raw ids that map to the
   same `varName` are rejected at board save.
 - Board save also rejects a stable id that would collide with the current scene's
@@ -59,8 +70,9 @@ fix, see [Data authority model](data-authority-model.md).
 - NuSMV and fix code resolve device references from canonical ids and fail fast on
   unknown ids.
 - NuSMV variable names are derived from node ids with the shared safe-normalization
-  algorithm: non-`[a-zA-Z0-9_]` characters become `_`, letters are lowercased, a leading
-  digit is prefixed with `_`, and NuSMV reserved words are prefixed with `_`. The raw
+  algorithm: non-`[a-zA-Z0-9_]` characters become `_` and letters are lowercased. An
+  all-underscore result becomes `device_0`; a leading digit and NuSMV reserved words
+  are prefixed with `_`. The raw
   board node id remains the persisted identity; the normalized name is the model/trace
   boundary representation.
 

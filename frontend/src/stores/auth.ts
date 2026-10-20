@@ -50,6 +50,7 @@ const getInitialState = (): AuthState => {
 };
 
 const state = reactive<AuthState>(getInitialState());
+let pendingPasswordChangeToken: string | null = null;
 
 const applyAuthState = (token: string | null, user: UserInfo | null) => {
   const authenticated = isLocallyUsableJwt(token) && Boolean(user);
@@ -70,10 +71,13 @@ if (typeof window !== 'undefined') {
   authWindow.__iotVerifyAuthStorageListener = (event: StorageEvent) => {
     if (event.storageArea && event.storageArea !== localStorage) return;
     if (event.key === null) {
-      applyAuthState(null, null);
+      const next = getInitialState();
+      applyAuthState(next.token, next.user);
       return;
     }
     if (event.key !== AUTH_SYNC_KEY || !event.newValue) return;
+    // A queued event can predate a newer login or profile update in this same tab.
+    if (event.newValue !== localStorage.getItem(AUTH_SYNC_KEY)) return;
     try {
       const next = JSON.parse(event.newValue) as { token?: string | null; user?: UserInfo | null };
       applyAuthState(next.token ?? null, next.user ?? null);
@@ -108,11 +112,36 @@ export const useAuth = () => {
 
   // A response may arrive after another tab has logged in as a different user.
   // Only the request's own token is allowed to invalidate the current session.
+  // Storage is a write fence: another tab may have changed sessions before its event arrives here.
+  const isCurrentSessionToken = (requestToken: string | null): boolean =>
+    state.token === requestToken && localStorage.getItem(TOKEN_KEY) === requestToken;
+
   const logoutIfTokenMatches = (requestToken: string | null): boolean => {
-    if (state.token !== requestToken) return false;
+    if (!isCurrentSessionToken(requestToken)) return false;
     logout();
     return true;
   };
+
+  const updateUserIfTokenMatches = (requestToken: string, user: UserInfo): boolean => {
+    if (!isCurrentSessionToken(requestToken) || state.user?.userId !== user.userId) return false;
+    state.user = user;
+    localStorage.setItem(USER_KEY, JSON.stringify(user));
+    publishAuthState(requestToken, user);
+    return true;
+  };
+
+  // A background 401 can arrive after a password commit but before its response.
+  // The interceptor must report the unconfirmed password change rather than ordinary expiry.
+  const beginPasswordChange = (requestToken: string): boolean => {
+    if (!isCurrentSessionToken(requestToken)) return false;
+    pendingPasswordChangeToken = requestToken;
+    return true;
+  };
+  const endPasswordChange = (requestToken: string) => {
+    if (pendingPasswordChangeToken === requestToken) pendingPasswordChangeToken = null;
+  };
+  const isPasswordChangePending = (requestToken: string | null): boolean =>
+    requestToken !== null && pendingPasswordChangeToken === requestToken;
 
   // 获取token
   const getToken = (): string | null => state.token;
@@ -132,7 +161,11 @@ export const useAuth = () => {
    */
   const revalidateSession = (): boolean => {
     if (state.isLoggedIn && !isLocallyUsableJwt(state.token)) {
-      logout();
+      if (!logoutIfTokenMatches(state.token)) {
+        // A newer shared session may precede its queued storage event.
+        const next = getInitialState();
+        applyAuthState(next.token, next.user);
+      }
     }
     return state.isLoggedIn;
   };
@@ -142,6 +175,11 @@ export const useAuth = () => {
     login,
     logout,
     logoutIfTokenMatches,
+    updateUserIfTokenMatches,
+    isCurrentSessionToken,
+    beginPasswordChange,
+    endPasswordChange,
+    isPasswordChangePending,
     getToken,
     getUser,
     isAuthenticated,

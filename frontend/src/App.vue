@@ -1,12 +1,17 @@
 <script setup lang="ts">
 import { ref, computed, defineAsyncComponent, onMounted, onUnmounted, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import type { ChatLogoutPreparation, StreamCommand } from "@/types/chat";
+import { useI18n } from "vue-i18n";
+import { ElConfigProvider } from "element-plus";
+import en from "element-plus/es/locale/lang/en";
+import zhCn from "element-plus/es/locale/lang/zh-cn";
+import type { ChatLogoutPreparation, ChatSessionObservationBaseline, StreamCommand } from "@/types/chat";
 import { useChatStore } from "@/stores/chat";
 import { useAuth } from "@/stores/auth";
 import { getSessionActivity, getSessionList, requestSessionStop } from "@/api/chat";
 import { publishBoardInvalidation } from "@/utils/boardInvalidation";
 import AppErrorBoundary from "./components/AppErrorBoundary.vue";
+import AssistantRecoveryPanel from "./components/AssistantRecoveryPanel.vue";
 import { loginRedirectTarget } from "@/router/loginRedirect";
 import { isNavigationInProgress } from "@/router";
 import {
@@ -16,17 +21,30 @@ import {
 
 const route = useRoute();
 const router = useRouter();
+const { locale } = useI18n({ useScope: "global" });
+const elementPlusLocale = computed(() => locale.value === "zh-CN" ? zhCn : en);
+const initialNavigationError = ref<unknown>(null);
+// Lazy route loading happens outside the rendered subtree. Before a first route exists,
+// there is no local view that can own its failed navigation and offer recovery.
+const removeInitialNavigationErrorHandler = router.onError(error => {
+  if (router.currentRoute.value.matched.length === 0) initialNavigationError.value = error;
+});
+const removeNavigationSuccessHandler = router.afterEach((to, _from, failure) => {
+  if (!failure && to.matched.length > 0) initialNavigationError.value = null;
+});
 const routerViewRef = ref<any>(null);
 const chatViewRef = ref<any>(null);
 const ChatView = defineAsyncComponent(() => import("./components/ChatView.vue"));
 const chatStore = useChatStore();
-const { state: authState, getUser } = useAuth();
+const { state: authState, getUser, isCurrentSessionToken } = useAuth();
 // Once ChatView has mounted it owns the session projection, including while its panel is hidden.
 // App only fills the pre-mount gap so the two components never reconcile the same completion.
 const hasMountedChat = ref(false);
+const initialChatSessionObservations = ref<ChatSessionObservationBaseline | null>(null);
 
 let chatSessionStateRequestEpoch = 0;
 let hiddenChatStateTimer: number | null = null;
+let hiddenChatStateRefresh: { repeat: boolean } | null = null;
 let assistantSessionStateUserId: number | null = null;
 type HiddenAssistantObservation = {
   active: boolean;
@@ -39,11 +57,13 @@ let hiddenAssistantReconciliationPromise: Promise<boolean> | null = null;
 let executeHiddenAssistantReconciliation: () => Promise<boolean> = async () => false;
 
 const resetHiddenAssistantSessionState = (userId: number | null) => {
+  hiddenChatStateRefresh = null;
   assistantSessionStateUserId = userId;
   hiddenAssistantObservations = new Map();
   hiddenAssistantObservationsInitialized = false;
   pendingAssistantReconciliationKeys.clear();
   hiddenAssistantReconciliationPromise = null;
+  initialChatSessionObservations.value = null;
 };
 
 const reconcileHiddenAssistantCompletions = async (userId: number) => {
@@ -73,8 +93,8 @@ const reconcileHiddenAssistantCompletions = async (userId: number) => {
 
 const refreshChatSessionState = async () => {
   const userId = authState.user?.userId ?? null;
-  const requestEpoch = ++chatSessionStateRequestEpoch;
   if (userId === null || route.meta.public) {
+    chatSessionStateRequestEpoch += 1;
     resetHiddenAssistantSessionState(null);
     chatStore.setActiveCount(0);
     chatStore.setUnreadCount(0);
@@ -89,6 +109,15 @@ const refreshChatSessionState = async () => {
     chatStore.setReconciliationRequired(false);
   }
   if (hasMountedChat.value) return;
+  // A slow observation must settle before later demand replaces it. Keep one follow-up so
+  // focus changes and timer ticks still obtain fresh state without starving pending responses.
+  if (hiddenChatStateRefresh) {
+    hiddenChatStateRefresh.repeat = true;
+    return;
+  }
+  const refresh = { repeat: false };
+  hiddenChatStateRefresh = refresh;
+  const requestEpoch = ++chatSessionStateRequestEpoch;
   try {
     const sessions = await getSessionList();
     if (requestEpoch !== chatSessionStateRequestEpoch || chatStore.state.visible
@@ -126,6 +155,11 @@ const refreshChatSessionState = async () => {
     await reconcileHiddenAssistantCompletions(userId);
   } catch (error) {
     console.warn('Could not refresh assistant session state:', error);
+  } finally {
+    if (hiddenChatStateRefresh === refresh) {
+      hiddenChatStateRefresh = null;
+      if (refresh.repeat) void refreshChatSessionState();
+    }
   }
 };
 
@@ -161,6 +195,8 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  removeInitialNavigationErrorHandler();
+  removeNavigationSuccessHandler();
   chatSessionStateRequestEpoch += 1;
   resetHiddenAssistantSessionState(null);
   if (hiddenChatStateTimer !== null) window.clearInterval(hiddenChatStateTimer);
@@ -179,6 +215,7 @@ onUnmounted(() => {
 const routeAuthScopeKey = computed(() =>
   `${String(route.name ?? route.path)}:${route.meta.public ? 'public' : (authState.user?.userId ?? 'anonymous')}`
 );
+const chatAuthScopeKey = computed(() => `chat:${authState.user?.userId ?? 'anonymous'}`);
 const canRenderCurrentRoute = computed(() => Boolean(route.meta.public) || authState.isLoggedIn);
 
 watch(() => authState.isLoggedIn, authenticated => {
@@ -194,10 +231,22 @@ watch(() => authState.isLoggedIn, authenticated => {
 // Load the assistant lazily on first open, then keep it mounted while hidden. Closing a
 // floating panel must not discard the selected conversation or abort an active stream.
 watch(() => chatStore.state.visible, visible => {
-  if (visible) hasMountedChat.value = true;
+  if (visible && !hasMountedChat.value) {
+    if (assistantSessionStateUserId !== null && hiddenAssistantObservationsInitialized) {
+      initialChatSessionObservations.value = {
+        userId: assistantSessionStateUserId,
+        sessions: Array.from(hiddenAssistantObservations, ([id, observation]) => ({ id, ...observation })),
+        reconciliation: hiddenAssistantReconciliationPromise
+      };
+    }
+    hasMountedChat.value = true;
+  }
 }, { immediate: true });
 const shouldMountChat = computed(() => !route.meta.public && hasMountedChat.value);
 const isBoardChat = computed(() => route.name === 'board');
+watch(() => route.name, name => {
+  if (name === 'account') chatStore.closeChat();
+}, { immediate: true });
 const isBoardChatInteractionLocked = computed(() => {
   const view = routerViewRef.value;
   return isBoardChat.value
@@ -232,8 +281,12 @@ const invokeViewMethod = async (methodName: string): Promise<boolean> => {
 };
 
 const invokeBoardRefresh = async (methodName: string): Promise<boolean> => {
+  const userId = getUser()?.userId;
+  const owningView = routerViewRef.value;
   const refreshed = await invokeViewMethod(methodName);
-  if (refreshed) publishBoardInvalidation(getUser()?.userId, 'chat-tool');
+  if (refreshed && getUser()?.userId === userId && routerViewRef.value === owningView) {
+    publishBoardInvalidation(userId, 'chat-tool');
+  }
   return refreshed;
 };
 
@@ -249,6 +302,14 @@ const handleSystemCommand = async (cmd: StreamCommand): Promise<boolean> => {
     // One table owns which board method a target reloads and whether it changed persisted state,
     // so this dispatch and the board's own follow-ups cannot disagree.
     const effects = assistantRefreshEffects(target);
+    if (!isBoardChat.value) {
+      const userId = getUser()?.userId;
+      if (userId === undefined || route.meta.public) return false;
+      // The account page owns no Board projection. Other tabs reload through invalidation;
+      // this tab reloads authoritative workspace state when its Board is mounted again.
+      if (effects.invalidatesOtherTabs) publishBoardInvalidation(userId, 'chat-tool');
+      return true;
+    }
     return effects.invalidatesOtherTabs
       ? await invokeBoardRefresh(effects.method)
       : await invokeViewMethod(effects.method);
@@ -257,23 +318,29 @@ const handleSystemCommand = async (cmd: StreamCommand): Promise<boolean> => {
   return false;
 };
 
-executeHiddenAssistantReconciliation = () => isBoardChat.value
-  ? handleSystemCommand({
+executeHiddenAssistantReconciliation = () => handleSystemCommand({
       type: 'REFRESH_DATA',
       payload: { target: 'board_state' }
-    })
-  : Promise.resolve(false);
+    });
 
 const prepareChatForLogout = async (): Promise<ChatLogoutPreparation> => {
+  const userId = authState.user?.userId;
+  const requestToken = authState.token;
+  const owningView = routerViewRef.value;
+  const ownsPreparation = () => authState.user?.userId === userId
+    && requestToken !== null && isCurrentSessionToken(requestToken)
+    && routerViewRef.value === owningView
+    && !route.meta.public;
+  if (!ownsPreparation()) return 'outcome-unknown';
   const view = chatViewRef.value;
   if (view && typeof view.prepareForLogout === 'function') {
-    return await view.prepareForLogout();
+    const outcome = await view.prepareForLogout();
+    return ownsPreparation() ? outcome : 'outcome-unknown';
   }
 
   // ChatView is lazy-mounted. Logout must still stop work started in another tab when this
   // tab never opened the panel, otherwise the UI would discard auth while the server keeps
   // mutating the user's Board.
-  const userId = authState.user?.userId;
   if (userId === undefined || route.meta.public) return 'ready';
   let sessions;
   try {
@@ -282,11 +349,13 @@ const prepareChatForLogout = async (): Promise<ChatLogoutPreparation> => {
     console.warn('Could not read assistant sessions before logout:', error);
     return 'outcome-unknown';
   }
+  if (!ownsPreparation()) return 'outcome-unknown';
   const activeSessionIds = sessions.filter(session => session.active).map(session => session.id);
   if (activeSessionIds.length === 0 && !chatStore.state.reconciliationRequired) return 'ready';
 
   const stopResults = await Promise.allSettled(activeSessionIds.map(sessionId =>
-    requestSessionStop(sessionId, undefined, authState.token)));
+    requestSessionStop(sessionId, undefined, requestToken)));
+  if (!ownsPreparation()) return 'outcome-unknown';
   if (stopResults.some(result => result.status === 'rejected'
       && (result.reason?.response?.status !== 404))) {
     return 'outcome-unknown';
@@ -296,10 +365,13 @@ const prepareChatForLogout = async (): Promise<ChatLogoutPreparation> => {
   for (const sessionId of activeSessionIds) {
     let idle = false;
     while (Date.now() < deadline) {
+      if (!ownsPreparation()) return 'outcome-unknown';
       try {
         idle = !(await getSessionActivity(sessionId)).active;
+        if (!ownsPreparation()) return 'outcome-unknown';
         if (idle) break;
       } catch (error: any) {
+        if (!ownsPreparation()) return 'outcome-unknown';
         if (error?.response?.status === 404) {
           idle = true;
           break;
@@ -312,43 +384,50 @@ const prepareChatForLogout = async (): Promise<ChatLogoutPreparation> => {
   }
 
   const reconciled = await executeHiddenAssistantReconciliation();
+  if (!ownsPreparation()) return 'outcome-unknown';
   if (!reconciled) return 'reconciliation-failed';
   chatStore.setReconciliationRequired(false);
   return 'ready';
 };
 
-const routerViewProps = computed(() => isBoardChat.value
+const routerViewProps = computed(() => route.name === 'account'
   ? { prepareChatForLogout }
   : {});
 </script>
 
 <template>
-  <div class="app-layout">
-    <main class="app-main">
-      <router-view v-slot="{ Component }">
-        <AppErrorBoundary :reset-key="routeAuthScopeKey">
-          <component
-            v-if="canRenderCurrentRoute"
-            :is="Component"
-            :key="routeAuthScopeKey"
-            ref="routerViewRef"
-            v-bind="routerViewProps"
-          />
-        </AppErrorBoundary>
-      </router-view>
+  <ElConfigProvider :locale="elementPlusLocale">
+    <div class="app-layout">
+      <main class="app-main">
+        <router-view v-slot="{ Component }">
+          <AppErrorBoundary :reset-key="routeAuthScopeKey" :error="initialNavigationError">
+            <component
+              v-if="canRenderCurrentRoute"
+              :is="Component"
+              :key="routeAuthScopeKey"
+              ref="routerViewRef"
+              v-bind="routerViewProps"
+            />
+          </AppErrorBoundary>
+        </router-view>
 
-      <AppErrorBoundary v-if="shouldMountChat" :reset-key="routeAuthScopeKey">
-        <ChatView
-          ref="chatViewRef"
-          :board-mode="isBoardChat"
-          :get-board-context="getBoardChatContext"
-          :interaction-locked="isBoardChatInteractionLocked"
-          :prepare-interaction="prepareBoardChatInteraction"
-          :execute-command="handleSystemCommand"
-        />
-      </AppErrorBoundary>
-    </main>
-  </div>
+        <AppErrorBoundary v-if="shouldMountChat" :reset-key="chatAuthScopeKey">
+          <ChatView
+            ref="chatViewRef"
+            :board-mode="isBoardChat"
+            :get-board-context="getBoardChatContext"
+            :interaction-locked="isBoardChatInteractionLocked"
+            :prepare-interaction="prepareBoardChatInteraction"
+            :execute-command="handleSystemCommand"
+            :initial-session-observations="initialChatSessionObservations"
+          />
+          <template #fallback="{ error, retry }">
+            <AssistantRecoveryPanel :error="error" @retry="retry" />
+          </template>
+        </AppErrorBoundary>
+      </main>
+    </div>
+  </ElConfigProvider>
 </template>
 
 <style scoped>

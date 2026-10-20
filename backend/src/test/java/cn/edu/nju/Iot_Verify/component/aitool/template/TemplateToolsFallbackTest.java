@@ -2,6 +2,8 @@ package cn.edu.nju.Iot_Verify.component.aitool.template;
 
 import cn.edu.nju.Iot_Verify.component.aitool.AiDestructiveActionGuard;
 import cn.edu.nju.Iot_Verify.component.template.DeviceTemplateSchemaValidator;
+import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
+import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDeletionResultDto;
 import cn.edu.nju.Iot_Verify.security.UserContextHolder;
@@ -85,7 +87,114 @@ class TemplateToolsFallbackTest {
         assertEquals("Camera", returnedTemplate.path("name").asText());
         assertEquals("Entry camera", returnedTemplate.path("manifest").path("Description").asText());
         assertFalse(returnedTemplate.path("manifest").has("Icon"));
+        String semantics = json.path("message").asText();
+        assertTrue(semantics.contains("false is one shared environment value per name"));
+        assertTrue(semantics.contains("Reads=false grants no reading"));
+        assertTrue(semantics.contains("effects on that shared value, not a private copy"));
+        assertTrue(semantics.contains("all active device effects with NaturalChangeRate"));
+        assertTrue(semantics.contains("mirrors the shared value outside compromise modeling"));
+        assertTrue(semantics.contains("current shared labels come from the Board Environment Pool"));
         assertTrue(json.toString().length() < 10_000);
+    }
+
+    @Test
+    void listTemplates_exactNamesReturnOnlyRelevantFullManifestsWithoutSilentlyDroppingUnknowns() throws Exception {
+        DeviceTemplateDto sensor = new DeviceTemplateDto();
+        sensor.setName("TemperatureSensor");
+        sensor.setManifest(DeviceTemplateDto.DeviceManifest.builder().description("Reports temperature").build());
+        DeviceTemplateDto ac = new DeviceTemplateDto();
+        ac.setName("AC");
+        ac.setManifest(DeviceTemplateDto.DeviceManifest.builder().description("Changes temperature").build());
+        DeviceTemplateDto irrelevant = new DeviceTemplateDto();
+        irrelevant.setName("Camera");
+        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(java.util.List.of(sensor, irrelevant, ac));
+        ListTemplatesTool tool = new ListTemplatesTool(boardStorageService, objectMapper);
+
+        JsonNode json = objectMapper.readTree(tool.execute("{\"names\":[\"ac\",\"TemperatureSensor\"],\"detail\":true}"));
+        assertEquals(2, json.path("count").asInt());
+        assertEquals("TemperatureSensor", json.path("templates").get(0).path("name").asText());
+        assertEquals("Reports temperature", json.path("templates").get(0).path("manifest").path("Description").asText());
+        assertEquals("AC", json.path("templates").get(1).path("name").asText());
+        assertFalse(json.toString().contains("Camera"));
+        JsonNode missing = objectMapper.readTree(tool.execute("{\"names\":[\"AC\",\"Missing\"]}"));
+        assertEquals(422, missing.path("status").asInt());
+        assertFalse(missing.has("templates"));
+        assertEquals(objectMapper.valueToTree(java.util.List.of("Missing")), missing.path("unknownTemplateNames"));
+        assertEquals(objectMapper.valueToTree(java.util.List.of("TemperatureSensor", "Camera", "AC")),
+                missing.path("availableTemplateNames"));
+        assertTrue(missing.path("error").asText().contains("not deviceLabel"));
+    }
+
+    @Test
+    void listTemplates_invalidExactNamesFailBeforeReadingAnyCatalog() throws Exception {
+        ListTemplatesTool tool = new ListTemplatesTool(boardStorageService, objectMapper);
+        for (String args : java.util.List.of("{\"names\":null}", "{\"names\":[]}", "{\"names\":[true]}",
+                "{\"names\":[\"AC\",\"AC\"]}", "{\"names\":[\" \"]}", "{\"names\":[\"AC\"],\"keyword\":\"AC\"}")) {
+            assertEquals("VALIDATION_ERROR", objectMapper.readTree(tool.execute(args)).path("errorCode").asText());
+        }
+        verifyNoInteractions(boardStorageService);
+    }
+
+    @Test
+    void listTemplates_deviceIdsReadActualTemplatesFromOneSnapshotWithoutGuessingLabels() throws Exception {
+        DeviceTemplateDto alarm = new DeviceTemplateDto();
+        alarm.setName("Alarm");
+        alarm.setManifest(DeviceTemplateDto.DeviceManifest.builder().description("Actual alarm behavior").build());
+        DeviceTemplateDto camera = new DeviceTemplateDto();
+        camera.setName("Camera");
+        DeviceNodeDto first = new DeviceNodeDto();
+        first.setId("alarm-1");
+        first.setTemplateName("Alarm");
+        first.setLabel("Camera");
+        DeviceNodeDto second = new DeviceNodeDto();
+        second.setId("alarm-2");
+        second.setTemplateName("Alarm");
+        second.setLabel("Emergency Alarm");
+        when(boardStorageService.getSemanticSnapshot(1L)).thenReturn(new BoardSemanticSnapshotDto(
+                java.util.List.of(first, second), java.util.List.of(), java.util.List.of(), java.util.List.of(),
+                java.util.List.of(camera, alarm)));
+        ListTemplatesTool tool = new ListTemplatesTool(boardStorageService, objectMapper);
+
+        JsonNode result = objectMapper.readTree(tool.execute(
+                "{\"deviceIds\":[\"alarm-1\",\"alarm-2\"],\"detail\":true}"));
+
+        assertEquals(1, result.path("count").asInt());
+        assertEquals("Alarm", result.path("templates").get(0).path("name").asText());
+        assertEquals("Actual alarm behavior", result.path("templates").get(0).path("manifest").path("Description").asText());
+        assertFalse(result.toString().contains("Camera"));
+        verify(boardStorageService).getSemanticSnapshot(1L);
+        verify(boardStorageService, never()).getDeviceTemplates(1L);
+    }
+
+    @Test
+    void listTemplates_missingDeviceDoesNotReturnAPartialOrGuessedTemplateRead() throws Exception {
+        DeviceNodeDto node = new DeviceNodeDto();
+        node.setId("alarm-1");
+        node.setTemplateName("Alarm");
+        node.setLabel("Emergency Alarm");
+        when(boardStorageService.getSemanticSnapshot(1L)).thenReturn(new BoardSemanticSnapshotDto(
+                java.util.List.of(node), java.util.List.of(), java.util.List.of(), java.util.List.of(), java.util.List.of()));
+        ListTemplatesTool tool = new ListTemplatesTool(boardStorageService, objectMapper);
+
+        JsonNode result = objectMapper.readTree(tool.execute(
+                "{\"deviceIds\":[\"alarm-1\",\"Emergency Alarm\"],\"detail\":true}"));
+
+        assertEquals(422, result.path("status").asInt());
+        assertEquals(objectMapper.valueToTree(java.util.List.of("Emergency Alarm")), result.path("unknownDeviceIds"));
+        assertFalse(result.has("templates"));
+        verify(boardStorageService, never()).getDeviceTemplates(1L);
+    }
+
+    @Test
+    void listTemplates_invalidDeviceScopeFailsBeforeReadingTheBoard() throws Exception {
+        ListTemplatesTool tool = new ListTemplatesTool(boardStorageService, objectMapper);
+        for (String args : java.util.List.of("{\"deviceIds\":null}", "{\"deviceIds\":[]}",
+                "{\"deviceIds\":[true]}", "{\"deviceIds\":[\"alarm-1\",\"alarm-1\"]}",
+                "{\"deviceIds\":[\" \"]}", "{\"deviceIds\":[\"alarm-1\"],\"names\":[\"Alarm\"]}",
+                "{\"deviceIds\":[\"alarm-1\"],\"keyword\":\"Alarm\"}")) {
+            assertEquals(400, objectMapper.readTree(tool.execute(args)).path("status").asInt(), args);
+        }
+        verifyNoInteractions(boardStorageService);
     }
 
     @Test
@@ -138,7 +247,7 @@ class TemplateToolsFallbackTest {
                 boardStorageService, objectMapper, destructiveActionGuard);
         JsonNode previewJson = objectMapper.readTree(
                 previewTool.execute("{\"templateId\":42,\"confirmed\":false}"));
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", previewJson.path("preview").path("impactToken").asText());
 
         DeleteTemplateTool tool = new DeleteTemplateTool(boardStorageService, failingMapper, destructiveActionGuard);
         String result = tool.execute("{\"templateId\":42,\"confirmed\":true,\"impactToken\":\""
@@ -167,6 +276,8 @@ class TemplateToolsFallbackTest {
 
         assertTrue(json.path("requiresUserConfirmation").asBoolean());
         assertEquals("preview", json.path("preview").path("operation").asText());
+        assertEquals("Lamp", destructiveActionGuard.pendingContext(1L, "template-test-session")
+                .orElseThrow().displayTarget());
         assertEquals(false, json.path("mutationMayHaveCommitted").asBoolean(false));
         verify(boardStorageService, never()).deleteDeviceTemplate(anyLong(), anyLong(), any());
     }
@@ -202,7 +313,7 @@ class TemplateToolsFallbackTest {
         // A pending confirmation belonging to a DIFFERENT tool — the thing the cleared session destroyed.
         Map<String, Object> pendingPreview = Map.of("device", Map.of("id", "node-7", "label", "Porch Light"));
         String otherToolsToken = destructiveActionGuard.issue(
-                1L, "delete_device", "node-7", pendingPreview, "device-domain-token");
+                1L, "delete_device", "node-7", "Preview target", pendingPreview, "device-domain-token");
 
         DeleteTemplateTool tool = new DeleteTemplateTool(boardStorageService, objectMapper, destructiveActionGuard);
         JsonNode json = objectMapper.readTree(tool.execute("{\"templateId\":42}"));
@@ -219,7 +330,7 @@ class TemplateToolsFallbackTest {
         // The guard also requires the *turn* to be a confirmation turn, independently of the stored token
         // (`consume_shouldRequireAnExplicitConfirmationTurn`). Without this the consume is refused for that
         // reason instead, and the test would pass or fail for nothing to do with session clearing.
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", otherToolsToken);
         AiDestructiveActionGuard.ConsumeResult stillPending = destructiveActionGuard.consume(
                 1L, "delete_device", "node-7", otherToolsToken, pendingPreview);
         assertTrue(stillPending.approved(),
@@ -243,7 +354,7 @@ class TemplateToolsFallbackTest {
         DeleteTemplateTool tool = new DeleteTemplateTool(boardStorageService, objectMapper, destructiveActionGuard);
         JsonNode original = objectMapper.readTree(
                 tool.execute("{\"templateId\":42,\"confirmed\":false}"));
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", original.path("preview").path("impactToken").asText());
 
         JsonNode json = objectMapper.readTree(tool.execute(
                 "{\"templateId\":42,\"confirmed\":true,\"impactToken\":\""

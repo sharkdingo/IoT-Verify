@@ -18,12 +18,6 @@ public class UnauthorizedException extends BaseException {
         return new UnauthorizedException("Missing Authorization header");
     }
 
-    /*
-     * No `expiredToken()`: its only caller was `JwtUtil.validateTokenOrThrow`, which had no callers of its own.
-     * Expiry now reaches the client through the boolean `validateToken` path, which the filter turns into the
-     * same 401 — this factory's message was never the one a user saw.
-     */
-
     public static UnauthorizedException invalidCredentials() {
         return new UnauthorizedException("Account or password is incorrect");
     }

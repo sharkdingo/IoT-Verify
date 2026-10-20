@@ -44,8 +44,7 @@ describe('ControlCenter device import freshness', () => {
   const jsonPayload = JSON.stringify([
     { templateName: 'Mobile Phone', label: 'first_phone' }
   ])
-  // `template,name` is the header the importer accepts, per `e2e/board-full-flow.spec.ts:1072`.
-  const csvPayload = 'template,name\nAlarm,second_alarm\n'
+  const secondPayload = JSON.stringify([{ templateName: 'Alarm', label: 'second_alarm' }])
 
   /** The import panel is behind a create-mode selector, not just the devices section. */
   const openImportMode = async (wrapper: ReturnType<typeof mountImportPanel>) => {
@@ -53,18 +52,12 @@ describe('ControlCenter device import freshness', () => {
     await wrapper.vm.$nextTick()
   }
 
-  /**
-   * A `change` on the hidden file input, with a File whose `text()` resolves to `content`.
-   *
-   * jsdom does not implement `Blob.prototype.text` (verified: `typeof new File([...]).text` is
-   * `undefined` here), so it is supplied rather than stubbed around — the handler awaits it, and in a
-   * real browser it exists. Without this the read throws, the catch shows an error toast, and the
-   * assertions below would fail for a reason unrelated to the debounce they are testing.
-   */
+  // jsdom lacks Blob.arrayBuffer(); supply the browser API while retaining the asynchronous read.
   const selectFile = async (wrapper: ReturnType<typeof mountImportPanel>, name: string, content: string) => {
+    await wrapper.get('[data-testid="device-import-source-file"]').setValue()
     const input = wrapper.get('[data-testid="device-import-file"]').element as HTMLInputElement
     const file = new File([content], name, { type: 'text/plain' })
-    Object.defineProperty(file, 'text', { value: () => Promise.resolve(content), configurable: true })
+    Object.defineProperty(file, 'arrayBuffer', { value: () => Promise.resolve(new TextEncoder().encode(content).buffer), configurable: true })
     Object.defineProperty(input, 'files', { value: [file], configurable: true })
     await wrapper.get('[data-testid="device-import-file"]').trigger('change')
     await flushPromises()
@@ -82,7 +75,7 @@ describe('ControlCenter device import freshness', () => {
       // make the assertion pass whether or not the debounce was flushed.
       expect(wrapper.text()).toContain('first_phone')
 
-      await selectFile(wrapper, 'devices.csv', csvPayload)
+      await selectFile(wrapper, 'second.json', secondPayload)
       expect(wrapper.text(), 'the second file must replace the first immediately')
         .toContain('second_alarm')
       expect(wrapper.text(), 'the first file must not still be offered for creation')
@@ -108,6 +101,7 @@ describe('ControlCenter device import freshness', () => {
       const wrapper = mountImportPanel()
       await openImportMode(wrapper)
 
+      await wrapper.get('[data-testid="device-import-source-paste"]').setValue()
       const textarea = wrapper.get('[data-testid="device-import-text"]')
       await textarea.setValue(jsonPayload)
       await vi.advanceTimersByTimeAsync(400)
@@ -119,7 +113,7 @@ describe('ControlCenter device import freshness', () => {
 
       // Replace the text and do NOT let the debounce settle: the preview still describes the old
       // payload, so creating now would import the wrong devices.
-      await textarea.setValue('template,name\nAlarm,pasted_alarm\n')
+      await textarea.setValue(JSON.stringify([{ templateName: 'Alarm', label: 'pasted_alarm' }]))
       await wrapper.vm.$nextTick()
       expect(
         wrapper.get('[data-testid="device-import-create"]').attributes('disabled'),
@@ -136,6 +130,89 @@ describe('ControlCenter device import freshness', () => {
 
       wrapper.unmount()
     } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('locates malformed pasted JSON in the original text and keeps its actual parser cause', async () => {
+    vi.useFakeTimers()
+    const wrapper = mountImportPanel()
+    try {
+      await openImportMode(wrapper)
+      const source = '\n\n [\n {"template" "Alarm"}\n ]'
+      let cause: unknown
+      try { JSON.parse(source) } catch (error) { cause = error }
+      await wrapper.get('[data-testid="device-import-source-paste"]').setValue()
+      await wrapper.get('[data-testid="device-import-text"]').setValue(source)
+      await vi.advanceTimersByTimeAsync(400)
+      const failure = wrapper.get('[data-testid="device-import-syntax-failure"]')
+      expect(failure.attributes('role')).toBe('alert')
+      expect(failure.text()).toContain(i18n.global.t('app.jsonSyntaxLocation', { line: 4, column: 14 }))
+      expect(failure.get('[data-testid="failure-cause"]').text()).toBe((cause as SyntaxError).message)
+      expect(failure.find('[data-testid="failure-next-step"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="device-import-help"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="device-import-preview"]').exists()).toBe(false)
+      const editor = wrapper.get<HTMLTextAreaElement>('[data-testid="device-import-text"]')
+      expect(failure.element.compareDocumentPosition(editor.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+      expect(wrapper.get('[data-testid="device-import-create"]').attributes('disabled')).toBeDefined()
+      expect(wrapper.get<HTMLTextAreaElement>('[data-testid="device-import-text"]').element.value).toBe(source)
+      expect(wrapper.emitted('create-devices')).toBeUndefined()
+      const corrected = JSON.stringify([{ templateName: 'Alarm', label: 'corrected_alarm' }])
+      await editor.setValue(corrected)
+      await vi.advanceTimersByTimeAsync(400)
+      expect(wrapper.find('[data-testid="device-import-syntax-failure"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="device-import-help"]').exists()).toBe(true)
+      expect(wrapper.get('[data-testid="device-import-preview"]').text()).toContain('corrected_alarm')
+      expect(wrapper.get('[data-testid="device-import-create"]').attributes('disabled')).toBeUndefined()
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps a failed file read distinct from malformed JSON and permits correction in the same editor', async () => {
+    const wrapper = mountImportPanel()
+    try {
+      await openImportMode(wrapper)
+      const input = wrapper.get<HTMLInputElement>('[data-testid="device-import-file"]')
+      Object.defineProperty(input.element, 'files', { configurable: true,
+        value: [{ size: 64, arrayBuffer: async () => { throw new DOMException('Disk read was denied', 'NotReadableError') } }] })
+      await input.trigger('change')
+      await flushPromises()
+      const failure = wrapper.get('[data-testid="device-import-file-failure"]')
+      expect(failure.text()).toContain(i18n.global.t('app.deviceImportFileReadFailedTitle'))
+      expect(failure.text()).toContain('Disk read was denied')
+      expect(failure.text()).not.toContain(i18n.global.t('app.invalidJsonFile'))
+      expect(input.element.value).toBe('')
+      expect(wrapper.get('[data-testid="device-import-create"]').attributes('disabled')).toBeDefined()
+      await selectFile(wrapper, 'corrected.json', secondPayload)
+      expect(wrapper.find('[data-testid="device-import-file-failure"]').exists()).toBe(false)
+      expect(wrapper.text()).toContain('second_alarm')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('ignores file contents that arrive after the user replaces them with pasted text', async () => {
+    vi.useFakeTimers()
+    const wrapper = mountImportPanel()
+    try {
+      await openImportMode(wrapper)
+      let finishRead!: (value: string) => void
+      const input = wrapper.get<HTMLInputElement>('[data-testid="device-import-file"]')
+      Object.defineProperty(input.element, 'files', { configurable: true,
+        value: [{ size: 64, arrayBuffer: () => new Promise<string>(resolve => { finishRead = resolve }).then(text => new TextEncoder().encode(text).buffer) }] })
+      await input.trigger('change')
+      await wrapper.get('[data-testid="device-import-source-paste"]').setValue()
+      await wrapper.get('[data-testid="device-import-text"]').setValue(secondPayload)
+      finishRead(jsonPayload)
+      await flushPromises()
+      await vi.advanceTimersByTimeAsync(400)
+      expect(wrapper.get<HTMLTextAreaElement>('[data-testid="device-import-text"]').element.value).toBe(secondPayload)
+      expect(wrapper.text()).toContain('second_alarm')
+      expect(wrapper.text()).not.toContain('first_phone')
+    } finally {
+      wrapper.unmount()
       vi.useRealTimers()
     }
   })

@@ -14,7 +14,8 @@ import java.util.Objects;
  * What one rule's command brings about: the end state and event of the API it calls and,
  * transitively, those of every rule that one of these effects triggers.
  *
- * <p>A condition established by these effects is a consequence of the rule, not a precondition of it.
+ * <p>A condition established by every recorded effect on its device is an unambiguous consequence,
+ * not a precondition of the rule. Conflicting outcomes in a feedback loop do not justify this pruning.
  * As an added guard it makes the automation wait for its own outcome. On trace 196, "light the way"
  * turns the bedside lamp on, the lamp turning on makes the hallway camera take a photo, and the
  * candidate guard "camera is taking a photo" on "light the way" can therefore only hold once the lamp
@@ -50,7 +51,7 @@ final class CommandEffects {
             for (RuleDto other : allRules == null ? List.<RuleDto>of() : allRules) {
                 if (other == null || other.getConditions() == null) continue;
                 // add() only ever grows the map, so a pass that adds nothing is the fixpoint.
-                if (other.getConditions().stream().filter(Objects::nonNull).anyMatch(closure::establishes)
+                if (other.getConditions().stream().filter(Objects::nonNull).anyMatch(closure::canEstablish)
                         && closure.add(other)) {
                     grew = true;
                 }
@@ -59,14 +60,27 @@ final class CommandEffects {
         return closure;
     }
 
-    /** Whether some effect definitely makes {@code condition} hold. */
+    /** Whether all recorded effects on the condition's device make it hold. */
     boolean establishes(RuleDto.Condition condition) {
-        if (condition == null || effects.isEmpty()) return false;
+        List<Effect> matching = effectsOn(condition);
+        // Conflicting effects occur at different steps of a feedback loop. Either state can be
+        // a useful precondition; pruning it as a one-way outcome would remove real repairs.
+        return !matching.isEmpty() && matching.stream()
+                .allMatch(effect -> FixStrategyUtils.apiOutcomeSatisfies(effect.device(), effect.api(), condition));
+    }
+
+    private boolean canEstablish(RuleDto.Condition condition) {
+        return effectsOn(condition).stream()
+                .anyMatch(effect -> FixStrategyUtils.apiOutcomeSatisfies(effect.device(), effect.api(), condition));
+    }
+
+    private List<Effect> effectsOn(RuleDto.Condition condition) {
+        if (condition == null || effects.isEmpty()) return List.of();
         String conditionVar = FixStrategyUtils.resolveVarNameSafe(condition.getDeviceName(), deviceSmvMap);
-        if (conditionVar == null) return false;
+        if (conditionVar == null) return List.of();
         return effects.values().stream()
                 .filter(effect -> effect.deviceVar().equals(conditionVar))
-                .anyMatch(effect -> FixStrategyUtils.apiOutcomeSatisfies(effect.device(), effect.api(), condition));
+                .toList();
     }
 
     /** Record {@code rule}'s own command effect; returns whether it was new. */

@@ -259,6 +259,15 @@ describe('board mutation response contracts', () => {
     vi.clearAllMocks()
   })
 
+  it('pins a layout save to the initiating session token', async () => {
+    const layout = { canvasPan: { x: 73, y: 41 }, canvasZoom: 0.65 }
+    vi.mocked(http.post).mockResolvedValueOnce(resultEnvelope(layout))
+    await expect(boardApi.saveLayout(layout, 'layout-owner-token')).resolves.toEqual(layout)
+    expect(http.post).toHaveBeenCalledExactlyOnceWith('/board/layout', layout, {
+      headers: { Authorization: 'Bearer layout-owner-token' }
+    })
+  })
+
   it('accepts a complete authoritative device-creation result', async () => {
     vi.mocked(http.post).mockResolvedValue(resultEnvelope(completeDeviceCreation()))
 
@@ -377,6 +386,55 @@ describe('board mutation response contracts', () => {
     })).resolves.toEqual(response)
   })
 
+  it.each(['slash/id', 'back\\slash', 'percent%2F', 'query?id', 'fragment#id',
+    'internal space', '.', '..', 'semi;colon', 'plus+id'])('addresses %s through an unchanged query value in every targeted API', async nodeId => {
+    const target = { ...device, id: nodeId }
+    const layout = { position: { x: 40, y: 50 }, width: 190, height: 140 }
+    const moved = { ...target, ...layout }
+    vi.mocked(http.put).mockResolvedValueOnce(resultEnvelope({
+      operation: 'updated', mutationType: 'layout', changedFields: ['position.x', 'position.y', 'width', 'height'],
+      previousDevice: target, currentDevice: moved, currentNodes: [moved], currentCount: 1,
+      canUndo: true, canRedo: false
+    }))
+    await boardApi.updateNodeLayout(nodeId, layout)
+    expect(http.put).toHaveBeenLastCalledWith('/board/nodes/layout', layout, { params: { nodeId } })
+
+    const runtime = { expected: { state: target.state }, desired: { state: 'active' } }
+    const configured = { ...target, state: 'active' }
+    vi.mocked(http.put).mockResolvedValueOnce(resultEnvelope({
+      operation: 'updated', mutationType: 'runtime', changedFields: ['state'],
+      previousDevice: target, currentDevice: configured, currentNodes: [configured], currentCount: 1,
+      canUndo: true, canRedo: false
+    }))
+    await boardApi.updateNodeRuntime(nodeId, runtime)
+    expect(http.put).toHaveBeenLastCalledWith('/board/nodes/runtime', runtime, { params: { nodeId } })
+
+    const renamed = { ...target, label: 'Kitchen sensor' }
+    vi.mocked(http.patch).mockResolvedValueOnce(resultEnvelope(completeDeviceRename({
+      affectedDevices: [renamed], currentNodes: [renamed]
+    })))
+    await boardApi.renameNode(nodeId, renamed.label, target.label)
+    expect(http.patch).toHaveBeenLastCalledWith('/board/nodes/label', {
+      label: renamed.label, expectedLabel: target.label
+    }, { params: { nodeId } })
+
+    const preview = {
+      operation: 'preview', impactToken: 'exact-device-token', deletedDevice: target,
+      removedRules: [], removedSpecifications: [], currentNodes: [target],
+      environmentVariables: [], environmentChanges: [], currentRules: [], currentSpecifications: []
+    }
+    vi.mocked(http.get).mockResolvedValueOnce(resultEnvelope(preview))
+    await boardApi.previewNodeDeletion(nodeId)
+    expect(http.get).toHaveBeenLastCalledWith('/board/nodes/deletion-preview', { params: { nodeId } })
+    vi.mocked(http.post).mockResolvedValueOnce(resultEnvelope({
+      ...preview, operation: 'deleted', currentNodes: [], canUndo: true, canRedo: false
+    }))
+    await boardApi.deleteNode(nodeId, preview.impactToken)
+    expect(http.post).toHaveBeenLastCalledWith('/board/nodes/delete', {
+      impactToken: preview.impactToken
+    }, { params: { nodeId } })
+  })
+
   it('rejects a targeted update whose matching node snapshot is malformed', async () => {
     const malformed = {
       ...device,
@@ -462,7 +520,7 @@ describe('board mutation response contracts', () => {
       }
     })).resolves.toEqual(response)
 
-    expect(http.put).toHaveBeenCalledWith('/board/nodes/device_1/runtime', {
+    expect(http.put).toHaveBeenCalledWith('/board/nodes/runtime', {
       expected: {
         state: device.state,
         variables: [],
@@ -473,7 +531,7 @@ describe('board mutation response contracts', () => {
         currentStateTrust: 'trusted',
         currentStatePrivacy: 'private'
       }
-    })
+    }, { params: { nodeId: 'device_1' } })
   })
 
   it('accepts inherited variable trust when the server serializes it as null', async () => {
@@ -505,10 +563,10 @@ describe('board mutation response contracts', () => {
 
     await boardApi.renameNode('device_1', 'Kitchen sensor', 'Hall sensor')
 
-    expect(vi.mocked(http.patch)).toHaveBeenCalledWith('/board/nodes/device_1/label', {
+    expect(vi.mocked(http.patch)).toHaveBeenCalledWith('/board/nodes/label', {
       label: 'Kitchen sensor',
       expectedLabel: 'Hall sensor'
-    })
+    }, { params: { nodeId: 'device_1' } })
   })
 
   it.each([
@@ -1207,7 +1265,7 @@ describe('board mutation response contracts', () => {
 
   it('validates the rules an undo returns as strictly as a normal read', async () => {
     // Specs were validated here but rules were not, though the same body from GET /board/rules is
-    // rejected: `fromBackendRuleDto` would silently yield `toId: ''` and `id: ''`, writing a rule with
+    // rejected: `fromRuleDto` would silently yield `toId: ''` and `id: ''`, writing a rule with
     // no target into board state and into the canvas edge projection.
     vi.mocked(http.post).mockResolvedValue(resultEnvelope(completeBoardUndo({
       rules: [{ id: 7, userId: 1, conditions: [], ruleString: 'r' }],
@@ -2023,6 +2081,20 @@ describe('board mutation response contracts', () => {
         headers: { Authorization: `Bearer ${authToken}` }
       }
     )
+  })
+
+  it('uses unload-safe transport only for a page-leaving fix cancellation', async () => {
+    vi.mocked(http.delete).mockResolvedValueOnce(resultEnvelope(true))
+
+    await expect(boardApi.cancelFixRequest('fix-request-1', 'owner-token', { keepalive: true }))
+      .resolves.toBe(true)
+
+    expect(http.delete).toHaveBeenCalledWith('/verify/fix-requests/fix-request-1', {
+      timeout: 2500,
+      headers: { Authorization: 'Bearer owner-token' },
+      adapter: 'fetch',
+      fetchOptions: { keepalive: true }
+    })
   })
 
   it('bounds interactive recommendation cancellation and status reads', async () => {

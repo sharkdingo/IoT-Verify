@@ -32,6 +32,10 @@ public final class LogCapture implements AutoCloseable {
         return appender.list.stream().map(ILoggingEvent::getFormattedMessage).toList();
     }
 
+    public List<ILoggingEvent> events() {
+        return List.copyOf(appender.list);
+    }
+
     @Override
     public void close() {
         logger.detachAppender(appender);

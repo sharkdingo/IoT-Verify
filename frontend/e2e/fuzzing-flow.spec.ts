@@ -1,5 +1,7 @@
-import { type APIRequestContext, type APIResponse, type Locator, type Page, type Route } from '@playwright/test'
+import { type APIRequestContext, type APIResponse, type Locator, type Page, type Response, type Route } from '@playwright/test'
 import path from 'node:path'
+import type { Specification } from '../src/types/spec'
+import { selectHistoryResultType } from './support/historyFilter'
 import {
   apiBaseURL,
   createAuthenticatedUser,
@@ -22,7 +24,10 @@ type FuzzRun = {
   explorationMode: 'BOARD_SNAPSHOT' | 'PAPER_COMPATIBLE'
   outcome: string
   findingCount: number
-  findings: Array<{ id: number }>
+  findings: Array<{ id: number; violatedSpecId: string; violatedSpec: Specification }>
+  modelSnapshot: { deviceCount: number }
+  eligibleSpecifications: Record<string, Specification>
+  modelTokenSourcesByDeviceId: Record<string, string>
   limitations: string[]
   eligibility: {
     eligibleSpecIds: string[]
@@ -34,7 +39,7 @@ const authHeaders = (auth: AuthUser) => ({
   Authorization: `Bearer ${auth.token}`
 })
 
-const unwrap = async <T>(response: APIResponse): Promise<T> => {
+const unwrap = async <T>(response: APIResponse | Response): Promise<T> => {
   expect(response.ok(), await response.text()).toBeTruthy()
   const body = await response.json()
   expect(body.code, JSON.stringify(body)).toBe(200)
@@ -112,7 +117,7 @@ const closeFuzzingPanelIfPresent = async (page: Page, panel: Locator) => {
 }
 
 test.describe('bounded counterexample exploration', () => {
-  test('imports a scene, finds and replays a candidate, and remains usable on mobile', async ({ page, request }) => {
+  test('imports a scene, finds and replays a candidate, and remains usable on mobile', async ({ page, request }, testInfo) => {
     test.setTimeout(180_000)
     page.setDefaultTimeout(20_000)
     const auth = await createAuthenticatedUser(request)
@@ -122,8 +127,8 @@ test.describe('bounded counterexample exploration', () => {
 
       const scenePath = path.resolve(process.cwd(), '..', 'docs', 'examples', 'default-climate-conflict-scene.json')
       await page.getByTestId('scene-import-file').setInputFiles(scenePath)
-      await page.getByRole('dialog', { name: 'Confirm Full Scene Replacement' })
-        .getByRole('button', { name: 'Replace in full' })
+      await page.getByRole('dialog', { name: 'Replace the current scene?' })
+        .getByRole('button', { name: 'Replace scene' })
         .click()
       await waitForBoardSpecCount(request, auth, 4)
 
@@ -226,6 +231,19 @@ test.describe('bounded counterexample exploration', () => {
       expect(run.findings).toHaveLength(run.findingCount)
       expect(run.eligibility.eligibleSpecIds).toHaveLength(2)
       expect(run.eligibility.ineligibleSpecs).toHaveLength(0)
+      expect(Object.keys(run.eligibleSpecifications).sort()).toEqual([...run.eligibility.eligibleSpecIds].sort())
+      expect(Object.keys(run.modelTokenSourcesByDeviceId)).toHaveLength(run.modelSnapshot.deviceCount)
+      const runSummaries = await unwrap<Array<FuzzRun & { dataAvailable: boolean }>>(await request.get(
+        `${apiBaseURL}/api/fuzz/runs`, { headers: authHeaders(auth) }
+      ))
+      const frozenSummary = runSummaries.find(summary => summary.id === runId)!
+      expect(frozenSummary.dataAvailable).toBe(true)
+      expect(frozenSummary.eligibleSpecifications).toEqual(run.eligibleSpecifications)
+      expect(frozenSummary.modelTokenSourcesByDeviceId).toEqual(run.modelTokenSourcesByDeviceId)
+      for (const finding of frozenSummary.findings) {
+        expect(finding.violatedSpec).toEqual(run.eligibleSpecifications[finding.violatedSpecId])
+        expect(finding).not.toHaveProperty('states')
+      }
 
       const resultDialog = page.getByTestId('fuzzing-result-dialog')
       await expect(resultDialog).toBeHidden()
@@ -236,11 +254,66 @@ test.describe('bounded counterexample exploration', () => {
       await expect(page.getByTestId('fuzz-unread-badge')).toHaveCount(0)
       await page.getByTestId(`open-fuzzing-run-${runId}`).click()
       await expect(resultDialog).toBeVisible()
-      await expect(page.getByTestId('close-fuzzing-result')).toBeFocused()
+      await expect(page.getByTestId('fuzzing-result-dialog').getByRole('dialog')).toBeFocused()
       await expect(resultDialog).toContainText('candidate')
       await expect(resultDialog).toContainText('Reproduction settings')
-      await expect(resultDialog).toContainText('Results by target')
-      await expect(resultDialog).toContainText('Formal verification checks the complete specification set on the current Board')
+      const remainingTargets = run.eligibility.eligibleSpecIds.length - run.findings.length
+      await expect(resultDialog.locator('[aria-labelledby="fuzz-target-results-title"]'))
+        .toHaveCount(remainingTargets > 0 ? 1 : 0)
+      await expect(resultDialog.locator('[aria-labelledby="fuzz-target-results-title"] li')).toHaveCount(remainingTargets)
+      await expect(resultDialog).toContainText('Formal verification checks every specification on the current board')
+      const settings = resultDialog.getByTestId('fuzz-reproduction-details')
+      expect(await settings.evaluate(element => (element as HTMLDetailsElement).open)).toBe(false)
+      const evidence = resultDialog.locator('[aria-labelledby="fuzz-findings-title"]')
+      expect(await evidence.evaluate(element => element.getBoundingClientRect().top))
+        .toBeLessThan(await settings.evaluate(element => element.getBoundingClientRect().top))
+      await expect(resultDialog.getByTestId('reuse-fuzzing-settings')).toBeVisible()
+      await page.screenshot({ path: testInfo.outputPath('exploration-evidence-first.png') })
+      await page.setViewportSize({ width: 320, height: 600 })
+      expect(await resultDialog.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
+      const settingsTitle = settings.locator('summary')
+      const reuseSettings = resultDialog.getByTestId('reuse-fuzzing-settings')
+      expect(await settingsTitle.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
+      expect(await settingsTitle.evaluate(element => element.getBoundingClientRect().bottom))
+        .toBeLessThanOrEqual(await reuseSettings.evaluate(element => element.getBoundingClientRect().top))
+      const metrics = resultDialog.locator('.board-metric')
+      await expect(metrics).toHaveCount(3)
+      const measurements = await metrics.evaluateAll(elements => elements.map(element => ({
+        text: element.textContent, scrollWidth: element.scrollWidth, clientWidth: element.clientWidth
+      })))
+      await testInfo.attach('exploration-320-metrics', {
+        body: Buffer.from(JSON.stringify(measurements)), contentType: 'application/json'
+      })
+      for (const metric of await metrics.all()) {
+        await expect(metric).toBeVisible()
+        expect(await metric.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
+      }
+      for (const title of await evidence.locator('article p').all()) {
+        expect(await title.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
+      }
+      for (const candidate of await evidence.locator('article').all()) {
+        const bounds = await candidate.evaluate(element => {
+          const row = element.getBoundingClientRect()
+          return Array.from(element.querySelectorAll('button')).map(button => {
+            const action = button.getBoundingClientRect()
+            return { text: button.textContent, left: action.left, right: action.right,
+              rowLeft: row.left, rowRight: row.right }
+          })
+        })
+        await testInfo.attach('exploration-320-actions', {
+          body: Buffer.from(JSON.stringify(bounds)), contentType: 'application/json'
+        })
+        for (const action of bounds) {
+          expect(action.left).toBeGreaterThanOrEqual(action.rowLeft)
+          expect(action.right).toBeLessThanOrEqual(action.rowRight)
+        }
+      }
+      await page.screenshot({ path: testInfo.outputPath('exploration-mobile.png') })
+      await evidence.locator('article').first().scrollIntoViewIfNeeded()
+      await page.screenshot({ path: testInfo.outputPath('exploration-mobile-actions.png') })
+      await metrics.first().scrollIntoViewIfNeeded()
+      await page.screenshot({ path: testInfo.outputPath('exploration-mobile-metrics.png') })
+      await page.setViewportSize({ width: 1440, height: 900 })
       await expect(resultDialog.getByText('Fix', { exact: true })).toHaveCount(0)
       await page.waitForTimeout(500)
       await expect(page.locator('.el-message').filter({ hasText: 'Counterexample search completed' })).toHaveCount(0)
@@ -253,15 +326,21 @@ test.describe('bounded counterexample exploration', () => {
       await expect(page.getByTestId('run-fuzzing')).toContainText('Start background search')
       await page.getByTestId('close-fuzzing-panel').click()
       await page.getByTestId('open-history-panel').click()
+      const findingId = run.findings[0]!.id
+      const historicalEvidence = page.getByTestId(`run-evidence-fuzzing-${runId}`)
+      await historicalEvidence.locator('summary').click()
+      await expect(historicalEvidence.getByTestId('history-fuzz-verification-scope'))
+        .toContainText('every specification on the current board')
+      await expect(historicalEvidence.getByTestId(`verify-fuzzing-finding-${findingId}`)).toHaveText('Configure current board verification')
+      await page.screenshot({ path: testInfo.outputPath('history-candidate-scope.png') })
       await page.getByTestId(`open-fuzzing-run-${runId}`).click()
       await expect(resultDialog).toBeVisible()
-      const findingId = run.findings[0]!.id
       await page.getByTestId(`verify-fuzzing-finding-${findingId}`).click()
       const verificationPanel = page.getByTestId('verification-panel')
       await expect(verificationPanel).toBeVisible()
       await expect(page.getByTestId('fuzz-verification-handoff')).toContainText(`search run #${runId}`)
       await expect(page.getByTestId('fuzz-verification-handoff')).toContainText('complete specification set on the current Board')
-      await expect(page.getByTestId('close-verification-panel')).toBeFocused()
+      await expect(page.getByTestId('verification-panel')).toBeFocused()
       await page.getByTestId('verification-mode-sync').click()
       const verificationResponsePromise = page.waitForResponse(response =>
         response.request().method() === 'POST'
@@ -292,6 +371,16 @@ test.describe('bounded counterexample exploration', () => {
       ))
       expect(verificationRun.outcome).toBe('VIOLATED')
       expect(verificationRun.counterexampleCount).toBe(2)
+      const formalSummaries = await unwrap<Array<{ id: number; counterexamples: Array<{
+        dataAvailable: boolean; modelTokenSourcesByDeviceId: Record<string, string>
+      }> }>>(await request.get(`${apiBaseURL}/api/verify/runs`, { headers: authHeaders(auth) }))
+      const formalSummary = formalSummaries.find(summary => summary.id === verification.historyPersistence.runId)!
+      expect(formalSummary.counterexamples).toHaveLength(2)
+      for (const trace of formalSummary.counterexamples) {
+        expect(trace.dataAvailable).toBe(true)
+        expect(Object.keys(trace.modelTokenSourcesByDeviceId)).toHaveLength(run.modelSnapshot.deviceCount)
+        expect(trace).not.toHaveProperty('states')
+      }
       const persistedTraces = await unwrap<Array<{ id: number }>>(await request.get(
         `${apiBaseURL}/api/verify/runs/${verification.historyPersistence.runId}/traces`,
         { headers: authHeaders(auth) }
@@ -301,10 +390,10 @@ test.describe('bounded counterexample exploration', () => {
       await page.getByTestId('close-verification-result').click()
 
       await page.getByTestId('open-history-panel').click()
-      await page.getByTestId('history-result-filter-verification').click()
+      await selectHistoryResultType(page, 'verification')
       await expect(page.getByTestId(`open-verification-run-${verification.historyPersistence.runId}`)).toBeVisible()
       await expect(page.getByTestId('trace-history-panel').locator('[data-testid^="view-verification-trace-"]')).toHaveCount(2)
-      await page.getByTestId('history-result-filter-fuzzing').click()
+      await selectHistoryResultType(page, 'fuzzing')
       await page.getByTestId(`open-fuzzing-run-${runId}`).click()
       let independentFindingReadCount = 0
       let replayRunDetailReadCount = 0
@@ -328,6 +417,30 @@ test.describe('bounded counterexample exploration', () => {
       expect(independentFindingReadCount).toBe(1)
       expect(replayRunDetailReadCount).toBe(0)
       await expect(page.getByTestId('fuzzing-playback-notice')).toBeVisible()
+      await expect(page.getByTestId('trace-timeline-incomplete-warning')).toHaveCount(0)
+      await page.getByTestId('trace-timeline-run-tab').click()
+      await expect(page.getByTestId('fuzzing-playback-notice')).toBeVisible()
+      await page.getByTestId('trace-timeline-details-tab').click()
+      await expect(page.getByTestId('fuzzing-playback-notice')).toBeVisible()
+      await page.getByTestId('trace-timeline-changes-tab').click()
+      await expect(page.getByTestId('trace-timeline').getByTestId('playback-changes-panel')).toBeVisible()
+      await expect(page.getByTestId('playback-change-fuzz-inputs')).toBeVisible()
+      const findingReplayUrl = page.url()
+      await page.getByTestId('open-account-center').click()
+      await expect(page.getByTestId('account-page')).toBeVisible()
+      const accountHash = new URL(page.url()).hash
+      expect(new URLSearchParams(accountHash.slice(accountHash.indexOf('?') + 1)).get('returnTo'))
+        .toBe(`/board?run=exploration:${runId}&finding=${findingId}`)
+      await page.getByTestId('account-back').click()
+      await expect(page).toHaveURL(findingReplayUrl)
+      await expect(page.getByTestId('trace-timeline')).toBeVisible({ timeout: 30_000 })
+      const findingState = await page.getByTestId('trace-timeline').getAttribute('data-selected-state-index')
+      await page.getByTestId('trace-timeline-hide-panel').click()
+      await expect(page.getByTestId('trace-timeline')).toBeHidden()
+      await expect(page.getByTestId('trace-timeline-close')).toBeVisible()
+      expect(page.url()).toBe(findingReplayUrl)
+      await page.getByTestId('playback-panel-toggle').click()
+      await expect(page.getByTestId('trace-timeline')).toHaveAttribute('data-selected-state-index', findingState!)
       await page.getByTestId('trace-timeline-close').click()
 
       const historyPanel = page.getByTestId('trace-history-panel')
@@ -354,7 +467,9 @@ test.describe('bounded counterexample exploration', () => {
       expect(paperPreview.modelFingerprint).toMatch(/^[0-9a-f]{64}$/)
       expect(paperPreview.deviceDomains.length).toBeGreaterThan(0)
       expect(Array.isArray(paperPreview.localVariableDomains)).toBe(true)
-      await expect(page.getByTestId('paper-domain-preview')).toContainText('There is no single')
+      await expect(page.getByTestId('paper-domain-preview')).toContainText('Initial states and input ranges')
+      await expect(page.getByTestId('paper-domain-choices')).toHaveJSProperty('open', false)
+      await expect(page.getByTestId('paper-domain-boundaries')).toHaveJSProperty('open', false)
       await page.getByTestId('fuzz-max-iterations').fill('2')
       const refreshedPaperPreviewPromise = page.waitForResponse(response =>
         response.request().method() === 'POST'
@@ -570,15 +685,17 @@ test.describe('bounded counterexample exploration', () => {
       await page.route('**/api/board/layout', delayLayoutSave)
 
       await page.getByTestId('control-center').locator('button').first().click()
-      await page.getByRole('button', { name: 'Log Out' }).click()
+      const startedAt = Date.now()
+      await page.getByTestId('open-account-center').click()
+      await layoutSaveStarted
+      await expect(page.getByTestId('account-page')).toBeVisible()
+      await page.getByTestId('account-logout').click()
       const dialog = page.getByRole('dialog', { name: 'Log Out' })
       await expect(dialog).toBeVisible()
 
       const logoutRequest = page.waitForRequest(request =>
         request.method() === 'POST' && new URL(request.url()).pathname === '/api/auth/logout')
-      const startedAt = Date.now()
       await dialog.getByRole('button', { name: 'Log Out' }).click()
-      await layoutSaveStarted
       await logoutRequest
       expect(Date.now() - startedAt).toBeLessThan(4_000)
       await expect(page).toHaveURL(/#\/?\?mode=login/, { timeout: 10_000 })

@@ -7,6 +7,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
 import java.util.Iterator;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -30,19 +31,22 @@ public class PortableSceneRequestParser {
     public BoardBatchDto parse(JsonNode body) {
         if (body == null || !body.isObject()) {
             throw new BadRequestException(
-                    "Scene import request must be a JSON object; no board data was changed.");
+                    "Scene import request must be a JSON object; no board data was changed.",
+                    Map.of("request", "A JSON object containing impactToken and scene is required"));
         }
         for (Iterator<String> names = body.fieldNames(); names.hasNext(); ) {
             String field = names.next();
             if (!ALLOWED_BODY_FIELDS.contains(field)) {
                 throw new BadRequestException("Unknown field '" + field
-                        + "' in scene import request; no board data was changed.");
+                        + "' in scene import request; no board data was changed.",
+                        Map.of(field, "Unknown request field; only impactToken and scene are accepted"));
             }
         }
         JsonNode scene = body.path("scene");
         if (!scene.isObject()) {
             throw new BadRequestException(
-                    "Scene import request requires a 'scene' object; no board data was changed.");
+                    "Scene import request requires a 'scene' object; no board data was changed.",
+                    Map.of("scene", "The exported portable scene must be supplied as a JSON object"));
         }
         String schema = scene.path("schema").isTextual() ? scene.path("schema").asText() : null;
         Integer version = scene.path("version").isInt() ? scene.path("version").asInt() : null;
@@ -52,7 +56,10 @@ public class PortableSceneRequestParser {
             throw new BadRequestException("Unsupported scene file: expected schema '"
                     + PortableSceneFormat.SCHEMA + "' version " + PortableSceneFormat.VERSION
                     + ", received schema '" + (schema == null ? "" : schema) + "' version "
-                    + (version == null ? "" : version) + ". No board data was changed.");
+                    + (version == null ? "" : version) + ". No board data was changed.",
+                    Map.of("schema", "Expected scene schema '" + PortableSceneFormat.SCHEMA + "'",
+                            "version", "Expected scene version " + PortableSceneFormat.VERSION
+                                    + "; export the scene again with this version"));
         }
         String impactToken = body.path("impactToken").isTextual()
                 ? body.path("impactToken").asText() : null;

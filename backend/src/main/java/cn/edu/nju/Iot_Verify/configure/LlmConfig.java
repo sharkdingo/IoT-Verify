@@ -2,6 +2,7 @@ package cn.edu.nju.Iot_Verify.configure;
 
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Pattern;
 import lombok.Data;
 import lombok.ToString;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -30,6 +31,13 @@ public class LlmConfig {
     private String provider = "openai";
 
     @NotBlank
+    @Pattern(regexp = "auto|chat-completions|responses")
+    private String api = "auto";
+
+    @Pattern(regexp = "|none|minimal|low|medium|high|xhigh|max")
+    private String reasoningEffort;
+
+    @NotBlank
     @ToString.Exclude
     private String apiKey;
 
@@ -46,4 +54,15 @@ public class LlmConfig {
 
     @Min(1)
     private int timeoutMinutes = 5;
+
+    public boolean usesResponses(String effectiveModel) {
+        return "responses".equals(api) || ("auto".equals(api) && requiresResponsesForToolReasoning(effectiveModel));
+    }
+
+    /** These model families require Responses to combine reasoning with function calls. */
+    public static boolean requiresResponsesForToolReasoning(String model) {
+        if (model == null) return false;
+        return java.util.List.of("gpt-6-luna", "gpt-6-sol", "gpt-6-astra", "gpt-6.1-sol").stream()
+                .anyMatch(name -> model.equals(name) || model.startsWith(name + "-"));
+    }
 }

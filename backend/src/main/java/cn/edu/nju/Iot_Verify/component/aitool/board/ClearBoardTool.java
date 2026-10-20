@@ -80,7 +80,8 @@ public class ClearBoardTool extends AbstractAiTool {
 
             if (!confirmed || !UserContextHolder.isDestructiveActionConfirmed()) {
                 String token = destructiveActionGuard.issue(
-                        userId, getName(), TARGET_KEY, snapshot, domainImpactToken);
+                        userId, getName(), TARGET_KEY,
+                        "Whole Board", snapshot, domainImpactToken);
                 return readOnlySuccessJson(previewResponse(preview, token),
                         "Board clear preview prepared; no changes were made.");
             }
@@ -90,7 +91,8 @@ public class ClearBoardTool extends AbstractAiTool {
                     userId, getName(), TARGET_KEY, suppliedToken, snapshot);
             if (!confirmation.approved()) {
                 String freshToken = destructiveActionGuard.issue(
-                        userId, getName(), TARGET_KEY, snapshot, domainImpactToken);
+                        userId, getName(), TARGET_KEY,
+                        "Whole Board", snapshot, domainImpactToken);
                 return errorJson(confirmation.message(), confirmation.errorCode(), 409, Map.of(
                         "requiresUserConfirmation", true,
                         "currentPreview", previewResponse(preview, freshToken)));

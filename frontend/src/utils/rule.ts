@@ -109,90 +109,37 @@ export const getNodeCenter = (node: DeviceNode) => {
     }
 }
 
-/**
- * 计算两个节点之间连线的端点（切点）
- * 使得连线看起来是从节点边缘出发，而不是从中心出发
- */
-export const getLinkPoints = (fromNode: DeviceNode, toNode: DeviceNode) => {
+const getNodeBoundaryPoint = (node: DeviceNode, origin: DeviceNode['position'], dx: number, dy: number) => {
+    const width = node.width || 176
+    const height = node.height || 128
+    const tx = dx === 0 ? Infinity : ((node.position.x + (dx > 0 ? width : 0)) - origin.x) / dx
+    const ty = dy === 0 ? Infinity : ((node.position.y + (dy > 0 ? height : 0)) - origin.y) / dy
+    const distance = Math.min(tx, ty)
+    return { x: origin.x + dx * distance, y: origin.y + dy * distance }
+}
+
+/** Clip the directed line to both nodes after shifting it sideways for a reverse connection. */
+export const getLinkPoints = (fromNode: DeviceNode, toNode: DeviceNode, lateralOffset = 0) => {
     const fromCenter = getNodeCenter(fromNode)
     const toCenter = getNodeCenter(toNode)
 
-    const fw = fromNode.width || 176
-    const fh = fromNode.height || 128
-    const fx1 = fromNode.position.x
-    const fy1 = fromNode.position.y
-    const fx2 = fx1 + fw
-    const fy2 = fy1 + fh
-
-    const tw = toNode.width || 176
-    const th = toNode.height || 128
-    const tx1 = toNode.position.x
-    const ty1 = toNode.position.y
-    const tx2 = tx1 + tw
-    const ty2 = ty1 + th
-
     const dx = toCenter.x - fromCenter.x
     const dy = toCenter.y - fromCenter.y
-    const EPS = 1e-6
+    const length = Math.hypot(dx, dy)
+    if (length === 0) return { fromPoint: fromCenter, toPoint: toCenter }
 
-    // 1) 计算起始点 (Intersection with From Node)
-    let tFrom = 1
-    if (Math.abs(dx) > EPS) {
-        // Left edge
-        const tL = (fx1 - fromCenter.x) / dx
-        const yL = fromCenter.y + tL * dy
-        if (tL > 0 && yL >= fy1 && yL <= fy2) tFrom = Math.min(tFrom, tL)
+    // Keep the shifted ray inside even a small node; reversing direction reverses its perpendicular.
+    const offset = Math.sign(lateralOffset) * Math.min(Math.abs(lateralOffset),
+        (fromNode.width || 176) / 4, (fromNode.height || 128) / 4,
+        (toNode.width || 176) / 4, (toNode.height || 128) / 4)
+    const shift = { x: -dy / length * offset, y: dx / length * offset }
+    const fromOrigin = { x: fromCenter.x + shift.x, y: fromCenter.y + shift.y }
+    const toOrigin = { x: toCenter.x + shift.x, y: toCenter.y + shift.y }
 
-        // Right edge
-        const tR = (fx2 - fromCenter.x) / dx
-        const yR = fromCenter.y + tR * dy
-        if (tR > 0 && yR >= fy1 && yR <= fy2) tFrom = Math.min(tFrom, tR)
+    return {
+        fromPoint: getNodeBoundaryPoint(fromNode, fromOrigin, dx, dy),
+        toPoint: getNodeBoundaryPoint(toNode, toOrigin, -dx, -dy)
     }
-    if (Math.abs(dy) > EPS) {
-        // Top edge
-        const tT = (fy1 - fromCenter.y) / dy
-        const xT = fromCenter.x + tT * dx
-        if (tT > 0 && xT >= fx1 && xT <= fx2) tFrom = Math.min(tFrom, tT)
-
-        // Bottom edge
-        const tB = (fy2 - fromCenter.y) / dy
-        const xB = fromCenter.x + tB * dx
-        if (tB > 0 && xB >= fx1 && xB <= fx2) tFrom = Math.min(tFrom, tB)
-    }
-    const fromPoint = {
-        x: fromCenter.x + dx * tFrom,
-        y: fromCenter.y + dy * tFrom,
-    }
-
-    // 2) 计算终点 (Intersection with To Node)
-    // 反向向量
-    const bdx = fromCenter.x - toCenter.x
-    const bdy = fromCenter.y - toCenter.y
-    let tTo = 1
-    if (Math.abs(bdx) > EPS) {
-        const tL = (tx1 - toCenter.x) / bdx
-        const yL = toCenter.y + tL * bdy
-        if (tL > 0 && yL >= ty1 && yL <= ty2) tTo = Math.min(tTo, tL)
-
-        const tR = (tx2 - toCenter.x) / bdx
-        const yR = toCenter.y + tR * bdy
-        if (tR > 0 && yR >= ty1 && yR <= ty2) tTo = Math.min(tTo, tR)
-    }
-    if (Math.abs(bdy) > EPS) {
-        const tT = (ty1 - toCenter.y) / bdy
-        const xT = toCenter.x + tT * bdx
-        if (tT > 0 && xT >= tx1 && xT <= tx2) tTo = Math.min(tTo, tT)
-
-        const tB = (ty2 - toCenter.y) / bdy
-        const xB = toCenter.x + tB * bdx
-        if (tB > 0 && xB >= tx1 && xB <= tx2) tTo = Math.min(tTo, tB)
-    }
-    const toPoint = {
-        x: toCenter.x + bdx * tTo,
-        y: toCenter.y + bdy * tTo,
-    }
-
-    return { fromPoint, toPoint }
 }
 
 /**

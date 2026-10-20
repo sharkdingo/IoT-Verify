@@ -215,10 +215,27 @@ describe('device runtime authority helpers', () => {
       currentStatePrivacy: 'secret'
     }, t)
 
-    expect(invalidEnum).toContain('app.deviceImportInvalidVariableValue')
-    expect(invalidRange).toContain('app.deviceImportInvalidVariableValue')
+    expect(invalidEnum).toContain('app.variableValueEnumDomain')
+    expect(invalidRange).toContain('app.variableValueIntegerDomain')
     expect(invalidTrust).toContain('app.deviceImportInvalidTrust')
     expect(invalidPrivacy).toContain('app.deviceImportInvalidPrivacy')
+  })
+
+  it.each(['1.5', '1e1', '1.0'])('rejects non-integer text %s before a runtime write', value => {
+    expect(validateDeviceRuntimeConfig(thermostatTemplate, {
+      variables: [{ name: 'temperature', value }]
+    }, t)).toContain('app.variableValueIntegerDomain')
+  })
+
+  it('accepts signed decimal integers without requiring runtime default overrides', () => {
+    expect(validateDeviceRuntimeConfig(thermostatTemplate, {
+      variables: [{ name: 'temperature', value: '+01' }]
+    }, t)).toBe('')
+    const draft = createDeviceRuntimeDraft()
+    resetDeviceRuntimeDraft(draft, thermostatTemplate)
+    draft.variables.temperature = ''
+    expect(buildDeviceRuntimeConfig(thermostatTemplate, draft)?.variables)
+      .not.toContainEqual(expect.objectContaining({ name: 'temperature' }))
   })
 
   it('requires both bounds before treating a variable as numeric', () => {

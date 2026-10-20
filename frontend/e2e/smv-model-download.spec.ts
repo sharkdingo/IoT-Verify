@@ -90,8 +90,8 @@ const saveEmptyBoard = async (request: APIRequestContext, auth: AuthUser) => {
 const importAcceptanceScene = async (page: Page, request: APIRequestContext, auth: AuthUser) => {
   const scenePath = path.resolve(process.cwd(), '..', 'docs', 'examples', 'acceptance-demo-scene.json')
   await page.getByTestId('scene-import-file').setInputFiles(scenePath)
-  await page.getByRole('dialog', { name: 'Confirm Full Scene Replacement' })
-    .getByRole('button', { name: 'Replace in full' })
+  await page.getByRole('dialog', { name: 'Replace the current scene?' })
+    .getByRole('button', { name: 'Replace scene' })
     .click()
   await waitForApi<any[]>(request, auth, '/api/board/rules', rules => rules.length === 3)
   await waitForApi<any[]>(request, auth, '/api/board/specs', specs => specs.length === 5)
@@ -158,7 +158,7 @@ test.describe('SMV model download', () => {
     // The artifact section is in the body, above the footer, and names what it covers.
     const artifact = page.getByTestId('verification-run-artifact')
     await expect(artifact).toBeVisible({ timeout: 30_000 })
-    await expect(artifact).toContainText('Artifact from this run')
+    await expect(artifact.getByRole('heading', { name: 'Verification model', exact: true })).toBeVisible()
     await expect(artifact).toContainText('The SMV model this run checked')
 
     // Enabled, not merely present: the flag that was never sent is exactly what left it unusable.
@@ -172,7 +172,7 @@ test.describe('SMV model download', () => {
     expectSceneModel(body, { expectsSpecifications: true })
   })
 
-  test('offers no run artifact inside the counterexample details, only a link to its run', async ({ page, request }) => {
+  test('keeps counterexample context in the terminal with a link to the owning run', async ({ page, request }) => {
     const auth = await createAuthenticatedUser(request)
     await saveEmptyBoard(request, auth)
     await openWorkspace(page, auth)
@@ -183,12 +183,12 @@ test.describe('SMV model download', () => {
     await page.getByTestId('run-verification').click()
     await expect(page.getByTestId('verification-result-dialog')).toBeVisible({ timeout: 60_000 })
 
-    // Replay a counterexample, then open its details from the replay bar.
-    await page.getByTestId('verification-result-scroll')
-      .getByRole('button', { name: /^View$/ }).first().click()
+    // Run context stays inside the terminal while the timeline remains visible.
+    await page.getByTestId('verification-trace-replay').first().click()
     await expect(page.getByTestId('trace-timeline')).toBeVisible({ timeout: 30_000 })
-    await page.getByTestId('trace-timeline-run-details').click()
-    const details = page.getByTestId('trace-details-dialog')
+    await page.getByTestId('trace-timeline-run-tab').click()
+    const details = page.getByTestId('counterexample-run-info')
+    await expect(page.getByTestId('trace-details-dialog')).toHaveCount(0)
     await expect(details).toBeVisible({ timeout: 30_000 })
 
     // The model is one per run; a per-counterexample copy would imply one model each.
@@ -198,7 +198,7 @@ test.describe('SMV model download', () => {
     await expect(details.getByTestId('counterexample-evidence')).toBeVisible()
     await expect(details.getByTestId('counterexample-run-context')).toBeVisible()
     await expect(details.getByTestId('counterexample-run-context'))
-      .toContainText('identical for all of its counterexamples')
+      .toContainText('Attack behavior not modeled')
 
     // Escalation reaches the run, where the artifact lives, and the URL follows.
     await details.getByTestId('counterexample-open-owning-run').click()
@@ -217,13 +217,10 @@ test.describe('SMV model download', () => {
     await page.getByTestId('simulation-mode-sync').click()
     await page.getByTestId('run-simulation').click()
 
-    // A simulation lands on the timeline, not on a dialog — the timeline is the point of the run, and
-    // `runSimulation` opens it directly (`simulationResult` is left null). The result dialog is a
-    // details surface reached from the timeline's "Run details" button, which is where the artifact
-    // section lives. Waiting for the dialog straight after the run timed out for this reason.
     await expect(page.getByTestId('simulation-timeline')).toBeVisible({ timeout: 60_000 })
-    await page.getByTestId('simulation-timeline-run-details').click()
-    await expect(page.getByTestId('simulation-result-dialog')).toBeVisible({ timeout: 30_000 })
+    await page.getByTestId('simulation-timeline-run-tab').click()
+    await expect(page.getByTestId('simulation-result-dialog')).toHaveCount(0)
+    await expect(page.getByTestId('playback-toolbar').getByTestId('simulation-timeline-track')).toBeVisible()
 
     const artifact = page.getByTestId('simulation-run-artifact')
     await expect(artifact).toBeVisible({ timeout: 30_000 })

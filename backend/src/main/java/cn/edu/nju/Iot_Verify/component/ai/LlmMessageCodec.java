@@ -7,6 +7,7 @@ import cn.edu.nju.Iot_Verify.exception.PersistedDataIntegrityException;
 import cn.edu.nju.Iot_Verify.po.ChatMessagePo;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
@@ -56,7 +57,7 @@ public class LlmMessageCodec {
 
         if ("tool".equals(roleStr)) {
             ToolResultParts parts = parseToolResult(content, po.getId());
-            return LlmMessage.tool(parts.toolCallId(), parts.result());
+            return LlmMessage.tool(parts.toolCallId(), projectToolResult(parts.result(), po.getId()));
         }
 
         if ("assistant".equals(roleStr)) {
@@ -73,6 +74,39 @@ public class LlmMessageCodec {
             default -> throw new PersistedDataIntegrityException(
                     "chat message", po.getId(), "role", "unsupported role '" + roleStr + "'");
         };
+    }
+
+    /** The canonical result is retained for server-side proposal selection, never copied by the model. */
+    public String toolResultContent(ChatMessagePo po) {
+        if (po == null || !"tool".equalsIgnoreCase(po.getRole())) {
+            throw new PersistedDataIntegrityException("chat message", po == null ? null : po.getId(),
+                    "role", "a stored tool result is required");
+        }
+        return parseToolResult(po.getContent(), po.getId()).result();
+    }
+
+    private String projectToolResult(String result, Long messageId) {
+        JsonNode root;
+        try {
+            root = objectMapper.readTree(result);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            return result;
+        }
+        if (root == null || !root.path("suggestions").isArray()) return result;
+        boolean changed = false;
+        int index = 0;
+        for (JsonNode suggestion : root.path("suggestions")) {
+            index++;
+            if (!suggestion.has("suggestionToken")) continue;
+            if (!(suggestion instanceof ObjectNode object) || messageId == null || messageId <= 0) {
+                throw new PersistedDataIntegrityException("chat message", messageId, "content",
+                        "signed repair suggestions require a persisted message identity");
+            }
+            object.remove("suggestionToken");
+            object.put("suggestionId", messageId + ":" + index);
+            changed = true;
+        }
+        return changed ? root.toString() : result;
     }
 
     // ── domain → persisted content ───────────────────────────────────────

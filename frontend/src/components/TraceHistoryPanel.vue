@@ -1,6 +1,9 @@
 <script setup lang="ts">
+import { compareModelSnapshot } from '@/utils/modelComparison'
+import { activeTaskProgressStage } from '@/utils/runResponse'
+import type { BoardModelFingerprints, ModelRunSnapshot, ModelSemantics, RunBoardComparison } from '@/types/modelSemantics'
 import { formatRunTimestamp } from '@/utils/runTimestamp'
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type {
   ModelGenerationIssue,
@@ -22,24 +25,20 @@ import type {
   FuzzingTaskSummary
 } from '@/types/fuzzing'
 import { formatTraceSpec } from '@/utils/traceView'
+import { formatFuzzingElapsed } from '@/utils/fuzzingPresentation'
 import { generationIssueReasonKey } from '@/utils/generationIssue'
 import RunInitiatorBadge from '@/components/RunInitiatorBadge.vue'
 import HintTooltip from '@/components/common/HintTooltip.vue'
+import InfoTooltip from '@/components/common/InfoTooltip.vue'
+import FieldSelect from '@/components/common/FieldSelect.vue'
+import FailureDetails from '@/components/FailureDetails.vue'
+import { technicalErrorLines, type ApiErrorDetails } from '@/utils/userMessage'
 
 type HistoryLayer = 'tasks' | 'results'
 type ResultFilter = 'all' | 'verification' | 'fuzzing' | 'simulation'
 type ResultSource = Exclude<ResultFilter, 'all'>
 type TaskKind = 'verification' | 'fuzzing' | 'simulation'
 type TaskStatus = 'PENDING' | 'RUNNING' | 'FAILED' | 'CANCELLED'
-type CurrentBoardScope = {
-  deviceCount: number
-  ruleCount: number
-  specificationCount: number
-  environmentVariableCount: number
-  deviceTemplateCount: number
-  modelFingerprint?: string | null
-}
-
 type TaskItem =
   | (VerificationTaskSummary & { kind: 'verification' })
   | (FuzzingTaskSummary & { kind: 'fuzzing' })
@@ -60,14 +59,16 @@ const props = defineProps<{
   fuzzingRuns: FuzzingRunSummary[]
   simulationRuns: SimulationTraceSummary[]
   loadingTasks: boolean
+  taskError?: ApiErrorDetails | null
   loadingResults: boolean
-  resultErrors?: Partial<Record<ResultSource, string | null>>
+  resultErrors?: Partial<Record<ResultSource, ApiErrorDetails | null>>
   hasMoreFuzzingRuns: boolean
   loadingMoreFuzzingRuns: boolean
   pendingTaskActionKeys?: ReadonlySet<string>
   pendingResultDeleteKeys?: ReadonlySet<string>
   actionLocked: boolean
-  currentBoardScope?: CurrentBoardScope
+  currentModelFingerprints?: BoardModelFingerprints | null
+  modelComparisonLoading?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -108,25 +109,85 @@ const emit = defineEmits<{
   (e: 'verify-fuzzing-finding', finding: FuzzingFindingSummary): void
 }>()
 
-const closeButtonRef = ref<HTMLButtonElement | null>(null)
+const panelRef = ref<HTMLElement | null>(null)
+const bodyRef = ref<HTMLElement | null>(null)
 let previousActiveElement: HTMLElement | null = null
+let panelActive = false
+let rememberedScrollTop = 0
+let readingAnchor: { element: HTMLElement; edge: 'top' | 'bottom'; offset: number } | null = null
 
-onMounted(async () => {
+const rememberReadingAnchor = () => {
+  const body = bodyRef.value
+  if (!panelActive || !body) return
+  const bounds = body.getBoundingClientRect()
+  const visible = Array.from(body.querySelectorAll<HTMLElement>('.history-card :is(h4, h5, p, time, summary, button)'))
+    .filter(element => {
+      const rect = element.getBoundingClientRect()
+      return rect.height > 0 && rect.bottom > bounds.top && rect.top < bounds.bottom
+    })
+  const atEnd = body.scrollTop > 0 && body.scrollHeight - body.scrollTop - body.clientHeight <= 1
+  const edge = atEnd ? 'bottom' : 'top'
+  const element = atEnd
+    ? visible.reverse().find(element => element.getBoundingClientRect().bottom <= bounds.bottom) || visible[0]
+    : visible.find(element => element.getBoundingClientRect().top >= bounds.top) || visible[0]
+  readingAnchor = element ? { element, edge, offset: element.getBoundingClientRect()[edge] - bounds[edge] } : null
+}
+
+const restoreReadingAnchor = () => {
+  const body = bodyRef.value
+  if (!panelActive || !body || !readingAnchor || !body.contains(readingAnchor.element)) return
+  // Reflow changes card heights, so the same pixel offset can point to a different run.
+  body.scrollTop += readingAnchor.element.getBoundingClientRect()[readingAnchor.edge]
+    - body.getBoundingClientRect()[readingAnchor.edge] - readingAnchor.offset
+  rememberedScrollTop = body.scrollTop
+}
+
+const activatePanel = async () => {
+  if (panelActive) return
+  panelActive = true
   previousActiveElement = document.activeElement as HTMLElement | null
   await nextTick()
-  closeButtonRef.value?.focus()
-})
+  if (!panelActive) return
+  if (bodyRef.value) bodyRef.value.scrollTop = rememberedScrollTop
+  restoreReadingAnchor()
+  panelRef.value?.focus({ preventScroll: true })
+}
 
-onBeforeUnmount(() => {
+const deactivatePanel = () => {
+  panelActive = false
   if (previousActiveElement
     && previousActiveElement !== document.body
     && document.contains(previousActiveElement)) {
-    previousActiveElement.focus()
+    previousActiveElement.focus({ preventScroll: true })
   }
   previousActiveElement = null
-})
+}
+
+const rememberScroll = () => {
+  if (panelActive && bodyRef.value) rememberedScrollTop = bodyRef.value.scrollTop
+  rememberReadingAnchor()
+}
+
+watch(() => [props.activeLayer, props.resultFilter], () => {
+  rememberedScrollTop = 0
+  readingAnchor = null
+  if (bodyRef.value) bodyRef.value.scrollTop = 0
+}, { flush: 'post' })
+
+onMounted(activatePanel)
+onMounted(() => window.addEventListener('resize', restoreReadingAnchor))
+onActivated(activatePanel)
+onDeactivated(deactivatePanel)
+onBeforeUnmount(deactivatePanel)
+onBeforeUnmount(() => window.removeEventListener('resize', restoreReadingAnchor))
 
 const { t, locale } = useI18n()
+
+watch(locale, async () => {
+  rememberReadingAnchor()
+  await nextTick()
+  restoreReadingAnchor()
+})
 
 const timestamp = (value?: string) => {
   if (!value) return 0
@@ -199,8 +260,7 @@ const formatStatus = (status?: string) => {
 
 const statusClass = (status?: string) => {
   if (status === 'FAILED') return 'board-surface-danger board-text-danger'
-  if (status === 'CANCELLED') return 'border-slate-200 bg-slate-100 text-slate-600'
-  return 'board-border-subtle board-chip-info board-text-info'
+  return 'board-meta-chip'
 }
 
 const taskKindLabel = (kind: TaskKind) => {
@@ -232,13 +292,13 @@ const taskActionPending = (action: 'cancel' | 'dismiss', task: TaskItem) =>
 
 const traceSpecTitle = (trace: TraceSummary) => {
   if (!trace.dataAvailable) return t('app.historyItemUnavailable')
-  const summary = trace.violatedSpec ? formatTraceSpec(trace.violatedSpec, t) : ''
+  const summary = trace.violatedSpec ? formatTraceSpec(trace.violatedSpec, t, trace.modelTokenSourcesByDeviceId) : ''
   return summary || t('app.unknownSpecification')
 }
 
-const fuzzFindingTitle = (finding: FuzzingFindingSummary) => {
+const fuzzFindingTitle = (finding: FuzzingFindingSummary, run: AvailableFuzzingRunSummary) => {
   if (finding.dataAvailable === false) return t('app.historyItemUnavailable')
-  const summary = finding.violatedSpec ? formatTraceSpec(finding.violatedSpec, t) : ''
+  const summary = finding.violatedSpec ? formatTraceSpec(finding.violatedSpec, t, run.modelTokenSourcesByDeviceId) : ''
   return summary || finding.specificationLabel || finding.violatedSpecId || t('app.unknownSpecification')
 }
 
@@ -254,64 +314,39 @@ const fuzzingModeDescription = (mode: FuzzingExplorationMode) => t(
     : 'app.fuzzModeBoardDescription'
 )
 
-/**
- * Drift, where an un-comparable fingerprint counts as drift rather than as a match.
- *
- * The bare `!==` carries that: a persisted fuzz run always has a 64-hex fingerprint (`FuzzMapper`
- * rejects a snapshot without one), so an absent or nulled current fingerprint compares unequal and the
- * row warns. `Board.vue`'s copy relies on the same property, and
- * `TraceHistoryPanel.spec.ts`'s "does not claim a fingerprinted run is unchanged when the current
- * fingerprint is unavailable" pins it — that case reaches here with a scope object that carries counts
- * but no fingerprint.
- *
- * Do not add a three-valued `UNAVAILABLE` branch here on the theory that unknown deserves its own
- * notice: the only unknown states reachable are already reported as drift, which is the conservative
- * answer, and splitting them turned that guarded behaviour into silence.
- */
-const fuzzRunHasBoardDrift = (run: AvailableFuzzingRunSummary) => {
-  const current = props.currentBoardScope
-  if (!current) return false
-  return run.modelSnapshot.modelFingerprint !== current.modelFingerprint
+const comparisonFor = (snapshot: ModelRunSnapshot, kind: TaskKind) =>
+  compareModelSnapshot(snapshot, props.currentModelFingerprints, kind)
+
+const comparisonLabel = (comparison: RunBoardComparison) => comparison === 'UNAVAILABLE' && props.modelComparisonLoading
+  ? t('app.historyModelComparing') : t({
+  UNCHANGED: 'app.historyModelUnchanged',
+  CHANGED: 'app.historyModelChanged',
+  UNAVAILABLE: 'app.historyModelUnavailable',
+  NOT_COMPARED: 'app.historyModelNotRecorded'
+}[comparison])
+
+const comparisonDetail = (comparison: RunBoardComparison, activeTask = false) => t({
+  UNCHANGED: 'app.runBoardInputUnchanged',
+  CHANGED: activeTask ? 'app.taskModelChangedDetail' : 'app.runBoardInputChanged',
+  UNAVAILABLE: props.modelComparisonLoading ? 'app.runBoardComparisonLoading' : 'app.runBoardComparisonUnavailable',
+  NOT_COMPARED: 'app.historyModelNotRecordedDetail'
+}[comparison])
+
+const taskGroups = computed(() => [
+  { key: 'active', label: t('app.runningTasks'), items: activeTasks.value },
+  { key: 'unresolved', label: t('app.tasksWithoutResults'), items: unresolvedTasks.value }
+].filter(group => group.items.length))
+
+const taskStageLabel = (task: TaskItem) => {
+  const stage = activeTaskProgressStage(task.progressStage, task.status)
+  return stage ? t(`app.taskProgressStage_${stage}`) : formatStatus(task.status)
 }
 
-/**
- * How a verification or simulation history row compares to the current canvas — three-valued, because
- * this comparison cannot answer "unchanged".
- *
- * It compares five integers. Every semantic edit that keeps them equal is invisible to it: inverting a
- * rule's relation operator, changing an environment variable's value, moving a specification's
- * threshold, swapping one device's template for another. (A device *rename* is deliberately not drift
- * anywhere in this product — `FuzzModelFingerprint.PRESENTATION_FIELDS` strips `deviceLabel`, and
- * `FuzzServiceImplTest` asserts a rename leaves the fingerprint equal.)
- *
- * It used to return a boolean, and the template read `false` as "no warning" — which a reader takes as
- * an affirmative "this verdict still describes my canvas". That is the one thing the product is careful
- * never to claim: `runBoardNotCompared` says the result applies only to its snapshot, the open result
- * withdraws its Fix action when the board changes, and the comment on `fuzzRunHasBoardDrift` above
- * states the rule that an un-comparable state must read as drift rather than as a match. This predicate
- * was the one place violating it.
- *
- * Why not a real fingerprint, like fuzz has: `modelFingerprint` is fuzz-only *by contract*, not by
- * omission. `PersistedModelContextIntegrity` (backend, ~line 500) rejects a verification or simulation
- * snapshot whose `modelFingerprint` is non-null, so populating it would make every existing row
- * unreadable. Closing the gap properly is a persisted-format decision, not a frontend one.
- */
-type RunScopeComparison = 'COUNTS_CHANGED' | 'COUNTS_ONLY_MATCH' | 'NOT_COMPARED'
-
-const runScopeComparison = (
-  run: AvailableVerificationRunSummary | AvailableSimulationTraceSummary,
-  includeSpecifications: boolean
-): RunScopeComparison => {
-  const current = props.currentBoardScope
-  if (!current) return 'NOT_COMPARED'
-  const snapshot = run.modelSnapshot
-  const countsDiffer = snapshot.deviceCount !== current.deviceCount
-    || snapshot.ruleCount !== current.ruleCount
-    || snapshot.environmentVariableCount !== current.environmentVariableCount
-    || snapshot.deviceTemplateCount !== current.deviceTemplateCount
-    || (includeSpecifications && snapshot.specificationCount !== current.specificationCount)
-  return countsDiffer ? 'COUNTS_CHANGED' : 'COUNTS_ONLY_MATCH'
-}
+const scopeText = (snapshot: ModelRunSnapshot, kind: TaskKind) => t(
+  kind === 'simulation' ? 'app.runScopeWithoutSpecs' : 'app.runScopeCounts', {
+    devices: snapshot.deviceCount, rules: snapshot.ruleCount, specs: snapshot.specificationCount
+  }
+)
 
 const resultErrorEntries = computed(() => {
   const errors = props.resultErrors || {}
@@ -320,8 +355,9 @@ const resultErrorEntries = computed(() => {
     : [props.resultFilter]
   return visibleSources
     .filter(source => Boolean(errors[source]))
-    .map(source => ({ source, message: errors[source] as string }))
+    .map(source => ({ source, error: errors[source]! }))
 })
+const hasStaleResults = computed(() => resultItems.value.some(item => Boolean(props.resultErrors?.[item.kind])))
 
 const resultSourceLabel = (source: ResultSource) => {
   if (source === 'verification') return t('app.verificationRunResult')
@@ -329,24 +365,22 @@ const resultSourceLabel = (source: ResultSource) => {
   return t('app.simulationRunResult')
 }
 
+const resultLoadErrorKey = (source: ResultSource) => ({
+  verification: 'app.failedToLoadVerificationHistory',
+  fuzzing: 'app.failedToLoadFuzzingHistory',
+  simulation: 'app.failedToLoadSimulationHistory'
+}[source])
+
 const emitDeleteResult = (item: ResultItem) => {
   if (item.kind === 'verification') emit('delete-verification-run', item.run)
   else if (item.kind === 'fuzzing') emit('delete-fuzzing-run', item.run)
   else emit('delete-simulation-run', item.run)
 }
 
-const generationIssuesFor = (item: { generationIssues?: ModelGenerationIssue[] }) =>
-  Array.isArray(item.generationIssues) ? item.generationIssues : []
+const generationIssuesFor = (item: AvailableVerificationRunSummary | AvailableSimulationTraceSummary | AvailableFuzzingRunSummary): ModelGenerationIssue[] =>
+  'generationIssues' in item && Array.isArray(item.generationIssues) ? item.generationIssues : []
 
-/**
- * The assumptions that decide what a verdict actually covers.
- *
- * A verdict alone is not comparable between runs: attack modeling off and exhaustive compromise up
- * to a budget produce identical badges and identical device/rule/spec counts. History is the surface
- * users scan to decide whether their home is safe, so the scope has to be legible here and not only
- * one click away in the opened result.
- */
-const runAssumptions = (run: AvailableVerificationRunSummary): string[] => {
+const runAssumptions = (run: Pick<AvailableVerificationRunSummary, 'isAttack' | 'attackBudget' | 'enablePrivacy'> & { modelSemantics?: ModelSemantics }): string[] => {
   const assumptions: string[] = []
   const points = run.modelSemantics?.modeledAttackPointCount
   if (!run.isAttack) {
@@ -358,11 +392,13 @@ const runAssumptions = (run: AvailableVerificationRunSummary): string[] => {
     assumptions.push(t('app.runAssumptionAttackPoints', {
       count: typeof points === 'number' ? points : (run.attackBudget ?? '?')
     }))
-  } else if (typeof run.attackBudget === 'number' && run.attackBudget > 0) {
+  } else if (run.modelSemantics && typeof run.attackBudget === 'number' && run.attackBudget > 0) {
     assumptions.push(t('app.runAssumptionAttackBudget', {
       count: run.attackBudget,
       total: typeof points === 'number' ? points : '?'
     }))
+  } else {
+    assumptions.push(t('app.runAssumptionAttackEnabled'))
   }
   if (run.enablePrivacy) assumptions.push(t('app.runAssumptionPrivacy'))
   return assumptions
@@ -393,16 +429,6 @@ const verificationOutcomeBadge = (run: AvailableVerificationRunSummary) => {
   }
 }
 
-const simulationOutcomeBadge = (run: AvailableSimulationTraceSummary) => run.modelComplete
-  ? {
-      label: t('app.allRulesModeled'),
-      className: 'board-border-subtle board-chip-info board-text-info'
-    }
-  : {
-      label: t('app.incompleteModel'),
-      className: 'board-surface-warning board-text-warning'
-    }
-
 const fuzzingOutcomeBadge = (run: AvailableFuzzingRunSummary) => {
   if (run.outcome === 'FOUND_VIOLATION') {
     return {
@@ -412,8 +438,9 @@ const fuzzingOutcomeBadge = (run: AvailableFuzzingRunSummary) => {
   }
   if (run.outcome === 'BUDGET_EXHAUSTED') {
     return {
-      label: t('app.fuzzBudgetExhausted'),
-      className: 'board-border-subtle board-chip-info board-text-info'
+      label: t(run.limitations.includes('TIME_BUDGET_EXHAUSTED')
+        ? 'app.fuzzTimeLimitReached' : 'app.fuzzBudgetExhausted'),
+      className: 'board-meta-chip'
     }
   }
   return {
@@ -421,796 +448,346 @@ const fuzzingOutcomeBadge = (run: AvailableFuzzingRunSummary) => {
     className: 'board-surface-warning board-text-warning'
   }
 }
+
+const resultOutcomeBadge = (item: ResultItem) => {
+  if (!item.run.dataAvailable) return { label: t('app.historyItemUnavailable'), className: 'board-chip-warning board-text-warning' }
+  if (item.kind === 'verification') return verificationOutcomeBadge(item.run)
+  if (item.kind === 'fuzzing') return fuzzingOutcomeBadge(item.run)
+  return { label: t('app.incompleteModel'), className: 'board-surface-warning board-text-warning' }
+}
+
+const resultTimestamp = (item: ResultItem) =>
+  item.kind === 'simulation' ? item.run.createdAt : (item.run.completedAt || item.run.createdAt)
+const resultDate = (item: ResultItem) => formatDate(resultTimestamp(item))
 </script>
 
 <template>
   <div
+    ref="panelRef"
     class="board-floating-panel history-panel board-surface-panel fixed top-20 z-30 flex w-[480px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-xl border shadow-2xl"
-    data-testid="trace-history-panel"
-    role="region"
-    aria-labelledby="trace-history-title"
-    tabindex="-1"
+    data-testid="trace-history-panel" role="region" aria-labelledby="trace-history-title" tabindex="-1"
     @keydown.esc.stop.prevent="emit('close')"
   >
-    <div class="flex shrink-0 items-center justify-between bg-slate-800 p-4">
+    <div class="board-tool-header">
       <div class="flex min-w-0 items-center gap-3">
-        <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[color:var(--accent-fill)] shadow-lg">
-          <span class="material-symbols-outlined text-xl text-white">history</span>
+        <div class="board-section-icon board-section-icon--lg">
+          <span class="material-symbols-outlined text-xl board-text-muted" aria-hidden="true">history</span>
         </div>
         <div class="min-w-0">
-          <h3 id="trace-history-title" class="text-base font-bold text-white">{{ t('app.runHistory') }}</h3>
-          <p class="truncate text-xs text-white/75">{{ t('app.runHistorySubtitle') }}</p>
+          <h3 id="trace-history-title" class="board-panel-title">{{ t('app.runHistory') }}</h3>
         </div>
       </div>
       <HintTooltip :content="t('app.close')">
-        <button
-          ref="closeButtonRef"
-          type="button"
-          data-testid="close-history-panel"
-          class="board-card flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-white/75 transition-colors hover:/10 hover:text-white"
-          :aria-label="t('app.close')"
-          @click="emit('close')"
-        >
-          <span class="material-symbols-outlined">close</span>
+        <button type="button" data-testid="close-history-panel"
+          class="board-panel-icon-action"
+          :aria-label="t('app.close')" @click="emit('close')">
+          <span class="material-symbols-outlined" aria-hidden="true">close</span>
         </button>
       </HintTooltip>
     </div>
 
-    <div class="board-panel-tabs shrink-0 border-b p-3">
+    <div class="board-panel-tabs history-tabs">
       <div class="board-segmented grid grid-cols-2 gap-1 rounded-lg p-1">
-        <button
-          type="button"
-          data-testid="history-layer-tasks"
-          class="flex min-h-11 items-center justify-center gap-1 rounded-md px-3 py-2 text-xs font-bold transition-colors"
-          :class="activeLayer === 'tasks' ? 'bg-white board-text-info shadow-sm' : 'text-slate-600 hover:text-slate-800'"
-          :aria-pressed="activeLayer === 'tasks'"
-          @click="emit('update:activeLayer', 'tasks')"
-        >
-          <span class="material-symbols-outlined text-sm" aria-hidden="true">pending_actions</span>
-          {{ t('app.taskStatusLayer') }}
-          <span v-if="activeTasks.length" class="rounded-full board-chip-info px-1.5 text-[length:var(--iot-font-min)] board-text-info">
-            {{ activeTasks.length }}
-          </span>
-        </button>
-        <button
-          type="button"
-          data-testid="history-layer-results"
-          class="flex min-h-11 items-center justify-center gap-1 rounded-md px-3 py-2 text-xs font-bold transition-colors"
-          :class="activeLayer === 'results' ? 'bg-white board-text-info shadow-sm' : 'text-slate-600 hover:text-slate-800'"
-          :aria-pressed="activeLayer === 'results'"
-          @click="emit('update:activeLayer', 'results')"
-        >
-          <span class="material-symbols-outlined text-sm" aria-hidden="true">fact_check</span>
-          {{ t('app.historyResultsLayer') }}
+        <button v-for="layer in (['tasks', 'results'] as const)" :key="layer" type="button"
+          :data-testid="`history-layer-${layer}`" class="history-tab"
+          :class="activeLayer === layer ? 'board-bg-elevated board-text-strong shadow-sm' : 'board-text-muted hover:board-text-strong'"
+          :aria-pressed="activeLayer === layer" @click="emit('update:activeLayer', layer)">
+          <span class="material-symbols-outlined text-base" aria-hidden="true">{{ layer === 'tasks' ? 'pending_actions' : 'fact_check' }}</span>
+          {{ t(layer === 'tasks' ? 'app.taskStatusLayer' : 'app.historyResultsLayer') }}
+          <span v-if="layer === 'tasks' && activeTasks.length" class="history-badge board-meta-chip">{{ activeTasks.length }}</span>
         </button>
       </div>
     </div>
 
-    <div class="iot-scroll-region board-panel-body min-h-0 flex-1 p-3">
-      <div
-        v-if="actionLocked"
-        class="mb-3 flex items-start gap-2 rounded-lg board-surface-warning px-3 py-2 text-xs board-text-warning"
-      >
-        <span class="material-symbols-outlined text-sm">lock</span>
-        <span>{{ t('app.historyActionsLockedHint') }}</span>
-      </div>
+    <div ref="bodyRef" class="iot-scroll-region board-panel-body history-body" @scroll="rememberScroll">
+      <p v-if="actionLocked" class="history-notice board-surface-warning board-text-warning">
+        <span class="material-symbols-outlined text-base" aria-hidden="true">lock</span>
+        {{ t(pendingResultDeleteKeys?.size ? 'app.historyDeletionInProgress' : 'app.historyActionsLockedHint') }}
+      </p>
 
-      <div v-if="activeLayer === 'tasks'" class="space-y-3">
-        <div class="flex items-center justify-between px-1">
-          <span class="text-xs font-medium text-slate-500">
-            {{ t('app.pendingTaskSummary', { active: activeTasks.length, unresolved: unresolvedTasks.length }) }}
-          </span>
-          <button
-            type="button"
-            class="flex min-h-11 items-center gap-1 px-2 text-xs font-medium board-text-info hover:board-text-strong"
-            :disabled="loadingTasks"
-            @click="emit('refresh-tasks')"
-          >
-            <span class="material-symbols-outlined text-sm" :class="loadingTasks ? 'animate-spin' : ''">refresh</span>
-            {{ t('app.refresh') }}
-          </button>
-        </div>
-
-        <div v-if="loadingTasks" class="flex flex-col items-center justify-center py-10 text-slate-500">
-          <span class="material-symbols-outlined animate-spin text-4xl board-text-progress">sync</span>
-          <p class="mt-3 text-sm">{{ t('app.loadingTasks') }}</p>
-        </div>
-
-        <div v-else-if="taskItems.length === 0" class="flex flex-col items-center justify-center py-10 text-center">
-          <div class="board-muted-surface mb-3 flex h-14 w-14 items-center justify-center rounded-full">
-            <span class="material-symbols-outlined text-3xl text-slate-500">task_alt</span>
+      <template v-if="activeLayer === 'tasks'">
+        <div class="history-toolbar">
+          <p class="board-text-muted">{{ t('app.pendingTaskSummary', { active: activeTasks.length, unresolved: unresolvedTasks.length }) }}</p>
+          <div class="flex shrink-0 items-center gap-4">
+            <InfoTooltip :text="t('app.noPendingTasksHint')" test-id="history-tasks-help"
+              :label="t('app.showHelpFor', { topic: t('app.taskStatusLayer') })" />
+            <HintTooltip :content="t('app.refresh')">
+              <button type="button" class="board-panel-icon-action" :aria-label="t('app.refresh')"
+                :disabled="loadingTasks" @click="emit('refresh-tasks')">
+                <span class="material-symbols-outlined" :class="loadingTasks ? 'animate-spin' : ''" aria-hidden="true">refresh</span>
+              </button>
+            </HintTooltip>
           </div>
-          <p class="text-sm font-medium text-slate-600">{{ t('app.noPendingTasks') }}</p>
-          <p class="mt-1 px-4 text-xs text-slate-500">{{ t('app.noPendingTasksHint') }}</p>
         </div>
-
+        <div v-if="taskError" data-testid="history-tasks-load-error"
+          class="history-notice board-surface-warning board-text-warning" role="alert">
+          <div class="min-w-0 flex-1 break-words">
+            <p>{{ t('app.failedToLoadTasks') }}</p>
+            <FailureDetails :details="technicalErrorLines(taskError)" suggestion="" />
+            <p v-if="taskItems.length" class="mt-1">{{ t('app.taskStatusesMayBeStale') }}</p>
+            <button type="button" class="history-text-action" :disabled="loadingTasks" @click="emit('refresh-tasks')">{{ t('app.retry') }}</button>
+          </div>
+        </div>
+        <div v-if="loadingTasks && !taskItems.length" class="history-empty board-text-muted" role="status">
+          <span class="material-symbols-outlined animate-spin text-2xl" aria-hidden="true">sync</span>
+          <p>{{ t('app.loadingTasks') }}</p>
+        </div>
+        <div v-else-if="!taskError && taskItems.length === 0" class="history-empty board-text-muted">
+          <span class="material-symbols-outlined text-2xl" aria-hidden="true">task_alt</span>
+          <p class="font-semibold">{{ t('app.noPendingTasks') }}</p>
+        </div>
         <template v-else>
-          <section v-if="activeTasks.length" class="space-y-2">
-            <h4 class="px-1 text-xs font-bold text-slate-600">{{ t('app.runningTasks') }}</h4>
-            <div
-              v-for="task in activeTasks"
-              :key="`${task.kind}-${task.id}`"
-              class="board-card-surface rounded-lg border p-3 shadow-sm"
-            >
-              <div class="flex items-start justify-between gap-3">
-                <div class="min-w-0 flex-1">
-                  <div class="flex flex-wrap items-center gap-2">
-                    <span class="text-xs font-bold board-text-info">{{ taskKindLabel(task.kind) }}</span>
-                    <span class="rounded-full border px-2 py-0.5 text-[11px] font-semibold" :class="statusClass(task.status)">
-                      {{ formatStatus(task.status) }}
-                    </span>
-                    <RunInitiatorBadge :initiator="task.initiator" />
-                    <span
-                      v-if="task.kind === 'fuzzing'"
-                      :data-testid="`fuzzing-task-mode-${task.id}`"
-                      class="max-w-full rounded-full board-surface-info px-2 py-0.5 text-[length:var(--iot-font-min)] font-semibold board-text-info"
-                      :title="fuzzingModeDescription(task.explorationMode)"
-                    >
-                      {{ fuzzingModeLabel(task.explorationMode) }}
-                    </span>
-                  </div>
-                  <div
-                    class="mt-2 h-2 w-full overflow-hidden rounded-full bg-slate-100"
-                    role="progressbar"
-                    :aria-label="`${taskKindLabel(task.kind)} ${t('app.progress')}`"
-                    aria-valuemin="0"
-                    aria-valuemax="100"
-                    :aria-valuenow="taskProgress(task)"
-                  >
-                    <div class="h-full rounded-full bg-[color:var(--accent)] transition-all" :style="{ width: `${taskProgress(task)}%` }"></div>
-                  </div>
-                  <div class="mt-1 flex justify-between text-[11px] text-slate-500">
-                    <span>{{ taskProgress(task) }}%</span>
-                    <span>{{ formatDate(task.createdAt) }}</span>
-                  </div>
-                </div>
-                <div class="flex shrink-0 flex-col gap-1">
-                  <button
-                    type="button"
-                    class="min-h-11 rounded bg-[color:var(--accent-fill)] px-2 py-1 text-xs font-medium text-white hover:bg-[color:var(--accent-fill-hover)]"
-                    @click="emitWatchTask(task)"
-                  >
-                    {{ t('app.watchTask') }}
-                  </button>
-                  <button
-                    type="button"
-                    class="inline-flex min-h-11 items-center justify-center gap-1 rounded bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700 hover:board-chip-danger hover:board-text-danger disabled:cursor-wait disabled:opacity-60"
-                    :disabled="taskActionPending('cancel', task)"
-                    :aria-busy="taskActionPending('cancel', task)"
-                    @click="emitCancelTask(task)"
-                  >
-                    <span
-                      v-if="taskActionPending('cancel', task)"
-                      class="material-symbols-outlined animate-spin text-sm"
-                      aria-hidden="true"
-                    >sync</span>
-                    {{ t('app.cancel') }}
-                  </button>
-                </div>
+          <section v-for="group in taskGroups" :key="group.key" class="history-group">
+            <h4 class="history-group-title board-text-muted">{{ group.label }}</h4>
+            <article v-for="task in group.items" :key="`${task.kind}-${task.id}`"
+              :data-testid="`history-task-${task.kind}-${task.id}`" class="history-card board-card-surface">
+              <div class="history-card__header">
+                <h5 class="history-card__title board-text-strong">{{ taskKindLabel(task.kind) }}</h5>
+                <time class="history-card__date board-text-muted" :datetime="task.createdAt">{{ formatDate(task.createdAt) }}</time>
               </div>
-            </div>
-          </section>
-
-          <section v-if="unresolvedTasks.length" class="space-y-2">
-            <h4 class="px-1 text-xs font-bold text-slate-600">{{ t('app.tasksWithoutResults') }}</h4>
-            <div
-              v-for="task in unresolvedTasks"
-              :key="`${task.kind}-${task.id}`"
-              class="board-card-surface rounded-lg border p-3 shadow-sm"
-            >
-              <div class="flex items-start justify-between gap-3">
-                <div class="min-w-0 flex-1">
-                  <div class="flex flex-wrap items-center gap-2">
-                    <span class="text-xs font-bold board-text-info">{{ taskKindLabel(task.kind) }}</span>
-                    <span class="rounded-full border px-2 py-0.5 text-[11px] font-semibold" :class="statusClass(task.status)">
-                      {{ formatStatus(task.status) }}
-                    </span>
-                    <RunInitiatorBadge :initiator="task.initiator" />
-                    <span
-                      v-if="task.kind === 'fuzzing'"
-                      :data-testid="`fuzzing-task-mode-${task.id}`"
-                      class="max-w-full rounded-full board-surface-info px-2 py-0.5 text-[length:var(--iot-font-min)] font-semibold board-text-info"
-                      :title="fuzzingModeDescription(task.explorationMode)"
-                    >
-                      {{ fuzzingModeLabel(task.explorationMode) }}
-                    </span>
-                  </div>
-                  <p class="mt-2 text-xs leading-5 text-slate-600">
-                    {{ task.status === 'CANCELLED' ? t('app.cancelledTaskNoResult') : t('app.failedTaskNoResult') }}
-                  </p>
-                  <!-- The reported cause is shown, not hidden behind a disclosure. A failure whose
-                       only visible text is "it produced no result" tells the user nothing they can
-                       act on, and two independent reviews of a real failed run reported exactly
-                       that: "the failure cause is missing". The raw text stays a technical
-                       diagnostic, so it is labelled as one rather than presented as guidance. -->
-                  <div
-                    v-if="task.errorMessage"
-                    :data-testid="`task-failure-reason-${task.kind}-${task.id}`"
-                    class="mt-2 rounded board-surface-danger board-text-danger px-2 py-1.5 text-[11px] leading-5"
-                  >
-                    <span class="font-semibold">{{ t('app.technicalDetails') }}:</span>
-                    <span class="ml-1 break-words">{{ task.errorMessage }}</span>
-                  </div>
-                  <div class="mt-1 text-[11px] text-slate-500">{{ formatDate(task.completedAt || task.createdAt) }}</div>
-                </div>
-                <div class="flex shrink-0 flex-col items-stretch gap-1">
-                  <!-- A failed run needs a way forward, not just a way to hide it. This opens the
-                       panel that owns launching the run so the settings can be checked against the
-                       current board first; it is not a blind re-submit of stale parameters. -->
-                  <button
-                    type="button"
-                    :data-testid="`reopen-task-settings-${task.kind}-${task.id}`"
-                    class="inline-flex min-h-11 items-center justify-center gap-1 rounded board-panel-submit px-2 py-1 text-xs font-medium"
-                    @click="emit('reopen-task-settings', task.kind)"
-                  >
-                    {{ t('app.adjustAndRunAgain') }}
-                  </button>
-                  <button
-                    type="button"
-                    class="inline-flex min-h-11 items-center justify-center gap-1 rounded board-chip-neutral px-2 py-1 text-xs font-medium hover:board-control-hover hover:board-text-strong disabled:cursor-wait disabled:opacity-60"
-                    :disabled="taskActionPending('dismiss', task)"
-                    :aria-busy="taskActionPending('dismiss', task)"
-                    @click="emitDismissTask(task)"
-                  >
-                    <span
-                      v-if="taskActionPending('dismiss', task)"
-                      class="material-symbols-outlined animate-spin text-sm"
-                      aria-hidden="true"
-                    >sync</span>
-                    {{ t('app.dismissTask') }}
-                  </button>
-                </div>
+              <div class="history-card__badges">
+                <span class="history-badge" :class="statusClass(task.status)">{{ formatStatus(task.status) }}</span>
+                <RunInitiatorBadge :initiator="task.initiator" />
+                <span v-if="task.kind === 'fuzzing'" :data-testid="`fuzzing-task-mode-${task.id}`"
+                  class="history-badge board-meta-chip inline-flex items-center gap-3">
+                  <span>{{ fuzzingModeLabel(task.explorationMode) }}</span>
+                  <InfoTooltip :text="fuzzingModeDescription(task.explorationMode)"
+                    :label="t('app.showHelpFor', { topic: t('app.fuzzExplorationMode') })"
+                    :test-id="`fuzzing-task-mode-help-${task.id}`" />
+                </span>
               </div>
-            </div>
+              <p class="history-model-relation" :class="comparisonFor(task.modelSnapshot, task.kind) === 'CHANGED' ? 'board-text-warning' : 'board-text-muted'"
+                :data-testid="`task-model-comparison-${task.kind}-${task.id}`" :data-state="comparisonFor(task.modelSnapshot, task.kind)">
+                <span class="material-symbols-outlined text-base" aria-hidden="true">{{ comparisonFor(task.modelSnapshot, task.kind) === 'CHANGED' ? 'edit_note' : 'layers' }}</span>
+                <span>{{ comparisonLabel(comparisonFor(task.modelSnapshot, task.kind)) }}</span>
+                <InfoTooltip v-if="comparisonFor(task.modelSnapshot, task.kind) !== 'CHANGED' || !isActiveStatus(task.status)"
+                  :text="comparisonDetail(comparisonFor(task.modelSnapshot, task.kind), isActiveStatus(task.status))"
+                  :label="t('app.showHelpFor', { topic: comparisonLabel(comparisonFor(task.modelSnapshot, task.kind)) })"
+                  :test-id="`${task.kind}-task-model-help-${task.id}`" />
+              </p>
+              <p v-if="comparisonFor(task.modelSnapshot, task.kind) === 'CHANGED' && isActiveStatus(task.status)" class="history-card__copy board-text-warning">
+                {{ t('app.taskModelChangedDetail') }}
+              </p>
+              <template v-if="isActiveStatus(task.status)">
+                <div class="history-progress-label board-text-muted"><span>{{ taskStageLabel(task) }}</span><span>{{ taskProgress(task) }}%</span></div>
+                <div class="history-progress board-bg-control" role="progressbar" :aria-label="`${taskKindLabel(task.kind)} ${t('app.progress')}`"
+                  aria-valuemin="0" aria-valuemax="100" :aria-valuenow="taskProgress(task)">
+                  <div class="bg-[color:var(--accent)]" :style="{ width: `${taskProgress(task)}%` }"></div>
+                </div>
+              </template>
+              <template v-else>
+                <p class="history-card__copy board-text-muted">{{ task.status === 'CANCELLED' ? t('app.cancelledTaskNoResult') : t('app.failedTaskNoResult') }}</p>
+                <p v-if="task.errorMessage" :data-testid="`task-failure-reason-${task.kind}-${task.id}`"
+                  class="history-notice board-surface-danger board-text-danger">
+                  <span><strong>{{ t('app.technicalDetails') }}:</strong> {{ task.errorMessage }}</span>
+                </p>
+              </template>
+              <div class="history-card__actions">
+                <template v-if="isActiveStatus(task.status)">
+                  <button type="button" class="board-action-secondary" @click="emitWatchTask(task)">{{ t('app.watchTask') }}</button>
+                  <button type="button" class="history-text-action board-text-muted hover:board-text-danger" :disabled="taskActionPending('cancel', task)"
+                    :aria-busy="taskActionPending('cancel', task)" @click="emitCancelTask(task)">{{ t('app.cancel') }}</button>
+                </template>
+                <template v-else>
+                  <button type="button" :data-testid="`reopen-task-settings-${task.kind}-${task.id}`" class="board-action-secondary"
+                    @click="emit('reopen-task-settings', task.kind)">{{ t('app.adjustAndRunAgain') }}</button>
+                  <button type="button" class="history-text-action board-text-muted hover:board-text-strong" :disabled="taskActionPending('dismiss', task)"
+                    :aria-busy="taskActionPending('dismiss', task)" @click="emitDismissTask(task)">{{ t('app.dismissTask') }}</button>
+                </template>
+              </div>
+            </article>
           </section>
         </template>
-      </div>
+      </template>
 
-      <div v-else class="space-y-3">
-        <div class="flex items-center justify-between gap-3 px-1">
-          <div class="board-segmented grid min-w-0 flex-1 grid-cols-4 gap-1 rounded-lg p-1">
-            <button
-              v-for="filter in (['all', 'verification', 'fuzzing', 'simulation'] as const)"
-              :key="filter"
-              type="button"
-              :data-testid="`history-result-filter-${filter}`"
-              class="min-h-11 rounded-md px-2 py-1.5 text-[11px] font-bold transition-colors"
-              :class="resultFilter === filter ? 'bg-white board-text-info shadow-sm' : 'text-slate-500 hover:text-slate-700'"
-              :aria-pressed="resultFilter === filter"
-              @click="emit('update:resultFilter', filter)"
-            >
-              {{ filter === 'all'
-                ? t('app.allResults')
-                : filter === 'verification'
-                  ? t('app.verification')
-                  : filter === 'fuzzing' ? t('app.fuzzSearch') : t('app.simulation') }}
+      <template v-else>
+        <div class="history-toolbar">
+          <FieldSelect
+            :model-value="resultFilter"
+            @update:model-value="emit('update:resultFilter', $event)"
+            class="history-filter-select"
+            data-testid="history-result-type"
+            :aria-label="t('app.historyResultType')"
+          >
+            <option v-for="filter in (['all', 'verification', 'fuzzing', 'simulation'] as const)" :key="filter" :value="filter">
+              {{ filter === 'all' ? t('app.allResults') : taskKindLabel(filter) }}
+            </option>
+          </FieldSelect>
+          <div class="board-segmented history-filters">
+            <button v-for="filter in (['all', 'verification', 'fuzzing', 'simulation'] as const)" :key="filter" type="button"
+              :data-testid="`history-result-filter-${filter}`" class="history-tab"
+              :class="resultFilter === filter ? 'board-bg-elevated board-text-strong shadow-sm' : 'board-text-muted hover:board-text-strong'"
+              :aria-label="filter === 'all' ? t('app.allResults') : taskKindLabel(filter)"
+              :aria-pressed="resultFilter === filter" @click="emit('update:resultFilter', filter)">
+              {{ filter === 'all' ? t('app.allResults') : filter === 'fuzzing' ? t('app.fuzzHistoryFilter') : taskKindLabel(filter) }}
             </button>
           </div>
-          <button
-            type="button"
-            class="flex min-h-11 shrink-0 items-center gap-1 px-2 text-xs font-medium board-text-info hover:board-text-strong"
-            :disabled="loadingResults"
-            @click="emit('refresh-results')"
-          >
-            <span class="material-symbols-outlined text-sm" :class="loadingResults ? 'animate-spin' : ''">refresh</span>
-            {{ t('app.refresh') }}
-          </button>
+          <HintTooltip :content="t('app.refresh')">
+            <button type="button" class="board-panel-icon-action"
+              :aria-label="t('app.refresh')" :disabled="loadingResults" @click="emit('refresh-results')">
+              <span class="material-symbols-outlined" :class="loadingResults ? 'animate-spin' : ''" aria-hidden="true">refresh</span>
+            </button>
+          </HintTooltip>
+        </div>
+        <div v-if="loadingResults && !resultItems.length" class="history-empty board-text-muted" role="status">
+          <span class="material-symbols-outlined animate-spin text-2xl" aria-hidden="true">sync</span><p>{{ t('app.loadingRunResults') }}</p>
+        </div>
+        <div v-if="!loadingResults && resultErrorEntries.length" data-testid="history-results-load-error"
+          class="history-notice board-surface-warning board-text-warning" role="alert">
+          <div class="min-w-0 flex-1 break-words">
+            <p class="font-semibold">{{ t('app.historyResultsLoadFailed') }}</p>
+            <p v-if="hasStaleResults" class="mt-1">{{ t('app.historyResultsMayBeStale') }}</p>
+            <ul class="mt-2 space-y-1">
+              <li v-for="entry in resultErrorEntries" :key="entry.source">
+                <p>{{ t(resultLoadErrorKey(entry.source)) }}</p>
+                <FailureDetails :details="technicalErrorLines(entry.error)" suggestion="" />
+              </li>
+            </ul>
+            <button type="button" class="history-text-action" :disabled="loadingResults" @click="emit('refresh-results')">{{ t('app.retry') }}</button>
+          </div>
+        </div>
+        <div v-if="!loadingResults && !resultErrorEntries.length && !resultItems.length" class="history-empty board-text-muted">
+          <span class="material-symbols-outlined text-2xl" aria-hidden="true">fact_check</span>
+          <p class="font-semibold">{{ resultFilter === 'all' ? t('app.noRunResults')
+            : t('app.noFilteredRunResults', { kind: taskKindLabel(resultFilter) }) }}</p>
+          <p v-if="resultFilter === 'all'">{{ t('app.noRunResultsHint') }}</p>
+          <button v-else-if="verificationRuns.length || fuzzingRuns.length || simulationRuns.length" type="button"
+            class="history-text-action" @click="emit('update:resultFilter', 'all')">{{ t('app.showAllResults') }}</button>
         </div>
 
-        <div v-if="loadingResults" class="flex flex-col items-center justify-center py-10 text-slate-500">
-          <span class="material-symbols-outlined animate-spin text-4xl board-text-progress">sync</span>
-          <p class="mt-3 text-sm">{{ t('app.loadingRunResults') }}</p>
-        </div>
+        <div v-if="resultItems.length" class="history-group">
+          <article v-for="item in resultItems" :key="`${item.kind}-${item.run.id}`"
+            :data-testid="`history-result-${item.kind}-${item.run.id}`" class="history-card board-card-surface">
+            <div class="history-card__header">
+              <h4 class="history-card__title board-text-strong">{{ resultSourceLabel(item.kind) }}</h4>
+              <time class="history-card__date board-text-muted" :datetime="resultTimestamp(item)">{{ resultDate(item) }}</time>
+            </div>
+            <div class="history-card__badges">
+              <span v-if="item.kind !== 'simulation' || !item.run.dataAvailable || !item.run.modelComplete" class="history-badge" :class="resultOutcomeBadge(item).className">{{ resultOutcomeBadge(item).label }}</span>
+              <RunInitiatorBadge :initiator="item.run.initiator" />
+              <span v-if="item.run.dataAvailable && item.kind === 'fuzzing'" :data-testid="`fuzzing-history-mode-${item.run.id}`"
+                class="history-badge board-meta-chip inline-flex items-center gap-3">
+                <span>{{ fuzzingModeLabel(item.run.explorationMode) }}</span>
+                <InfoTooltip :text="fuzzingModeDescription(item.run.explorationMode)"
+                  :label="t('app.showHelpFor', { topic: t('app.fuzzExplorationMode') })"
+                  :test-id="`fuzzing-history-mode-help-${item.run.id}`" />
+              </span>
+            </div>
 
-        <div
-          v-if="!loadingResults && resultErrorEntries.length > 0"
-          data-testid="history-results-load-error"
-          class="rounded-lg board-surface-warning px-3 py-2.5 text-xs leading-5 board-text-warning"
-          role="alert"
-        >
-          <div class="flex items-start gap-2">
-            <span class="material-symbols-outlined mt-0.5 text-base board-text-warning" aria-hidden="true">warning</span>
-            <div class="min-w-0 flex-1">
-              <p class="font-bold">{{ t('app.historyResultsPartialFailure') }}</p>
-              <ul class="mt-1 list-disc space-y-0.5 pl-4">
-                <li v-for="entry in resultErrorEntries" :key="entry.source">
-                  {{ resultSourceLabel(entry.source) }}: {{ entry.message }}
-                </li>
-              </ul>
-              <button
-                type="button"
-                class="mt-2 inline-flex min-h-11 items-center gap-1 rounded-md border board-border-subtle bg-white px-2 py-1 text-[11px] font-semibold board-text-warning hover:board-chip-warning disabled:opacity-50"
-                :disabled="loadingResults"
-                @click="emit('refresh-results')"
-              >
-                <span class="material-symbols-outlined text-sm" aria-hidden="true">refresh</span>
-                {{ t('app.retry') }}
+            <p v-if="item.run.dataAvailable === false" class="history-card__copy board-text-muted">{{ t('app.historyItemUnavailableDetail') }}</p>
+            <template v-else>
+              <p class="history-model-relation" :class="comparisonFor(item.run.modelSnapshot, item.kind) === 'CHANGED' ? 'board-text-warning' : 'board-text-muted'"
+                :data-testid="`${item.kind}-history-model-comparison-${item.run.id}`" :data-state="comparisonFor(item.run.modelSnapshot, item.kind)">
+                <span class="material-symbols-outlined text-base" aria-hidden="true">{{ comparisonFor(item.run.modelSnapshot, item.kind) === 'CHANGED' ? 'edit_note' : 'layers' }}</span>
+                <span>{{ comparisonLabel(comparisonFor(item.run.modelSnapshot, item.kind)) }}</span>
+                <InfoTooltip :text="comparisonDetail(comparisonFor(item.run.modelSnapshot, item.kind))"
+                  :label="t('app.showHelpFor', { topic: comparisonLabel(comparisonFor(item.run.modelSnapshot, item.kind)) })"
+                  :test-id="`${item.kind}-history-model-help-${item.run.id}`" />
+              </p>
+              <p class="history-card__scope board-text-muted">{{ scopeText(item.run.modelSnapshot, item.kind) }}</p>
+              <p v-if="item.kind === 'simulation'" class="history-card__copy board-text-muted">{{ t('app.simulationHistoryCounts', {
+                requested: item.run.requestedSteps, steps: item.run.steps, states: item.run.steps + 1 }) }}</p>
+              <p v-if="item.kind === 'fuzzing' && item.run.outcome === 'BUDGET_EXHAUSTED'" class="history-card__copy board-text-muted">{{ t('app.fuzzNoViolationWithinBudget') }}</p>
+              <p v-if="item.kind === 'verification' && item.run.outcome === 'VIOLATED' && item.run.counterexampleCount < item.run.violatedSpecCount"
+                class="history-card__copy board-text-warning">{{ t('app.someViolationsHaveNoReplayableCounterexample') }}</p>
+
+              <div class="history-disclosures">
+              <details class="history-disclosure" :data-testid="`run-details-${item.kind}-${item.run.id}`">
+                <summary class="board-text-muted hover:board-text-strong">{{ t('app.historyRunDetails') }}</summary>
+                <div class="history-disclosure__body">
+                  <p class="board-text-muted">{{ t('app.historySnapshotCaptured', { time: formatDate(item.run.modelSnapshot.capturedAt) }) }}</p>
+                  <p class="board-text-muted">{{ t('app.historyModelResources', { environments: item.run.modelSnapshot.environmentVariableCount, templates: item.run.modelSnapshot.deviceTemplateCount }) }}</p>
+                  <p class="board-text-muted">{{ comparisonDetail(comparisonFor(item.run.modelSnapshot, item.kind)) }}</p>
+                  <ul v-if="item.kind !== 'fuzzing'" :aria-label="t('app.runAssumptionsLabel')"
+                    :data-testid="`${item.kind}-run-assumptions-${item.run.id}`" class="history-card__badges">
+                    <li v-for="assumption in runAssumptions(item.run)" :key="assumption" class="history-badge board-meta-chip">{{ assumption }}</li>
+                  </ul>
+                  <p v-if="item.kind === 'fuzzing'" class="board-text-muted">{{ t('app.fuzzRunCounts', {
+                    iterations: item.run.iterations, paths: item.run.generatedPaths, elapsed: formatFuzzingElapsed(item.run.elapsedMs, t) }) }}</p>
+                  <ul v-if="generationIssuesFor(item.run).length" class="history-diagnostics board-text-warning">
+                    <li v-for="(issue, index) in generationIssuesFor(item.run)" :key="`${issue.itemLabel}-${index}`">
+                      <strong>{{ issue.itemLabel || t('app.unknownModelItem') }}</strong>: {{ t(generationIssueReasonKey(issue)) }}
+                    </li>
+                  </ul>
+                </div>
+              </details>
+
+              <details v-if="item.kind === 'verification' && (tracesForRun(item.run).length || item.run.violatedSpecCount > 0 || item.run.counterexampleCount > 0)"
+                class="history-disclosure" :data-testid="`run-evidence-verification-${item.run.id}`">
+                <summary :class="item.run.outcome === 'VIOLATED' ? 'board-text-danger' : 'board-text-warning'">
+                  {{ t('app.historyCounterexamples', { count: item.run.counterexampleCount }) }}
+                </summary>
+                <div class="history-disclosure__body">
+                  <p v-if="item.run.outcome !== 'VIOLATED'" class="board-text-warning">{{ t('app.inconclusiveEvidenceSummary', { counterexamples: item.run.counterexampleCount }) }}</p>
+                  <p v-if="tracesForRun(item.run).length" :id="`historical-fix-caveat-${item.run.id}`" :data-testid="`historical-fix-caveat-${item.run.id}`"
+                    class="board-text-muted">{{ comparisonFor(item.run.modelSnapshot, 'verification') === 'UNCHANGED'
+                      ? t('app.historicalFixMayFailIfBoardChanged') : comparisonDetail(comparisonFor(item.run.modelSnapshot, 'verification')) }}</p>
+                  <div v-for="trace in tracesForRun(item.run)" :key="trace.id" class="history-evidence-row board-muted-surface">
+                    <p class="font-semibold board-text-strong" :title="traceSpecTitle(trace)">{{ traceSpecTitle(trace) }}</p>
+                    <p :class="trace.dataAvailable ? 'board-text-muted' : 'board-text-warning'">{{ trace.dataAvailable
+                      ? t('app.statesCount', { count: trace.stateCount || 0 }) : t('app.historyTraceUnavailableDetail') }}</p>
+                    <div class="history-evidence-actions">
+                      <button type="button" :data-testid="`view-verification-trace-${trace.id}`" class="board-action-secondary"
+                        :disabled="actionLocked || !trace.dataAvailable" @click="emit('view-verification-trace', trace.id)">{{ t('app.replay') }}</button>
+                      <button type="button" :data-testid="`fix-verification-trace-${trace.id}`" class="history-text-action board-text-muted hover:board-text-strong"
+                        :disabled="actionLocked || !trace.dataAvailable || comparisonFor(item.run.modelSnapshot, 'verification') !== 'UNCHANGED'"
+                        :aria-describedby="trace.dataAvailable ? `historical-fix-caveat-${item.run.id}` : undefined"
+                        @click="emit('fix-verification-trace', trace)">{{ t('app.fixRules') }}</button>
+                    </div>
+                  </div>
+                </div>
+              </details>
+
+              <details v-if="item.kind === 'fuzzing' && item.run.outcome === 'FOUND_VIOLATION' && item.run.findings.length"
+                class="history-disclosure" :data-testid="`run-evidence-fuzzing-${item.run.id}`">
+                <summary class="board-text-danger">{{ t('app.fuzzFindingsCount', { count: item.run.findings.length }) }}</summary>
+                <div class="history-disclosure__body">
+                  <p data-testid="history-fuzz-verification-scope" class="board-text-muted">{{ t('app.fuzzFormalVerificationCurrentBoardNotice') }}</p>
+                  <div v-for="finding in item.run.findings" :key="finding.id" class="history-evidence-row board-muted-surface">
+                    <p class="font-semibold board-text-strong" :title="fuzzFindingTitle(finding, item.run)">{{ fuzzFindingTitle(finding, item.run) }}</p>
+                    <p :class="finding.dataAvailable === false ? 'board-text-warning' : 'board-text-muted'">{{ finding.dataAvailable === false
+                      ? t('app.historyFindingUnavailableDetail') : t('app.fuzzFirstViolationStep', { step: displayStep(finding.firstViolationStep) }) }}</p>
+                    <div class="history-evidence-actions">
+                      <button type="button" :data-testid="`view-fuzzing-finding-${finding.id}`" class="board-action-secondary"
+                        :disabled="actionLocked || finding.dataAvailable === false" @click="emit('view-fuzzing-finding', finding.id, item.run.id)">{{ t('app.replay') }}</button>
+                      <button type="button" :data-testid="`verify-fuzzing-finding-${finding.id}`" class="history-text-action board-text-muted hover:board-text-strong"
+                        :disabled="actionLocked || finding.dataAvailable === false" @click="emit('verify-fuzzing-finding', finding)">{{ t('app.configureCurrentBoardVerification') }}</button>
+                    </div>
+                  </div>
+                </div>
+              </details>
+              </div>
+            </template>
+
+            <div class="history-card__actions">
+              <template v-if="item.run.dataAvailable">
+                <button v-if="item.kind === 'verification'" type="button" :data-testid="`open-verification-run-${item.run.id}`" class="board-action-secondary"
+                  :disabled="actionLocked" @click="emit('open-verification-run', item.run.id)">{{ t('app.openResult') }}</button>
+                <button v-else-if="item.kind === 'fuzzing'" type="button" :data-testid="`open-fuzzing-run-${item.run.id}`" class="board-action-secondary"
+                  :disabled="actionLocked" @click="emit('open-fuzzing-run', item.run.id)">{{ t('app.openResult') }}</button>
+                <button v-else type="button" :data-testid="`replay-simulation-trace-${item.run.id}`" class="board-action-secondary"
+                  :disabled="actionLocked" @click="emit('view-simulation-run', item.run.id)">
+                  <span class="material-symbols-outlined text-base" aria-hidden="true">play_arrow</span>{{ t('app.replay') }}
+                </button>
+                <button v-if="item.kind === 'verification' && item.run.hasSmvModel" type="button" :data-testid="`download-verification-run-smv-${item.run.id}`"
+                  class="history-text-action board-text-muted hover:board-text-strong" :disabled="actionLocked" @click="emit('download-verification-run-smv', item.run.id)">{{ t('app.downloadSmvModel') }}</button>
+                <button v-if="item.kind === 'simulation' && item.run.hasSmvModel" type="button" :data-testid="`download-simulation-trace-smv-${item.run.id}`"
+                  class="history-text-action board-text-muted hover:board-text-strong" :disabled="actionLocked" @click="emit('download-simulation-trace-smv', item.run.id)">{{ t('app.downloadSmvModel') }}</button>
+              </template>
+              <button type="button" :data-testid="resultDeleteTestId(item.kind, item.run.id)"
+                class="board-panel-icon-action board-panel-icon-action--danger history-delete"
+                :aria-label="t('app.delete')" :title="t('app.delete')" :disabled="actionLocked || isResultDeletePending(item.kind, item.run.id)"
+                :aria-busy="isResultDeletePending(item.kind, item.run.id)" @click="emitDeleteResult(item)">
+                <span class="material-symbols-outlined" :class="isResultDeletePending(item.kind, item.run.id) ? 'animate-spin' : ''" aria-hidden="true">{{ isResultDeletePending(item.kind, item.run.id) ? 'sync' : 'delete' }}</span>
               </button>
             </div>
-          </div>
-        </div>
-
-        <div v-if="!loadingResults && resultErrorEntries.length === 0 && resultItems.length === 0" class="flex flex-col items-center justify-center py-10 text-center">
-          <div class="board-muted-surface mb-3 flex h-14 w-14 items-center justify-center rounded-full">
-            <!-- Decoration: the two lines below carry the whole message, so this glyph adds no information a
-                 screen reader needs and SC 1.4.3 does not apply to it. It measured 1.42:1 without the
-                 attribute, which read as a contrast defect on an illustration that is meant to be faint. -->
-            <span class="material-symbols-outlined text-3xl text-slate-300" aria-hidden="true">fact_check</span>
-          </div>
-          <p class="text-sm font-medium text-slate-600">{{ t('app.noRunResults') }}</p>
-          <!-- slate-500, not slate-400: this hint is real text explaining an empty state, and slate-400 is
-               2.56:1 on white. slate-500 is 4.76 and reads as the same de-emphasised step. -->
-          <p class="mt-1 px-4 text-xs text-slate-500">{{ t('app.noRunResultsHint') }}</p>
-        </div>
-
-        <div v-if="!loadingResults && resultItems.length > 0" class="space-y-3">
-          <article
-            v-for="item in resultItems"
-            :key="`${item.kind}-${item.run.id}`"
-            class="board-card-surface rounded-lg border p-3 shadow-sm transition-colors hover:border-[color:var(--accent)]"
-          >
-            <template v-if="item.run.dataAvailable === false">
-              <div class="flex items-start justify-between gap-3">
-                <div class="min-w-0 flex-1">
-                  <div class="flex items-center gap-2 board-text-warning">
-                    <span class="material-symbols-outlined text-base" aria-hidden="true">warning</span>
-                    <span class="text-xs font-bold">{{ t('app.historyItemUnavailable') }}</span>
-                    <RunInitiatorBadge :initiator="item.run.initiator" />
-                  </div>
-                  <p class="mt-1 text-[11px] leading-4 text-slate-600">
-                    {{ t('app.historyItemUnavailableDetail') }}
-                  </p>
-                  <p class="mt-1 text-[11px] text-slate-500">
-                    {{ formatDate(item.kind === 'simulation' ? item.run.createdAt : (item.run.completedAt || item.run.createdAt)) }}
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  :data-testid="resultDeleteTestId(item.kind, item.run.id)"
-                  class="min-h-11 shrink-0 rounded bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700 hover:board-chip-danger hover:board-text-danger disabled:opacity-50"
-                  :disabled="actionLocked || isResultDeletePending(item.kind, item.run.id)"
-                  :aria-busy="isResultDeletePending(item.kind, item.run.id)"
-                  @click="emitDeleteResult(item)"
-                >
-                  {{ t('app.delete') }}
-                </button>
-              </div>
-            </template>
-
-            <template v-else-if="item.kind === 'verification'">
-              <div class="flex items-start justify-between gap-3">
-                <div class="min-w-0 flex-1">
-                  <div class="flex flex-wrap items-center gap-2">
-                    <span class="text-xs font-bold board-text-info">{{ t('app.verificationRunResult') }}</span>
-                    <span
-                      class="inline-flex min-w-0 max-w-full items-center rounded-full px-2 py-0.5 text-[11px] font-semibold"
-                      :class="verificationOutcomeBadge(item.run).className"
-                      :title="verificationOutcomeBadge(item.run).label"
-                    >
-                      <span class="truncate">{{ verificationOutcomeBadge(item.run).label }}</span>
-                    </span>
-                    <RunInitiatorBadge :initiator="item.run.initiator" />
-                  </div>
-                  <p class="mt-1 text-[11px] text-slate-500">
-                    {{ t('app.runScopeCounts', {
-                      devices: item.run.modelSnapshot.deviceCount,
-                      rules: item.run.modelSnapshot.ruleCount,
-                      specs: item.run.modelSnapshot.specificationCount
-                    }) }}
-                  </p>
-                  <ul
-                    v-if="runAssumptions(item.run).length"
-                    class="mt-1 flex flex-wrap gap-1"
-                    :aria-label="t('app.runAssumptionsLabel')"
-                    :data-testid="`verification-run-assumptions-${item.run.id}`"
-                  >
-                    <li
-                      v-for="assumption in runAssumptions(item.run)"
-                      :key="assumption"
-                      class="rounded border border-slate-300 px-1.5 py-0.5 text-[length:var(--iot-font-min)] text-slate-600 dark:border-slate-600 dark:text-slate-300"
-                    >{{ assumption }}</li>
-                  </ul>
-                  <!-- A run reopened from history has no client submission to compare against, so its
-                       board-comparison chip reads "not compared" while Fix stays enabled. The backend's
-                       drift guards make that fail safe, but an enabled button reads as "this repair
-                       applies to my current board" — say otherwise up front. Stated once per run: one
-                       warning per counterexample would be the same sentence repeated N times. -->
-                  <p
-                    v-if="item.run.counterexamples.length"
-                    :id="`historical-fix-caveat-${item.run.id}`"
-                    :data-testid="`historical-fix-caveat-${item.run.id}`"
-                    class="mt-1 text-[length:var(--iot-font-min)] board-text-warning"
-                  >
-                    {{ t('app.historicalFixMayFailIfBoardChanged') }}
-                  </p>
-                  <p class="mt-1 text-[11px] text-slate-500">{{ formatDate(item.run.completedAt) }}</p>
-                </div>
-                <div class="flex shrink-0 flex-wrap justify-end gap-1">
-                  <button
-                    type="button"
-                    :data-testid="`open-verification-run-${item.run.id}`"
-                    class="min-h-11 rounded bg-[color:var(--accent-fill)] px-2 py-1 text-xs font-medium text-white hover:bg-[color:var(--accent-fill-hover)] disabled:cursor-not-allowed board-action-disarmed"
-                    :disabled="actionLocked"
-                    @click="emit('open-verification-run', item.run.id)"
-                  >
-                    {{ t('app.openResult') }}
-                  </button>
-                  <!--
-                    Hidden when the run holds no model, unlike the result dialogs, which disable the
-                    control and state the reason. The difference is deliberate: this is a dense list of
-                    every retained run, so a disabled button plus an explanation on each row would
-                    repeat the same notice many times over. The dialog is a single run the user opened
-                    on purpose, and there the absence needs saying — the whole feature read as missing
-                    while nothing explained why no button appeared.
-                  -->
-                  <button
-                    v-if="item.run.hasSmvModel"
-                    type="button"
-                    :data-testid="`download-verification-run-smv-${item.run.id}`"
-                    class="min-h-11 rounded board-chip-info px-2 py-1 text-xs font-medium board-text-info hover:bg-[color:var(--info-surface)] disabled:cursor-not-allowed disabled:opacity-50"
-                    :disabled="actionLocked"
-                    @click="emit('download-verification-run-smv', item.run.id)"
-                  >
-                    {{ t('app.downloadSmvModel') }}
-                  </button>
-                  <button
-                    type="button"
-                    :data-testid="`delete-verification-run-${item.run.id}`"
-                    class="min-h-11 rounded bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700 hover:board-chip-danger hover:board-text-danger disabled:cursor-not-allowed disabled:opacity-50"
-                    :disabled="actionLocked || isResultDeletePending('verification', item.run.id)"
-                    :aria-busy="isResultDeletePending('verification', item.run.id)"
-                    @click="emit('delete-verification-run', item.run)"
-                  >
-                    {{ t('app.delete') }}
-                  </button>
-                </div>
-              </div>
-
-              <p
-                v-if="runScopeComparison(item.run, true) === 'COUNTS_CHANGED'"
-                class="mt-2 rounded-md board-surface-warning px-2 py-1.5 text-[11px] font-semibold leading-4 board-text-warning"
-                data-testid="verification-history-board-drift"
-              >
-                {{ t('app.historicalRunBoardScopeChanged') }}
-              </p>
-              <!--
-                Matching counts are not a match. Stated quietly (muted, not a warning) because it is a
-                limit of the comparison rather than a problem with the run — but stated, because the
-                previous silence read as "this verdict still describes your canvas".
-              -->
-              <p
-                v-else-if="runScopeComparison(item.run, true) === 'COUNTS_ONLY_MATCH'"
-                class="mt-2 text-[11px] leading-4 text-slate-500"
-                data-testid="verification-history-scope-counts-only"
-              >
-                {{ t('app.historicalRunScopeCountsOnly') }}
-              </p>
-
-              <ul v-if="generationIssuesFor(item.run).length" class="mt-2 space-y-1.5">
-                <li
-                  v-for="(issue, index) in generationIssuesFor(item.run)"
-                  :key="`${issue.itemLabel}-${index}`"
-                  class="border-l-2 board-border-subtle pl-2 text-[11px] leading-4 board-text-warning"
-                >
-                  <span class="font-semibold">{{ issue.itemLabel || t('app.unknownModelItem') }}</span>
-                  <span>: {{ t(generationIssueReasonKey(issue)) }}</span>
-                </li>
-              </ul>
-
-              <!--
-                Gated on the run having evidence to describe, NOT on the trace list being non-empty.
-
-                It used to require `tracesForRun(item.run).length`, which hid the whole block in exactly
-                the case its own inner warning exists to explain: a run can count a specification as
-                violated and produce no replayable counterexample at all — `VerificationServiceImpl`
-                logs "violated (no counterexample)" for an unparseable one, and skips the trace when the
-                parsed state list comes back empty. That left "3 violations" on screen with nothing
-                saying why none of them could be replayed, and the sentence written for it
-                (`counterexampleCount < violatedSpecCount`, true at zero) could never render.
-              -->
-              <div
-                v-if="tracesForRun(item.run).length
-                  || item.run.violatedSpecCount > 0
-                  || item.run.counterexampleCount > 0"
-                class="mt-3 rounded-lg border p-2.5"
-                :class="item.run.outcome === 'VIOLATED'
-                  ? 'board-surface-danger'
-                  : 'board-surface-warning'"
-              >
-                <div class="flex flex-wrap items-center justify-between gap-2">
-                  <span
-                    class="text-xs font-semibold"
-                    :class="item.run.outcome === 'VIOLATED' ? 'board-text-danger' : 'board-text-warning'"
-                  >
-                    {{ item.run.outcome === 'VIOLATED'
-                      ? t('app.violationEvidenceSummary', {
-                        violations: item.run.violatedSpecCount,
-                        counterexamples: item.run.counterexampleCount
-                      })
-                      : t('app.inconclusiveEvidenceSummary', {
-                        counterexamples: item.run.counterexampleCount
-                      }) }}
-                  </span>
-                </div>
-                <p
-                  v-if="item.run.outcome === 'VIOLATED'
-                    && item.run.counterexampleCount < item.run.violatedSpecCount"
-                  class="mt-1 text-[11px] leading-4 board-text-warning"
-                >
-                  {{ t('app.someViolationsHaveNoReplayableCounterexample') }}
-                </p>
-                <div v-if="tracesForRun(item.run).length" class="mt-2 space-y-1.5">
-                  <div
-                    v-for="trace in tracesForRun(item.run)"
-                    :key="trace.id"
-                    class="flex items-center justify-between gap-2 rounded-md border board-border-subtle bg-white px-2 py-1.5"
-                  >
-                    <div class="min-w-0">
-                      <p class="truncate text-[11px] font-medium text-slate-700" :title="traceSpecTitle(trace)">
-                        {{ traceSpecTitle(trace) }}
-                      </p>
-                      <p v-if="trace.dataAvailable" class="text-[length:var(--iot-font-min)] text-slate-500">
-                        {{ t('app.statesCount', { count: trace.stateCount || 0 }) }}
-                      </p>
-                      <p v-else class="text-[length:var(--iot-font-min)] font-medium board-text-warning">
-                        {{ t('app.historyTraceUnavailableDetail') }}
-                      </p>
-                    </div>
-                    <div class="flex shrink-0 gap-1">
-                      <button
-                        type="button"
-                        :data-testid="`view-verification-trace-${trace.id}`"
-                        class="min-h-11 rounded bg-[color:var(--accent-fill)] px-2 py-1 text-[11px] font-medium text-white hover:bg-[color:var(--accent-fill-hover)] board-action-disarmed"
-                        :disabled="actionLocked || !trace.dataAvailable"
-                        @click="emit('view-verification-trace', trace.id)"
-                      >
-                        {{ t('app.replay') }}
-                      </button>
-                      <!--
-                        No per-counterexample SMV download here. One model is checked per run and every
-                        counterexample under it came from that model, so a button on each row offered
-                        the same file N times under a name implying N different models. The run row
-                        above carries it once (`download-verification-run-smv-<runId>`), which is also
-                        the only copy that exists for a run where every specification held.
-                      -->
-                      <button
-                        type="button"
-                        :data-testid="`fix-verification-trace-${trace.id}`"
-                        class="min-h-11 rounded board-chip-warning px-2 py-1 text-[11px] font-medium board-text-warning hover:bg-[color:var(--warning-surface)] disabled:opacity-50"
-                        :disabled="actionLocked || !trace.dataAvailable"
-                        :aria-describedby="trace.dataAvailable ? `historical-fix-caveat-${item.run.id}` : undefined"
-                        @click="emit('fix-verification-trace', trace)"
-                      >
-                        {{ t('app.fixRules') }}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </template>
-
-            <template v-else-if="item.kind === 'fuzzing'">
-              <div class="flex items-start justify-between gap-3">
-                <div class="min-w-0 flex-1">
-                  <div class="flex flex-wrap items-center gap-2">
-                    <span class="text-xs font-bold board-text-info">{{ t('app.fuzzRunResult') }}</span>
-                    <span
-                      class="inline-flex min-w-0 max-w-full items-center rounded-full px-2 py-0.5 text-[11px] font-semibold"
-                      :class="fuzzingOutcomeBadge(item.run).className"
-                    >
-                      <span class="truncate">{{ fuzzingOutcomeBadge(item.run).label }}</span>
-                    </span>
-                    <span
-                      :data-testid="`fuzzing-history-mode-${item.run.id}`"
-                      class="max-w-full rounded-full board-surface-info px-2 py-0.5 text-[length:var(--iot-font-min)] font-semibold board-text-info"
-                      :title="fuzzingModeDescription(item.run.explorationMode)"
-                    >
-                      {{ fuzzingModeLabel(item.run.explorationMode) }}
-                    </span>
-                    <RunInitiatorBadge :initiator="item.run.initiator" />
-                  </div>
-                  <p class="mt-1 text-[11px] text-slate-500">
-                    {{ t('app.fuzzRunCounts', {
-                      iterations: item.run.iterations,
-                      paths: item.run.generatedPaths,
-                      elapsed: Math.round(item.run.elapsedMs / 1000)
-                    }) }}
-                  </p>
-                  <p class="mt-1 text-[11px] text-slate-500">
-                    {{ t('app.runScopeCounts', {
-                      devices: item.run.modelSnapshot.deviceCount,
-                      rules: item.run.modelSnapshot.ruleCount,
-                      specs: item.run.modelSnapshot.specificationCount
-                    }) }}
-                  </p>
-                  <p class="mt-1 text-[11px] text-slate-500">{{ formatDate(item.run.completedAt || item.run.createdAt) }}</p>
-                </div>
-                <div class="flex shrink-0 flex-wrap justify-end gap-1">
-                  <button
-                    type="button"
-                    :data-testid="`open-fuzzing-run-${item.run.id}`"
-                    class="min-h-11 rounded bg-[color:var(--accent-fill)] px-2 py-1 text-xs font-medium text-white hover:bg-[color:var(--accent-fill-hover)] disabled:cursor-not-allowed board-action-disarmed"
-                    :disabled="actionLocked"
-                    @click="emit('open-fuzzing-run', item.run.id)"
-                  >
-                    {{ t('app.openResult') }}
-                  </button>
-                  <button
-                    type="button"
-                    :data-testid="`delete-fuzzing-run-${item.run.id}`"
-                    class="min-h-11 rounded bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700 hover:board-chip-danger hover:board-text-danger disabled:cursor-not-allowed disabled:opacity-50"
-                    :disabled="actionLocked || isResultDeletePending('fuzzing', item.run.id)"
-                    :aria-busy="isResultDeletePending('fuzzing', item.run.id)"
-                    @click="emit('delete-fuzzing-run', item.run)"
-                  >
-                    {{ t('app.delete') }}
-                  </button>
-                </div>
-              </div>
-
-              <p
-                v-if="fuzzRunHasBoardDrift(item.run)"
-                class="mt-2 rounded-md board-surface-warning px-2 py-1.5 text-[11px] font-semibold leading-4 board-text-warning"
-                data-testid="fuzzing-history-board-drift"
-              >
-                {{ t('app.fuzzBoardScopeChanged') }}
-              </p>
-
-              <p
-                v-if="item.run.outcome === 'BUDGET_EXHAUSTED'"
-                class="mt-2 rounded-md board-surface-info px-2 py-1.5 text-[11px] leading-4"
-              >
-                {{ t('app.fuzzNoViolationWithinBudget') }}
-              </p>
-
-              <div
-                v-if="item.run.outcome === 'FOUND_VIOLATION' && item.run.findings?.length"
-                class="mt-3 rounded-lg border board-surface-danger p-2.5"
-              >
-                <div class="text-xs font-semibold board-text-danger">
-                  {{ t('app.fuzzFindingsCount', { count: item.run.findings.length }) }}
-                </div>
-                <div class="mt-2 space-y-1.5">
-                  <div
-                    v-for="finding in item.run.findings"
-                    :key="finding.id"
-                    class="flex items-center justify-between gap-2 rounded-md border board-border-subtle bg-white px-2 py-1.5"
-                  >
-                    <div class="min-w-0">
-                      <p class="truncate text-[11px] font-medium text-slate-700" :title="fuzzFindingTitle(finding)">
-                        {{ fuzzFindingTitle(finding) }}
-                      </p>
-                      <p v-if="finding.dataAvailable !== false" class="text-[length:var(--iot-font-min)] text-slate-500">
-                        {{ t('app.fuzzFirstViolationStep', { step: displayStep(finding.firstViolationStep) }) }}
-                      </p>
-                      <p v-else class="text-[length:var(--iot-font-min)] font-medium board-text-warning">
-                        {{ t('app.historyFindingUnavailableDetail') }}
-                      </p>
-                    </div>
-                    <div class="flex shrink-0 gap-1">
-                      <button
-                        type="button"
-                        :data-testid="`view-fuzzing-finding-${finding.id}`"
-                        class="min-h-11 rounded bg-[color:var(--accent-fill)] px-2 py-1 text-[11px] font-medium text-white hover:bg-[color:var(--accent-fill-hover)] board-action-disarmed"
-                        :disabled="actionLocked || finding.dataAvailable === false"
-                        @click="emit('view-fuzzing-finding', finding.id, item.run.id)"
-                      >
-                        {{ t('app.replay') }}
-                      </button>
-                      <button
-                        type="button"
-                        :data-testid="`verify-fuzzing-finding-${finding.id}`"
-                        class="min-h-11 rounded board-chip-success px-2 py-1 text-[11px] font-medium board-text-success hover:bg-[color:var(--success-surface)] disabled:opacity-50"
-                        :disabled="actionLocked || finding.dataAvailable === false"
-                        @click="emit('verify-fuzzing-finding', finding)"
-                      >
-                        {{ t('app.verifyFormally') }}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </template>
-
-            <template v-else>
-              <div class="flex items-start justify-between gap-3">
-                <div class="min-w-0 flex-1">
-                  <div class="flex flex-wrap items-center gap-2">
-                    <span class="text-xs font-bold board-text-info">{{ t('app.simulationRunResult') }}</span>
-                    <span
-                      class="inline-flex min-w-0 max-w-full items-center rounded-full px-2 py-0.5 text-[11px] font-semibold"
-                      :class="simulationOutcomeBadge(item.run).className"
-                    >
-                      <span class="truncate">{{ simulationOutcomeBadge(item.run).label }}</span>
-                    </span>
-                    <RunInitiatorBadge :initiator="item.run.initiator" />
-                  </div>
-                  <p class="mt-1 text-[11px] text-slate-500">
-                    {{ t('app.simulationHistoryCounts', {
-                      requested: item.run.requestedSteps,
-                      steps: item.run.steps,
-                      states: item.run.steps + 1
-                    }) }}
-                  </p>
-                  <p class="mt-1 text-[11px] text-slate-500">{{ formatDate(item.run.createdAt) }}</p>
-                </div>
-                <div class="flex shrink-0 flex-wrap justify-end gap-1">
-                  <button
-                    type="button"
-                    :data-testid="`replay-simulation-trace-${item.run.id}`"
-                    class="min-h-11 rounded bg-[color:var(--accent-fill)] px-2 py-1 text-xs font-medium text-white hover:bg-[color:var(--accent-fill-hover)] disabled:cursor-not-allowed board-action-disarmed"
-                    :disabled="actionLocked"
-                    @click="emit('view-simulation-run', item.run.id)"
-                  >
-                    {{ t('app.replay') }}
-                  </button>
-                  <button
-                    v-if="item.run.hasSmvModel"
-                    type="button"
-                    :data-testid="`download-simulation-trace-smv-${item.run.id}`"
-                    class="min-h-11 rounded board-chip-info px-2 py-1 text-xs font-medium board-text-info hover:bg-[color:var(--info-surface)] disabled:cursor-not-allowed disabled:opacity-50"
-                    :disabled="actionLocked"
-                    @click="emit('download-simulation-trace-smv', item.run.id)"
-                  >
-                    {{ t('app.downloadSmvModel') }}
-                  </button>
-                  <button
-                    type="button"
-                    :data-testid="`delete-simulation-trace-${item.run.id}`"
-                    class="min-h-11 rounded bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700 hover:board-chip-danger hover:board-text-danger disabled:cursor-not-allowed disabled:opacity-50"
-                    :disabled="actionLocked || isResultDeletePending('simulation', item.run.id)"
-                    :aria-busy="isResultDeletePending('simulation', item.run.id)"
-                    @click="emit('delete-simulation-run', item.run)"
-                  >
-                    {{ t('app.delete') }}
-                  </button>
-                </div>
-              </div>
-              <p
-                v-if="runScopeComparison(item.run, false) === 'COUNTS_CHANGED'"
-                class="mt-2 rounded-md board-surface-warning px-2 py-1.5 text-[11px] font-semibold leading-4 board-text-warning"
-                data-testid="simulation-history-board-drift"
-              >
-                {{ t('app.historicalRunBoardScopeChanged') }}
-              </p>
-              <!-- `false` for specifications: a trajectory checks none, so a spec edit is not drift for it. -->
-              <p
-                v-else-if="runScopeComparison(item.run, false) === 'COUNTS_ONLY_MATCH'"
-                class="mt-2 text-[11px] leading-4 text-slate-500"
-                data-testid="simulation-history-scope-counts-only"
-              >
-                {{ t('app.historicalRunScopeCountsOnly') }}
-              </p>
-              <ul v-if="generationIssuesFor(item.run).length" class="mt-2 space-y-1.5">
-                <li
-                  v-for="(issue, index) in generationIssuesFor(item.run)"
-                  :key="`${issue.itemLabel}-${index}`"
-                  class="border-l-2 board-border-subtle pl-2 text-[11px] leading-4 board-text-warning"
-                >
-                  <span class="font-semibold">{{ issue.itemLabel || t('app.unknownModelItem') }}</span>
-                  <span>: {{ t(generationIssueReasonKey(issue)) }}</span>
-                </li>
-              </ul>
-            </template>
           </article>
-
-          <button
-            v-if="resultFilter === 'fuzzing' && hasMoreFuzzingRuns"
-            type="button"
-            data-testid="load-more-fuzzing-runs"
-            class="flex min-h-11 w-full items-center justify-center gap-1 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-semibold board-text-info hover:border-[color:var(--accent)] hover:board-chip-info disabled:cursor-not-allowed disabled:opacity-50"
-            :disabled="actionLocked || loadingMoreFuzzingRuns"
-            @click="emit('load-more-fuzzing-runs')"
-          >
-            <span
-              v-if="loadingMoreFuzzingRuns"
-              class="material-symbols-outlined animate-spin text-sm"
-              aria-hidden="true"
-            >sync</span>
+          <button v-if="resultFilter === 'fuzzing' && hasMoreFuzzingRuns" type="button" data-testid="load-more-fuzzing-runs"
+            class="board-action-secondary w-full" :disabled="actionLocked || loadingMoreFuzzingRuns" @click="emit('load-more-fuzzing-runs')">
             {{ loadingMoreFuzzingRuns ? t('app.loadingMoreFuzzingResults') : t('app.loadMoreFuzzingResults') }}
           </button>
         </div>
-      </div>
+      </template>
     </div>
   </div>
 </template>

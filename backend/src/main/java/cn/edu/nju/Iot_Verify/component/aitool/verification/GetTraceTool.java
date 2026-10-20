@@ -39,16 +39,18 @@ public class GetTraceTool extends AbstractAiTool {
         FunctionParameterSchema schema = new FunctionParameterSchema(
                 "object",
                 Map.of(
-                        "traceId", Map.of("type", "integer", "description", "Verification trace ID."),
+                        "traceId", Map.of("type", "integer", "minimum", 1, "description", "Exact traceId from get_verification_run counterexamples or list_traces. Never copy runId or taskId here."),
                         "stateOffset", Map.of("type", "integer",
                                 "description", "Non-negative zero-based state-sequence offset (default 0)."),
                         "stateLimit", Map.of("type", "integer",
-                                "description", "Number of states to return, 1-10 (default 10).")),
+                                "description", "Maximum states to return, 1-10 (default 10). The byte budget may return fewer; continue from nextStateOffset."),
+                        "includePropertyLabels", Map.of("type", List.of("boolean", "null"), "description",
+                                "Include state/content trust and privacy labels (omitted/null defaults to false). Set true when interpreting label-based properties or attacks; state, variable and environment values are always included.")),
                 List.of("traceId")
         );
 
         return LlmToolSpec.of(getName(),
-                "Get a saved verification trace by traceId with a bounded state window. Page the sequence with stateOffset and stateLimit; use stateCount and nextStateOffset to inspect another window. A state may carry loopStart or loopBack: the trace ends in an infinite cycle from loopStart to loopBack, which for a liveness specification (templateId 2, 5, 6) is itself the violation rather than any single state. The loopBack state repeats the loopStart state, not necessarily the state before it: when the cycle spans several states it carries its own changed values and looks like an ordinary step, and only when the cycle is a single state does it match its predecessor. Rely on the flags rather than on comparing values, and treat neither shape as a stalled or truncated path.",
+                "Get a saved verification trace by traceId with a bounded state window. The default value view includes every device state, variable, environment value, compromised flag and loop boundary; use it for trigger timing and liveness analysis. Each state begins with valueSnapshot, a small same-state view of device states and shared environment values. Read it with stateIndex and make a compact table before explaining temporal causes; never merge changes from different indices or infer duration from one snapshot. Full variables, reported readings and labels remain in the detailed fields. Set includePropertyLabels=true only when inspecting state/content source or sensitivity labels, not merely a state/value prohibition; propertyLabelsIncluded identifies the view. In the label view, propertyLabelsFromStateIndex reuses the identical trust/privacy lists for the same device and mode in that earlier state of this returned page. Changed labels and every page's first state carry full lists; resolve references before interpreting labels. changesFromPreviousState gives exact observed changes from the named predecessor. When hasMoreStates is true, read nextStateOffset before claiming a full trajectory or explaining a liveness cycle. loopStart and loopBack mark an infinite cycle; for liveness specifications (templateId 2, 5, 6) the cycle itself is the violation. loopBack repeats loopStart, not necessarily its preceding state. Rely on the flags rather than value comparison; neither a one-state nor a longer cycle is a truncated path.",
                 schema);
     }
 
@@ -62,13 +64,14 @@ public class GetTraceTool extends AbstractAiTool {
                 return e.getErrorResponse();
             }
 
-            requireOnlyFields(args, "arguments", Set.of("traceId", "stateOffset", "stateLimit"));
+            requireOnlyFields(args, "arguments", Set.of("traceId", "stateOffset", "stateLimit", "includePropertyLabels"));
             long traceId = positiveLongArg(args, "traceId");
             int stateOffset = intArgInRange(args, "stateOffset", 0, 0,
                     ModelTraceToolPresenter.MAX_STATE_OFFSET);
             int stateLimit = intArgInRange(args, "stateLimit",
                     ModelTraceToolPresenter.DEFAULT_STATE_LIMIT, 1,
                     ModelTraceToolPresenter.MAX_STATE_LIMIT);
+            boolean includePropertyLabels = booleanArg(args, "includePropertyLabels", false);
 
             TraceDto trace = verificationService.getTrace(userId, traceId);
 
@@ -79,8 +82,9 @@ public class GetTraceTool extends AbstractAiTool {
             body.put("disabledRuleCount", trace.getDisabledRuleCount());
             body.put("skippedSpecCount", trace.getSkippedSpecCount());
             body.put("generationIssues", trace.getGenerationIssues());
+            body.put("propertyLabelsIncluded", includePropertyLabels);
             ModelTraceToolPresenter.putStateWindow(
-                    body, trace.getStates(), stateOffset, stateLimit);
+                    body, trace.getStates(), stateOffset, stateLimit, includePropertyLabels);
             body.put("isAttack", trace.getAttack());
             body.put("attackBudget", trace.getAttackBudget());
             body.put("enablePrivacy", trace.getEnablePrivacy());

@@ -8,7 +8,7 @@ import {
   UserOutlined, StopOutlined,
   MenuFoldOutlined, MenuUnfoldOutlined,
   CopyOutlined, ThunderboltOutlined, SafetyCertificateOutlined, CheckOutlined,
-  CodeOutlined, ExperimentOutlined, DownOutlined
+  CodeOutlined, ExperimentOutlined, DownOutlined, LoadingOutlined
 } from '@ant-design/icons-vue';
 
 import 'element-plus/es/components/message/style/css';
@@ -17,11 +17,12 @@ import 'element-plus/es/components/message-box/style/css';
 import type {
   ChatConfirmationAction,
   ChatConfirmationCommand,
-  ChatConfirmationKind,
+  ChatProtectedAction,
   ChatLogoutPreparation,
   ChatMessage,
   ChatHistoryPage,
   ChatSession,
+  ChatSessionObservationBaseline,
   StreamCommand,
   StreamProgress,
   StreamTerminal
@@ -41,10 +42,12 @@ import {
 } from '@/api/chat';
 import { useChatStore } from '@/stores/chat';
 import { useAuth } from '@/stores/auth';
-import { localizedTextOrFallback } from '@/utils/userMessage';
+import { errorDetails, localizedTextOrFallback, type ApiErrorDetails } from '@/utils/userMessage';
+import FailureDetails from '@/components/FailureDetails.vue';
 import { REQUEST_LIMITS } from '@/constants/requestLimits';
 import { confirmDestructive, notifyBlocked, notifyError, notifyInfo, notifySuccess } from '@/utils/feedback'
 import HintTooltip from '@/components/common/HintTooltip.vue'
+import { useModalAccessibility } from '@/composables/useModalAccessibility'
 
 type BoardChatContext = {
   deviceCount?: number;
@@ -63,6 +66,7 @@ const props = withDefaults(defineProps<{
   interactionLocked?: boolean;
   prepareInteraction?: () => boolean;
   executeCommand?: (command: StreamCommand) => Promise<boolean>;
+  initialSessionObservations?: ChatSessionObservationBaseline | null;
 }>(), {
   boardMode: false,
   interactionLocked: false
@@ -78,15 +82,6 @@ const authenticatedUserId = computed(() => authState.user?.userId ?? null);
 let chatAuthEpoch = 0;
 let userSessionNavigationEpoch = 0;
 
-/**
- * Legacy protocol residue, kept as a no-op safety net for persisted history.
- *
- * The backend no longer emits this prefix (nor the `CallEnd|>` marker stripped in `copyFullMessage`,
- * `applyHistoryPage`, and the chunk handler) — both strings have zero hits in `backend/src/main`.
- * Progress is a typed SSE frame now. Old rows in `chat_message` may still contain them, so the
- * stripping stays; do not add new callers, and drop all of it once history is known to be clean.
- */
-const loadingRegex = /^(正在执行指令|Executing command)[.\s\n]*/;
 const boardContext = ref<BoardChatContext | null>(null);
 
 const refreshBoardContext = () => {
@@ -131,19 +126,16 @@ const presetTasks = computed(() => [
             {
               icon: ExperimentOutlined,
               title: p('empty.starterDevices.title'),
-              desc: p('empty.starterDevices.desc'),
               text: p('empty.starterDevices.text', { templates: templateNames })
             },
             {
               icon: SafetyCertificateOutlined,
               title: p('empty.planGoals.title'),
-              desc: p('empty.planGoals.desc'),
               text: p('empty.planGoals.text')
             },
             {
               icon: CodeOutlined,
               title: p('empty.setupSteps.title'),
-              desc: p('empty.setupSteps.desc'),
               text: p('empty.setupSteps.text')
             }
           ];
@@ -177,7 +169,6 @@ const presetTasks = computed(() => [
           {
             icon: CodeOutlined,
             title: p('scene.violationTest.title'),
-            desc: p('scene.violationTest.desc'),
             text: p('scene.violationTest.text',
                 { devices: deviceCount, rules: ruleCount, specs: specCount })
           }
@@ -187,7 +178,6 @@ const presetTasks = computed(() => [
         {
           icon: ThunderboltOutlined,
           title: t('app.chat.presetTasks.quickDevice.title'),
-          desc: t('app.chat.presetTasks.quickDevice.desc'),
           text: t('app.chat.presetTasks.quickDevice.text')
         },
         {
@@ -222,9 +212,10 @@ const isCreatingSession = ref(false);
 const isPreparingStreamSession = ref(false);
 const currentSessionId = ref<string>('');
 const messages = ref<ChatMessage[]>([]);
-const pendingConfirmationKinds = ref<ChatConfirmationKind[]>([]);
+const pendingConfirmationActions = ref<ChatProtectedAction[]>([]);
 const pendingConfirmationLoadFailed = ref(false);
 const inputValue = ref('');
+const inputRef = ref<HTMLTextAreaElement | null>(null);
 const isStreaming = ref(false);
 const isSettlingStream = ref(false);
 const isMonitoringRemoteExecution = ref(false);
@@ -232,6 +223,16 @@ const remoteActivityCheckFailed = ref(false);
 const streamProgress = ref<StreamProgress | null>(null);
 const streamProgressEvents = ref<StreamProgress[]>([]);
 const streamElapsedSeconds = ref(0);
+const streamLastActivitySeconds = ref(0);
+const streamWaitingForUpdate = computed(() =>
+    streamElapsedSeconds.value - streamLastActivitySeconds.value >= 15);
+const streamActivityLabel = computed(() => {
+  const progress = streamProgress.value;
+  if (progress?.stage === 'TOOL_EXECUTION') return readableToolName(progress);
+  if (progress?.stage === 'PLANNING' && progress.detail) return progress.detail;
+  if (messages.value[messages.value.length - 1]?.content) return t('app.chat.responseStreaming');
+  return progress ? progressEventTitle(progress) : t('app.chat.progressContextTitle');
+});
 let streamElapsedTimer: ReturnType<typeof setInterval> | null = null;
 let confirmationRequestEpoch = 0;
 const reconciliationRequired = computed({
@@ -249,6 +250,7 @@ const explicitStopRegistrationPending = ref(false);
 const activeStreamRetryDraft = ref('');
 const isLoadingHistory = ref(false);
 const historyLoadFailed = ref(false);
+const historyLoadDiagnostics = ref<ApiErrorDetails | null>(null);
 const isLoadingOlderHistory = ref(false);
 const historyHasMore = ref(false);
 const historyNextBeforeId = ref<number | null>(null);
@@ -265,6 +267,7 @@ const hasAnyAssistantWork = computed(() =>
     || hasAuthoritativeActiveSession.value || chatStore.state.activeCount > 0);
 const isLoading = computed(() => isAssistantBusy.value || isLoadingHistory.value);
 const TOOL_LABEL_KEYS: Record<string, string> = {
+  prepare_tools: 'app.chat.toolLabels.prepareTools',
   edit_device: 'app.chat.toolLabels.editDevice',
   apply_fix: 'app.chat.toolLabels.applyFix',
   delete_verification_run: 'app.chat.toolLabels.deleteVerificationRun',
@@ -315,6 +318,8 @@ const TOOL_LABEL_KEYS: Record<string, string> = {
   list_async_tasks: 'app.chat.toolLabels.listAsyncTasks',
   list_verification_runs: 'app.chat.toolLabels.listVerificationRuns',
   get_verification_run: 'app.chat.toolLabels.getVerificationRun',
+  read_run_model: 'app.chat.toolLabels.readRunModel',
+  read_conversation_activity: 'app.chat.toolLabels.readConversationActivity',
   manage_board_history: 'app.chat.toolLabels.manageBoardHistory',
   clear_board: 'app.chat.toolLabels.clearBoard',
   board_overview: 'app.chat.toolLabels.boardOverview'
@@ -329,6 +334,7 @@ const progressEventTitle = (progress: StreamProgress) => {
   if (progress.stage === 'TASK_RESUMED') return t('app.chat.progressTaskResumedTitle');
   if (progress.stage === 'PLANNING') return t('app.chat.progressPlanningTitle');
   if (progress.stage === 'REASONING') return t('app.chat.progressReasoningTitle');
+  if (progress.stage === 'CLAIM_REVIEW') return t('app.chat.progressClaimReviewTitle');
   if (progress.stage === 'TOOL_EXECUTION' || progress.stage === 'TOOL_RESULT') {
     return readableToolName(progress);
   }
@@ -356,6 +362,9 @@ const progressEventDetail = (progress: StreamProgress, streaming = false) => {
     // the absence of reasoning as reasoning.
     return progress.detail || t('app.chat.progressReasoningFallback');
   }
+  if (progress.stage === 'CLAIM_REVIEW') {
+    return t(`app.chat.claimReviewReasons.${progress.claimReview.reasonCode}`);
+  }
   if (progress.stage === 'TOOL_EXECUTION') {
     return t('app.chat.progressToolStartedDetail', {
       round,
@@ -368,7 +377,7 @@ const progressEventDetail = (progress: StreamProgress, streaming = false) => {
     if (progress.outcome === 'PARTIAL') return t('app.chat.progressToolPartialDetail', { round });
     if (progress.outcome === 'RESULT_UNAVAILABLE') return t('app.chat.progressToolUnconfirmedDetail', { round });
     if (progress.outcome === 'CONFIRMATION_REQUIRED') return t('app.chat.progressToolNeedsConfirmationDetail', { round });
-    return t('app.chat.progressToolSucceededDetail', { round });
+    return '';
   }
   if (progress.stage === 'EXECUTION_GUARD') {
     return progress.outcome === 'NO_PROGRESS'
@@ -400,6 +409,7 @@ const progressEventStatus = (progress: StreamProgress) => {
     return t('app.chat.progressStatusSucceeded');
   }
   if (progress.stage === 'TASK_RESUMED') return t('app.chat.progressStatusResumed');
+  if (progress.stage === 'CLAIM_REVIEW') return t('app.chat.progressClaimHidden');
   return null;
 };
 /**
@@ -475,7 +485,7 @@ const sessionExecutionStatus = (session: ChatSession) => {
   switch (session.latestExecutionStatus) {
     case 'COMPLETED': return t('app.chat.executionTraceCompleted');
     case 'AWAITING_CONFIRMATION': return t('app.chat.executionTraceAwaitingConfirmation');
-    case 'PARTIAL': return t('app.chat.executionTracePartial');
+    case 'PARTIAL': return t('app.chat.sessionExecutionDetails');
     case 'STOPPED': return t('app.chat.executionTraceStopped');
     case 'DISCONNECTED': return t('app.chat.executionTraceDisconnected');
     case 'FAILED': return t('app.chat.executionTraceFailed');
@@ -497,6 +507,7 @@ const sessionStatusTitle = (session: ChatSession) => session.hasUnreadUpdate
 const progressEventClass = (progress: StreamProgress, active: boolean) => ({
   'is-success': progress.stage === 'TOOL_RESULT' && progress.outcome === 'USABLE',
   'is-warning': progress.stage === 'EXECUTION_GUARD'
+      || progress.stage === 'CLAIM_REVIEW'
       || progress.outcome === 'PARTIAL'
       || progress.outcome === 'RESULT_UNAVAILABLE'
       || progress.outcome === 'CONFIRMATION_REQUIRED',
@@ -507,9 +518,11 @@ const progressEventClass = (progress: StreamProgress, active: boolean) => ({
 const isCurrentProgressEvent = (progress: StreamProgress, active: boolean) =>
     active && progress === streamProgressEvents.value[streamProgressEvents.value.length - 1];
 const appendStreamProgress = (progress: StreamProgress) => {
+  streamLastActivitySeconds.value = streamElapsedSeconds.value;
   streamProgress.value = progress;
   const previous = streamProgressEvents.value[streamProgressEvents.value.length - 1];
   if (previous
+      && progress.stage !== 'CLAIM_REVIEW'
       && previous.stage === progress.stage
       && (previous.toolName ?? null) === (progress.toolName ?? null)
       && (previous.round ?? null) === (progress.round ?? null)
@@ -618,6 +631,22 @@ watch(streamProgressEvents, () => {
 
 const scrollRef = ref<HTMLElement | null>(null);
 const chatPanelRef = ref<HTMLElement | null>(null);
+const sidebarToggleRef = ref<HTMLButtonElement | null>(null);
+watch(isSidebarOpen, open => {
+  // Move focus before inert hides the selected session on a compact panel or after resizing.
+  if (!open && chatPanelRef.value?.querySelector('.sidebar')?.contains(document.activeElement)) {
+    sidebarToggleRef.value?.focus({ preventScroll: true });
+  }
+}, { flush: 'sync' });
+const { setDialogRef: setChatDialogRef, handleModalKeydown: handleChatKeydown } = useModalAccessibility(
+  visible, () => chatStore.closeChat(),
+  () => document.querySelector<HTMLElement>('[data-testid="open-ai-assistant"]'),
+  { trapFocus: false }
+);
+const setChatPanelRef = (element: unknown) => {
+  chatPanelRef.value = element instanceof HTMLElement ? element : null;
+  setChatDialogRef(element);
+};
 const abortController = ref<AbortController | null>(null);
 const historyAbortController = ref<AbortController | null>(null);
 let streamRequestEpoch = 0;
@@ -635,6 +664,67 @@ let activeSessionsPollInFlight = false;
 let chatViewMounted = false;
 let sessionCompletionObservationsInitialized = false;
 const chatPosition = ref<{ left: number; top: number; width: number; height: number } | null>(null);
+const composerHeight = ref(44);
+const composerMinHeight = ref(44);
+const composerMaxHeight = ref(128);
+let composerResize: { pointerId: number; startY: number; height: number; target: HTMLElement } | null = null;
+
+const setComposerHeight = (height: number) => {
+  composerHeight.value = Math.min(composerMaxHeight.value, Math.max(composerMinHeight.value, height));
+};
+
+const stopComposerResize = (event?: PointerEvent) => {
+  const gesture = composerResize;
+  if (!gesture || (event && event.pointerId !== gesture.pointerId)) return;
+  composerResize = null;
+  try {
+    gesture.target.releasePointerCapture?.(gesture.pointerId);
+  } catch {
+    // Cancellation or window blur may have already released the pointer.
+  }
+};
+
+const startComposerResize = (event: PointerEvent) => {
+  if (event.button !== 0 || event.isPrimary === false) return;
+  const target = event.currentTarget as HTMLElement;
+  target.focus({ preventScroll: true });
+  composerResize = { pointerId: event.pointerId, startY: event.clientY,
+    height: composerHeight.value, target };
+  target.setPointerCapture?.(event.pointerId);
+  event.preventDefault();
+};
+
+const moveComposerResize = (event: PointerEvent) => {
+  if (!composerResize || event.pointerId !== composerResize.pointerId) return;
+  if (event.pointerType === 'mouse' && event.buttons === 0) {
+    stopComposerResize(event);
+    return;
+  }
+  // The composer is bottom-anchored: moving its top edge upward increases the writing space.
+  setComposerHeight(composerResize.height + composerResize.startY - event.clientY);
+};
+
+const handleComposerResizeKeydown = (event: KeyboardEvent) => {
+  if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault();
+  setComposerHeight(event.key === 'Home' ? composerMinHeight.value
+    : event.key === 'End' ? composerMaxHeight.value
+      : composerHeight.value + (event.key === 'ArrowUp' ? 16 : -16));
+};
+
+const clampComposerHeight = () => {
+  if (!inputRef.value) return;
+  composerMinHeight.value = parseFloat(getComputedStyle(inputRef.value).minHeight) || 44;
+  composerMaxHeight.value = Math.max(composerMinHeight.value,
+    Math.min(parseFloat(getComputedStyle(document.documentElement).fontSize) * 8 || 128, window.innerHeight * 0.28));
+  setComposerHeight(composerHeight.value);
+};
+
+watch([visible, () => chatPosition.value?.height], async () => {
+  await nextTick();
+  if (visible.value) clampComposerHeight();
+}, { immediate: true });
+
 const panelInteraction = ref<{
   mode: 'drag' | 'resize';
   pointerId: number;
@@ -799,8 +889,9 @@ const startPanelInteraction = (event: PointerEvent, mode: 'drag' | 'resize') => 
 
   event.preventDefault();
   const target = event.currentTarget as HTMLElement;
-  const rect = panel.getBoundingClientRect();
-  const geometry = clampChatGeometry(rect.left, rect.top, rect.width, rect.height);
+  // Entry and viewport transitions interpolate the rendered box; they must not resize the window.
+  const position = chatPosition.value ?? createDefaultChatGeometry();
+  const geometry = clampChatGeometry(position.left, position.top, position.width, position.height);
   chatPosition.value = geometry;
   panelInteraction.value = {
     mode,
@@ -901,11 +992,16 @@ const clampChatPositionAfterResize = throttle(() => {
 }, 200);
 
 const handleChatViewportResize = () => {
+  stopComposerResize();
+  clampComposerHeight();
   stopPanelInteractionOnViewportResize();
   clampChatPositionAfterResize();
 };
 
-const handlePanelWindowBlur = () => stopPanelInteraction();
+const handlePanelWindowBlur = () => {
+  stopComposerResize();
+  stopPanelInteraction();
+};
 
 // ================= 文本处理辅助函数 =================
 
@@ -917,18 +1013,6 @@ const convertLatexDelimiters = (text: string) => {
     if (roundBracket !== undefined) return `$${roundBracket}$`;
     return match;
   });
-};
-
-const getRawContentWithoutThinking = (content: string) => {
-  if (!content) return '';
-  const match = content.match(loadingRegex);
-  if (match) {
-    const prefixLength = match[0].length;
-    // 如果只有提示语，为了避免空内容，暂时返回提示语（或可返回空字符串让界面显示 Loading）
-    if (content.length <= prefixLength) return content;
-    return content.substring(prefixLength);
-  }
-  return content;
 };
 
 /**
@@ -943,10 +1027,7 @@ const getProcessedContent = (content: string) => {
   const cached = processedContentCache.get(content);
   if (cached !== undefined) return cached;
 
-  // 1. 去除 Thinking 前缀
-  let text = getRawContentWithoutThinking(content);
-  // 2. 标准化 LaTeX
-  const processed = convertLatexDelimiters(text);
+  const processed = convertLatexDelimiters(content);
 
   processedContentCache.set(content, processed);
   return processed;
@@ -954,8 +1035,7 @@ const getProcessedContent = (content: string) => {
 
 const copyFullMessage = async (content: string) => {
   try {
-    const cleanContent = content.replace('CallEnd|>', '');
-    await navigator.clipboard.writeText(cleanContent);
+    await navigator.clipboard.writeText(content);
     notifySuccess(t('app.chat.copied'));
   } catch (err) {
     notifyError(t('app.chat.copyFailed'));
@@ -978,6 +1058,9 @@ const formatStreamError = (error: unknown) => {
         if (error.status === 401) return t('app.chat.authenticationExpired');
         if (error.reasonCode === 'CHAT_HISTORY_LIMIT_REACHED') {
           return t('app.chat.historyLimitReached');
+        }
+        if (error.reasonCode === 'CHAT_SESSION_BUSY') {
+          return t('app.chat.sessionBusyOnSend');
         }
         if (error.reasonCode === 'USER_CHAT_OPERATION_BUSY') {
           return Number.isSafeInteger(error.limit) && (error.limit ?? 0) > 0
@@ -1060,6 +1143,7 @@ const startListening = () => {
 // 监听 visible 变化，执行相应逻辑
 watch(visible, (newVal) => {
   if (!newVal) {
+    stopComposerResize();
     stopPanelInteraction();
     return;
   }
@@ -1204,11 +1288,12 @@ const clearAuthoritativelyDeletedSession = (sessionId: string) => {
   confirmationRequestEpoch += 1;
   isLoadingHistory.value = false;
   historyLoadFailed.value = false;
+  historyLoadDiagnostics.value = null;
   currentSessionId.value = '';
   messages.value = [];
   historyHasMore.value = false;
   historyNextBeforeId.value = null;
-  pendingConfirmationKinds.value = [];
+  pendingConfirmationActions.value = [];
   pendingConfirmationLoadFailed.value = false;
   clearPerformanceCaches();
 };
@@ -1221,14 +1306,14 @@ const reportAuthoritativeSessionDeletion = (sessionId: string) => {
 const refreshPendingConfirmation = async (sessionId = currentSessionId.value, signal?: AbortSignal) => {
   const requestEpoch = ++confirmationRequestEpoch;
   if (!sessionId) {
-    pendingConfirmationKinds.value = [];
+    pendingConfirmationActions.value = [];
     pendingConfirmationLoadFailed.value = false;
     return;
   }
   try {
     const pending = await getPendingConfirmation(sessionId, signal);
     if (requestEpoch === confirmationRequestEpoch && currentSessionId.value === sessionId) {
-      pendingConfirmationKinds.value = pending.kinds;
+      pendingConfirmationActions.value = pending.actions;
       pendingConfirmationLoadFailed.value = false;
     }
   } catch (error: any) {
@@ -1334,11 +1419,24 @@ const scheduleActiveSessionsPoll = () => {
 
 type SessionCompletionObservation = Pick<ChatSession, 'active' | 'latestTerminalMessageId'>;
 
-const captureSessionCompletionObservations = (availableSessions: ChatSession[]) => new Map(
+const captureSessionCompletionObservations = (
+    availableSessions: ChatSessionObservationBaseline['sessions']
+) => new Map(
     availableSessions.map(session => [session.id, {
       active: session.active,
       latestTerminalMessageId: session.latestTerminalMessageId
     }]));
+
+const sessionCompletionBaseline = () => {
+  const handoff = !sessionCompletionObservationsInitialized
+      && props.initialSessionObservations?.userId === authenticatedUserId.value
+      ? props.initialSessionObservations : null;
+  return {
+    previous: captureSessionCompletionObservations(handoff?.sessions ?? sessions.value),
+    compareTerminalMessages: sessionCompletionObservationsInitialized || handoff !== null,
+    handoff
+  };
+};
 
 const completedBackgroundSessions = (
     previous: Map<string, SessionCompletionObservation>,
@@ -1354,11 +1452,29 @@ const completedBackgroundSessions = (
       && session.id !== activeStreamSessionId.value;
 });
 
+const observedRemovedActiveSession = (
+    previous: Map<string, SessionCompletionObservation>, nextSessions: ChatSession[]
+) => Array.from(previous).some(([id, observation]) => observation.active
+    && id !== activeStreamSessionId.value && !nextSessions.some(session => session.id === id));
+
 const reconcileCompletedBackgroundSessions = async (
     completedSessions: ChatSession[],
-    authEpoch: number
+    authEpoch: number,
+    handoff: ChatSessionObservationBaseline | null = null,
+    removedActiveSession = false
 ) => {
-  if (completedSessions.length === 0) return;
+  if (handoff?.reconciliation) {
+    try {
+      await handoff.reconciliation;
+    } catch (error) {
+      console.warn('[Chat] The pre-mount assistant reconciliation did not complete:', error);
+    }
+  }
+  if (!chatViewMounted || authEpoch !== chatAuthEpoch) return;
+  if (completedSessions.length === 0) {
+    if (removedActiveSession || (handoff && reconciliationRequired.value)) await reconcileAuthoritativeState();
+    return;
+  }
   const reconciled = await reconcileAuthoritativeState();
   if (!chatViewMounted || authEpoch !== chatAuthEpoch) return;
   completedSessions.forEach(session => {
@@ -1380,7 +1496,7 @@ const pollActiveSessions = async () => {
   const pollEpoch = activeSessionsMonitorEpoch;
   const authEpoch = chatAuthEpoch;
   const sessionListEpoch = sessionListRequestEpoch;
-  const previous = captureSessionCompletionObservations(sessions.value);
+  const baseline = sessionCompletionBaseline();
   try {
     const res = await getSessionList();
     if (authEpoch !== chatAuthEpoch || pollEpoch !== activeSessionsMonitorEpoch
@@ -1390,8 +1506,10 @@ const pollActiveSessions = async () => {
         ? res
         : res.filter(session => session.userId === authenticatedUserId.value);
     sessions.value = ownedSessions;
+    sessionCompletionObservationsInitialized = true;
     await reconcileCompletedBackgroundSessions(
-        completedBackgroundSessions(previous, ownedSessions, true), authEpoch);
+        completedBackgroundSessions(baseline.previous, ownedSessions, baseline.compareTerminalMessages),
+        authEpoch, baseline.handoff, observedRemovedActiveSession(baseline.previous, ownedSessions));
   } catch (error) {
     if (authEpoch === chatAuthEpoch && pollEpoch === activeSessionsMonitorEpoch
         && sessionListEpoch === sessionListRequestEpoch) {
@@ -1426,8 +1544,7 @@ const reattachAuthoritativeActiveSession = (availableSessions: ChatSession[]) =>
 const initSessions = async (reattachActive = true): Promise<boolean> => {
   const requestEpoch = ++sessionListRequestEpoch;
   const authEpoch = chatAuthEpoch;
-  const previous = captureSessionCompletionObservations(sessions.value);
-  const compareTerminalMessages = sessionCompletionObservationsInitialized;
+  const baseline = sessionCompletionBaseline();
   isLoadingSessions.value = true;
   sessionListLoadFailed.value = false;
   try {
@@ -1443,7 +1560,8 @@ const initSessions = async (reattachActive = true): Promise<boolean> => {
         reattachAuthoritativeActiveSession(ownedSessions);
       }
       await reconcileCompletedBackgroundSessions(
-          completedBackgroundSessions(previous, ownedSessions, compareTerminalMessages), authEpoch);
+          completedBackgroundSessions(baseline.previous, ownedSessions, baseline.compareTerminalMessages),
+          authEpoch, baseline.handoff, observedRemovedActiveSession(baseline.previous, ownedSessions));
       return true;
     }
     return false;
@@ -1540,9 +1658,10 @@ const handleSelectSession = async (sessionId: string, knownActive = false) => {
   messages.value = [];
   historyHasMore.value = false;
   historyNextBeforeId.value = null;
-  pendingConfirmationKinds.value = [];
+  pendingConfirmationActions.value = [];
   pendingConfirmationLoadFailed.value = false;
   historyLoadFailed.value = false;
+  historyLoadDiagnostics.value = null;
   clearPerformanceCaches();
   isLoadingHistory.value = true;
   const requestEpoch = ++historyRequestEpoch;
@@ -1558,6 +1677,7 @@ const handleSelectSession = async (sessionId: string, knownActive = false) => {
     if (requestEpoch !== historyRequestEpoch || currentSessionId.value !== sessionId) return;
     applyHistoryPage(historyPage, false);
     historyLoadFailed.value = false;
+    historyLoadDiagnostics.value = null;
     await refreshPendingConfirmation(sessionId, controller.signal);
     scrollToBottom(true);
     if (!knownActive) monitorSessionActivity(sessionId);
@@ -1565,7 +1685,7 @@ const handleSelectSession = async (sessionId: string, knownActive = false) => {
     if (requestEpoch !== historyRequestEpoch) return;
     if (e?.name !== 'CanceledError' && e?.code !== 'ERR_CANCELED') {
       historyLoadFailed.value = true;
-      notifyError(t('app.chat.networkError'));
+      historyLoadDiagnostics.value = errorDetails(e);
     }
   } finally {
     if (requestEpoch === historyRequestEpoch) {
@@ -1608,17 +1728,14 @@ const acknowledgeCurrentVisibleHistory = () => {
 };
 
 const applyHistoryPage = (page: ChatHistoryPage, prepend: boolean) => {
-  const cleaned = page.messages.map(m => ({
-      ...m,
-      content: m.content ? m.content.replace('CallEnd|>', '') : ''
-    }));
   if (prepend) {
     const existingIds = new Set(messages.value.map(message => message.id).filter(id => id != null));
-    messages.value = [...cleaned.filter(message => message.id == null || !existingIds.has(message.id)), ...messages.value];
+    messages.value = [...page.messages.filter(message => message.id == null || !existingIds.has(message.id)), ...messages.value];
   } else {
-    messages.value = cleaned;
+    // Optimistic turns append to the local collection, never to the authoritative response.
+    messages.value = [...page.messages];
     const sessionId = currentSessionId.value;
-    if (sessionId) void nextTick(() => acknowledgeVisibleTerminal(sessionId, cleaned));
+    if (sessionId) void nextTick(() => acknowledgeVisibleTerminal(sessionId, page.messages));
   }
   historyHasMore.value = page.hasMore && page.nextBeforeId != null;
   historyNextBeforeId.value = page.nextBeforeId;
@@ -1775,7 +1892,7 @@ const resetChatForAuthSubjectChange = (previousAuthToken: string | null) => {
   collapsedExecutionTraces.value = new Set();
   clearPerformanceCaches();
   inputValue.value = '';
-  pendingConfirmationKinds.value = [];
+  pendingConfirmationActions.value = [];
   pendingConfirmationLoadFailed.value = false;
   activeStreamSessionId.value = '';
   activeStreamTurnId.value = '';
@@ -1794,6 +1911,7 @@ const resetChatForAuthSubjectChange = (previousAuthToken: string | null) => {
   isPreparingStreamSession.value = false;
   isLoadingHistory.value = false;
   historyLoadFailed.value = false;
+  historyLoadDiagnostics.value = null;
   isLoadingOlderHistory.value = false;
   historyHasMore.value = false;
   historyNextBeforeId.value = null;
@@ -1806,14 +1924,19 @@ const resetChatForAuthSubjectChange = (previousAuthToken: string | null) => {
 };
 
 const waitForSessionIdle = async (sessionId: string, signal?: AbortSignal): Promise<boolean> => {
+  const requestAuthEpoch = chatAuthEpoch;
+  const ownsSession = () => chatViewMounted && requestAuthEpoch === chatAuthEpoch;
   const deadline = Date.now() + 10_000;
   let consecutiveFailures = 0;
   while (Date.now() < deadline) {
+    if (!ownsSession()) return false;
     try {
       const activity = await getSessionActivity(sessionId, { signal });
+      if (!ownsSession()) return false;
       if (!activity.active) return true;
       consecutiveFailures = 0;
     } catch (error: any) {
+      if (!ownsSession()) return false;
       if (error?.response?.status === 404) return true;
       consecutiveFailures += 1;
       if (consecutiveFailures >= 3) throw error;
@@ -1946,6 +2069,7 @@ const settleActiveRequest = (
           if (hasTerminal || replaceHistoryWithoutTerminal) {
             applyHistoryPage(history, false);
             historyLoadFailed.value = false;
+            historyLoadDiagnostics.value = null;
             if (replaceHistoryWithoutTerminal && !hasTerminal) {
               restoreRetryDraftIfTurnWasNotAdmitted(history.messages, turnId);
               notifyBlocked(t('app.chat.incompleteStreamHistoryRestored'));
@@ -2011,24 +2135,31 @@ const handleStop = async () => {
 };
 
 const prepareForLogout = async (): Promise<ChatLogoutPreparation> => {
+  const requestAuthEpoch = chatAuthEpoch;
+  const requestToken = authState.token;
+  const ownsPreparation = () => chatViewMounted && requestAuthEpoch === chatAuthEpoch
+    && requestToken === authState.token;
   let outcome: ChatLogoutPreparation = await initSessions(false)
       ? 'ready'
       : 'outcome-unknown';
+  if (!ownsPreparation()) return 'outcome-unknown';
   const attachedSessionId = activeStreamSessionId.value;
   const backgroundSessionIds = Array.from(new Set(
       sessions.value
           .filter(session => session.active && session.id !== attachedSessionId)
           .map(session => session.id)));
   const stopConfirmedSessionIds: string[] = [];
-  const ownerToken = activeStreamAuthToken.value || scopedAuthToken.value;
+  const ownerToken = requestToken;
 
   for (const sessionId of backgroundSessionIds) {
     try {
       await (ownerToken
           ? requestSessionStop(sessionId, undefined, ownerToken)
           : requestSessionStop(sessionId));
+      if (!ownsPreparation()) return 'outcome-unknown';
       stopConfirmedSessionIds.push(sessionId);
     } catch (error) {
+      if (!ownsPreparation()) return 'outcome-unknown';
       if (isHttpNotFound(error)) continue;
       console.warn(`[Chat] Failed to stop background session ${sessionId} before logout:`, error);
       outcome = 'outcome-unknown';
@@ -2037,23 +2168,30 @@ const prepareForLogout = async (): Promise<ChatLogoutPreparation> => {
 
   if (attachedSessionId) {
     const attachedOutcome = await settleActiveRequest(true);
+    if (!ownsPreparation()) return 'outcome-unknown';
     if (attachedOutcome === 'reconciliation-failed') return attachedOutcome;
     if (attachedOutcome === 'outcome-unknown') outcome = attachedOutcome;
   }
 
   for (const sessionId of stopConfirmedSessionIds) {
     try {
-      if (!await waitForSessionIdle(sessionId)) return 'reconciliation-failed';
+      const idle = await waitForSessionIdle(sessionId);
+      if (!ownsPreparation()) return 'outcome-unknown';
+      if (!idle) return 'reconciliation-failed';
       updateSessionActivity(sessionId, false);
     } catch (error) {
+      if (!ownsPreparation()) return 'outcome-unknown';
       console.warn(`[Chat] Could not confirm background session ${sessionId} stopped before logout:`, error);
       outcome = 'outcome-unknown';
     }
   }
 
   if (backgroundSessionIds.length > 0 || reconciliationRequired.value) {
-    if (!await reconcileAuthoritativeState()) return 'reconciliation-failed';
+    const reconciled = await reconcileAuthoritativeState();
+    if (!ownsPreparation()) return 'outcome-unknown';
+    if (!reconciled) return 'reconciliation-failed';
     await initSessions(false);
+    if (!ownsPreparation()) return 'outcome-unknown';
   }
   return outcome;
 };
@@ -2063,6 +2201,7 @@ defineExpose({ prepareForLogout });
 const handleDocumentVisibilityChange = () => {
   if (document.hidden) {
     stopPanelInteraction();
+    stopComposerResize();
     return;
   }
   if (!document.hidden && visible.value) void initSessions();
@@ -2122,6 +2261,7 @@ onUnmounted(() => {
   historyAbortController.value = null;
   isLoadingHistory.value = false;
   stopPanelInteraction();
+  stopComposerResize();
   window.removeEventListener('resize', handleChatViewportResize);
   window.removeEventListener('blur', handlePanelWindowBlur);
   window.removeEventListener('focus', handlePanelWindowFocus);
@@ -2179,6 +2319,7 @@ const submitChatTurn = async (content: string, confirmation?: ChatConfirmationCo
   appendStreamProgress({ stage: 'CONTEXT_READY' });
   streamElapsedSeconds.value = 0;
   const streamStartedAt = Date.now();
+  streamLastActivitySeconds.value = 0;
   if (streamElapsedTimer) clearInterval(streamElapsedTimer);
   streamElapsedTimer = setInterval(() => {
     streamElapsedSeconds.value = Math.floor((Date.now() - streamStartedAt) / 1000);
@@ -2244,22 +2385,23 @@ const submitChatTurn = async (content: string, confirmation?: ChatConfirmationCo
         targetSessionId,
         content,
         {
+          isCurrentRequest: requestContextIsCurrent,
           onMessage: (chunk) => {
             if (requestEpoch !== streamRequestEpoch) return;
-            const cleanChunk = chunk.replace('CallEnd|>', '');
-            if (!cleanChunk) return;
+            if (!chunk) return;
 
             hasReceivedContent = true;
             const msg = activeAssistantMessage();
             if (!msg) return;
             // 直接追加，渲染器会自动处理 Markdown 格式
-            msg.content += cleanChunk;
+            msg.content += chunk;
+            streamLastActivitySeconds.value = streamElapsedSeconds.value;
             scrollToBottom(false);
           },
           onAccepted: () => {
             if (requestEpoch !== streamRequestEpoch) return;
             requestAccepted = true;
-            if (confirmation) pendingConfirmationKinds.value = [];
+            if (confirmation) pendingConfirmationActions.value = [];
           },
           onCommand: (cmd: StreamCommand) => {
             if (requestEpoch !== streamRequestEpoch) return;
@@ -2432,18 +2574,32 @@ const handleSend = async () => {
   await submitChatTurn(inputValue.value.trim());
 };
 
-const confirmationKindLabel = (kind: ChatConfirmationKind) =>
-    t(`app.chat.confirmationKinds.${kind}`);
+// Confirmation names the write being authorized; tool labels can also describe a read or preview.
+const CONFIRMATION_LABEL_KEYS: Record<string, string> = {
+  delete_device: 'app.deleteDevice',
+  delete_template: 'app.deleteTemplate',
+  delete_trace: 'app.chat.confirmationDeleteTrace',
+  delete_simulation_trace: 'app.deleteSimulationRunTitle',
+  manage_rule: 'app.deleteRule',
+  manage_spec: 'app.deleteSpecification',
+  manage_board_history: 'app.chat.confirmationClearBoardHistory',
+  clear_board: 'app.sceneClear',
+  reset_default_templates: 'app.resetDefaultTemplates',
+  apply_scenario: 'app.chat.confirmationKinds.SCENE_REPLACEMENT'
+};
+const confirmationActionLabel = (pending: ChatProtectedAction) =>
+    t(CONFIRMATION_LABEL_KEYS[pending.toolName] || TOOL_LABEL_KEYS[pending.toolName]
+      || `app.chat.confirmationKinds.${pending.kind}`);
 
 const handleProtectedConfirmation = async (
-    kind: ChatConfirmationKind,
+    pending: ChatProtectedAction,
     action: ChatConfirmationAction
 ) => {
   if (isLoading.value || props.interactionLocked) return;
   const content = action === 'CONFIRM'
-      ? t('app.chat.protectedConfirmationAccepted', { action: confirmationKindLabel(kind) })
-      : t('app.chat.protectedConfirmationCancelled', { action: confirmationKindLabel(kind) });
-  await submitChatTurn(content, { kind, action });
+      ? t('app.chat.protectedConfirmationAccepted', { action: confirmationActionLabel(pending), target: pending.target })
+      : t('app.chat.protectedConfirmationCancelled', { action: confirmationActionLabel(pending), target: pending.target });
+  await submitChatTurn(content, { kind: pending.kind, action, confirmationId: pending.confirmationId });
 };
 
 const retryPendingConfirmation = () => {
@@ -2458,9 +2614,7 @@ const handleTaskClick = (text: string) => {
   }
   refreshBoardContext();
   inputValue.value = text;
-  // 可选：聚焦输入框 (如果 textarea 组件有 ref)
-  // const textarea = document.querySelector('.modern-textarea') as HTMLTextAreaElement;
-  // if (textarea) textarea.focus();
+  nextTick(() => inputRef.value?.focus());
 };
 
 const scrollToBottom = (force = false) => {
@@ -2479,7 +2633,7 @@ const scrollToBottom = (force = false) => {
 
     <transition name="panel-zoom">
       <div
-        ref="chatPanelRef"
+        :ref="setChatPanelRef"
         v-show="visible"
         data-testid="chat-panel"
         :class="[
@@ -2492,17 +2646,19 @@ const scrollToBottom = (force = false) => {
           }
         ]"
         :style="chatPanelStyle"
-        role="dialog"
-        aria-modal="false"
+        role="region"
         :aria-label="t('app.aiAssistant')"
+        tabindex="-1"
+        @keydown="handleChatKeydown"
       >
 
-        <div :class="['sidebar', { collapsed: !isSidebarOpen }]">
+        <div :class="['sidebar', { collapsed: !isSidebarOpen }]"
+          :inert="isSidebarOpen ? undefined : true" :aria-hidden="!isSidebarOpen">
           <div class="sidebar-header">
-            <button type="button" class="new-chat-btn"
+            <button type="button" class="new-chat-btn iot-action-label"
               :disabled="isSettlingStream || isCreatingSession || isPreparingStreamSession"
               @click="onNewChatClick">
-              <PlusOutlined/> <span class="btn-label">{{ t('app.chat.newChat') }}</span>
+              <PlusOutlined aria-hidden="true"/> <span class="btn-label">{{ t('app.chat.newChat') }}</span>
             </button>
           </div>
 
@@ -2562,7 +2718,7 @@ const scrollToBottom = (force = false) => {
                   </span>
                 </span>
               </button>
-              <HintTooltip :content="session.active ? t('app.chat.sessionStillRunning') : t('app.delete')">
+              <HintTooltip :content="visible ? (session.active ? t('app.chat.sessionStillRunning') : t('app.delete')) : ''">
                 <button
                   type="button"
                   class="delete-btn-wrapper"
@@ -2581,9 +2737,8 @@ const scrollToBottom = (force = false) => {
           </div>
         </div>
 
-        <HintTooltip :content="t('app.collapse')">
+        <HintTooltip v-if="isChatPanelCompact && isSidebarOpen" :content="visible ? t('app.collapse') : ''">
           <button
-            v-if="isChatPanelCompact && isSidebarOpen"
             type="button"
             class="sidebar-scrim"
             data-testid="chat-sidebar-scrim"
@@ -2599,24 +2754,24 @@ const scrollToBottom = (force = false) => {
             @pointerdown="startPanelDrag"
           >
             <div class="header-left-group">
-              <HintTooltip :content="isSidebarOpen ? t('app.collapse') : t('app.expand')">
-                <button
+              <button
+                  ref="sidebarToggleRef"
                   type="button"
                   class="control-icon-button sidebar-toggle"
                   data-testid="chat-sidebar-toggle"
                   :aria-label="isSidebarOpen ? t('app.collapse') : t('app.expand')"
+                  :aria-expanded="isSidebarOpen"
                   @click="isSidebarOpen = !isSidebarOpen"
                 >
                   <component :is="isSidebarOpen ? MenuFoldOutlined : MenuUnfoldOutlined" />
-                </button>
-              </HintTooltip>
-              <div class="header-title">
-                <RobotOutlined class="header-title-icon" />
+              </button>
+              <div class="header-title board-panel-title">
+                <RobotOutlined class="header-title-icon" aria-hidden="true" />
                 <span>{{ t('app.aiAssistant') }}</span>
               </div>
             </div>
             <div class="header-controls">
-              <HintTooltip :content="t('app.close')">
+              <HintTooltip :content="visible ? t('app.close') : ''">
                 <button
                   type="button"
                   class="control-icon-button control-icon-button--danger"
@@ -2650,7 +2805,7 @@ const scrollToBottom = (force = false) => {
             >
               <button
                 type="button"
-                class="history-pagination__button"
+                class="history-pagination__button iot-action-label"
                 data-testid="chat-load-older"
                 :disabled="isLoadingOlderHistory"
                 @click="loadOlderHistory"
@@ -2665,8 +2820,12 @@ const scrollToBottom = (force = false) => {
               data-testid="chat-history-retry"
               role="alert"
             >
-              <span>{{ t('app.chat.networkError') }}</span>
-              <button type="button" class="history-pagination__button" @click="handleUserSelectSession(currentSessionId)">
+              <div>
+                <p>{{ t('app.chat.loadConversationFailed') }}</p>
+                <FailureDetails v-if="historyLoadDiagnostics" :message="t('app.chat.loadConversationFailed')"
+                  suggestion="" v-bind="historyLoadDiagnostics" />
+              </div>
+              <button type="button" class="history-pagination__button iot-action-label" @click="handleUserSelectSession(currentSessionId)">
                 {{ t('app.retry') }}
               </button>
             </div>
@@ -2674,11 +2833,9 @@ const scrollToBottom = (force = false) => {
             <div v-else-if="messages.length === 0" class="welcome-screen">
               <div class="brand-logo">
                 <div class="logo-inner">
-                  <img src="/AI.png" :alt="t('app.aiAssistant')" class="custom-logo-img" />
+                  <img src="/AI.png" :alt="t('app.aiAssistant')" class="custom-logo-img iot-device-artwork" />
                 </div>
               </div>
-              <h3 class="welcome-title">{{ t('app.chat.welcomeTitle') }}</h3>
-              <p class="welcome-subtitle">{{ t('app.chat.welcomeSubtitle') }}</p>
 
               <div class="task-grid">
                 <button
@@ -2695,7 +2852,7 @@ const scrollToBottom = (force = false) => {
                   </div>
                   <div class="task-info">
                     <div class="task-title">{{ task.title }}</div>
-                    <div class="task-desc">{{ task.desc }}</div>
+                    <div v-if="task.desc" class="task-desc">{{ task.desc }}</div>
                   </div>
                 </button>
               </div>
@@ -2791,7 +2948,6 @@ const scrollToBottom = (force = false) => {
                           <span class="chat-execution-icon" aria-hidden="true"><CodeOutlined /></span>
                           <div>
                             <strong>{{ t('app.chat.executionTraceTitle') }}</strong>
-                            <p>{{ t('app.chat.executionTraceSubtitle') }}</p>
                           </div>
                         </div>
                         <div class="chat-execution-meta">
@@ -2859,7 +3015,12 @@ const scrollToBottom = (force = false) => {
                             <strong>{{ progressEventTitle(progress) }}</strong>
                             <!-- Reasoning keeps its line breaks: the backend preserves them
                                  precisely so a decomposition does not read as one run-on line. -->
-                            <p :class="{ 'is-reasoning-copy': progress.stage === 'REASONING' }">{{ progressEventDetail(progress, isActiveAssistantMessage(index)) }}</p>
+                            <p v-if="progressEventDetail(progress, isActiveAssistantMessage(index))" :class="{ 'is-reasoning-copy': progress.stage === 'REASONING' }">{{ progressEventDetail(progress, isActiveAssistantMessage(index)) }}</p>
+                            <details v-if="progress.stage === 'CLAIM_REVIEW'" class="chat-claim-review" data-testid="chat-claim-review">
+                              <summary>{{ t('app.chat.claimReviewOriginal') }}</summary>
+                              <blockquote>{{ progress.claimReview.originalText }}</blockquote>
+                              <p>{{ t('app.chat.claimReviewMatched') }} <code>{{ progress.claimReview.matchedText }}</code></p>
+                            </details>
                           </div>
                           <span
                             v-if="progressEventStatus(progress)"
@@ -2892,7 +3053,7 @@ const scrollToBottom = (force = false) => {
                   </article>
 
                   <div v-if="msg.role === 'assistant' && msg.content && !isStreaming" class="msg-actions">
-                    <HintTooltip :content="t('app.chat.copyAll')">
+                    <HintTooltip :content="visible ? t('app.chat.copyAll') : ''">
                       <button
                         type="button"
                         class="action-btn-small"
@@ -2923,7 +3084,7 @@ const scrollToBottom = (force = false) => {
               <div class="protected-confirmation__actions">
                 <button
                   type="button"
-                  class="protected-confirmation__button"
+                  class="protected-confirmation__button iot-action-label"
                   :disabled="interactionLocked || isLoading"
                   @click="retryPendingConfirmation"
                 >
@@ -2932,53 +3093,87 @@ const scrollToBottom = (force = false) => {
               </div>
             </div>
             <div
-              v-for="kind in pendingConfirmationKinds"
-              :key="kind"
+              v-for="pending in pendingConfirmationActions"
+              :key="pending.confirmationId"
               class="protected-confirmation"
               data-testid="chat-protected-confirmation"
             >
               <div class="protected-confirmation__copy">
                 <SafetyCertificateOutlined aria-hidden="true" />
-                <span>{{ t('app.chat.protectedConfirmationPrompt', {
-                  action: confirmationKindLabel(kind)
-                }) }}</span>
+                <span>
+                  <strong>{{ t('app.chat.protectedConfirmationPrompt', { action: confirmationActionLabel(pending) }) }}</strong>
+                  <span class="block" data-testid="chat-confirmation-target">{{ pending.target }}</span>
+                </span>
               </div>
               <div class="protected-confirmation__actions">
                 <button
                   type="button"
-                  class="protected-confirmation__button is-cancel"
+                  class="protected-confirmation__button is-cancel iot-action-label"
                   :disabled="interactionLocked || isLoading"
-                  @click="handleProtectedConfirmation(kind, 'CANCEL')"
+                  @click="handleProtectedConfirmation(pending, 'CANCEL')"
                 >
-                  <CloseOutlined />
+                  <CloseOutlined aria-hidden="true" />
                   {{ t('app.cancel') }}
                 </button>
                 <button
                   type="button"
-                  class="protected-confirmation__button is-confirm"
+                  class="protected-confirmation__button is-confirm iot-action-label"
                   :disabled="interactionLocked || isLoading"
-                  @click="handleProtectedConfirmation(kind, 'CONFIRM')"
+                  @click="handleProtectedConfirmation(pending, 'CONFIRM')"
                 >
-                  <CheckOutlined />
+                  <CheckOutlined aria-hidden="true" />
                   {{ t('app.confirm') }}
                 </button>
               </div>
             </div>
-            <div class="input-card">
+            <div class="input-card" :class="{ 'is-streaming': isStreaming }">
+              <div
+                v-if="!isStreaming"
+                role="separator"
+                tabindex="0"
+                class="chat-input-resize-handle"
+                data-testid="chat-input-resize-handle"
+                aria-orientation="horizontal"
+                :aria-label="t('app.chat.resizeInput')"
+                aria-describedby="chat-input-resize-help"
+                :aria-valuemin="Math.round(composerMinHeight)"
+                :aria-valuemax="Math.round(composerMaxHeight)"
+                :aria-valuenow="Math.round(composerHeight)"
+                @pointerdown="startComposerResize"
+                @pointermove="moveComposerResize"
+                @pointerup="stopComposerResize"
+                @pointercancel="stopComposerResize"
+                @lostpointercapture="stopComposerResize"
+                @keydown="handleComposerResizeKeydown"
+              ><span aria-hidden="true"></span></div>
+              <span id="chat-input-resize-help" class="sr-only">{{ t('app.chat.resizeInputHelp') }}</span>
+              <div
+                v-if="isStreaming"
+                class="chat-response-status"
+                data-testid="chat-response-status"
+                role="status"
+                aria-live="polite"
+              >
+                <span class="chat-response-phase"><LoadingOutlined aria-hidden="true" />{{ streamActivityLabel }}</span>
+                <span class="chat-response-time" aria-hidden="true">{{ t('app.chat.progressElapsed', { seconds: streamElapsedSeconds }) }}</span>
+                <span v-if="streamWaitingForUpdate" class="chat-response-wait">{{ t('app.chat.responseWaiting') }}</span>
+              </div>
               <textarea
+                ref="inputRef"
                 v-model="inputValue"
                 data-testid="chat-input"
                 :placeholder="t('app.chat.inputPlaceholder')"
                 :aria-label="t('app.chat.messageInput')"
                 :disabled="interactionLocked || isLoading || historyLoadFailed"
                 rows="2"
+                :style="{ height: `${composerHeight}px` }"
                 :maxlength="REQUEST_LIMITS.chatContentCharacters"
                 @keydown.ctrl.enter="handleSend"
                 class="modern-textarea"
               ></textarea>
               <div class="input-actions">
                 <div class="left-tools">
-                  <HintTooltip :content="isRecording ? t('app.chat.stopVoiceInput') : t('app.chat.startVoiceInput')">
+                  <HintTooltip :content="visible ? (isRecording ? t('app.chat.stopVoiceInput') : t('app.chat.startVoiceInput')) : ''">
                     <button
                       type="button"
                       :class="['tool-icon', { active: isRecording }]"
@@ -3001,9 +3196,9 @@ const scrollToBottom = (force = false) => {
                   -->
                   <HintTooltip
                     v-if="isStreaming || isMonitoringRemoteExecution"
-                    :content="t(isMonitoringRemoteExecution
+                    :content="visible ? t(isMonitoringRemoteExecution
                       ? 'app.chat.stopRemoteExecution'
-                      : 'app.chat.stopResponse')"
+                      : 'app.chat.stopResponse') : ''"
                   >
                     <button
                       type="button"
@@ -3017,7 +3212,7 @@ const scrollToBottom = (force = false) => {
                   </HintTooltip>
                   <HintTooltip
                     v-else
-                    :content="interactionLocked ? t('app.chat.boardInteractionLocked') : ''"
+                    :content="visible && interactionLocked ? t('app.chat.boardInteractionLocked') : ''"
                   >
                     <button
                       type="button"
@@ -3044,26 +3239,17 @@ const scrollToBottom = (force = false) => {
   inset: 0;
   z-index: var(--z-chat-panel);
   pointer-events: none;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: var(--iot-font-body);
   --chat-accent: var(--accent-strong);
-  /* Deepen the chat accent rather than switch hue.
-   *
-   * This was `#6d28d9`, a hardcoded violet, and it is used on exactly one thing: the send button's hover
-   * and focus state. Resting is `var(--chat-accent)` — blue — so hovering the primary action changed its
-   * hue. In dark theme it also inverted the lightness, because `--accent-strong` resolves to `#93c5fd`
-   * there and the violet is dark: the button went light-blue to dark-violet on hover, which reads as a
-   * different control rather than the same one under the cursor. Mixing toward black keeps both themes
-   * moving in the direction a hover is expected to move. */
-  --chat-accent-strong: color-mix(in srgb, var(--chat-accent) 82%, #000);
   --chat-success: var(--success);
-  --chat-bg: color-mix(in srgb, var(--surface-overlay) 94%, transparent);
-  --chat-sidebar-bg: color-mix(in srgb, var(--surface-panel) 92%, var(--surface-control));
+  --chat-bg: var(--surface-panel);
+  --chat-sidebar-bg: var(--surface-panel-muted);
   --chat-input-bg: var(--surface-elevated);
   --chat-control-bg: var(--surface-control);
   --chat-text: var(--text);
   --chat-muted: var(--text-muted);
   --chat-border: var(--border);
-  --chat-shadow: 0 24px 70px rgba(15, 23, 42, 0.24);
+  --chat-shadow: var(--shadow-elevated);
   --chat-user-bg: color-mix(in srgb, var(--accent-strong) 12%, var(--surface-control));
   --chat-ai-bg: color-mix(in srgb, var(--surface-elevated) 86%, transparent);
   --chat-safe-left: 1rem;
@@ -3071,7 +3257,6 @@ const scrollToBottom = (force = false) => {
 }
 
 :global(:root[data-theme='dark'] .global-chat-wrapper) {
-  --chat-shadow: 0 28px 80px rgba(2, 6, 23, 0.54);
   --chat-user-bg: color-mix(in srgb, var(--accent-strong) 20%, var(--surface-control));
   --chat-ai-bg: color-mix(in srgb, var(--surface-elevated) 92%, transparent);
 }
@@ -3103,7 +3288,6 @@ const scrollToBottom = (force = false) => {
   background: var(--chat-bg);
   color: var(--chat-text);
   box-shadow: var(--chat-shadow);
-  backdrop-filter: blur(18px);
   transition: top 0.28s ease, right 0.28s ease, bottom 0.28s ease, left 0.28s ease, width 0.28s ease, height 0.28s ease, border-radius 0.28s ease, box-shadow 0.28s ease;
 }
 
@@ -3147,7 +3331,7 @@ const scrollToBottom = (force = false) => {
 
 .new-chat-btn {
   width: 100%;
-  min-height: 2.25rem;
+  min-height: var(--iot-target-min);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3157,18 +3341,15 @@ const scrollToBottom = (force = false) => {
   background: color-mix(in srgb, var(--chat-accent) 12%, transparent);
   color: var(--chat-text);
   cursor: pointer;
-  font: inherit;
-  font-size: 0.85rem;
-  font-weight: 700;
   transition: background 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
 }
 
-.new-chat-btn:hover {
+.new-chat-btn:hover:not(:disabled) {
   border-color: var(--chat-accent);
   background: color-mix(in srgb, var(--chat-accent) 18%, transparent);
 }
 
-.new-chat-btn:active {
+.new-chat-btn:active:not(:disabled) {
   transform: translateY(1px);
 }
 
@@ -3193,7 +3374,7 @@ const scrollToBottom = (force = false) => {
   color: var(--chat-muted);
   padding: 0.75rem;
   font: inherit;
-  font-size: 0.75rem;
+  font-size: var(--iot-font-caption);
   line-height: 1.45;
   text-align: center;
   white-space: normal;
@@ -3203,16 +3384,14 @@ const scrollToBottom = (force = false) => {
   cursor: pointer;
 }
 
-.session-list-retry:hover,
-.session-list-retry:focus-visible {
-  outline: none;
+.session-list-retry:hover:not(:disabled) {
   border-color: color-mix(in srgb, var(--chat-accent) 54%, var(--chat-border));
   color: var(--chat-text);
 }
 
 .session-list-retry__action {
   color: var(--chat-accent);
-  font-weight: 750;
+  font-weight: 600;
 }
 
 .session-item {
@@ -3225,7 +3404,7 @@ const scrollToBottom = (force = false) => {
   border: 1px solid transparent;
   border-radius: var(--iot-radius-well);
   color: var(--chat-muted);
-  font-size: 0.82rem;
+  font-size: var(--iot-font-label);
   transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease;
 }
 
@@ -3239,6 +3418,7 @@ const scrollToBottom = (force = false) => {
 
 .session-select-button {
   min-width: 0;
+  min-height: var(--iot-target-min);
   flex: 1;
   display: flex;
   align-items: center;
@@ -3251,12 +3431,6 @@ const scrollToBottom = (force = false) => {
   cursor: pointer;
   font: inherit;
   text-align: left;
-}
-
-.session-select-button:focus-visible {
-  border-radius: var(--iot-radius-control);
-  outline: 2px solid color-mix(in srgb, var(--chat-accent) 72%, transparent);
-  outline-offset: 2px;
 }
 
 .session-item.active {
@@ -3292,7 +3466,7 @@ const scrollToBottom = (force = false) => {
   align-items: center;
   gap: 0.3rem;
   color: var(--chat-muted);
-  font-size: 0.7rem;
+  font-size: var(--iot-font-caption);
   line-height: 1.25;
   white-space: normal;
 }
@@ -3319,7 +3493,7 @@ const scrollToBottom = (force = false) => {
 
 .session-status.is-unread {
   color: var(--chat-accent);
-  font-weight: 750;
+  font-weight: 600;
 }
 
 .session-status.is-running .session-status-dot {
@@ -3328,8 +3502,8 @@ const scrollToBottom = (force = false) => {
 }
 
 .delete-btn-wrapper {
-  width: 1.75rem;
-  height: 1.75rem;
+  width: var(--iot-target-min);
+  height: var(--iot-target-min);
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
@@ -3339,16 +3513,10 @@ const scrollToBottom = (force = false) => {
   background: transparent;
   color: var(--chat-muted);
   cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.16s ease, background 0.16s ease, color 0.16s ease;
+  transition: background 0.16s ease, color 0.16s ease;
 }
 
-.session-item:hover .delete-btn-wrapper,
-.session-item:focus-within .delete-btn-wrapper {
-  opacity: 1;
-}
-
-.delete-btn-wrapper:hover {
+.delete-btn-wrapper:hover:not(:disabled) {
   background: color-mix(in srgb, var(--danger) 14%, transparent);
   color: var(--danger);
 }
@@ -3378,7 +3546,7 @@ const scrollToBottom = (force = false) => {
   width: clamp(13rem, 42%, 15.5rem);
   max-width: calc(100% - 4rem);
   border-right: 1px solid var(--chat-border);
-  box-shadow: 16px 0 30px rgba(15, 23, 42, 0.22);
+  box-shadow: var(--shadow-floating);
   transform: translateX(0);
   transition: transform 0.22s ease, opacity 0.16s ease;
 }
@@ -3438,8 +3606,6 @@ const scrollToBottom = (force = false) => {
   align-items: center;
   gap: 0.45rem;
   color: var(--chat-text);
-  font-size: 0.95rem;
-  font-weight: 800;
 }
 
 .header-title-icon {
@@ -3453,8 +3619,8 @@ const scrollToBottom = (force = false) => {
 }
 
 .control-icon-button {
-  width: 2rem;
-  height: 2rem;
+  width: var(--iot-target-min);
+  height: var(--iot-target-min);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -3467,15 +3633,13 @@ const scrollToBottom = (force = false) => {
   transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease;
 }
 
-.control-icon-button:hover,
-.control-icon-button:focus-visible {
-  outline: none;
+.control-icon-button:hover:not(:disabled) {
   border-color: var(--chat-border);
   background: var(--chat-control-bg);
   color: var(--chat-text);
 }
 
-.control-icon-button--danger:hover,
+.control-icon-button--danger:hover:not(:disabled),
 .control-icon-button--danger:focus-visible {
   color: var(--danger);
 }
@@ -3485,8 +3649,8 @@ const scrollToBottom = (force = false) => {
   right: 0;
   bottom: 0;
   z-index: 6;
-  width: 2rem;
-  height: 2rem;
+  width: var(--iot-target-min);
+  height: var(--iot-target-min);
   border: 0;
   border-radius: var(--iot-radius-control);
   background:
@@ -3499,7 +3663,6 @@ const scrollToBottom = (force = false) => {
 
 .chat-resize-handle:hover,
 .chat-resize-handle:focus-visible {
-  outline: none;
   opacity: 1;
   background-color: color-mix(in srgb, var(--chat-control-bg) 70%, transparent);
 }
@@ -3553,21 +3716,6 @@ const scrollToBottom = (force = false) => {
   object-fit: contain;
 }
 
-.welcome-title {
-  margin: 0;
-  color: var(--chat-text);
-  font-size: 1.05rem;
-  font-weight: 850;
-}
-
-.welcome-subtitle {
-  max-width: 26rem;
-  margin: 0.3rem 0 0.85rem;
-  color: var(--chat-muted);
-  font-size: 0.8rem;
-  line-height: 1.5;
-}
-
 .task-grid {
   width: 100%;
   display: grid;
@@ -3593,23 +3741,30 @@ const scrollToBottom = (force = false) => {
   transition: border-color 0.16s ease, background 0.16s ease, transform 0.16s ease, box-shadow 0.16s ease;
 }
 
-.task-card:hover {
+.task-card:hover:not(:disabled) {
   border-color: color-mix(in srgb, var(--chat-accent) 62%, var(--chat-border));
   background: color-mix(in srgb, var(--chat-accent) 9%, var(--chat-ai-bg));
-  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12);
+  box-shadow: var(--shadow-raised);
   transform: translateY(-1px);
 }
 
 .task-card:disabled {
   cursor: not-allowed;
-  opacity: 0.58;
-}
-
-.task-card:disabled:hover {
+  opacity: 1;
+  color: var(--chat-muted);
   border-color: var(--chat-border);
-  background: var(--chat-ai-bg);
+  background: var(--chat-control-bg);
   box-shadow: none;
   transform: none;
+}
+
+.task-card:disabled .task-title,
+.task-card:disabled .task-icon {
+  color: var(--chat-muted);
+}
+
+.task-card:disabled .task-icon {
+  background: var(--chat-control-bg);
 }
 
 .task-icon {
@@ -3632,14 +3787,14 @@ const scrollToBottom = (force = false) => {
 
 .task-title {
   color: var(--chat-text);
-  font-size: 0.83rem;
-  font-weight: 800;
+  font-size: var(--iot-font-label);
+  font-weight: 600;
 }
 
 .task-desc {
   margin-top: 0.15rem;
   color: var(--chat-muted);
-  font-size: 0.7rem;
+  font-size: var(--iot-font-caption);
   line-height: 1.35;
 }
 
@@ -3658,19 +3813,18 @@ const scrollToBottom = (force = false) => {
 }
 
 .history-pagination__button {
+  min-height: var(--iot-target-min);
   border: 0;
   background: transparent;
   color: var(--chat-accent);
   cursor: pointer;
-  font: inherit;
-  font-size: 0.78rem;
-  font-weight: 700;
   padding: 0.35rem 0.55rem;
 }
 
 .history-pagination__button:disabled {
   cursor: wait;
-  opacity: 0.58;
+  color: var(--chat-muted);
+  opacity: 1;
 }
 
 .ai-row {
@@ -3689,7 +3843,7 @@ const scrollToBottom = (force = false) => {
   align-items: center;
   justify-content: center;
   border-radius: var(--iot-radius-well);
-  font-size: 0.85rem;
+  font-size: var(--iot-font-control);
 }
 
 .ai-row .avatar-container {
@@ -3715,7 +3869,7 @@ const scrollToBottom = (force = false) => {
   border-radius: var(--iot-radius-card);
   padding: 0.7rem 0.85rem;
   color: var(--chat-text);
-  font-size: 0.88rem;
+  font-size: var(--iot-font-control);
   line-height: 1.6;
 }
 
@@ -3754,18 +3908,11 @@ const scrollToBottom = (force = false) => {
   display: flex;
   gap: 0.35rem;
   margin-top: 0.25rem;
-  opacity: 0;
-  transition: opacity 0.16s ease;
-}
-
-.msg-row:hover .msg-actions,
-.msg-row:focus-within .msg-actions {
-  opacity: 1;
 }
 
 .action-btn-small {
-  width: 1.75rem;
-  height: 1.75rem;
+  width: var(--iot-target-min);
+  height: var(--iot-target-min);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -3776,9 +3923,7 @@ const scrollToBottom = (force = false) => {
   cursor: pointer;
 }
 
-.action-btn-small:hover,
-.action-btn-small:focus-visible {
-  outline: none;
+.action-btn-small:hover:not(:disabled) {
   border-color: var(--chat-border);
   background: var(--chat-control-bg);
   color: var(--chat-text);
@@ -3789,7 +3934,7 @@ const scrollToBottom = (force = false) => {
   align-items: center;
   gap: 0.55rem;
   color: var(--chat-muted);
-  font-size: 0.8rem;
+  font-size: var(--iot-font-label);
 }
 
 .remote-execution-state {
@@ -3803,7 +3948,7 @@ const scrollToBottom = (force = false) => {
   border-top: 1px solid color-mix(in srgb, var(--chat-accent) 42%, var(--chat-border));
   border-bottom: 1px solid color-mix(in srgb, var(--chat-accent) 42%, var(--chat-border));
   color: var(--chat-text);
-  font-size: 0.8rem;
+  font-size: var(--iot-font-label);
 }
 
 .remote-execution-state p {
@@ -3823,14 +3968,14 @@ const scrollToBottom = (force = false) => {
   border-radius: var(--iot-radius-well);
   background: color-mix(in srgb, var(--danger) 8%, var(--chat-ai-bg));
   color: var(--chat-text);
-  font-size: 0.8rem;
+  font-size: var(--iot-font-label);
 }
 
 .chat-execution-trace {
   width: 100%;
   min-width: 0;
   color: var(--chat-text);
-  font-size: 0.8rem;
+  font-size: var(--iot-font-label);
   overflow-wrap: anywhere;
 }
 
@@ -3893,11 +4038,10 @@ const scrollToBottom = (force = false) => {
 
 .chat-execution-heading strong {
   display: block;
-  font-size: 0.88rem;
+  font-size: var(--iot-font-control);
   line-height: 1.3;
 }
 
-.chat-execution-heading p,
 .chat-execution-event-copy p {
   margin: 0.12rem 0 0;
   color: var(--chat-muted);
@@ -3911,6 +4055,34 @@ const scrollToBottom = (force = false) => {
   white-space: pre-wrap;
   color: var(--chat-text);
   line-height: 1.55;
+}
+
+.chat-claim-review {
+  margin-top: var(--iot-space-sm);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.chat-claim-review summary {
+  width: fit-content;
+  padding: var(--iot-space-2xs) 0;
+  color: var(--chat-muted);
+  cursor: pointer;
+}
+
+.chat-claim-review summary:hover,
+.chat-claim-review summary:focus-visible {
+  color: var(--chat-text);
+}
+
+.chat-claim-review blockquote {
+  margin: var(--iot-space-sm) 0;
+  padding: var(--iot-space-sm) var(--iot-space-md);
+  border-inline-start: 2px solid var(--chat-border);
+  border-radius: var(--iot-radius-control);
+  background: var(--chat-control-bg);
+  color: var(--chat-text);
+  white-space: pre-wrap;
 }
 
 .chat-execution-meta {
@@ -3929,8 +4101,8 @@ const scrollToBottom = (force = false) => {
   border-radius: var(--iot-radius-control);
   background: var(--chat-control-bg);
   color: var(--chat-muted);
-  font-size: 0.72rem;
-  font-weight: 700;
+  font-size: var(--iot-font-caption);
+  font-weight: 600;
 }
 
 .chat-execution-state.is-running {
@@ -3954,7 +4126,41 @@ const scrollToBottom = (force = false) => {
   gap: 0.5rem;
   margin-bottom: 0.65rem;
   color: var(--chat-muted);
-  font-size: 0.75rem;
+  font-size: var(--iot-font-caption);
+}
+
+.chat-response-status {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.75rem;
+  color: var(--chat-muted);
+  font-size: var(--iot-font-caption);
+  line-height: 1.5;
+}
+
+.chat-response-phase {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--chat-text);
+  overflow-wrap: anywhere;
+}
+
+.chat-response-phase .anticon {
+  flex-shrink: 0;
+}
+
+.chat-response-time {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-response-wait {
+  flex-basis: 100%;
 }
 
 .chat-execution-metrics {
@@ -3977,7 +4183,7 @@ const scrollToBottom = (force = false) => {
 
 .chat-execution-metrics strong {
   color: var(--chat-text);
-  font-size: 0.85rem;
+  font-size: var(--iot-font-control);
   font-variant-numeric: tabular-nums;
 }
 
@@ -4038,8 +4244,8 @@ const scrollToBottom = (force = false) => {
   border-radius: 50%;
   background: var(--chat-control-bg);
   color: var(--chat-muted);
-  font-size: 0.7rem;
-  font-weight: 700;
+  font-size: var(--iot-font-caption);
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 
@@ -4050,7 +4256,7 @@ const scrollToBottom = (force = false) => {
 .chat-execution-event-copy strong {
   display: block;
   color: var(--chat-text);
-  font-size: 0.82rem;
+  font-size: var(--iot-font-label);
   line-height: 1.35;
 }
 
@@ -4061,8 +4267,8 @@ const scrollToBottom = (force = false) => {
   border-radius: var(--iot-radius-control);
   background: var(--chat-control-bg);
   color: var(--chat-muted);
-  font-size: 0.7rem;
-  font-weight: 700;
+  font-size: var(--iot-font-caption);
+  font-weight: 600;
   white-space: nowrap;
 }
 
@@ -4097,27 +4303,39 @@ const scrollToBottom = (force = false) => {
 
 .reconciliation-retry {
   flex: 0 0 auto;
-  min-height: 2rem;
+  min-height: var(--iot-target-min);
   padding: 0.35rem 0.65rem;
-  border: 1px solid var(--chat-accent);
+  border: 1px solid var(--accent-fill);
   border-radius: var(--iot-radius-action);
-  background: var(--chat-accent);
-  color: #fff;
+  background: var(--accent-fill);
+  color: var(--text-on-fill);
   cursor: pointer;
   font: inherit;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .reconciliation-retry:disabled {
   cursor: wait;
-  opacity: 0.65;
+  background: var(--accent-fill-disabled);
+  border-color: var(--accent-fill-disabled);
+}
+
+.reconciliation-retry:hover:not(:disabled) {
+  background: var(--accent-fill-hover);
+  border-color: var(--accent-fill-hover);
+}
+
+.reconciliation-retry:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
 }
 
 .input-floating-area {
   position: relative;
   z-index: 2;
   flex: 0 0 auto;
-  padding: 0.85rem 1rem 1rem;
+  /* Reserve the resize corner so its target cannot cover the composer actions. */
+  padding: 0.85rem 1rem var(--iot-target-min);
   background: linear-gradient(to top, var(--chat-bg) 86%, transparent);
 }
 
@@ -4139,13 +4357,13 @@ const scrollToBottom = (force = false) => {
   background: color-mix(in srgb, var(--danger-surface) 88%, var(--chat-input-bg));
   color: var(--danger);
   padding: 0.65rem 0.75rem;
-  box-shadow: 0 10px 28px color-mix(in srgb, var(--danger-fill) 14%, transparent);
+  box-shadow: var(--shadow-raised);
 }
 
 .protected-confirmation.is-load-error {
   border-color: color-mix(in srgb, var(--warning) 48%, var(--chat-border));
   background: color-mix(in srgb, var(--warning-surface) 88%, var(--chat-input-bg));
-  color: color-mix(in srgb, #92400e 84%, var(--chat-text));
+  color: var(--warning);
 }
 
 .protected-confirmation__copy,
@@ -4158,8 +4376,8 @@ const scrollToBottom = (force = false) => {
 .protected-confirmation__copy {
   min-width: 0;
   gap: 0.5rem;
-  font-size: 0.82rem;
-  font-weight: 650;
+  font-size: var(--iot-font-label);
+  font-weight: 600;
 }
 
 .protected-confirmation__actions {
@@ -4168,6 +4386,7 @@ const scrollToBottom = (force = false) => {
 }
 
 .protected-confirmation__button {
+  min-height: var(--iot-target-min);
   gap: 0.3rem;
   border: 1px solid var(--chat-border);
   border-radius: var(--iot-radius-action);
@@ -4175,34 +4394,29 @@ const scrollToBottom = (force = false) => {
   background: var(--chat-input-bg);
   color: var(--chat-text);
   font: inherit;
-  font-size: 0.78rem;
-  font-weight: 700;
+  font-size: var(--iot-font-control);
+  font-weight: 600;
   cursor: pointer;
 }
 
 .protected-confirmation__button.is-confirm {
   border-color: var(--danger);
   background: var(--danger-fill);
-  color: #fff;
+  color: var(--text-on-fill);
 }
 
 .protected-confirmation__button:disabled {
   cursor: not-allowed;
-  opacity: 0.55;
+  color: var(--chat-muted);
+  background: var(--chat-control-bg);
+  opacity: 1;
 }
 
-/*
- * The filled confirm desaturates rather than fading, for the reason the root CLAUDE.md gives: opacity
- * fades the label with the control. Measured, `opacity: 0.55` took white-on-`--danger-fill` from 4.83:1
- * to **2.51:1**, so the one button a user needs to read before confirming a protected action became the
- * hardest to read. Mixed toward a warm neutral it says "inactive" through saturation and keeps the ink at
- * 7.29:1. `AccountDeleteDialog` solves the same problem by mixing toward its surface; this banner already
- * sits on a danger tint, so a neutral reads as drained here rather than as a lighter danger.
- */
+/* Disabled confirmation keeps opaque label ink on the shared neutral fill. */
 .protected-confirmation__button.is-confirm:disabled {
   border-color: transparent;
-  background: color-mix(in srgb, var(--danger-fill) 34%, #57534e);
-  opacity: 1;
+  background: var(--accent-fill-disabled);
+  color: var(--text-on-fill);
 }
 
 .input-card {
@@ -4213,7 +4427,7 @@ const scrollToBottom = (force = false) => {
   border: 1px solid var(--chat-border);
   border-radius: var(--iot-radius-card);
   background: var(--chat-input-bg);
-  box-shadow: 0 14px 35px rgba(15, 23, 42, 0.16);
+  box-shadow: var(--shadow-raised);
   padding: 0.65rem;
 }
 
@@ -4221,27 +4435,72 @@ const scrollToBottom = (force = false) => {
   border-color: color-mix(in srgb, var(--chat-accent) 54%, var(--chat-border));
 }
 
+/* Keep activity and Stop in the fixed composer instead of reserving an unusable draft field. */
+.input-card.is-streaming {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.input-card.is-streaming .modern-textarea,
+.input-card.is-streaming .left-tools {
+  display: none;
+}
+
+.input-card.is-streaming .input-actions {
+  flex: 0 0 auto;
+  align-self: flex-end;
+  margin-top: 0;
+}
+
 .modern-textarea {
   width: 100%;
-  min-height: 2.7rem;
+  min-height: var(--iot-target-min);
   max-height: min(8rem, 28vh);
-  resize: vertical;
+  resize: none;
   border: 0;
   outline: none;
   background: transparent;
   color: var(--chat-text);
   font: inherit;
-  font-size: 0.9rem;
+  font-size: var(--iot-font-control);
   line-height: 1.45;
 }
 
+.chat-input-resize-handle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
+  flex: 0 0 20px;
+  margin: -0.4rem 0 0.2rem;
+  border-radius: var(--iot-radius-pill);
+  cursor: ns-resize;
+  touch-action: none;
+}
+
+.chat-input-resize-handle span {
+  width: 2.5rem;
+  height: 3px;
+  border-radius: var(--iot-radius-pill);
+  background: var(--chat-muted);
+}
+
+.chat-input-resize-handle:hover,
+.chat-input-resize-handle:focus-visible {
+  background: var(--chat-control-bg);
+  outline: 2px solid var(--accent-border);
+  outline-offset: 1px;
+}
+
 .modern-textarea::placeholder {
-  color: color-mix(in srgb, var(--chat-muted) 78%, transparent);
+  color: var(--chat-muted);
 }
 
 .modern-textarea:disabled {
   cursor: not-allowed;
-  opacity: 0.62;
+  color: var(--chat-muted);
+  opacity: 1;
 }
 
 .input-actions {
@@ -4260,8 +4519,8 @@ const scrollToBottom = (force = false) => {
 
 .tool-icon,
 .action-btn {
-  width: 2rem;
-  height: 2rem;
+  width: var(--iot-target-min);
+  height: var(--iot-target-min);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -4274,29 +4533,55 @@ const scrollToBottom = (force = false) => {
   transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease, transform 0.16s ease;
 }
 
-.tool-icon:hover,
-.tool-icon:focus-visible {
-  outline: none;
+.tool-icon:hover:not(:disabled) {
   border-color: var(--chat-border);
   background: var(--chat-control-bg);
   color: var(--chat-text);
 }
 
-.tool-icon.active {
+.new-chat-btn:disabled,
+.control-icon-button:disabled,
+.delete-btn-wrapper:disabled,
+.action-btn-small:disabled,
+.tool-icon:disabled {
+  color: var(--chat-muted);
+  background: var(--chat-control-bg);
+  border-color: var(--chat-border);
+  cursor: not-allowed;
+}
+
+.tool-icon.active:not(:disabled) {
   color: var(--danger);
 }
 
 .action-btn.send {
-  border-color: var(--chat-accent);
-  background: var(--chat-accent);
-  color: #fff;
+  border-color: var(--accent-fill);
+  background: var(--accent-fill);
+  color: var(--text-on-fill);
 }
 
 .action-btn.send:hover:not(:disabled),
 .action-btn.send:focus-visible:not(:disabled) {
-  outline: none;
-  background: var(--chat-accent-strong);
-  transform: translateY(-1px);
+  border-color: var(--accent-fill-hover);
+  background: var(--accent-fill-hover);
+  transform: none;
+}
+
+.new-chat-btn:focus-visible,
+.session-list-retry:focus-visible,
+.session-select-button:focus-visible,
+.control-icon-button:focus-visible,
+.delete-btn-wrapper:focus-visible,
+.chat-resize-handle:focus-visible,
+.task-card:focus-visible,
+.history-pagination__button:focus-visible,
+.action-btn-small:focus-visible,
+.protected-confirmation__button:focus-visible,
+.modern-textarea:focus-visible,
+.tool-icon:focus-visible,
+.action-btn:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
 }
 
 .action-btn.send:disabled {
@@ -4338,7 +4623,7 @@ const scrollToBottom = (force = false) => {
   width: 100%;
   margin: 0.75rem 0;
   border-collapse: collapse;
-  font-size: 0.82rem;
+  font-size: var(--iot-font-label);
 }
 
 .vue-markdown-wrapper :deep(th),
@@ -4350,7 +4635,7 @@ const scrollToBottom = (force = false) => {
 
 .vue-markdown-wrapper :deep(th) {
   background: var(--chat-control-bg);
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .vue-markdown-wrapper :deep(p) {
@@ -4399,13 +4684,6 @@ const scrollToBottom = (force = false) => {
     border-radius: var(--iot-radius-card);
   }
 
-  .control-icon-button,
-  .tool-icon,
-  .action-btn {
-    min-width: 2.75rem;
-    min-height: 2.75rem;
-  }
-
   /* The mobile panel already has a fixed viewport geometry; a resize
    * affordance only consumes space and is not a useful touch interaction. */
   .chat-resize-handle {
@@ -4422,7 +4700,7 @@ const scrollToBottom = (force = false) => {
     inset: 0 auto 0 0;
     z-index: 20;
     width: min(17rem, 82vw);
-    box-shadow: 16px 0 30px rgba(15, 23, 42, 0.22);
+    box-shadow: var(--shadow-floating);
   }
 
   .sidebar.collapsed {
@@ -4447,10 +4725,6 @@ const scrollToBottom = (force = false) => {
     display: none;
   }
 
-  .welcome-subtitle {
-    margin-bottom: 0.65rem;
-  }
-
   .task-card {
     padding: 0.6rem;
   }
@@ -4467,7 +4741,6 @@ const scrollToBottom = (force = false) => {
 
   .msg-body {
     padding: 0.6rem 0.7rem;
-    font-size: 0.84rem;
   }
 
   .chat-execution-header {
@@ -4506,20 +4779,6 @@ const scrollToBottom = (force = false) => {
   }
 }
 
-@media (pointer: coarse) {
-  .control-icon-button,
-  .tool-icon,
-  .action-btn {
-    min-width: 2.75rem;
-    min-height: 2.75rem;
-  }
-
-  .chat-resize-handle {
-    width: 2.75rem;
-    height: 2.75rem;
-  }
-}
-
 @media (max-height: 720px) {
   .chat-panel {
     top: calc(4rem + 0.5rem);
@@ -4548,8 +4807,5 @@ const scrollToBottom = (force = false) => {
     padding: 0.55rem;
   }
 
-  .modern-textarea {
-    min-height: 2.35rem;
-  }
 }
 </style>

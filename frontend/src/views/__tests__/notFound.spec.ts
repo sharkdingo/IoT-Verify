@@ -73,9 +73,9 @@ describe('the not-found route', () => {
   it('states what happened rather than only that something is wrong', () => {
     const i18n = readFileSync(join(__dirname, '../../assets/i18n.ts'), 'utf8')
 
-    // "Error" / "错误" told the user only what they already knew. Both locales now name the cause and
-    // say that nothing of theirs was lost — the reassurance a verification tool owes someone whose
-    // Board, specs, and run history are the point.
+    // The title names the missing page; the address and exits support recovery without a second
+    // paragraph repeating the title or speculating about how the user arrived here.
+    expect(readView('NotFound.vue')).not.toContain("t('app.notFound.subtitle')")
     expect(i18n).not.toMatch(/notFound:\s*\{\s*title:\s*'(Error|错误)'/)
     expect(i18n).toMatch(/notFound:[\s\S]{0,400}?attempted:/)
     expect(i18n).toMatch(/notFound:[\s\S]{0,400}?workspace:/)

@@ -1,12 +1,14 @@
 # Troubleshooting
 
-> Verified against code on 2026-07-25. Source:
+> Verified against code on 2026-10-15. Source:
 > `backend/src/main/resources/application.yaml`,
 > `backend/src/main/java/cn/edu/nju/Iot_Verify/component/nusmv/`,
 > `backend/src/main/java/cn/edu/nju/Iot_Verify/service/impl/VerificationServiceImpl.java`,
 > `backend/src/main/java/cn/edu/nju/Iot_Verify/service/impl/RedisTokenBlacklistService.java`,
 > `backend/src/main/java/cn/edu/nju/Iot_Verify/service/UserOperationGuard.java`,
 > `backend/src/main/java/cn/edu/nju/Iot_Verify/service/DistributedInteractiveExecutionStore.java`,
+> `backend/src/main/java/cn/edu/nju/Iot_Verify/service/InteractiveAiExecutionService.java`,
+> `backend/src/main/java/cn/edu/nju/Iot_Verify/service/recommendation/RuleRecommendationService.java`,
 > `backend/src/main/java/cn/edu/nju/Iot_Verify/security/SecurityConfig.java`.
 
 Common issues and fixes. For every configuration key mentioned here, see [../getting-started/configuration.md](../getting-started/configuration.md) for the variable, its default, and how it is resolved — this page does not repeat defaults.
@@ -129,13 +131,46 @@ This means the model is too complex or the timeout is too short. Try:
 
 See the NuSMV timeout/concurrency keys in [../getting-started/configuration.md](../getting-started/configuration.md).
 
+## AI recommendation failed
+
+A provider HTTP `404` with `reason=MODEL_NOT_FOUND` means the configured model is unavailable
+to that endpoint/account; it happens before candidate validation. Check the effective
+[AI model configuration](../getting-started/configuration.md#llm-ai) and the provider's available
+models before retrying. A catalog entry does not establish that the current credential's group
+has an active account supporting that model; confirm a completion through the same protocol.
+The provider log recognizes `model_not_found` in either the error type
+or code, while other values remain `UNCLASSIFIED`; raw provider messages and unknown codes are
+not logged. The stream-finished log records the effective request model, including a recommendation
+model override. A `404` alone can also mean an incorrect API route and does not prove a missing model.
+
+A provider completion log confirms only that model text arrived. Rule recommendations still
+need JSON parsing and capability/semantic validation. The rule service logs the start of this
+step and its retained/filtered counts without logging candidate content. Unexpected worker
+failures log `userId`, `requestId`, the last observed stage, and the original exception stack.
+The exception classification and HTTP masking rules are owned by
+[API error handling](../api/overview.md#error-and-status-codes).
+
+If the same interval contains `CodeCache is full` or `Out of space in CodeCache`, inspect the
+running JVM with `jcmd <pid> Compiler.codecache` and `jcmd <pid> VM.flags`. Code cache is distinct
+from Java heap. Space may later be reclaimed and compilation restarted, so a successful retry
+does not establish that the original request or its JSON was valid. A warning alone cannot
+identify the exact exception thrown by an earlier request whose cause was not logged.
+
+The project's [development JVM launch](../getting-started/configuration.md#development-jvm-launch)
+uses normal tiered compilation to avoid the Maven startup optimization's reduced code cache.
+Restart after changing launch configuration and verify the new JVM's flags; rebuilding underneath
+an existing process does not apply it. For explicit JVM limits, inspect the actual code-cache
+capacity and pressure before changing them.
+
 ## JWT token expired
 
 ```json
-{"code": 401, "message": "Token expired"}
+{"code": 401, "message": "Authentication required"}
 ```
 
-The access token has passed its expiration window. Log in again to obtain a new token. See [../api/auth.md](../api/auth.md); token lifetime is controlled by `JWT_EXPIRATION` in [../getting-started/configuration.md](../getting-started/configuration.md).
+Missing, invalid, expired, or revoked tokens produce this response. Log in again;
+the message alone does not distinguish expiration. See [API authentication](../api/overview.md#authentication)
+and the [JWT configuration](../getting-started/configuration.md#authentication-jwt).
 
 ## Test compilation cannot find a class that exists
 
@@ -144,17 +179,9 @@ The access token has passed its expiration window. Log in again to obtain a new 
   找不到SimulationTraceMapper的类文件 / class file for SimulationTraceMapper not found
 ```
 
-The named class compiles fine and `target/classes/**/SimulationTraceMapper.class` is present, yet
-`mvn test` fails to resolve it. This is stale incremental-compilation state, not a code defect —
-usually after interrupting a build or mixing `mvn clean` with a later incremental `mvn test`.
-
-```bash
-cd backend && mvn clean test-compile
-```
-
-Diagnose before assuming a real error: if `ls target/classes/.../<Name>.class` shows the file, the
-source is correct and only the build state is wrong. Treating this as a missing dependency and
-"fixing" imports would change working code to satisfy a stale artifact.
+A present `.class` file does not establish that the source or build is correct.
+Check for concurrent writers and a running backend before cleaning or rebuilding;
+follow the [build-environment diagnostics](../development/known-traps.md#2-build-environment).
 
 ## Related
 

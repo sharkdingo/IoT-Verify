@@ -1,6 +1,7 @@
 package cn.edu.nju.Iot_Verify.component.aitool.verification;
 
 import cn.edu.nju.Iot_Verify.component.aitool.AiDestructiveActionGuard;
+import cn.edu.nju.Iot_Verify.component.ai.LlmMessageCodec;
 import cn.edu.nju.Iot_Verify.configure.ChatExecutionConfig;
 import cn.edu.nju.Iot_Verify.configure.JwtConfig;
 import cn.edu.nju.Iot_Verify.dto.fix.FixApplyResultDto;
@@ -13,7 +14,12 @@ import cn.edu.nju.Iot_Verify.exception.BadRequestException;
 import cn.edu.nju.Iot_Verify.exception.FixApplyPreflightUnavailableException;
 import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
 import cn.edu.nju.Iot_Verify.security.UserContextHolder;
+import cn.edu.nju.Iot_Verify.po.ChatMessagePo;
+import cn.edu.nju.Iot_Verify.po.ChatSessionPo;
+import cn.edu.nju.Iot_Verify.repository.ChatMessageRepository;
+import cn.edu.nju.Iot_Verify.repository.ChatSessionRepository;
 import cn.edu.nju.Iot_Verify.service.FixService;
+import cn.edu.nju.Iot_Verify.service.AiFixSuggestionService;
 import cn.edu.nju.Iot_Verify.service.FixSuggestionTokenService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -28,6 +34,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.IntStream;
 
@@ -38,6 +45,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -48,12 +56,17 @@ class ApplyFixToolTest {
 
     @Mock
     private FixService fixService;
+    @Mock private ChatMessageRepository messageRepository;
+    @Mock private ChatSessionRepository sessionRepository;
 
     private ObjectMapper objectMapper;
     private FixSuggestionTokenService tokenService;
     private AiDestructiveActionGuard guard;
     private ChatExecutionConfig chatExecutionConfig;
     private ApplyFixTool tool;
+    private LlmMessageCodec messageCodec;
+    private AiFixSuggestionService suggestionService;
+    private long nextMessageId;
 
     @BeforeEach
     void setUp() {
@@ -63,10 +76,19 @@ class ApplyFixToolTest {
         tokenService = new FixSuggestionTokenService(objectMapper, jwtConfig);
         guard = new AiDestructiveActionGuard(objectMapper);
         chatExecutionConfig = new ChatExecutionConfig();
+        messageCodec = new LlmMessageCodec(objectMapper);
+        nextMessageId = 521L;
+        suggestionService = new AiFixSuggestionService(messageRepository, sessionRepository, objectMapper, messageCodec);
         tool = new ApplyFixTool(
-                fixService, tokenService, objectMapper, guard, chatExecutionConfig);
+                fixService, tokenService, objectMapper, guard, chatExecutionConfig,
+                suggestionService);
         UserContextHolder.setUserId(7L);
         UserContextHolder.setChatSessionId("apply-fix-session");
+        ChatSessionPo session = new ChatSessionPo();
+        session.setId("apply-fix-session");
+        session.setUserId(7L);
+        lenient().when(sessionRepository.findByIdAndUserId("apply-fix-session", 7L))
+                .thenReturn(Optional.of(session));
     }
 
     @AfterEach
@@ -83,6 +105,8 @@ class ApplyFixToolTest {
         assertTrue(preview.path("requiresUserConfirmation").asBoolean());
         assertEquals("remove", preview.path("suggestion").path("strategy").asText());
         assertFalse(preview.path("suggestion").has("suggestionToken"));
+        assertEquals(String.join(", ", suggestion.getRemovedRuleDescriptions()),
+                guard.pendingContext(7L, "apply-fix-session").orElseThrow().displayTarget());
         verifyNoInteractions(fixService);
 
         when(fixService.applyFix(
@@ -90,7 +114,7 @@ class ApplyFixToolTest {
                 eq(suggestion.getSuggestionToken()), eq(null)))
                 .thenReturn(appliedResult(suggestion, 3, 2));
 
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", preview.path("impactToken").asText());
         JsonNode applied = objectMapper.readTree(tool.execute("""
                 {"traceId":31,"confirmed":true,"impactToken":"%s"}
                 """.formatted(preview.path("impactToken").asText())));
@@ -105,7 +129,7 @@ class ApplyFixToolTest {
     }
 
     @Test
-    void confirmedApply_acceptsThePreviewArgumentsResentUnchanged() throws Exception {
+    void confirmedApply_acceptsTheSelectedReferenceResentUnchanged() throws Exception {
         FixSuggestionDto suggestion = signedPublicRemovalSuggestion();
         JsonNode preview = objectMapper.readTree(tool.execute(previewArgs(suggestion).toString()));
 
@@ -114,26 +138,16 @@ class ApplyFixToolTest {
                 eq(suggestion.getSuggestionToken()), eq(null)))
                 .thenReturn(appliedResult(suggestion, 3, 2));
 
-        // The model reaches the confirmed call by resending the object it previewed with plus the
-        // token. Rejecting the carried-over fields spent a whole round on a guaranteed
-        // VALIDATION_ERROR while no description said they had to be dropped.
-        //
-        // Resend a TAMPERED copy, not the original: the confirmed path never re-verifies the
-        // signature (that happens only in preview), so if it read `suggestion` from the arguments
-        // instead of the stored payload, a caller could swap in a proposal the user never reviewed.
-        // Asserting against the pristine DTO is what makes that a red test rather than a silent pass.
-        ObjectNode confirmedArgs = previewArgs(suggestion);
-        ObjectNode tampered = (ObjectNode) confirmedArgs.get("suggestion");
-        tampered.set("removedRuleDescriptions",
-                objectMapper.createArrayNode().add("a rule the user never approved removing"));
+        ObjectNode confirmedArgs = objectMapper.createObjectNode();
+        confirmedArgs.put("traceId", 31);
+        confirmedArgs.put("suggestionId", preview.path("suggestionId").asText());
         confirmedArgs.put("confirmed", true);
         confirmedArgs.put("impactToken", preview.path("impactToken").asText());
 
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", preview.path("impactToken").asText());
         JsonNode applied = objectMapper.readTree(tool.execute(confirmedArgs.toString()));
 
         assertEquals("applied", applied.path("operation").asText());
-        // The stored proposal is what gets applied, so the tampered copy cannot influence the write.
         verify(fixService).applyFix(
                 7L, 31L, "remove", suggestion, suggestion.getSuggestionToken(), null);
     }
@@ -154,31 +168,19 @@ class ApplyFixToolTest {
     }
 
     @Test
-    @SuppressWarnings("unchecked")
-    void definitionClosesRootAndNestedMutationArguments() {
+    void definitionAcceptsOnlyAReferenceAndConfirmationFields() {
         var definition = tool.getDefinition();
-        Map<String, Object> suggestionSchema = (Map<String, Object>)
-                definition.parameters().properties.get("suggestion");
-        Map<String, Object> parameterItems = (Map<String, Object>)
-                ((Map<String, Object>) suggestionSchema.get("properties"))
-                        .get("parameterAdjustments");
-        Map<String, Object> preferredRangeItems = (Map<String, Object>)
-                ((Map<String, Object>) definition.parameters().properties
-                        .get("preferredRangeSelections")).get("items");
-
         assertFalse(definition.parameters().additionalProperties);
         assertEquals(List.of("traceId", "confirmed"), definition.parameters().required);
-        assertEquals(false, suggestionSchema.get("additionalProperties"));
-        assertEquals(false,
-                ((Map<String, Object>) parameterItems.get("items")).get("additionalProperties"));
-        assertEquals(false, preferredRangeItems.get("additionalProperties"));
+        assertEquals(Set.of("traceId", "confirmed", "suggestionId", "impactToken"),
+                definition.parameters().properties.keySet());
     }
 
     @Test
-    void preview_rejectsUnknownAndMalformedSuggestionFieldsBeforeAnyMutation() throws Exception {
+    void preview_rejectsModelSuppliedProposalBodiesBeforeAnyMutation() throws Exception {
         FixSuggestionDto suggestion = signedPublicRemovalSuggestion();
         ObjectNode args = previewArgs(suggestion);
-        ((ObjectNode) args.path("suggestion")).put("removedRuleIndices", "0");
+        args.set("suggestion", objectMapper.valueToTree(suggestion));
 
         JsonNode result = objectMapper.readTree(tool.execute(args.toString()));
 
@@ -188,26 +190,25 @@ class ApplyFixToolTest {
     }
 
     @Test
-    void preview_rejectsAPreexistingViolationMissingAFieldTheSchemaRequires() throws Exception {
-        // The schema marks every field required; accepting a partial entry meant the model could drop
-        // the formula the user needs to recognise which specification stays violated.
-        ObjectNode args = previewArgs(signedPublicRemovalSuggestion());
-        ((ObjectNode) args.path("suggestion")).putArray("preexistingViolations")
-                .addObject().put("specId", "s2").put("templateId", "1");
+    void preview_rejectsMalformedAndOutOfRangeReferences() throws Exception {
+        for (String reference : List.of("521", "521:0", "521:01", "521:1:2",
+                "9223372036854775808:1", "521:2147483648")) {
+            ObjectNode args = objectMapper.createObjectNode();
+            args.put("traceId", 31);
+            args.put("suggestionId", reference);
 
-        JsonNode result = objectMapper.readTree(tool.execute(args.toString()));
+            JsonNode result = objectMapper.readTree(tool.execute(args.toString()));
 
-        assertEquals("VALIDATION_ERROR", result.path("errorCode").asText());
-        assertTrue(result.path("error").asText().contains("preexistingViolations[0].formulaPreview"),
-                result.path("error").asText());
+            assertEquals("VALIDATION_ERROR", result.path("errorCode").asText(), reference);
+        }
         verifyNoInteractions(fixService);
     }
 
     @Test
     void preview_rejectsTamperedSuggestionUnderItsOriginalSignature() throws Exception {
         FixSuggestionDto suggestion = signedPublicRemovalSuggestion();
+        suggestion.setDescription("Remove a different automation");
         ObjectNode args = previewArgs(suggestion);
-        ((ObjectNode) args.path("suggestion")).put("description", "Remove a different automation");
 
         JsonNode result = objectMapper.readTree(tool.execute(args.toString()));
 
@@ -226,7 +227,8 @@ class ApplyFixToolTest {
                 new ObjectMapper(), jwtConfig);
         AiDestructiveActionGuard localGuard = new AiDestructiveActionGuard(failingMapper);
         ApplyFixTool failingTool = new ApplyFixTool(
-                fixService, localTokenService, failingMapper, localGuard, chatExecutionConfig);
+                fixService, localTokenService, failingMapper, localGuard, chatExecutionConfig,
+                suggestionService);
         FixSuggestionDto serverSuggestion = removalSuggestion();
         String token = localTokenService.issue(7L, 31L, serverSuggestion, null);
         FixSuggestionDto publicSuggestion = objectMapper.readValue(
@@ -289,19 +291,25 @@ class ApplyFixToolTest {
         FixSuggestionDto publicSuggestion = objectMapper.readValue(
                 objectMapper.writeValueAsBytes(serverSuggestion), FixSuggestionDto.class);
         publicSuggestion.setSuggestionToken(signedToken);
-        ObjectNode exactArgs = previewArgs(publicSuggestion);
-        exactArgs.putArray("preferredRangeSelections").addObject()
-                .put("targetId", targetId).put("lower", 10).put("upper", 20);
+        ObjectNode exactArgs = previewArgs(publicSuggestion,
+                List.of(new PreferredRangeSelection(targetId, 10, 20)));
 
         JsonNode exact = objectMapper.readTree(tool.execute(exactArgs.toString()));
 
         assertEquals("preview", exact.path("operation").asText());
-        ObjectNode changedArgs = previewArgs(publicSuggestion);
-        changedArgs.putArray("preferredRangeSelections").addObject()
-                .put("targetId", targetId).put("lower", 11).put("upper", 20);
+        when(fixService.applyFix(any(), any(), any(), any(), any(), any()))
+                .thenReturn(appliedResult(publicSuggestion, 1, 1));
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", exact.path("impactToken").asText());
+        JsonNode applied = objectMapper.readTree(tool.execute("""
+                {"traceId":31,"confirmed":true,"impactToken":"%s"}
+                """.formatted(exact.path("impactToken").asText())));
+        assertEquals("applied", applied.path("operation").asText());
+        verify(fixService).applyFix(7L, 31L, "parameter", publicSuggestion, signedToken,
+                Map.of(targetId, new PreferredRange(10, 20)));
+        ObjectNode changedArgs = previewArgs(publicSuggestion,
+                List.of(new PreferredRangeSelection(targetId, 11, 20)));
         JsonNode changed = objectMapper.readTree(tool.execute(changedArgs.toString()));
         assertEquals("BAD_REQUEST", changed.path("errorCode").asText());
-        verifyNoInteractions(fixService);
     }
 
     @Test
@@ -309,7 +317,7 @@ class ApplyFixToolTest {
         FixSuggestionDto suggestion = signedPublicRemovalSuggestion();
         JsonNode preview = objectMapper.readTree(tool.execute(previewArgs(suggestion).toString()));
         String realToken = preview.path("impactToken").asText();
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", realToken);
 
         JsonNode mismatch = objectMapper.readTree(tool.execute(
                 "{\"traceId\":31,\"confirmed\":true,\"impactToken\":\"wrong-token\"}"));
@@ -338,8 +346,9 @@ class ApplyFixToolTest {
                         null,
                         null));
         ApplyFixTool expiredTool = new ApplyFixTool(
-                fixService, tokenService, objectMapper, expiredGuard, chatExecutionConfig);
-        UserContextHolder.setDestructiveActionConfirmed(true);
+                fixService, tokenService, objectMapper, expiredGuard, chatExecutionConfig,
+                suggestionService);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", "expired-token");
 
         JsonNode result = objectMapper.readTree(expiredTool.execute(
                 "{\"traceId\":31,\"confirmed\":true,\"impactToken\":\"expired-token\"}"));
@@ -358,7 +367,8 @@ class ApplyFixToolTest {
         FixSuggestionTokenService localTokenService = new FixSuggestionTokenService(new ObjectMapper(), jwtConfig);
         AiDestructiveActionGuard localGuard = new AiDestructiveActionGuard(failingMapper);
         ApplyFixTool failingTool = new ApplyFixTool(
-                fixService, localTokenService, failingMapper, localGuard, chatExecutionConfig);
+                fixService, localTokenService, failingMapper, localGuard, chatExecutionConfig,
+                suggestionService);
         FixSuggestionDto serverSuggestion = removalSuggestion();
         String token = localTokenService.issue(7L, 31L, serverSuggestion, null);
         FixSuggestionDto publicSuggestion = new ObjectMapper().readValue(
@@ -371,7 +381,7 @@ class ApplyFixToolTest {
                 .thenReturn(appliedResult(publicSuggestion, 2, 1));
         doThrow(new JsonProcessingException("forced response failure") { })
                 .when(failingMapper).writeValueAsString(any(Object.class));
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", preview.path("impactToken").asText());
 
         JsonNode result = objectMapper.readTree(failingTool.execute("""
                 {"traceId":31,"confirmed":true,"impactToken":"%s"}
@@ -388,7 +398,7 @@ class ApplyFixToolTest {
         FixSuggestionDto suggestion = signedPublicRemovalSuggestion();
         JsonNode preview = objectMapper.readTree(tool.execute(previewArgs(suggestion).toString()));
         when(fixService.applyFix(any(), any(), any(), any(), any(), any())).thenReturn(null);
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", preview.path("impactToken").asText());
 
         JsonNode result = objectMapper.readTree(tool.execute("""
                 {"traceId":31,"confirmed":true,"impactToken":"%s"}
@@ -406,7 +416,7 @@ class ApplyFixToolTest {
         JsonNode preview = objectMapper.readTree(tool.execute(previewArgs(suggestion).toString()));
         when(fixService.applyFix(any(), any(), any(), any(), any(), any()))
                 .thenThrow(new IllegalStateException("commit acknowledgement lost"));
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", preview.path("impactToken").asText());
 
         JsonNode result = objectMapper.readTree(tool.execute("""
                 {"traceId":31,"confirmed":true,"impactToken":"%s"}
@@ -423,7 +433,7 @@ class ApplyFixToolTest {
         JsonNode preview = objectMapper.readTree(tool.execute(previewArgs(suggestion).toString()));
         when(fixService.applyFix(any(), any(), any(), any(), any(), any()))
                 .thenThrow(new ServiceUnavailableException("lease lost during settlement"));
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", preview.path("impactToken").asText());
 
         JsonNode result = objectMapper.readTree(tool.execute("""
                 {"traceId":31,"confirmed":true,"impactToken":"%s"}
@@ -439,7 +449,7 @@ class ApplyFixToolTest {
         JsonNode preview = objectMapper.readTree(tool.execute(previewArgs(suggestion).toString()));
         when(fixService.applyFix(any(), any(), any(), any(), any(), any()))
                 .thenThrow(new FixApplyPreflightUnavailableException("template snapshot unavailable"));
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", preview.path("impactToken").asText());
 
         JsonNode result = objectMapper.readTree(tool.execute("""
                 {"traceId":31,"confirmed":true,"impactToken":"%s"}
@@ -458,7 +468,7 @@ class ApplyFixToolTest {
         differentSuggestion.setDescription("Remove an unrelated automation");
         when(fixService.applyFix(any(), any(), any(), any(), any(), any()))
                 .thenReturn(appliedResult(differentSuggestion, 2, 1));
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", preview.path("impactToken").asText());
 
         JsonNode result = objectMapper.readTree(tool.execute("""
                 {"traceId":31,"confirmed":true,"impactToken":"%s"}
@@ -475,6 +485,98 @@ class ApplyFixToolTest {
                 "{\"traceId\":31,\"findingId\":9,\"confirmed\":false}"));
 
         assertEquals("VALIDATION_ERROR", result.path("errorCode").asText());
+        verifyNoInteractions(fixService);
+    }
+
+    @Test
+    void previewUsesThePersistedProposalSelectedByTheModelFacingReference() throws Exception {
+        FixSuggestionDto suggestion = signedPublicRemovalSuggestion();
+        ObjectNode args = previewArgs(suggestion);
+        ChatMessagePo stored = messageRepository.findByIdAndSessionIdAndRole(
+                521L, "apply-fix-session", "tool").orElseThrow();
+        JsonNode projection = objectMapper.readTree(messageCodec.toMessage(stored).content());
+        args.put("suggestionId", projection.path("suggestions").get(0).path("suggestionId").asText());
+        assertFalse(projection.path("suggestions").get(0).has("suggestionToken"));
+        String canonicalBefore = stored.getContent();
+
+        JsonNode preview = objectMapper.readTree(tool.execute(args.toString()));
+
+        assertEquals("preview", preview.path("operation").asText());
+        assertEquals(suggestion.getDescription(), preview.path("suggestion").path("description").asText());
+        assertEquals(canonicalBefore, stored.getContent());
+        assertFalse(preview.toString().contains(suggestion.getSuggestionToken()));
+        verifyNoInteractions(fixService);
+    }
+
+    @Test
+    void previewRejectsReferencesFromAnotherOwnerOrConversation() throws Exception {
+        ObjectNode args = previewArgs(signedPublicRemovalSuggestion());
+        UserContextHolder.setUserId(8L);
+        assertEquals("BAD_REQUEST", objectMapper.readTree(tool.execute(args.toString()))
+                .path("errorCode").asText());
+        UserContextHolder.setUserId(7L);
+        UserContextHolder.setChatSessionId("another-conversation");
+        assertEquals("BAD_REQUEST", objectMapper.readTree(tool.execute(args.toString()))
+                .path("errorCode").asText());
+        verifyNoInteractions(fixService);
+    }
+
+    @Test
+    void previewRejectsAnUnknownOptionAndAMismatchedTraceWithoutSelectingAnotherProposal() throws Exception {
+        ObjectNode args = previewArgs(signedPublicRemovalSuggestion());
+        args.put("suggestionId", "521:2");
+        assertEquals("BAD_REQUEST", objectMapper.readTree(tool.execute(args.toString()))
+                .path("errorCode").asText());
+        args.put("suggestionId", "521:1");
+        args.put("traceId", 32);
+        assertEquals("BAD_REQUEST", objectMapper.readTree(tool.execute(args.toString()))
+                .path("errorCode").asText());
+        verifyNoInteractions(fixService);
+    }
+
+    @Test
+    void selectingTheSecondOptionPreviewsAndAppliesOnlyThatImmutableProposal() throws Exception {
+        FixSuggestionDto first = signedPublicRemovalSuggestion();
+        ObjectNode args = previewArgs(first);
+        FixSuggestionDto second = removalSuggestion();
+        second.setDescription("Remove the second conflicting automation");
+        second.setRemovedRuleDescriptions(List.of("A different conflicting rule"));
+        String token = tokenService.issue(7L, 31L, second, null);
+        second = objectMapper.readValue(objectMapper.writeValueAsBytes(second), FixSuggestionDto.class);
+        second.setSuggestionToken(token);
+        ChatMessagePo stored = messageRepository.findByIdAndSessionIdAndRole(
+                521L, "apply-fix-session", "tool").orElseThrow();
+        stored.setContent(messageCodec.serializeToolResult("fix-call-521",
+                objectMapper.writeValueAsString(Map.of("traceId", 31, "suggestions", List.of(first, second),
+                        "preferredRangeSelections", List.of()))));
+        args.put("suggestionId", "521:2");
+
+        JsonNode preview = objectMapper.readTree(tool.execute(args.toString()));
+        assertEquals(second.getDescription(), preview.path("suggestion").path("description").asText());
+        when(fixService.applyFix(any(), any(), any(), any(), any(), any()))
+                .thenReturn(appliedResult(second, 2, 1));
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", preview.path("impactToken").asText());
+        JsonNode applied = objectMapper.readTree(tool.execute("""
+                {"traceId":31,"confirmed":true,"impactToken":"%s"}
+                """.formatted(preview.path("impactToken").asText())));
+
+        assertEquals("applied", applied.path("operation").asText());
+        verify(fixService).applyFix(7L, 31L, "remove", second, token, null);
+    }
+
+    @Test
+    void aReferenceToAnUnrelatedToolResultIsAnInvalidOptionRatherThanAServerFailure() throws Exception {
+        ObjectNode args = previewArgs(signedPublicRemovalSuggestion());
+        ChatMessagePo stored = messageRepository.findByIdAndSessionIdAndRole(
+                521L, "apply-fix-session", "tool").orElseThrow();
+        for (String content : List.of("a read-only tool response", "null", "[]")) {
+            stored.setContent(messageCodec.serializeToolResult("other-tool", content));
+
+            JsonNode result = objectMapper.readTree(tool.execute(args.toString()));
+
+            assertEquals("BAD_REQUEST", result.path("errorCode").asText(), content);
+            assertEquals(400, result.path("status").asInt());
+        }
         verifyNoInteractions(fixService);
     }
 
@@ -502,7 +604,7 @@ class ApplyFixToolTest {
                 .toList();
         return FixApplyResultDto.builder()
                 .applied(true)
-                .strategy("remove")
+                .strategy(suggestion.getStrategy())
                 .verificationEvidenceReused(true)
                 .appliedSuggestion(suggestion)
                 .previousRuleCount(previous)
@@ -512,11 +614,26 @@ class ApplyFixToolTest {
                 .build();
     }
 
-    private ObjectNode previewArgs(FixSuggestionDto suggestion) {
+    private ObjectNode previewArgs(FixSuggestionDto suggestion) throws Exception {
+        return previewArgs(suggestion, List.of());
+    }
+
+    private ObjectNode previewArgs(FixSuggestionDto suggestion,
+                                   List<PreferredRangeSelection> selections) throws Exception {
+        long id = nextMessageId++;
+        String canonical = objectMapper.writeValueAsString(Map.of("traceId", 31,
+                "suggestions", List.of(suggestion), "preferredRangeSelections", selections));
+        ChatMessagePo stored = new ChatMessagePo();
+        stored.setId(id);
+        stored.setSessionId("apply-fix-session");
+        stored.setRole("tool");
+        stored.setContent(messageCodec.serializeToolResult("fix-call-" + id, canonical));
+        lenient().when(messageRepository.findByIdAndSessionIdAndRole(id, "apply-fix-session", "tool"))
+                .thenReturn(Optional.of(stored));
         ObjectNode args = objectMapper.createObjectNode();
         args.put("traceId", 31);
         args.put("confirmed", false);
-        args.set("suggestion", objectMapper.valueToTree(suggestion));
+        args.put("suggestionId", id + ":1");
         return args;
     }
 }

@@ -37,6 +37,10 @@ public class ParameterizationConfig {
     @Builder.Default
     private Map<String, String> conditionLambdas = new LinkedHashMap<>();
 
+    /** Pinned lambda values for a deterministic condition probe; empty for the joint search. */
+    @Builder.Default
+    private Map<String, Boolean> fixedConditionLambdas = new LinkedHashMap<>();
+
     /**
      * §5.2: Free values for candidate conditions.
      * Key = "r{ruleIdx}_c{condIdx}", value = the candidate value domain and FROZENVAR name.

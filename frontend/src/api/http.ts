@@ -28,7 +28,7 @@ export const isBoardMutationRequest = (config: { url?: string; method?: string }
   // `edits/availability` is a GET and already excluded above; `edits/undo|redo` change rules and
   // specifications when they apply, so other tabs must be invalidated exactly as for a direct
   // mutation. The response interceptor skips the no-op case (`applied: false`).
-  return /^\/?board\/(nodes|environment|specs|rules|templates|batch|edits)(?:\/|$)/.test(path)
+  return /^\/?board\/(nodes|environment|specs|rules|templates|scene|batch|edits)(?:\/|$)/.test(path)
     || /^\/?verify\/traces\/[^/]+\/fix\/apply$/.test(path)
 }
 
@@ -88,9 +88,10 @@ api.interceptors.response.use(
     if (error.response?.status === 401) {
       const requestConfig = (error.config || error.response?.config) as BoardAwareRequestConfig | undefined
       const requestToken = requestConfig?.authTokenAtRequest ?? null
-      const { logoutIfTokenMatches } = useAuth();
+      const { logoutIfTokenMatches, isPasswordChangePending } = useAuth();
+      const reason = isPasswordChangePending(requestToken) ? 'password-change-unknown' : 'session-expired';
       if (logoutIfTokenMatches(requestToken)) {
-        void redirectToLogin();
+        void redirectToLogin({ reason });
       }
     }
     return Promise.reject(error);

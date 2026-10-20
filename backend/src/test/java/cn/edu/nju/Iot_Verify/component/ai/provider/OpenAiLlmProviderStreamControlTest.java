@@ -9,27 +9,21 @@ import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
 import cn.edu.nju.Iot_Verify.testutil.LogCapture;
 import com.openai.client.OpenAIClient;
 import com.openai.client.OpenAIClientAsync;
-import com.openai.core.http.StreamResponse;
+import com.openai.core.http.AsyncStreamResponse;
 import com.openai.errors.OpenAIInvalidDataException;
 import com.openai.models.chat.completions.ChatCompletionChunk;
-import com.openai.models.chat.completions.ChatCompletion;
 import com.openai.models.chat.completions.ChatCompletionCreateParams;
-import com.openai.services.blocking.ChatService;
-import com.openai.services.blocking.chat.ChatCompletionService;
 import com.openai.services.async.ChatServiceAsync;
 import com.openai.services.async.chat.ChatCompletionServiceAsync;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.List;
-import java.util.Spliterators;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.StreamSupport;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -56,78 +50,71 @@ class OpenAiLlmProviderStreamControlTest {
     private static final long COORDINATION_TIMEOUT_SECONDS = 10;
 
     @Test
+    void chat_failedPlanningRequest_logsCauseTypesWithoutUpstreamMessages() {
+        String sensitive = "private-upstream-response-never-log";
+        RuntimeException failure = new RuntimeException(sensitive, new IOException(sensitive));
+        OpenAIClient client = mock(OpenAIClient.class);
+        OpenAIClientAsync asyncClient = mock(OpenAIClientAsync.class);
+        ChatServiceAsync chatService = mock(ChatServiceAsync.class);
+        ChatCompletionServiceAsync completions = mock(ChatCompletionServiceAsync.class);
+        when(client.async()).thenReturn(asyncClient);
+        when(asyncClient.chat()).thenReturn(chatService);
+        when(chatService.completions()).thenReturn(completions);
+        AsyncStreamResponse<ChatCompletionChunk> response = mock(AsyncStreamResponse.class);
+        when(completions.createStreaming(any(ChatCompletionCreateParams.class))).thenReturn(response);
+        when(response.onCompleteFuture()).thenReturn(CompletableFuture.failedFuture(failure));
+
+        try (LogCapture logs = LogCapture.forClass(OpenAiLlmProvider.class)) {
+            ServiceUnavailableException error = assertThrows(ServiceUnavailableException.class,
+                    () -> provider(client).chat(request(), new LlmRequestControl()));
+            org.junit.jupiter.api.Assertions.assertSame(failure, error.getCause());
+            org.junit.jupiter.api.Assertions.assertTrue(logs.messages().stream().anyMatch(message ->
+                    message.contains("java.lang.RuntimeException -> java.io.IOException")));
+            assertFalse(logs.messages().stream().anyMatch(message -> message.contains(sensitive)));
+        }
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     void streamChat_withStopSignal_shouldStopConsumingFurtherChunks() {
-        OpenAIClient client = mock(OpenAIClient.class);
-        ChatService chatService = mock(ChatService.class);
-        ChatCompletionService completions = mock(ChatCompletionService.class);
-        StreamResponse<ChatCompletionChunk> streamResponse = mock(StreamResponse.class);
-
-        when(client.chat()).thenReturn(chatService);
-        when(chatService.completions()).thenReturn(completions);
-        when(completions.createStreaming(any(ChatCompletionCreateParams.class))).thenReturn(streamResponse);
-        when(streamResponse.stream()).thenReturn(List.of(chunk("A"), chunk("B"), chunk("C")).stream());
-
-        LlmConfig config = new LlmConfig();
-        config.setModel("mock-model");
-        OpenAiLlmProvider provider = new OpenAiLlmProvider(config);
-        ReflectionTestUtils.setField(provider, "client", client);
-
+        AsyncStreamResponse<ChatCompletionChunk> response = mock(AsyncStreamResponse.class);
+        when(response.onCompleteFuture()).thenReturn(CompletableFuture.completedFuture(null));
+        doAnswer(invocation -> {
+            AsyncStreamResponse.Handler<ChatCompletionChunk> handler = invocation.getArgument(0);
+            List.of(chunk("A"), chunk("B"), chunk("C")).forEach(handler::onNext);
+            return response;
+        }).when(response).subscribe(any(AsyncStreamResponse.Handler.class));
         List<String> outputs = new ArrayList<>();
-        AtomicInteger stopChecks = new AtomicInteger(0);
-        LlmChatRequest request = LlmChatRequest.builder()
-                .messages(List.of(LlmMessage.user("hello")))
-                .build();
-
-        provider.streamChat(request, outputs::add, () -> stopChecks.incrementAndGet() > 1);
-
-        // stop returns true on the 2nd check → only the first chunk is emitted
+        provider(asyncClient(response)).streamChat(request(), outputs::add, () -> !outputs.isEmpty());
         assertEquals(List.of("A"), outputs);
+        verify(response, atLeastOnce()).close();
     }
 
     @Test
     @SuppressWarnings("unchecked")
     void streamChat_whenSdkParsingFails_shouldPropagateServiceUnavailable() {
-        OpenAIClient client = mock(OpenAIClient.class);
-        ChatService chatService = mock(ChatService.class);
-        ChatCompletionService completions = mock(ChatCompletionService.class);
-        StreamResponse<ChatCompletionChunk> streamResponse = mock(StreamResponse.class);
-
-        when(client.chat()).thenReturn(chatService);
-        when(chatService.completions()).thenReturn(completions);
-        when(completions.createStreaming(any(ChatCompletionCreateParams.class))).thenReturn(streamResponse);
-        when(streamResponse.stream()).thenThrow(new OpenAIInvalidDataException("Invalid UTF-8 middle byte 0xe3"));
-
-        LlmConfig config = new LlmConfig();
-        config.setModel("mock-model");
-        OpenAiLlmProvider provider = new OpenAiLlmProvider(config);
-        ReflectionTestUtils.setField(provider, "client", client);
-
-        LlmChatRequest request = LlmChatRequest.builder()
-                .messages(List.of(LlmMessage.user("hello")))
-                .build();
-
+        AsyncStreamResponse<ChatCompletionChunk> response = mock(AsyncStreamResponse.class);
+        when(response.onCompleteFuture()).thenReturn(CompletableFuture.failedFuture(
+                new OpenAIInvalidDataException("Invalid UTF-8 middle byte 0xe3")));
         assertThrows(ServiceUnavailableException.class,
-                () -> provider.streamChat(request, ignored -> { }, () -> false));
+                () -> provider(asyncClient(response)).streamChat(request(), ignored -> { }, () -> false));
     }
 
     @Test
     @SuppressWarnings("unchecked")
     void streamChat_cancelledFailure_doesNotLogUpstreamExceptionMessage() {
         String sensitive = "private-upstream-response-never-log";
-        OpenAIClient client = mock(OpenAIClient.class);
-        ChatService chatService = mock(ChatService.class);
-        ChatCompletionService completions = mock(ChatCompletionService.class);
-        StreamResponse<ChatCompletionChunk> streamResponse = mock(StreamResponse.class);
-
-        when(client.chat()).thenReturn(chatService);
-        when(chatService.completions()).thenReturn(completions);
-        when(completions.createStreaming(any(ChatCompletionCreateParams.class))).thenReturn(streamResponse);
-        when(streamResponse.stream()).thenThrow(new OpenAIInvalidDataException(sensitive));
-
+        AsyncStreamResponse<ChatCompletionChunk> response = mock(AsyncStreamResponse.class);
+        LlmRequestControl control = new LlmRequestControl();
+        CompletableFuture<Void> failure = new CompletableFuture<>();
+        when(response.onCompleteFuture()).thenReturn(failure);
+        doAnswer(ignored -> {
+            control.cancel();
+            failure.completeExceptionally(new OpenAIInvalidDataException(sensitive));
+            return response;
+        }).when(response).subscribe(any(AsyncStreamResponse.Handler.class));
         try (LogCapture logs = LogCapture.forClass(OpenAiLlmProvider.class)) {
-            provider(client).streamChat(request(), ignored -> { }, () -> true);
-
+            provider(asyncClient(response)).streamChat(request(), ignored -> { }, () -> false, control);
             assertFalse(logs.messages().stream().anyMatch(message -> message.contains(sensitive)));
         }
     }
@@ -135,51 +122,33 @@ class OpenAiLlmProviderStreamControlTest {
     @Test
     @SuppressWarnings("unchecked")
     void streamChat_explicitCancellation_shouldCloseBlockedUpstreamStream() throws Exception {
-        OpenAIClient client = mock(OpenAIClient.class);
-        ChatService chatService = mock(ChatService.class);
-        ChatCompletionService completions = mock(ChatCompletionService.class);
-        StreamResponse<ChatCompletionChunk> streamResponse = mock(StreamResponse.class);
-        CountDownLatch iteratorBlocked = new CountDownLatch(1);
-        CountDownLatch streamClosed = new CountDownLatch(1);
-        Iterator<ChatCompletionChunk> blockingIterator = new Iterator<>() {
-            @Override
-            public boolean hasNext() {
-                iteratorBlocked.countDown();
-                try {
-                    streamClosed.await(COORDINATION_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-                return false;
-            }
-
-            @Override
-            public ChatCompletionChunk next() {
-                throw new java.util.NoSuchElementException();
-            }
-        };
-
-        when(client.chat()).thenReturn(chatService);
-        when(chatService.completions()).thenReturn(completions);
-        when(completions.createStreaming(any(ChatCompletionCreateParams.class))).thenReturn(streamResponse);
-        when(streamResponse.stream()).thenReturn(StreamSupport.stream(
-                Spliterators.spliteratorUnknownSize(blockingIterator, 0), false));
+        AsyncStreamResponse<ChatCompletionChunk> response = mock(AsyncStreamResponse.class);
+        CountDownLatch waiting = new CountDownLatch(1);
+        CompletableFuture<Void> pending = new CompletableFuture<>();
+        when(response.onCompleteFuture()).thenAnswer(ignored -> {
+            waiting.countDown();
+            return pending;
+        });
         doAnswer(ignored -> {
-            streamClosed.countDown();
+            pending.complete(null);
             return null;
-        }).when(streamResponse).close();
+        }).when(response).close();
 
-        OpenAiLlmProvider provider = provider(client);
+        OpenAiLlmProvider provider = provider(asyncClient(response));
         LlmRequestControl control = new LlmRequestControl();
         LlmChatRequest request = request();
         CompletableFuture<Void> call = CompletableFuture.runAsync(() ->
                 provider.streamChat(request, ignored -> { }, () -> false, control));
 
-        org.junit.jupiter.api.Assertions.assertTrue(iteratorBlocked.await(COORDINATION_TIMEOUT_SECONDS, TimeUnit.SECONDS));
-        control.cancel();
-        call.get(COORDINATION_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-
-        verify(streamResponse, atLeastOnce()).close();
+        try {
+            org.junit.jupiter.api.Assertions.assertTrue(waiting.await(COORDINATION_TIMEOUT_SECONDS, TimeUnit.SECONDS));
+            control.cancel();
+            call.get(COORDINATION_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            verify(response, atLeastOnce()).close();
+        } finally {
+            control.cancel();
+            pending.complete(null);
+        }
     }
 
     @Test
@@ -188,16 +157,22 @@ class OpenAiLlmProviderStreamControlTest {
         OpenAIClientAsync asyncClient = mock(OpenAIClientAsync.class);
         ChatServiceAsync chatService = mock(ChatServiceAsync.class);
         ChatCompletionServiceAsync completions = mock(ChatCompletionServiceAsync.class);
-        CompletableFuture<ChatCompletion> pending = new CompletableFuture<>();
+        CompletableFuture<Void> pending = new CompletableFuture<>();
+        AsyncStreamResponse<ChatCompletionChunk> response = mock(AsyncStreamResponse.class);
         CountDownLatch requestStarted = new CountDownLatch(1);
 
         when(client.async()).thenReturn(asyncClient);
         when(asyncClient.chat()).thenReturn(chatService);
         when(chatService.completions()).thenReturn(completions);
-        when(completions.create(any(ChatCompletionCreateParams.class))).thenAnswer(ignored -> {
+        when(completions.createStreaming(any(ChatCompletionCreateParams.class))).thenAnswer(ignored -> {
             requestStarted.countDown();
-            return pending;
+            return response;
         });
+        when(response.onCompleteFuture()).thenReturn(pending);
+        doAnswer(ignored -> {
+            pending.complete(null);
+            return null;
+        }).when(response).close();
 
         OpenAiLlmProvider provider = provider(client);
         LlmRequestControl control = new LlmRequestControl();
@@ -206,17 +181,77 @@ class OpenAiLlmProviderStreamControlTest {
 
         org.junit.jupiter.api.Assertions.assertTrue(requestStarted.await(COORDINATION_TIMEOUT_SECONDS, TimeUnit.SECONDS));
         control.cancel();
-        LlmChatResponse response = call.get(COORDINATION_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        LlmChatResponse result = call.get(COORDINATION_TIMEOUT_SECONDS, TimeUnit.SECONDS);
 
-        org.junit.jupiter.api.Assertions.assertTrue(pending.isCancelled());
-        org.junit.jupiter.api.Assertions.assertFalse(response.hasToolCalls());
-        assertEquals("", response.text());
+        verify(response, atLeastOnce()).close();
+        org.junit.jupiter.api.Assertions.assertFalse(result.hasToolCalls());
+        assertEquals("", result.text());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void http2ResetUsesTheAlternativeOnlyForTheSameTurnContinuation() {
+        AsyncStreamResponse<ChatCompletionChunk> failed = mock(AsyncStreamResponse.class);
+        when(failed.onCompleteFuture()).thenReturn(CompletableFuture.failedFuture(new RuntimeException(
+                new IOException(new okhttp3.internal.http2.StreamResetException(okhttp3.internal.http2.ErrorCode.CANCEL)))));
+        OpenAIClient primary = asyncClient(failed);
+        AsyncStreamResponse<ChatCompletionChunk> completed = mock(AsyncStreamResponse.class);
+        doAnswer(invocation -> {
+            AsyncStreamResponse.Handler<ChatCompletionChunk> handler = invocation.getArgument(0);
+            handler.onNext(ChatCompletionChunk.builder().id("finished").created(0L).model("mock-model")
+                    .addChoice(ChatCompletionChunk.Choice.builder().index(0L)
+                            .delta(ChatCompletionChunk.Choice.Delta.builder().content("Complete answer.").build())
+                            .finishReason(ChatCompletionChunk.Choice.FinishReason.STOP).build()).build());
+            return completed;
+        }).when(completed).subscribe(any(AsyncStreamResponse.Handler.class));
+        when(completed.onCompleteFuture()).thenReturn(CompletableFuture.completedFuture(null));
+        OpenAIClient alternative = asyncClient(completed);
+        OpenAiLlmProvider provider = provider(primary);
+        ReflectionTestUtils.setField(provider, "alternativeClient", alternative);
+        LlmRequestControl control = new LlmRequestControl();
+
+        assertThrows(cn.edu.nju.Iot_Verify.component.ai.model.LlmStreamInterruptedException.class,
+                () -> provider.chat(request(), control));
+        org.junit.jupiter.api.Assertions.assertTrue(control.isAlternativeTransportRequested());
+        assertFalse(control.isCancellationRequested());
+        assertEquals("Complete answer.", provider.chat(request(), control).text());
+        LlmRequestControl nextTurn = new LlmRequestControl();
+        assertFalse(nextTurn.isAlternativeTransportRequested());
+        assertThrows(cn.edu.nju.Iot_Verify.component.ai.model.LlmStreamInterruptedException.class,
+                () -> provider.chat(request(), nextTurn));
+        verify(primary, org.mockito.Mockito.times(2)).async();
+        verify(alternative).async();
+    }
+
+    @Test
+    void ordinaryIoFailuresDoNotSilentlyChangeProtocol() {
+        AsyncStreamResponse<ChatCompletionChunk> failed = mock(AsyncStreamResponse.class);
+        when(failed.onCompleteFuture()).thenReturn(CompletableFuture.failedFuture(new IOException("network failure")));
+        LlmRequestControl control = new LlmRequestControl();
+        assertThrows(cn.edu.nju.Iot_Verify.component.ai.model.LlmStreamInterruptedException.class,
+                () -> provider(asyncClient(failed)).chat(request(), control));
+        assertFalse(control.isAlternativeTransportRequested());
+    }
+
+    private static OpenAIClient asyncClient(AsyncStreamResponse<ChatCompletionChunk> response) {
+        OpenAIClient client = mock(OpenAIClient.class);
+        when(client.withOptions(any())).thenReturn(client);
+        OpenAIClientAsync asyncClient = mock(OpenAIClientAsync.class);
+        ChatServiceAsync chatService = mock(ChatServiceAsync.class);
+        ChatCompletionServiceAsync completions = mock(ChatCompletionServiceAsync.class);
+        when(client.async()).thenReturn(asyncClient);
+        when(asyncClient.chat()).thenReturn(chatService);
+        when(chatService.completions()).thenReturn(completions);
+        when(completions.createStreaming(any(ChatCompletionCreateParams.class))).thenReturn(response);
+        return client;
     }
 
     private static OpenAiLlmProvider provider(OpenAIClient client) {
         LlmConfig config = new LlmConfig();
         config.setModel("mock-model");
         OpenAiLlmProvider provider = new OpenAiLlmProvider(config);
+        when(client.withOptions(any())).thenReturn(client);
+        ReflectionTestUtils.setField(provider, "transport", new okhttp3.OkHttpClient());
         ReflectionTestUtils.setField(provider, "client", client);
         return provider;
     }

@@ -1,9 +1,12 @@
 package cn.edu.nju.Iot_Verify.component.aitool;
 
+import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
 import cn.edu.nju.Iot_Verify.dto.model.AttackPointDto;
 import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
+import cn.edu.nju.Iot_Verify.exception.BadRequestException;
 import cn.edu.nju.Iot_Verify.security.UserContextHolder;
 import cn.edu.nju.Iot_Verify.util.DeviceNameNormalizer;
+import cn.edu.nju.Iot_Verify.util.RecommendationInputs;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -114,6 +117,15 @@ public abstract class AbstractAiTool implements AiTool {
 
     // ── 共用 helper ─────────────────────────────────────────────────
 
+    protected final int taskStatusWaitMsArg(JsonNode args) throws ArgValidationException {
+        if (args.has("waitMs") && args.get("waitMs").isNull()) {
+            throw new ArgValidationException(errorJson("waitMs must be an integer when provided.",
+                    "VALIDATION_ERROR", 400));
+        }
+        return intArgInRange(args, "waitMs", AiTaskStatusWaiter.MAX_WAIT_MS, 0,
+                AiTaskStatusWaiter.MAX_WAIT_MS);
+    }
+
     protected final int intArgInRange(JsonNode args,
                                       String field,
                                       int defaultValue,
@@ -217,13 +229,15 @@ public abstract class AbstractAiTool implements AiTool {
                 "type", "array",
                 "description", "Required only for attackMode exact; must be omitted or empty for " + forbidden
                         + ". Device ids use the canonical ids returned by board_overview and are normalized at "
-                        + "the model boundary; automation links use persisted rule ids.",
+                        + "the model boundary; automation links use persisted rule ids, never a rule's "
+                        + "display order, ruleIndex, or priority.",
                 "items", Map.of(
                         "type", "object",
                         "properties", Map.of(
                                 "kind", Map.of("type", "string", "enum", List.of("device", "automation_link")),
                                 "deviceId", Map.of("type", "string"),
-                                "ruleId", Map.of("type", "integer")),
+                                "ruleId", Map.of("type", "integer", "description",
+                                        "Exact persisted id of the selected rule from board_overview or list_rules, not its order/index.")),
                         "required", List.of("kind"),
                         "additionalProperties", false));
     }
@@ -326,7 +340,7 @@ public abstract class AbstractAiTool implements AiTool {
             String kind = optionalEnumArg(pointNode, "kind", "",
                     Set.of("device", "automation_link"));
             if ("device".equals(kind)) {
-                String deviceId = requiredTextField(pointNode, "deviceId", path);
+                String deviceId = requiredDeviceIdField(pointNode, "deviceId", path);
                 if (pointNode.hasNonNull("ruleId")) {
                     throw new ArgValidationException(errorJson(
                             path + ".ruleId must be omitted for a device attack point.",
@@ -380,15 +394,12 @@ public abstract class AbstractAiTool implements AiTool {
     }
 
     protected final String languageArg(JsonNode args, String field) throws ArgValidationException {
-        String value = optionalTextArg(args, field, "en", 20).toLowerCase(Locale.ROOT);
-        if ("en".equals(value) || value.startsWith("en-") || value.startsWith("en_")) {
-            return "en";
+        try {
+            return RecommendationInputs.language(optionalTextArg(args, field, "en", 20));
+        } catch (BadRequestException e) {
+            throw new ArgValidationException(errorJson(
+                    field + " must be en or zh-CN.", "VALIDATION_ERROR", 400));
         }
-        if ("zh".equals(value) || value.startsWith("zh-") || value.startsWith("zh_")) {
-            return "zh-CN";
-        }
-        throw new ArgValidationException(errorJson(
-                field + " must be en or zh-CN.", "VALIDATION_ERROR", 400));
     }
 
     /**
@@ -434,6 +445,33 @@ public abstract class AbstractAiTool implements AiTool {
                     "VALIDATION_ERROR", 400));
         }
         return normalized;
+    }
+
+    /** Device identities are validated before lookup or model-name conversion, never repaired by trimming. */
+    protected final String requiredDeviceIdField(JsonNode object,
+                                                 String field,
+                                                 String path) throws ArgValidationException {
+        JsonNode value = object == null ? null : object.get(field);
+        if (value == null || value.isNull() || !value.isTextual()) {
+            throw new ArgValidationException(errorJson(
+                    fieldPath(path, field) + " is required and must be a non-empty string.",
+                    "VALIDATION_ERROR", 400));
+        }
+        String id = value.textValue();
+        if (!id.matches(DeviceNodeDto.ID_PATTERN)) {
+            throw new ArgValidationException(errorJson(
+                    fieldPath(path, field) + " must be a non-empty device ID without leading or trailing whitespace.",
+                    "VALIDATION_ERROR", 400));
+        }
+        return id;
+    }
+
+    protected final String nullableDeviceIdField(JsonNode object,
+                                                 String field,
+                                                 String path) throws ArgValidationException {
+        JsonNode value = object == null ? null : object.get(field);
+        if (value == null || value.isNull()) return null;
+        return requiredDeviceIdField(object, field, path);
     }
 
     /** Returns null for an omitted, explicit-null, or blank optional string; rejects other JSON types. */

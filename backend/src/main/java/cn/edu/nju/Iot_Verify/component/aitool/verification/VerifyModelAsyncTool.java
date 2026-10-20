@@ -2,12 +2,7 @@ package cn.edu.nju.Iot_Verify.component.aitool.verification;
 
 import cn.edu.nju.Iot_Verify.component.ai.model.LlmToolSpec;
 import cn.edu.nju.Iot_Verify.component.aitool.AbstractAiTool;
-import cn.edu.nju.Iot_Verify.util.mapper.BoardDataConverter;
-import cn.edu.nju.Iot_Verify.util.mapper.BoardDataConverter.ModelInputSnapshot;
-import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
 import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
-import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
-import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import cn.edu.nju.Iot_Verify.dto.verification.VerificationRequestDto;
 import cn.edu.nju.Iot_Verify.exception.AsyncTaskDispatchOutcomeUnknownException;
 import cn.edu.nju.Iot_Verify.exception.BaseException;
@@ -30,14 +25,11 @@ import java.util.Set;
 @Component
 public class VerifyModelAsyncTool extends AbstractAiTool {
 
-    private final BoardDataConverter boardDataConverter;
     private final VerificationService verificationService;
 
-    public VerifyModelAsyncTool(BoardDataConverter boardDataConverter,
-                                VerificationService verificationService,
+    public VerifyModelAsyncTool(VerificationService verificationService,
                                 ObjectMapper objectMapper) {
         super(objectMapper);
-        this.boardDataConverter = boardDataConverter;
         this.verificationService = verificationService;
     }
 
@@ -73,28 +65,11 @@ public class VerifyModelAsyncTool extends AbstractAiTool {
             AttackScenarioDto attackScenario = attackScenarioArg(args, true);
             boolean enablePrivacy = booleanArg(args, "enablePrivacy", false);
 
-            ModelInputSnapshot board = boardDataConverter.getModelInputSnapshot(userId);
-            List<DeviceVerificationDto> devices = board.devices();
-            List<RuleDto> rules = board.rules();
-            List<SpecificationDto> specs = board.specifications();
-
-            if (devices.isEmpty()) {
-                return errorJson("No devices found on the board. Please add devices first.",
-                        "VALIDATION_ERROR", 400);
-            }
-            if (specs.isEmpty()) {
-                return errorJson("No specifications found on the board. Please add at least one specification to verify.",
-                        "VALIDATION_ERROR", 400);
-            }
-
-            // The service reads the scene from the same board this tool just inspected, so the
-            // request carries only run parameters.
             VerificationRequestDto request = new VerificationRequestDto();
             request.setAttackScenario(attackScenario);
             request.setEnablePrivacy(enablePrivacy);
 
-            Long taskId = verificationService.submitVerificationWithTemplateSnapshot(
-                    userId, request, board.templateManifests());
+            Long taskId = verificationService.submitVerification(userId, request);
             if (taskId == null || taskId <= 0) {
                 throw new IllegalStateException("Verification submission returned no usable task id");
             }

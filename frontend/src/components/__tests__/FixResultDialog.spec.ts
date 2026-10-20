@@ -1,13 +1,15 @@
 // @vitest-environment jsdom
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { createI18n } from 'vue-i18n'
-import { defineComponent, ref } from 'vue'
+import { defineComponent, h, ref } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import FixResultDialog from '../FixResultDialog.vue'
-import type { FixResult, FixStrategyAttemptStatus } from '@/types/fix'
+import HintTooltip from '../common/HintTooltip.vue'
+import type { FaultLocalizationResult, FixResult, FixStrategyAttemptStatus } from '@/types/fix'
 import { useAuth } from '@/stores/auth'
 import { FIX_RESPONSE_INCOMPLETE_CODE } from '@/utils/fixResponse'
 import { openModalDepth, registerModalSurface } from '@/composables/useBodyScrollLock'
+import actualI18n from '@/assets/i18n'
 
 const elementPlus = vi.hoisted(() => ({
   confirm: vi.fn(),
@@ -16,7 +18,8 @@ const elementPlus = vi.hoisted(() => ({
   // warning silently downgrade to an informational toast and still satisfy the assertions below.
   warning: vi.fn(),
   info: vi.fn(),
-  error: vi.fn()
+  error: vi.fn(),
+  failure: vi.fn()
 }))
 
 vi.mock('@/utils/feedback', () => ({
@@ -24,6 +27,7 @@ vi.mock('@/utils/feedback', () => ({
   notifyBlocked: elementPlus.warning,
   notifyInfo: elementPlus.info,
   notifyError: elementPlus.error,
+  acknowledgeFailure: elementPlus.failure,
   confirmDestructive: elementPlus.confirm
 }))
 
@@ -57,8 +61,7 @@ const provenanceI18n = createI18n({
   messages: {
     zh: {
       app: {
-        preferredRangeTargetLabel: '{description}',
-        parameterTargetFallback: '调整 {attribute} {relation} {original}',
+        fixParameterTargetLabel: '规则 {rule} · {device}：{attribute} {relation} {original}',
         relationEquals: '等于',
         relationNotEquals: '不等于',
         relationGreater: '大于',
@@ -139,6 +142,8 @@ const parameterResult = (): FixResult => ({
     description: 'Adjust the gas threshold',
     parameterAdjustments: [{
       targetId: 'param_abcdefghijklmnopqrstuvwx',
+      rulePosition: 1,
+      deviceLabel: 'Sensor',
       attribute: 'gas',
       relation: '>',
       originalValue: '70',
@@ -160,6 +165,8 @@ const parameterResult = (): FixResult => ({
   }],
   parameterTargets: [{
     targetId: 'param_abcdefghijklmnopqrstuvwx',
+    rulePosition: 1,
+    deviceLabel: 'Sensor',
     attribute: 'gas',
     relation: '>',
     originalValue: '70',
@@ -442,6 +449,118 @@ describe('FixResultDialog strategy workflow', () => {
     await Promise.resolve()
   })
 
+  it('focuses the repair dialog, traps Tab, and restores the opener when closed', async () => {
+    const opener = document.createElement('button')
+    document.body.append(opener)
+    opener.focus()
+    const wrapper = mount(FixResultDialog, { attachTo: document.body,
+      props: { visible: true, traceId: 7 }, global: { plugins: [i18n] } })
+    mountedDialogs.push(wrapper)
+    try {
+      await flush()
+      expect(document.activeElement).toBe(wrapper.get('[role="dialog"]').element)
+      const close = wrapper.get(`button[aria-label="${i18n.global.t('app.close')}"]`)
+      ;(close.element as HTMLElement).focus()
+      const tab = new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true })
+      close.element.dispatchEvent(tab)
+      expect(tab.defaultPrevented).toBe(true)
+      expect(wrapper.get('[role="dialog"]').element.contains(document.activeElement)).toBe(true)
+      await close.trigger('keydown', { key: 'Escape' })
+      expect(wrapper.emitted('update:visible')?.[0]).toEqual([false])
+      await wrapper.setProps({ visible: false })
+      expect(document.activeElement).toBe(opener)
+    } finally { opener.remove() }
+  })
+
+  it('returns to the verification result when applying a fix removes its original entry', async () => {
+    const result = document.createElement('div')
+    result.dataset.testid = 'verification-result-dialog'
+    result.innerHTML = '<section role="dialog" tabindex="-1"><button>Repair</button></section>'
+    document.body.append(result)
+    const opener = result.querySelector('button')!
+    opener.focus()
+    const wrapper = mount(FixResultDialog, { attachTo: document.body,
+      props: { visible: true, traceId: 7 }, global: { plugins: [i18n] } })
+    mountedDialogs.push(wrapper)
+    try {
+      await flush()
+      opener.remove()
+      await wrapper.setProps({ visible: false })
+      expect(document.activeElement).toBe(result.querySelector('[role="dialog"]'))
+    } finally { result.remove() }
+  })
+
+  it.each(['fault', 'strategy'] as const)('updates retained %s failure copy and keeps raw diagnostics in technical details', async surface => {
+    const translations = createI18n({ legacy: false, locale: 'zh-CN', messages: {
+      en: actualI18n.global.getLocaleMessage('en'), 'zh-CN': actualI18n.global.getLocaleMessage('zh-CN')
+    } })
+    const error = { response: { status: 422, data: { message: 'Preferred range was rejected',
+      data: { errors: { 'preferredRangeSelections[0].lower': 'Outside allowed bounds' } } } } }
+    if (surface === 'fault') boardApi.getFaultRules.mockRejectedValueOnce(error)
+    else boardApi.fixTrace.mockRejectedValueOnce(error)
+    const wrapper = mountDialog(translations)
+    await flush()
+    if (surface === 'strategy') {
+      await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+      await flush()
+    }
+    const card = wrapper.get(`[data-testid="fix-${surface === 'fault' ? 'fault' : 'search'}-failure"]`)
+    const key = surface === 'fault' ? 'app.failedToLoadFaultLocalization' : 'app.failedToLoadFixSuggestions'
+    for (const locale of ['zh-CN', 'en'] as const) {
+      translations.global.locale.value = locale
+      await flush()
+      expect(card.get('p').text()).toBe(translations.global.t(key))
+      expect(wrapper.getComponent(HintTooltip).props('content')).toBe(translations.global.t('app.close'))
+      expect(card.get('[data-testid="failure-next-step"]').text()).toContain(translations.global.t('app.fixRequestFailedNextStep'))
+      expect(card.find('[data-testid="failure-cause"]').exists()).toBe(false)
+      expect(card.find('[data-testid="failure-fields"]').exists()).toBe(false)
+      const technical = card.get('[data-testid="failure-technical-details"]')
+      expect(technical.text()).toContain('Preferred range was rejected')
+      expect(technical.text()).toContain('preferredRangeSelections[0].lower: Outside allowed bounds')
+      expect(technical.attributes('open')).toBeUndefined()
+    }
+    expect(boardApi.fixTrace).toHaveBeenCalledTimes(surface === 'fault' ? 0 : 1)
+    expect(elementPlus.error).not.toHaveBeenCalled()
+  })
+
+  it('keeps an unknown search and its confirmed cancellation localized without repeating progress', async () => {
+    const translations = createI18n({ legacy: false, locale: 'zh-CN', messages: {
+      en: actualI18n.global.getLocaleMessage('en'), 'zh-CN': actualI18n.global.getLocaleMessage('zh-CN')
+    } })
+    const cancellation = deferred<boolean>()
+    boardApi.fixTrace.mockRejectedValueOnce(new Error('Lost search response'))
+    boardApi.cancelFixRequest.mockReturnValueOnce(cancellation.promise)
+    const wrapper = mountDialog(translations)
+    try {
+      await flush()
+      await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+      await flush()
+      for (const locale of ['zh-CN', 'en'] as const) {
+        translations.global.locale.value = locale
+        await flush()
+        expect(wrapper.get('[data-testid="fix-search-failure-summary"]').text()).toBe(translations.global.t('app.fixSearchOutcomeUnknown'))
+        expect(wrapper.get('[data-testid="fix-search-announcement"]').text()).toBe('')
+        expect(wrapper.get('[data-testid="fix-search-failure"]').attributes('role')).toBe('alert')
+        expect(wrapper.get('[role="dialog"]').classes()).toContain('iot-dialog--warning')
+        expect(wrapper.find('[data-testid="fix-strategy-loading"]').exists()).toBe(false)
+        expect(wrapper.get('[data-testid="fix-try-current"]').attributes('disabled')).toBeDefined()
+        expect(wrapper.get('[data-testid="fix-try-current"]').attributes('aria-describedby')?.split(' ')).toContain('fix-search-failure')
+      }
+      cancellation.resolve(true)
+      await flush()
+      for (const locale of ['zh-CN', 'en'] as const) {
+        translations.global.locale.value = locale
+        await flush()
+        expect(wrapper.get('[data-testid="fix-search-failure-summary"]').text()).toBe(translations.global.t('app.fixSearchCancelledWithoutResult'))
+        expect(wrapper.get('[data-testid="fix-try-current"]').attributes('disabled')).toBeUndefined()
+        expect(wrapper.get('[data-testid="fix-search-failure"]').get('p').text()).toBe(translations.global.t('app.fixSearchCancelledWithoutResult'))
+        expect(wrapper.get('[role="dialog"]').classes()).toContain('iot-dialog--warning')
+      }
+      expect(elementPlus.warning).not.toHaveBeenCalled()
+      expect(elementPlus.success).not.toHaveBeenCalled()
+    } finally { cancellation.resolve(true) }
+  })
+
   it('opens with fault localization only and does not implicitly run an expensive strategy', async () => {
     const wrapper = mountDialog()
     await flush()
@@ -657,6 +776,43 @@ describe('FixResultDialog strategy workflow', () => {
     expect(options.signal.aborted).toBe(true)
     expect(boardApi.cancelFixRequest).toHaveBeenCalledWith(options.requestId, defaultToken)
     expect(wrapper.find('[data-testid="fix-result-dialog"]').exists()).toBe(false)
+  })
+
+  it.each(['running', 'cancellation-pending'] as const)(
+    'keeps the owned stop request alive when the page leaves during %s', async state => {
+      const pending = deferred<FixResult>()
+      const cancellation = deferred<boolean>()
+      boardApi.fixTrace.mockReturnValueOnce(pending.promise)
+      boardApi.cancelFixRequest.mockReturnValue(cancellation.promise)
+      const wrapper = mountDialog()
+      await flush()
+      await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+      const options = boardApi.fixTrace.mock.calls[0]![2]
+      if (state === 'cancellation-pending') await wrapper.setProps({ visible: false })
+
+      authStore.login(validToken('other-session'), { userId: 2, phone: '13800138001', username: 'bob' })
+      window.dispatchEvent(new Event('pagehide'))
+
+      expect(boardApi.cancelFixRequest).toHaveBeenCalledWith(options.requestId, defaultToken, { keepalive: true })
+      expect(options.signal.aborted).toBe(false)
+      cancellation.resolve(true)
+      await flush()
+      expect(options.signal.aborted).toBe(true)
+      expect(elementPlus.success).not.toHaveBeenCalled()
+    }
+  )
+
+  it('does not send an unload stop after the search has already returned', async () => {
+    boardApi.fixTrace.mockResolvedValueOnce(parameterResult())
+    const wrapper = mountDialog()
+    await flush()
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+
+    window.dispatchEvent(new Event('pagehide'))
+
+    expect(boardApi.cancelFixRequest).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="fix-apply-current"]').exists()).toBe(true)
   })
 
   it('retries cancellation when the first DELETE beats server-side registration', async () => {
@@ -1079,23 +1235,28 @@ describe('FixResultDialog strategy workflow', () => {
     errorSpy.mockRestore()
   })
 
-  it('shows the server-observed automatic-fix phase while the strategy is running', async () => {
-    const pending = deferred<FixResult>()
-    boardApi.fixTrace.mockReturnValueOnce(pending.promise)
-    const wrapper = mountDialog()
-    await flush()
+  it.each(['SEARCHING_AND_VERIFYING', 'COMPARING_VERIFIED_OPTIONS'] as const)(
+    'shows the server-observed %s phase without offering an unfinished result', async stage => {
+      const pending = deferred<FixResult>()
+      boardApi.fixTrace.mockReturnValueOnce(pending.promise)
+      boardApi.getFixRequestStatus.mockResolvedValue({ requestId: 'request', state: 'RUNNING', stage, elapsedMs: 1000 })
+      const wrapper = mountDialog()
+      await flush()
 
-    vi.useFakeTimers()
-    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
-    await vi.advanceTimersByTimeAsync(1000)
-    await wrapper.vm.$nextTick()
+      vi.useFakeTimers()
+      await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+      await vi.advanceTimersByTimeAsync(1000)
+      await wrapper.vm.$nextTick()
 
-    expect(boardApi.getFixRequestStatus).toHaveBeenCalledWith(expect.any(String), defaultToken)
-    expect(wrapper.text()).toContain('fixProgressStage_SEARCHING_AND_VERIFYING')
+      expect(boardApi.getFixRequestStatus).toHaveBeenCalledWith(expect.any(String), defaultToken)
+      expect(wrapper.text()).toContain(`fixProgressStage_${stage}`)
+      expect(wrapper.get('[data-testid="fix-search-announcement"]').text())
+        .toContain(`fixProgressStage_${stage}`)
+      expect(wrapper.find('[data-testid="fix-apply-current"]').exists()).toBe(false)
 
-    vi.useRealTimers()
-    pending.resolve(parameterResult())
-    await flush()
+      vi.useRealTimers()
+      pending.resolve(parameterResult())
+      await flush()
   })
 
   it('invalidates an old verified suggestion before retrying that strategy', async () => {
@@ -1309,6 +1470,13 @@ describe('FixResultDialog strategy workflow', () => {
     await wrapper.vm.$nextTick()
     const radios = wrapper.findAll('[data-testid="fix-alternative"] input[type="radio"]')
     expect(radios.every(radio => radio.attributes('disabled') !== undefined)).toBe(true)
+    expect(wrapper.findAll('[data-testid^="fix-strategy-"]').filter(item => item.element.tagName === 'BUTTON')
+      .every(button => button.attributes('disabled') !== undefined)).toBe(true)
+    expect(wrapper.findAll('[data-testid="fix-parameter-range-row"] input[type="number"]')
+      .every(input => input.attributes('disabled') !== undefined)).toBe(true)
+    expect(wrapper.get('[data-testid="fix-keep-original"]').attributes('disabled')).toBeDefined()
+    await wrapper.get('[data-testid="fix-strategy-condition"]').trigger('click')
+    expect(wrapper.get('[data-testid="fix-strategy-parameter"]').attributes('aria-pressed')).toBe('true')
     await wrapper.findAll('[data-testid="fix-alternative"]')[1]!.trigger('click')
     expect(alternativesChecked(wrapper)).toEqual([true, false])
 
@@ -1434,6 +1602,47 @@ describe('FixResultDialog strategy workflow', () => {
       .findAll('input[type="number"]')[1]!.element as HTMLInputElement).value).toBe('90')
   })
 
+  it('shows verified parameter changes before optional search ranges', async () => {
+    const wrapper = await tryParameter(parameterResult())
+    const proposals = wrapper.get('[data-testid="fix-verified-proposals"]')
+    const ranges = wrapper.get('[data-testid="fix-parameter-ranges"]')
+    expect(proposals.text()).toContain('70')
+    expect(proposals.text()).toContain('85')
+    expect(proposals.element.compareDocumentPosition(ranges.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('identifies equal thresholds by their frozen rule order and device, without truncating the target', async () => {
+    const result = jointParameterResult()
+    result.parameterTargets[1]!.rulePosition = 2
+    result.parameterTargets[1]!.deviceLabel = 'Bedroom Sensor'
+    result.suggestions[0]!.parameterAdjustments[1]!.rulePosition = 2
+    result.suggestions[0]!.parameterAdjustments[1]!.deviceLabel = 'Bedroom Sensor'
+    boardApi.fixTrace.mockResolvedValueOnce(result)
+    const wrapper = mountDialog(provenanceI18n)
+    await flush()
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+    const rows = wrapper.findAll('[data-testid="fix-parameter-range-row"]')
+    expect(rows[0]!.text()).toContain('规则 1 · Sensor')
+    expect(rows[1]!.text()).toContain('规则 2 · Bedroom Sensor')
+    for (const row of rows) {
+      const label = row.get('p span')
+      expect(label.classes()).toContain('break-words')
+      expect(label.classes()).not.toContain('truncate')
+    }
+  })
+
+  it('reports an inapplicable numeric search rather than suggesting the click did nothing', async () => {
+    boardApi.fixTrace.mockResolvedValueOnce({ ...parameterOutcomeResult('SKIPPED_NO_PARAMETERIZABLE_VALUES'), parameterTargets: [] })
+    const wrapper = mountDialog()
+    await flush()
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+    expect(wrapper.get('[data-testid="fix-attempt-outcome"] .font-semibold').text()).toBe('fixNoAdjustableValuesTitle')
+    expect(wrapper.get('[data-testid="fix-try-next-strategy"]').text()).toContain('fixTryNextStrategy')
+    expect(wrapper.text()).not.toContain('fixStrategyNotRunTitle')
+  })
+
   it('offers search ranges from parameter targets when no suggestion was found', async () => {
     boardApi.fixTrace.mockResolvedValueOnce(parameterBudgetExhaustedResult())
     const wrapper = mountDialog()
@@ -1461,7 +1670,7 @@ describe('FixResultDialog strategy workflow', () => {
     await flush()
     await wrapper.vm.$nextTick()
 
-    expect(wrapper.text()).toContain('调整 工作状态 大于 70')
+    expect(wrapper.text()).toContain('规则 1 · Sensor：工作状态 > 70')
     expect(wrapper.text()).not.toContain('SERVER_FIXED_ENGLISH_DESCRIPTION')
   })
 
@@ -1477,6 +1686,20 @@ describe('FixResultDialog strategy workflow', () => {
     expect(wrapper.text()).toContain('fixParameterBudgetExhaustedDetail')
     expect(wrapper.find('[data-testid="fix-attempt-outcome-note"]').exists()).toBe(false)
   })
+
+  it.each(['SEARCH_BUDGET_EXHAUSTED', 'TIMED_OUT', 'INCONCLUSIVE', 'ALL_CANDIDATES_REJECTED'] as const)(
+    'uses a caution tone for the %s search outcome rather than a service-failure tone', async status => {
+      boardApi.fixTrace.mockResolvedValueOnce(parameterOutcomeResult(status))
+      const wrapper = mountDialog()
+      await flush()
+      await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+      await flush()
+
+      expect(wrapper.get('[role="dialog"]').classes()).toContain('iot-dialog--warning')
+      expect(wrapper.get('[role="dialog"]').classes()).not.toContain('iot-dialog--danger')
+      expect(wrapper.find('[data-testid="fix-search-failure"]').exists()).toBe(false)
+    }
+  )
 
   // The same request against the same frozen snapshot reproduces the budget outcome exactly.
   it('offers a retry after an exhausted budget only once the search ranges change', async () => {
@@ -1555,6 +1778,38 @@ describe('FixResultDialog strategy workflow', () => {
     expect(wrapper.get('[data-testid="fix-try-current"]').text()).toContain('retryFixStrategy')
   })
 
+  it('offers model review after all strategies return no option without treating a budget as proof', async () => {
+    boardApi.fixTrace
+      .mockResolvedValueOnce({ ...parameterOutcomeResult('SKIPPED_NO_PARAMETERIZABLE_VALUES'), parameterTargets: [] })
+      .mockResolvedValueOnce({
+        ...conditionWithoutSuggestionResult(),
+        strategyAttempts: [{ strategy: 'condition', status: 'SEARCH_BUDGET_EXHAUSTED', reason: 'Server reason.' }]
+      })
+      .mockResolvedValueOnce({
+        ...removeResult(),
+        suggestions: [],
+        strategyAttempts: [{ strategy: 'remove', status: 'ALL_CANDIDATES_REJECTED', reason: 'Server reason.' }],
+        fixable: false
+      })
+    const wrapper = mountDialog()
+    await flush()
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+    await wrapper.get('[data-testid="fix-try-next-strategy"]').trigger('click')
+    await flush()
+    expect(wrapper.find('[data-testid="fix-no-safe-repair-next-step"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="fix-try-next-strategy"]').trigger('click')
+    await flush()
+
+    expect(wrapper.get('[data-testid="fix-no-safe-repair-next-step"]').text()).toBe('fixNoSafeRepairNextStep')
+    expect(wrapper.get('[data-testid="fix-result-header"] .iot-dialog__subtitle').text()).toBe('noVerifiedSolutionsYet')
+    expect(wrapper.find('[data-testid="fix-apply-current"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="fix-strategy-condition"]').trigger('click')
+    expect(wrapper.text()).toContain('fixAttemptReason.SEARCH_BUDGET_EXHAUSTED')
+    expect(wrapper.find('[data-testid="fix-attempt-outcome-note"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="fix-no-safe-repair-next-step"]').text()).toBe('fixNoSafeRepairNextStep')
+  })
+
   it('offers no primary action once every strategy has settled without a repair', async () => {
     boardApi.fixTrace
       .mockResolvedValueOnce(parameterOutcomeResult('NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE'))
@@ -1582,6 +1837,7 @@ describe('FixResultDialog strategy workflow', () => {
     expect(wrapper.find('[data-testid="fix-apply-current"]').exists()).toBe(false)
     // Every strategy proved it cannot repair this over its whole space, so "yet" would promise more.
     expect(wrapper.get('[data-testid="fix-result-header"] .iot-dialog__subtitle').text()).toBe('noVerifiedOptions')
+    expect(wrapper.get('[data-testid="fix-no-safe-repair-next-step"]').text()).toBe('fixNoSafeRepairNextStep')
   })
 
   // A strategy that does not apply to this model is as final as one that proved it cannot repair it.
@@ -1607,6 +1863,7 @@ describe('FixResultDialog strategy workflow', () => {
     expect(wrapper.find('[data-testid="fix-try-current"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="fix-try-next-strategy"]').exists()).toBe(false)
     expect(wrapper.get('[data-testid="fix-result-header"] .iot-dialog__subtitle').text()).toBe('noVerifiedOptions')
+    expect(wrapper.get('[data-testid="fix-no-safe-repair-next-step"]').text()).toBe('fixNoSafeRepairNextStep')
   })
 
   it('keeps a parameter at its original value for the next search and can release it', async () => {
@@ -1647,6 +1904,7 @@ describe('FixResultDialog strategy workflow', () => {
     expect(wrapper.text()).toContain('fixConditionNoCandidateDetail')
     expect(wrapper.get('[data-testid="fix-attempt-outcome-note"]').text()).toBe('fixProofCompleteNote')
     expect(wrapper.find('[data-testid="fix-try-current"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="fix-no-safe-repair-next-step"]').exists()).toBe(false)
   })
 
   it('shows and applies a verified condition adjustment without destructive confirmation', async () => {
@@ -1688,7 +1946,7 @@ describe('FixResultDialog strategy workflow', () => {
       conditionResult().suggestions[0],
       undefined
     )
-    expect(elementPlus.success).toHaveBeenCalledWith('fixAppliedWithSignedEvidence')
+    expect(elementPlus.success).not.toHaveBeenCalled()
     expect(wrapper.emitted('applied')?.[0]?.[0]).toMatchObject({
       strategy: 'condition',
       currentRuleCount: 1
@@ -1727,14 +1985,14 @@ describe('FixResultDialog strategy workflow', () => {
       parameterResult().suggestions[0],
       undefined
     )
-    expect(elementPlus.success).toHaveBeenCalledWith('fixAppliedWithSignedEvidence')
+    expect(elementPlus.success).not.toHaveBeenCalled()
     expect(wrapper.emitted('applied')?.[0]?.[0]).toMatchObject({
       strategy: 'parameter',
       currentRuleCount: 1
     })
   })
 
-  it.each([0, 1])('reports signed evidence after closing its dialog with %i underlying modals', async (underlyingModals) => {
+  it.each([0, 1])('leaves apply feedback to its parent after closing with %i underlying modals', async (underlyingModals) => {
     const releaseUnderlyingModal = underlyingModals ? registerModalSurface() : () => {}
     const result = parameterResult()
     const applied = parameterApplied(result.suggestions[0]!)
@@ -1748,18 +2006,13 @@ describe('FixResultDialog strategy workflow', () => {
       await flush()
       expect(openModalDepth.value).toBe(underlyingModals + 1)
       const dialog = wrapper.findComponent(FixResultDialog)
-      const observations: unknown[] = []
-      elementPlus.success.mockImplementationOnce(() => observations.push({
-        depth: openModalDepth.value,
-        visible: wrapper.find('[data-testid="fix-result-dialog"]').exists(),
-        applied: dialog.emitted('applied')?.[0]?.[0]
-      }))
-
       await wrapper.get('[data-testid="fix-apply-current"]').trigger('click')
       await flush()
 
-      expect(elementPlus.success).toHaveBeenCalledWith('fixAppliedWithSignedEvidence')
-      expect(observations).toEqual([{ depth: underlyingModals, visible: false, applied }])
+      expect(elementPlus.success).not.toHaveBeenCalled()
+      expect(openModalDepth.value).toBe(underlyingModals)
+      expect(wrapper.find('[data-testid="fix-result-dialog"]').exists()).toBe(false)
+      expect(dialog.emitted('applied')?.[0]?.[0]).toEqual(applied)
       expect(dialog.emitted('update:visible')).toEqual([[false]])
     } finally {
       releaseUnderlyingModal()
@@ -1767,7 +2020,55 @@ describe('FixResultDialog strategy workflow', () => {
     }
   })
 
-  it('requires confirmation before permanently removing rules', async () => {
+  it.each([['en', 1], ['en', 2], ['zh-CN', 1], ['zh-CN', 2]] as const)('names the reviewed rules in %s removal confirmation for %i rules and preserves a cancelled choice', async (locale, count) => {
+    const translations = createI18n({ legacy: false, locale, messages: {
+      en: actualI18n.global.getLocaleMessage('en'), 'zh-CN': actualI18n.global.getLocaleMessage('zh-CN')
+    } })
+    const result = removeResult()
+    result.suggestions[0]!.removedRuleDescriptions = ['A very long rule name without spaces'.repeat(4), '<script>literal rule name</script>'].slice(0, count)
+    boardApi.fixTrace.mockResolvedValueOnce(result)
+    elementPlus.confirm.mockResolvedValueOnce(false)
+    const wrapper = mountDialog(translations)
+    await flush()
+    await wrapper.get('[data-testid="fix-strategy-remove"]').trigger('click')
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+    await wrapper.get('[data-testid="fix-apply-current"]').trigger('click')
+    await flush()
+
+    const options = elementPlus.confirm.mock.calls[0]![0]
+    const confirmation = mount({ render: () => h('div', options.message) })
+    try {
+      expect(options.title).toBe(translations.global.t('app.removeRulesFixTitle'))
+      expect(options.customClass).toBe('fix-removal-confirm')
+      expect(confirmation.text()).toContain(translations.global.t('app.confirmRemoveRulesFix', { count }))
+      expect(confirmation.text()).not.toMatch(/\b1 rules\b/)
+      expect(confirmation.findAll('li').map(item => item.text())).toEqual(result.suggestions[0]!.removedRuleDescriptions)
+      expect(confirmation.find('script').exists()).toBe(false)
+      expect(boardApi.applyFix).not.toHaveBeenCalled()
+      expect(wrapper.emitted('update:visible')).toBeUndefined()
+      expect(wrapper.get('[data-testid="fix-apply-current"]').attributes('disabled')).toBeUndefined()
+    } finally { confirmation.unmount() }
+  })
+
+  it.each(['success', 'uncertain failure'])('ignores an old session apply %s after the account changes', async outcome => {
+    const result = parameterResult()
+    const pending = deferred<ReturnType<typeof parameterApplied>>()
+    boardApi.applyFix.mockReturnValueOnce(pending.promise)
+    const wrapper = await tryParameter(result)
+    await wrapper.get('[data-testid="fix-apply-current"]').trigger('click')
+    authStore.login(validToken('another-owner'), { userId: 2, phone: '13800138001', username: 'bob' })
+    if (outcome === 'success') pending.resolve(parameterApplied(result.suggestions[0]!))
+    else pending.reject(new Error('Connection lost'))
+    await flush()
+    expect(wrapper.emitted('applied')).toBeUndefined()
+    expect(wrapper.emitted('outcome-uncertain')).toBeUndefined()
+    expect(wrapper.emitted('update:visible')).toBeUndefined()
+    expect(elementPlus.success).not.toHaveBeenCalled()
+    expect(elementPlus.failure).not.toHaveBeenCalled()
+  })
+
+  it('requires confirmation before removing rules from the board', async () => {
     boardApi.fixTrace.mockResolvedValueOnce(removeResult())
     boardApi.applyFix.mockResolvedValueOnce({
       applied: true,
@@ -1794,7 +2095,7 @@ describe('FixResultDialog strategy workflow', () => {
       removeResult().suggestions[0],
       undefined
     )
-    expect(elementPlus.success).toHaveBeenCalledWith('fixAppliedWithSignedEvidence')
+    expect(elementPlus.success).not.toHaveBeenCalled()
     expect(elementPlus.success).not.toHaveBeenCalledWith('Removed one rule.')
     expect(wrapper.emitted('applied')?.[0]?.[0]).toMatchObject({
       applied: true,
@@ -1804,7 +2105,7 @@ describe('FixResultDialog strategy workflow', () => {
     })
   })
 
-  it('does not expose an internal device reference when fix apply is rejected', async () => {
+  it('keeps an internal device reference in technical details when fix apply is rejected', async () => {
     boardApi.fixTrace.mockResolvedValueOnce(parameterResult())
     boardApi.applyFix.mockRejectedValueOnce({
       response: {
@@ -1822,8 +2123,14 @@ describe('FixResultDialog strategy workflow', () => {
     await wrapper.get('[data-testid="fix-apply-current"]').trigger('click')
     await flush()
 
-    expect(elementPlus.error).toHaveBeenCalledWith('fixDeviceReferenceUnavailable')
-    expect(elementPlus.error).not.toHaveBeenCalledWith(expect.stringContaining('device_78da526b'))
+    expect(elementPlus.failure).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'fixDeviceReferenceUnavailable',
+      suggestion: 'fixApplyRejectedNextStep',
+      details: expect.arrayContaining([
+        'rules[0].conditions[0].deviceName: Unknown condition device: device_78da526b_8cb4'
+      ])
+    }))
+    expect(elementPlus.error).not.toHaveBeenCalled()
     expect(wrapper.emitted('outcome-uncertain')).toBeUndefined()
     expect(wrapper.emitted('update:visible')).toBeUndefined()
   })
@@ -1847,9 +2154,72 @@ describe('FixResultDialog strategy workflow', () => {
     await wrapper.get('[data-testid="fix-apply-current"]').trigger('click')
     await flush()
 
-    expect(elementPlus.error).toHaveBeenCalledWith('Current template comparison is unavailable.')
+    expect(elementPlus.failure).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'fixApplyPreflightUnavailable',
+      suggestion: 'fixApplyPreflightRetry',
+      details: expect.arrayContaining(['reasonCode: FIX_APPLY_PREFLIGHT_UNAVAILABLE'])
+    }))
     expect(wrapper.emitted('outcome-uncertain')).toBeUndefined()
     expect(wrapper.emitted('update:visible')).toBeUndefined()
+  })
+
+  it('keeps the proposal retryable when another formal operation temporarily blocks apply', async () => {
+    boardApi.fixTrace.mockResolvedValueOnce(parameterResult())
+    boardApi.applyFix.mockRejectedValueOnce({ response: { status: 429, data: {
+      message: 'Another formal operation owns the user permit.', data: { reasonCode: 'USER_FORMAL_OPERATION_BUSY' }
+    } } })
+    const wrapper = mountDialog()
+    await flush()
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+    await wrapper.get('[data-testid="fix-apply-current"]').trigger('click')
+    await flush()
+    expect(elementPlus.failure).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'formalOperationBusy', suggestion: 'fixApplyPreflightRetry',
+      details: expect.arrayContaining(['HTTP 429', 'reasonCode: USER_FORMAL_OPERATION_BUSY'])
+    }))
+    expect(wrapper.emitted('applied')).toBeUndefined()
+    expect(wrapper.emitted('outcome-uncertain')).toBeUndefined()
+    expect(wrapper.get('[data-testid="fix-apply-current"]').attributes('disabled')).toBeUndefined()
+  })
+
+  it.each(['zh-CN', 'en'] as const)('retries the same signed proposal after a preflight-only rejection in %s', async locale => {
+    const translations = createI18n({ legacy: false, locale, messages: {
+      en: actualI18n.global.getLocaleMessage('en'), 'zh-CN': actualI18n.global.getLocaleMessage('zh-CN')
+    } })
+    const result = parameterResult()
+    const pendingApply = deferred<ReturnType<typeof parameterApplied> & { canUndo: boolean; canRedo: boolean }>()
+    boardApi.fixTrace.mockResolvedValueOnce(result)
+    boardApi.applyFix.mockRejectedValueOnce({ response: { status: 503, data: {
+      message: 'Current template comparison is unavailable.', data: { reasonCode: 'FIX_APPLY_PREFLIGHT_UNAVAILABLE' }
+    } } }).mockReturnValueOnce(pendingApply.promise)
+    const wrapper = mountDialog(translations)
+    await flush()
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+    const apply = wrapper.get('[data-testid="fix-apply-current"]')
+    await apply.trigger('click')
+    await flush()
+    expect(elementPlus.failure).toHaveBeenCalledWith(expect.objectContaining({
+      message: translations.global.t('app.fixApplyPreflightUnavailable'),
+      suggestion: translations.global.t('app.fixApplyPreflightRetry'),
+      details: expect.arrayContaining(['HTTP 503', 'reasonCode: FIX_APPLY_PREFLIGHT_UNAVAILABLE'])
+    }))
+    expect(apply.attributes('disabled')).toBeUndefined()
+    expect(wrapper.emitted('applied')).toBeUndefined()
+    expect(wrapper.emitted('outcome-uncertain')).toBeUndefined()
+    await apply.trigger('click')
+    translations.global.locale.value = locale === 'zh-CN' ? 'en' : 'zh-CN'
+    await flush()
+    expect(apply.attributes('aria-label')).toBe(translations.global.t('app.applying'))
+    expect(apply.attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-testid="fix-strategy-condition"]').attributes('disabled')).toBeDefined()
+    pendingApply.resolve({ ...parameterApplied(result.suggestions[0]!), canUndo: true, canRedo: false })
+    await flush()
+    expect(boardApi.fixTrace).toHaveBeenCalledOnce()
+    expect(boardApi.applyFix.mock.calls[1]).toEqual(boardApi.applyFix.mock.calls[0])
+    expect(wrapper.emitted('applied')?.[0]?.[0]).toMatchObject({ applied: true, canUndo: true, canRedo: false })
+    expect(elementPlus.success).not.toHaveBeenCalled()
   })
 
   it('treats an unclassified 503 as an uncertain mutation outcome', async () => {
@@ -1868,6 +2238,240 @@ describe('FixResultDialog strategy workflow', () => {
     expect(wrapper.emitted('outcome-uncertain')).toHaveLength(1)
     expect(wrapper.emitted('update:visible')?.at(-1)).toEqual([false])
     expect(elementPlus.error).not.toHaveBeenCalled()
+    expect(elementPlus.failure).not.toHaveBeenCalled()
+  })
+
+  it('retains English search diagnostics and field errors in a Chinese persistent failure card', async () => {
+    const chinese = createI18n({
+      legacy: false, locale: 'zh-CN', missingWarn: false, fallbackWarn: false,
+      messages: { 'zh-CN': { app: {
+        failedToLoadFixSuggestions: '获取修复方案失败',
+        fixRequestFailedNextStep: '核对画布并重新验证后再尝试',
+        failureNextStep: '下一步', technicalDetails: '技术详情'
+      } } }
+    })
+    boardApi.fixTrace.mockRejectedValueOnce({
+      response: { status: 422, data: {
+        message: 'Preferred range is outside the template bounds',
+        data: { errors: { 'preferredRangeSelections[0].lower': 'Must be at least 0' } }
+      } }
+    })
+    const wrapper = mountDialog(chinese)
+    await flush()
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+    const card = wrapper.get('[data-testid="fix-search-failure"]')
+    expect(card.get('[data-testid="fix-search-failure-summary"]').text()).toBe('获取修复方案失败')
+    expect(card.text()).toContain('核对画布并重新验证后再尝试')
+    expect(card.get('[data-testid="failure-technical-details"]').text()).toContain('Preferred range is outside the template bounds')
+    expect(card.get('[data-testid="failure-technical-details"]').text()).toContain('preferredRangeSelections[0].lower')
+    expect(card.get('[data-testid="failure-technical-details"]').text()).toContain('Must be at least 0')
+    expect(card.find('[data-testid="failure-fields"]').exists()).toBe(false)
+    expect(elementPlus.error).not.toHaveBeenCalled()
+  })
+
+  it('does not report a rule count while fault localization is loading', async () => {
+    const localization = deferred<FaultLocalizationResult>()
+    boardApi.getFaultRules.mockReturnValueOnce(localization.promise)
+    const wrapper = mountDialog()
+    await flush()
+
+    expect(wrapper.get('[data-testid="fix-fault-summary"]').text()).toContain('loadingFaultLocalization')
+    expect(wrapper.find('[data-testid="fix-fault-count"]').exists()).toBe(false)
+
+    localization.resolve({ traceId: 7, violatedSpecId: 'spec-1', sourceModelComplete: true,
+      sourceDisabledRuleCount: 0, sourceSkippedSpecCount: 0, sourceGenerationIssues: [],
+      faultRules: [], summary: 'No user-defined automation rule was localized.', warnings: [] })
+    await flush()
+    expect(wrapper.get('[data-testid="fix-fault-summary"]').text()).toContain('faultRulesIdentified')
+    expect(wrapper.find('[data-testid="fix-fault-count"]').exists()).toBe(true)
+  })
+
+  it('retains fault-localization failure evidence without reporting an empty result or another toast', async () => {
+    const chinese = createI18n({
+      legacy: false, locale: 'zh-CN', missingWarn: false, fallbackWarn: false,
+      messages: { 'zh-CN': { app: {
+        faultLocalization: '故障定位',
+        failedToLoadFaultLocalization: '获取故障定位失败',
+        fixRequestFailedNextStep: '核对画布并重新验证后再尝试'
+      } } }
+    })
+    boardApi.getFaultRules.mockRejectedValueOnce({ response: { status: 404, data: {
+      message: 'Trace does not exist or is not owned by this user',
+      data: { reasonCode: 'TRACE_UNAVAILABLE', logs: ['No frozen run context was read'] }
+    } } })
+    const wrapper = mountDialog(chinese)
+    await flush()
+    expect(wrapper.get('[data-testid="fix-fault-summary"]').text()).toBe('故障定位')
+    expect(wrapper.find('[data-testid="fix-fault-count"]').exists()).toBe(false)
+    const card = wrapper.get('[data-testid="fix-fault-failure"]')
+    expect(card.attributes('role')).toBe('alert')
+    expect(card.text()).toContain('核对画布并重新验证后再尝试')
+    expect(card.get('[data-testid="failure-technical-details"]').text()).toContain('Trace does not exist or is not owned by this user')
+    expect(card.get('details').text()).toContain('No frozen run context was read')
+    expect(elementPlus.error).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])('replaces failed localization with trusted search localization, empty=%s', async (empty) => {
+    boardApi.getFaultRules.mockRejectedValueOnce({ response: { status: 503, data: {
+      message: 'Fault localization was temporarily unavailable'
+    } } })
+    const result = parameterResult()
+    result.faultRules = empty ? [] : [{
+      ruleString: 'Recovered unsafe automation', transitionNumber: 1, targetDeviceLabel: 'Exit',
+      targetActionLabel: 'off', conflicting: false, reasonCode: 'TRIGGERED',
+      reason: 'Triggered', modelTokenSource: 'BUNDLED'
+    }]
+    boardApi.fixTrace.mockResolvedValueOnce(result)
+    const wrapper = mountDialog()
+    await flush()
+    expect(wrapper.find('[data-testid="fix-fault-failure"]').exists()).toBe(true)
+
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+
+    expect(wrapper.find('[data-testid="fix-fault-failure"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="fix-fault-summary"]').text()).toContain('faultRulesIdentified')
+    expect(wrapper.find('[data-testid="fix-fault-count"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain(empty ? 'noFaultRulesFound' : 'Recovered unsafe automation')
+    expect(wrapper.find('[data-testid="fix-apply-current"]').exists()).toBe(true)
+    expect(elementPlus.error).not.toHaveBeenCalled()
+  })
+
+  it('keeps failed localization when a failed search cannot replace its evidence', async () => {
+    boardApi.getFaultRules.mockRejectedValueOnce({ response: { status: 503, data: {
+      message: 'Fault localization was temporarily unavailable'
+    } } })
+    boardApi.fixTrace.mockRejectedValueOnce({ response: { status: 422, data: {
+      message: 'The preferred range is outside the template bounds'
+    } } })
+    const wrapper = mountDialog()
+    await flush()
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+
+    const faultFailure = wrapper.get('[data-testid="fix-fault-failure"]')
+    expect(faultFailure.text().split('Fault localization was temporarily unavailable')).toHaveLength(2)
+    expect(wrapper.find('[data-testid="fix-search-failure"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="fix-apply-current"]').exists()).toBe(false)
+  })
+
+  it('updates an unknown search after accepted cancellation and allows a fresh retry', async () => {
+    const cancellation = deferred<boolean>()
+    boardApi.fixTrace.mockRejectedValueOnce(new Error('Fix response transport was lost'))
+    boardApi.cancelFixRequest.mockReturnValueOnce(cancellation.promise)
+    const wrapper = mountDialog()
+    try {
+      await flush()
+      await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+      await flush()
+      expect(wrapper.get('[data-testid="fix-search-failure"]').text())
+        .toContain('fixStopRequestMayStillBeRunning')
+      expect(wrapper.get('[data-testid="fix-try-current"]').attributes('disabled')).toBeDefined()
+      expect(elementPlus.warning).not.toHaveBeenCalled()
+      expect(elementPlus.error).not.toHaveBeenCalled()
+
+      cancellation.resolve(true)
+      await flush()
+
+      const card = wrapper.get('[data-testid="fix-search-failure"]')
+      expect(card.get('[data-testid="fix-search-failure-summary"]').text())
+        .toBe('fixSearchCancelledWithoutResult')
+      expect(card.text()).toContain('fixRequestFailedNextStep')
+      expect(card.text()).not.toContain('fixStopRequestMayStillBeRunning')
+      expect(card.get('[data-testid="failure-technical-details"]').text()).toContain('Fix response transport was lost')
+      expect(wrapper.get('[data-testid="fix-try-current"]').attributes('disabled')).toBeUndefined()
+      expect(elementPlus.success).not.toHaveBeenCalled()
+
+      boardApi.fixTrace.mockResolvedValueOnce(parameterResult())
+      await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+      await flush()
+      expect(boardApi.fixTrace).toHaveBeenCalledTimes(2)
+      expect(wrapper.find('[data-testid="fix-search-failure"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="fix-apply-current"]').exists()).toBe(true)
+    } finally {
+      cancellation.resolve(true)
+    }
+  })
+
+  it.each(['hidden', 'other-strategy'] as const)(
+    'still warns about a lost search response when its error card is not visible: %s', async surface => {
+      const pending = deferred<FixResult>()
+      const cancellation = deferred<boolean>()
+      boardApi.fixTrace.mockReturnValueOnce(pending.promise)
+      boardApi.cancelFixRequest.mockReturnValueOnce(cancellation.promise)
+      const wrapper = mountDialog()
+      try {
+        await flush()
+        await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+        if (surface === 'hidden') await wrapper.setProps({ visible: false })
+        else await wrapper.get('[data-testid="fix-strategy-condition"]').trigger('click')
+        pending.reject(new Error('Fix response transport was lost'))
+        await flush()
+        expect(wrapper.find('[data-testid="fix-search-failure"]').exists()).toBe(false)
+        expect(elementPlus.warning).toHaveBeenCalledWith('fixStopRequestMayStillBeRunning')
+      } finally {
+        cancellation.resolve(true)
+        await flush()
+      }
+    })
+
+  it.each([
+    { outcome: 'false', newerRequest: false },
+    { outcome: 'false', newerRequest: true },
+    { outcome: 'throw', newerRequest: true }
+  ])('does not repeat unknown warnings after FINISHED and late cancellation $outcome, newer=$newerRequest', async ({ outcome, newerRequest }) => {
+    const cancellation = deferred<boolean>()
+    const nextSearch = deferred<FixResult>()
+    boardApi.fixTrace.mockRejectedValueOnce(new Error('Fix response transport was lost'))
+    boardApi.cancelFixRequest.mockReturnValueOnce(cancellation.promise).mockResolvedValue(false)
+    const wrapper = mountDialog()
+    try {
+      await flush()
+      await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+      await flush()
+      const requestId = boardApi.fixTrace.mock.calls[0]![2].requestId
+      expect(elementPlus.warning).not.toHaveBeenCalled()
+      expect(wrapper.get('[data-testid="fix-try-current"]').attributes('disabled')).toBeDefined()
+
+      boardApi.getFixRequestStatus.mockResolvedValueOnce({
+        requestId, state: 'FINISHED', stage: 'FINALIZING', elapsedMs: 1000
+      })
+      await (wrapper.vm as any).refreshFixProgress(requestId)
+      await wrapper.vm.$nextTick()
+
+      const card = wrapper.get('[data-testid="fix-search-failure"]')
+      expect(card.get('[data-testid="fix-search-failure-summary"]').text())
+        .toBe('fixSearchEndedWithoutResult')
+      expect(card.text()).toContain('fixRequestFailedNextStep')
+      expect(card.text()).not.toContain('fixStopRequestMayStillBeRunning')
+      expect(card.get('[data-testid="failure-technical-details"]').text()).toContain('Fix response transport was lost')
+      expect(wrapper.get('[data-testid="fix-try-current"]').attributes('disabled')).toBeUndefined()
+      expect(elementPlus.success).not.toHaveBeenCalled()
+
+      const warningCount = elementPlus.warning.mock.calls.length
+      if (newerRequest) {
+        boardApi.fixTrace.mockReturnValueOnce(nextSearch.promise)
+        await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+      }
+      if (outcome === 'throw') cancellation.reject(new Error('Late cancellation transport failure'))
+      else cancellation.resolve(false)
+      await flush()
+
+      expect(elementPlus.warning).toHaveBeenCalledTimes(warningCount)
+      if (newerRequest) {
+        expect(boardApi.fixTrace.mock.calls[1]![2].signal.aborted).toBe(false)
+        expect(wrapper.get('[data-testid="fix-try-current"]').attributes('disabled')).toBeDefined()
+        expect(wrapper.find('[data-testid="fix-search-failure"]').exists()).toBe(false)
+      } else {
+        expect(wrapper.get('[data-testid="fix-search-failure-summary"]').text())
+          .toBe('fixSearchEndedWithoutResult')
+      }
+    } finally {
+      cancellation.resolve(true)
+      nextSearch.resolve(parameterResult())
+      await flush()
+    }
   })
 
   it('disables apply when the template snapshot has changed', async () => {
@@ -1930,23 +2534,41 @@ describe('FixResultDialog strategy workflow', () => {
   })
 
   it.each([
-    ['no fired rule can influence the specification', noFaultRulesResult],
-    ['the source model is incomplete', incompleteSourceModelResult]
-  ])('offers no other strategy after a dialog-wide skip because %s', async (_label, resultFactory) => {
+    ['no rule can influence the specification', noFaultRulesResult, 'fixNoControllableRuleTitle'],
+    ['the initial state already violates safety', () => parameterOutcomeResult('SKIPPED_INITIAL_STATE_VIOLATION'), 'fixInitialStateViolationTitle'],
+    ['the source model is incomplete', incompleteSourceModelResult, 'fixIncompleteModelTitle']
+  ] as const)('keeps an explained disabled action after a dialog-wide skip because %s', async (_label, resultFactory, title) => {
     const result = resultFactory()
     const status = result.strategyAttempts[0]!.status
     const wrapper = await tryParameter(result)
 
     expect(wrapper.find('[data-testid="fix-try-current"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="fix-try-next-strategy"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="fix-search-blocked"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-testid="fix-search-blocked"]').attributes('aria-describedby'))
+      .toBe('fix-search-needs-verification')
+    expect(wrapper.get('[data-testid="fix-search-needs-verification"]').text()).toBe('fixSearchNeedsNewVerification')
     expect(wrapper.get('[data-testid="fix-result-header"] .iot-dialog__subtitle').text()).toBe('noVerifiedOptions')
 
     // Another strategy would only return the same skip, so its tab shows that outcome instead of Try.
     await wrapper.get('[data-testid="fix-strategy-condition"]').trigger('click')
     const outcome = wrapper.get('[data-testid="fix-attempt-outcome"]')
-    expect(outcome.text()).toContain('fixStrategyNotRunTitle')
+    expect(outcome.text()).toContain(title)
     expect(outcome.text()).toContain(`fixAttemptReason.${status}`)
     expect(wrapper.find('[data-testid="fix-try-current"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="fix-search-blocked"]').attributes('disabled')).toBeDefined()
+    expect(boardApi.fixTrace).toHaveBeenCalledOnce()
+  })
+
+  it('removes irrelevant ranges and rejects a queued retry after an initial-state blocker', async () => {
+    const wrapper = await tryParameter(parameterOutcomeResult('SKIPPED_INITIAL_STATE_VIOLATION'))
+    expect(wrapper.find('[data-testid="fix-parameter-range-row"]').exists()).toBe(false)
+    ;(wrapper.vm as any).preferredRangeRows[0].lower = 20
+    await flush()
+    expect(wrapper.find('[data-testid="fix-try-current"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="fix-search-blocked"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-testid="fix-attempt-outcome"]').text()).toContain('fixInitialStateViolationTitle')
+    await (wrapper.vm as any).trySelectedStrategy()
     expect(boardApi.fixTrace).toHaveBeenCalledOnce()
   })
   it.each([
@@ -1998,7 +2620,7 @@ describe('FixResultDialog strategy workflow', () => {
       for (const control of controls) {
         const [targetId, labelId] = control.attributes('aria-labelledby')!.split(' ')
         // Both referenced labels sit in this row, so each name starts with this row's target.
-        expect(row.get(`[id="${targetId}"]`).text()).toContain('preferredRangeTargetLabel')
+        expect(row.get(`[id="${targetId}"]`).text()).toContain('fixParameterTargetLabel')
         expect(row.find(`[id="${labelId}"]`).exists()).toBe(true)
         names.add(`${targetId} ${labelId}`)
       }
@@ -2017,7 +2639,7 @@ describe('FixResultDialog strategy workflow', () => {
   })
   it.each([
     ['the Apply that replaces Try', parameterResult, 'verifiedSolution', '[data-testid="fix-apply-current"]'],
-    ['the dialog when no action is left', noFaultRulesResult, 'fixStrategyNotRunTitle', '[role="dialog"]']
+    ['the dialog when search is blocked', noFaultRulesResult, 'fixNoControllableRuleTitle', '[role="dialog"]']
   ])('announces a settled search and hands focus to %s', async (_label, resultFactory, announced, focusTarget) => {
     const pending = deferred<FixResult>()
     boardApi.fixTrace.mockReturnValueOnce(pending.promise)
@@ -2034,7 +2656,7 @@ describe('FixResultDialog strategy workflow', () => {
     await tryButton.trigger('click')
     const announcement = wrapper.get('[data-testid="fix-search-announcement"]')
     expect(announcement.attributes('aria-live')).toBe('polite')
-    expect(announcement.text()).toBe('tryingFixStrategy')
+    expect(announcement.text()).toBe('tryingFixStrategy · fixProgressStage_QUEUED')
 
     pending.resolve(resultFactory())
     await flush()
@@ -2082,7 +2704,8 @@ describe('FixResultDialog strategy workflow', () => {
     await flush()
 
     // Still selected: the inline error card is the one statement of the failure.
-    expect(wrapper.text()).toContain('fixStrategyRequestFailed')
+    expect(wrapper.get('[data-testid="fix-search-failure-summary"]').text()).toBe('failedToLoadFixSuggestions')
+    expect(wrapper.get('[role="dialog"]').classes()).toContain('iot-dialog--danger')
     expect(elementPlus.error).not.toHaveBeenCalled()
 
     const pending = deferred<FixResult>()
@@ -2095,7 +2718,7 @@ describe('FixResultDialog strategy workflow', () => {
 
     expect(elementPlus.error).toHaveBeenCalledOnce()
     await wrapper.get('[data-testid="fix-strategy-condition"]').trigger('click')
-    expect(wrapper.text()).toContain('fixStrategyRequestFailed')
+    expect(wrapper.get('[data-testid="fix-search-failure-summary"]').text()).toBe('failedToLoadFixSuggestions')
     errorSpy.mockRestore()
   })
 

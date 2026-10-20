@@ -62,6 +62,8 @@ public class FixContext {
     /** The time checked against {@link #deadline} and the alternatives search, so tests can advance it. */
     @Builder.Default
     private final Clock clock = Clock.systemUTC();
+    @Builder.Default
+    private final Runnable onVerifiedRepair = () -> { };
 
     /**
      * What the strategies record while the request runs, reachable only through the methods below: a final
@@ -74,15 +76,16 @@ public class FixContext {
     private final RunState state = new RunState();
 
     /**
-     * Shortest search for further alternatives. Without it a strategy that finds its first repair within a
-     * second or two would get no time to look for others, while it is exactly then that looking is cheap.
-     * On the demo Boards one candidate costs a solver run and a forward verification of a second or two
-     * together, so this covers several candidates beyond the first repair.
+     * Minimum comparison window for large searches; finite affordable searches use their remaining
+     * measured budget instead, so a quick first answer does not stop a cheap enumeration prematurely.
      */
-    static final Duration MIN_ALTERNATIVES_SEARCH = Duration.ofSeconds(10);
+    static final Duration MIN_ALTERNATIVES_SEARCH = Duration.ofSeconds(3);
+    /** A finite search is affordable only while both its assignment count and observed cost stay small. */
+    static final int SMALL_SEARCH_ASSIGNMENTS = 256;
+    static final Duration SMALL_SEARCH_TIME = Duration.ofSeconds(30);
 
     /**
-     * Returns true when the search must stop: the deadline has passed, or this worker was
+     * Returns true when the search must stop: the deadline is reached, or this worker was
      * interrupted because the request was cancelled.
      *
      * <p>Interruption is checked here rather than left to each strategy loop. A strategy's broad
@@ -98,7 +101,7 @@ public class FixContext {
     public boolean isExpired() {
         Instant effective = effectiveDeadline();
         return Thread.currentThread().isInterrupted()
-                || (effective != null && clock.instant().isAfter(effective));
+                || (effective != null && !clock.instant().isBefore(effective));
     }
 
     /** Remaining wall-clock budget for a child NuSMV call, in whole milliseconds. */
@@ -112,8 +115,11 @@ public class FixContext {
 
     private Instant effectiveDeadline() {
         Instant alternatives = state.alternativesDeadline;
-        if (alternatives == null) return deadline;
-        return deadline == null || alternatives.isBefore(deadline) ? alternatives : deadline;
+        Instant effective = alternatives == null || (deadline != null && deadline.isBefore(alternatives))
+                ? deadline : alternatives;
+        Instant smallSearch = state.smallSearchDeadline;
+        return smallSearch != null && (effective == null || smallSearch.isBefore(effective))
+                ? smallSearch : effective;
     }
 
     /**
@@ -129,15 +135,18 @@ public class FixContext {
         state.strategiesLeft = Math.max(1, strategiesLeft);
         state.strategyStartedAt = clock.instant();
         state.alternativesDeadline = null;
+        state.smallSearchDeadline = null;
+        state.smallSearch = false;
+        state.nominalAttemptLimit = 0;
     }
 
     /**
-     * The running strategy found its first verified repair. From now on it looks for alternatives for as
-     * long again as that repair took, but at least {@link #MIN_ALTERNATIVES_SEARCH}, so the wait for the
-     * others is proportional to the wait for the first answer. It never gets more than an equal share of
+     * The running strategy found its first verified repair. Affordable finite searches keep their
+     * remaining enumeration time; larger searches get as long again as the repair took, but at least
+     * {@link #MIN_ALTERNATIVES_SEARCH}. Neither gets more than an equal share of
      * the remaining time among itself and the strategies still to run, so listing alternatives cannot
-     * starve a later strategy. A later repair of the same strategy does not restart this window. Nothing
-     * is bounded without a request deadline, which production always sets.
+     * starve a later strategy. A later repair of the same strategy does not restart this window. There is
+     * no comparison clock without a request deadline, which production always sets.
      */
     public synchronized void startAlternativesSearch() {
         if (deadline == null || state.alternativesDeadline != null) return;
@@ -145,8 +154,11 @@ public class FixContext {
         long toFirstRepair = state.strategyStartedAt == null
                 ? 0 : Duration.between(state.strategyStartedAt, now).toMillis();
         long share = Duration.between(now, deadline).toMillis() / Math.max(1, state.strategiesLeft);
-        long window = Math.min(share, Math.max(toFirstRepair, MIN_ALTERNATIVES_SEARCH.toMillis()));
+        long window = Math.min(share, prefersCompleteSearch()
+                ? SMALL_SEARCH_TIME.toMillis() - toFirstRepair
+                : Math.max(toFirstRepair, MIN_ALTERNATIVES_SEARCH.toMillis()));
         state.alternativesDeadline = now.plusMillis(window);
+        onVerifiedRepair.run();
     }
 
     public synchronized void addDiagnostic(String diagnostic) {
@@ -194,11 +206,30 @@ public class FixContext {
         return state.strategyNoResults.get(strategy);
     }
 
-    public synchronized void initializeStrategySearch(String strategy, int attemptLimit) {
+    /** Domain products include free candidate values as well as boolean edits; only a safe upper bound qualifies. */
+    public synchronized void initializeStrategySearch(String strategy, int attemptLimit, List<Long> domainSizes) {
         if (strategy != null && !strategy.isBlank()) {
+            long assignments = 1;
+            for (long domainSize : domainSizes) {
+                if (domainSize <= 0) throw new IllegalArgumentException("Search domains must be nonempty");
+                assignments = assignments > SMALL_SEARCH_ASSIGNMENTS / domainSize
+                        ? SMALL_SEARCH_ASSIGNMENTS + 1L : assignments * domainSize;
+            }
+            state.smallSearch = deadline != null && assignments <= SMALL_SEARCH_ASSIGNMENTS;
+            state.smallSearchDeadline = null;
+            state.nominalAttemptLimit = Math.max(0, attemptLimit);
+            if (state.strategyStartedAt == null) state.strategyStartedAt = clock.instant();
+            // Small probes and the joint solve can each visit an assignment; leave room for the final UNSAT.
+            int limit = state.smallSearch ? Math.max(attemptLimit, (int) assignments * 2 + 1) : attemptLimit;
             state.strategySearchProgress.put(strategy,
-                    new StrategySearchProgress(0, Math.max(0, attemptLimit)));
+                    new StrategySearchProgress(0, Math.max(0, limit)));
         }
+    }
+
+    /** Finite enumeration may exceed the usual attempt/listing limits only under a measured time bound. */
+    public synchronized boolean prefersCompleteSearch() {
+        return state.smallSearch && Duration.between(state.strategyStartedAt, clock.instant())
+                .compareTo(SMALL_SEARCH_TIME) < 0;
     }
 
     public synchronized void addStrategyAttempts(String strategy, int attempts) {
@@ -211,6 +242,10 @@ public class FixContext {
             return;
         }
         long updated = (long) current.attemptsUsed() + attempts;
+        if (state.smallSearch && updated > state.nominalAttemptLimit) {
+            // The extra enumeration must bound an in-flight solver too, not just the next loop iteration.
+            state.smallSearchDeadline = state.strategyStartedAt.plus(SMALL_SEARCH_TIME);
+        }
         state.strategySearchProgress.put(strategy, new StrategySearchProgress(
                 (int) Math.min(updated, current.attemptLimit()), current.attemptLimit()));
     }
@@ -221,6 +256,12 @@ public class FixContext {
 
     public synchronized boolean hasStrategyAttemptsLeft(String strategy) {
         StrategySearchProgress progress = state.strategySearchProgress.get(strategy);
+        if (progress != null && state.smallSearch && progress.attemptsUsed() >= state.nominalAttemptLimit
+                && !prefersCompleteSearch()) {
+            state.strategySearchProgress.put(strategy,
+                    new StrategySearchProgress(progress.attemptsUsed(), progress.attemptsUsed()));
+            return false;
+        }
         return progress != null && progress.attemptsUsed() < progress.attemptLimit();
     }
 
@@ -280,7 +321,7 @@ public class FixContext {
     }
 
     /**
-     * Guarded by the enclosing context's monitor. {@link #alternativesDeadline} is also read without it, by
+     * Guarded by the enclosing context's monitor. The volatile deadlines are also read without it, by
      * {@link FixContext#isExpired()} and {@link FixContext#remainingMillis()}, hence volatile.
      */
     private static final class RunState {
@@ -294,6 +335,8 @@ public class FixContext {
 
         /** Strategies from the current one to the end of the request that will actually run. */
         private int strategiesLeft;
+        private boolean smallSearch;
+        private int nominalAttemptLimit;
         /**
          * When the running strategy started; null when a strategy is driven without
          * {@link FixContext#beginStrategy}.
@@ -307,6 +350,8 @@ public class FixContext {
          * a repair in seconds.
          */
         private volatile Instant alternativesDeadline;
+        /** Extra enumeration's clock does not mark first-repair comparison feedback as already sent. */
+        private volatile Instant smallSearchDeadline;
         /**
          * Verdict of the unmodified rules on the forward-verification model, needed only once a candidate
          * repairs the target while other specifications still fail. The holder is set even when the verdict

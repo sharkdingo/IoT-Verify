@@ -70,6 +70,7 @@ public class SmvTraceParser {
 
         String[] lines = counterexample.split("\n");
         TraceStateDto currentState = null;
+        Map<String, TraceDeviceDto> currentDevicesById = new HashMap<>();
         String pendingStateName = null;
         Map<String, Map<String, String>> previousModeValuesByDevice = new HashMap<>();
         Map<Integer, Boolean> ruleExecutionValues = new HashMap<>();
@@ -84,13 +85,14 @@ public class SmvTraceParser {
                 continue;
             }
 
-            if (LOOP_START_PATTERN.matcher(line).matches()) {
+            if (line.startsWith("--") && LOOP_START_PATTERN.matcher(line).matches()) {
                 nextStateStartsLoop = true;
                 continue;
             }
 
-            Matcher stateMatcher = STATE_LINE_PATTERN.matcher(line);
-            if (stateMatcher.find()) {
+            Matcher stateMatcher = (line.startsWith("State") || line.startsWith("->"))
+                    ? STATE_LINE_PATTERN.matcher(line) : null;
+            if (stateMatcher != null && stateMatcher.find()) {
                 int stateIdx = Integer.parseInt(stateMatcher.group(1));
                 if (currentState != null) {
                     finalizeModeStates(currentState, deviceSmvMap, previousModeValuesByDevice);
@@ -102,6 +104,7 @@ public class SmvTraceParser {
                 }
 
                 currentState = new TraceStateDto();
+                currentDevicesById.clear();
                 currentState.setStateIndex(stateIdx);
                 currentState.setDevices(new ArrayList<>());
                 currentState.setTriggeredRules(new ArrayList<>());
@@ -119,13 +122,13 @@ public class SmvTraceParser {
                     pendingStateName = null;
                 }
 
-                parseLineVariables(currentState, line, deviceSmvMap, pendingStateName,
+                parseLineVariables(currentState, currentDevicesById, line, deviceSmvMap, pendingStateName,
                         ruleExecutionValues, automationLinkAttackValues);
                 continue;
             }
 
             if (currentState != null) {
-                parseLineVariables(currentState, line, deviceSmvMap, pendingStateName,
+                parseLineVariables(currentState, currentDevicesById, line, deviceSmvMap, pendingStateName,
                         ruleExecutionValues, automationLinkAttackValues);
             }
         }
@@ -170,21 +173,33 @@ public class SmvTraceParser {
     }
 
     private void parseLineVariables(TraceStateDto currentState,
+                                    Map<String, TraceDeviceDto> currentDevicesById,
                                     String line,
                                     Map<String, DeviceSmvData> deviceSmvMap,
                                     String pendingStateName,
                                     Map<Integer, Boolean> ruleExecutionValues,
                                     Map<Integer, Boolean> automationLinkAttackValues) {
-        Matcher varMatcher = VAR_PATTERN.matcher(line);
-        while (varMatcher.find()) {
-            processVariable(currentState,
-                    varMatcher.group(1),
-                    varMatcher.group(2),
-                    varMatcher.group(3),
-                    deviceSmvMap,
-                    pendingStateName);
+        int assignmentIndex = line.indexOf('=');
+        if (assignmentIndex < 0) {
+            return;
+        }
+        int qualifierIndex = line.indexOf('.');
+        if (qualifierIndex >= 0) {
+            Matcher varMatcher = VAR_PATTERN.matcher(line);
+            while (varMatcher.find()) {
+                processVariable(currentState, currentDevicesById,
+                        varMatcher.group(1),
+                        varMatcher.group(2),
+                        varMatcher.group(3),
+                        deviceSmvMap,
+                        pendingStateName);
+            }
         }
 
+        // Environment assignments have an unqualified left-hand side; dots in values remain valid.
+        if (qualifierIndex >= 0 && qualifierIndex < assignmentIndex) {
+            return;
+        }
         Matcher envMatcher = ENV_VAR_PATTERN.matcher(line);
         while (envMatcher.find()) {
             processEnvVariable(currentState, envMatcher.group(1), envMatcher.group(2),
@@ -193,6 +208,7 @@ public class SmvTraceParser {
     }
 
     private void processVariable(TraceStateDto state,
+                                 Map<String, TraceDeviceDto> currentDevicesById,
                                  String deviceId,
                                  String attr,
                                  String value,
@@ -209,7 +225,7 @@ public class SmvTraceParser {
             return;
         }
 
-        TraceDeviceDto devTrace = findOrCreateDeviceTrace(state, deviceId);
+        TraceDeviceDto devTrace = findOrCreateDeviceTrace(state, currentDevicesById, deviceId);
         if (devTrace.getTemplateName() == null) {
             devTrace.setTemplateName(smv.getTemplateName());
         }
@@ -881,20 +897,23 @@ public class SmvTraceParser {
         return null;
     }
 
-    private TraceDeviceDto findOrCreateDeviceTrace(TraceStateDto state, String deviceId) {
+    private TraceDeviceDto findOrCreateDeviceTrace(TraceStateDto state,
+                                                   Map<String, TraceDeviceDto> currentDevicesById,
+                                                   String deviceId) {
         if (state.getDevices() == null) {
             state.setDevices(new ArrayList<>());
         }
 
-        for (TraceDeviceDto dev : state.getDevices()) {
-            if (deviceId.equals(dev.getDeviceId())) {
-                return dev;
-            }
+        TraceDeviceDto existing = currentDevicesById.get(deviceId);
+        if (existing != null) {
+            return existing;
         }
 
         TraceDeviceDto newDev = new TraceDeviceDto();
         newDev.setDeviceId(deviceId);
+        // Keep encounter order in the DTO list; this index belongs only to the current delta state.
         state.getDevices().add(newDev);
+        currentDevicesById.put(deviceId, newDev);
         return newDev;
     }
 

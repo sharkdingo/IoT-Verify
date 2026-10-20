@@ -67,28 +67,41 @@ const emit = defineEmits<{ (e: 'change', checked: boolean): void }>()
   display: inline-flex;
   align-items: center;
   flex: 0 0 auto;
-  width: 2.75rem;
-  height: 1.5rem;
+  width: var(--iot-target-min);
+  height: var(--iot-target-min);
   padding: 0;
   border: 0;
   border-radius: var(--iot-radius-pill);
-  /* Was a private grey literal that stayed light in dark theme, so an off switch glowed against the
-     dark panel instead of receding. */
-  background: var(--border);
+  background: transparent;
   cursor: pointer;
+}
+
+.iot-toggle-switch::before {
+  content: '';
+  position: absolute;
+  inset: 50% 0 auto;
+  height: 1.5rem;
+  transform: translateY(-50%);
+  border-radius: var(--iot-radius-pill);
+  background: var(--control-border);
   transition: background-color 0.2s ease;
 }
 
 .iot-toggle-switch:disabled {
   cursor: not-allowed;
-  opacity: 0.6;
+  opacity: 1;
 }
 
-/* The on-state colours come from the shared tokens rather than four private hex values, so this
-   control follows the theme instead of carrying its own palette. */
-.iot-toggle-switch--on.iot-toggle-switch--enabled { background: var(--accent); }
-.iot-toggle-switch--on.iot-toggle-switch--adversarial { background: var(--danger); }
-.iot-toggle-switch--on.iot-toggle-switch--sensitivity { background: var(--accent-strong); }
+/* Filled tracks keep the on-state thumb readable in both themes. */
+.iot-toggle-switch--on.iot-toggle-switch--enabled::before { background: var(--accent-fill); }
+.iot-toggle-switch--on.iot-toggle-switch--adversarial::before { background: var(--danger-fill); }
+.iot-toggle-switch--on.iot-toggle-switch--sensitivity::before { background: var(--accent-fill); }
+.iot-toggle-switch--on:disabled::before { background: var(--accent-fill-disabled); }
+
+.iot-toggle-switch:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
+}
 
 .iot-toggle-switch__thumb {
   position: absolute;
@@ -96,17 +109,18 @@ const emit = defineEmits<{ (e: 'change', checked: boolean): void }>()
   width: 1rem;
   height: 1rem;
   border-radius: var(--iot-radius-pill);
-  background: #fff;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.4);
+  background: var(--surface-elevated);
+  box-shadow: var(--shadow-raised);
   transition: transform 0.2s ease;
 }
 
 .iot-toggle-switch--on .iot-toggle-switch__thumb {
+  background: var(--text-on-fill);
   transform: translateX(1.25rem);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .iot-toggle-switch,
+  .iot-toggle-switch::before,
   .iot-toggle-switch__thumb {
     transition: none;
   }

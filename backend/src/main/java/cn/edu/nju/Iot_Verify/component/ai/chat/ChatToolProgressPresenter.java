@@ -7,6 +7,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -40,6 +41,17 @@ public class ChatToolProgressPresenter {
     public boolean hasValidKnownToolPayload(String functionName, JsonNode root) {
         if (AiToolResultContract.isMutationCapable(functionName)) {
             return AiToolResultContract.hasValidKnownToolPayload(functionName, root);
+        }
+        if ("prepare_tools".equals(functionName)) {
+            if (root == null || !root.isObject() || !"toolSchemasPrepared".equals(root.path("operation").asText())
+                    || !hasArray(root, "loadedTools") || root.path("loadedTools").isEmpty()
+                    || nonNegativeInt(root.get("count")) == null
+                    || root.path("count").intValue() != root.path("loadedTools").size()) return false;
+            Set<String> names = new java.util.HashSet<>();
+            for (JsonNode name : root.path("loadedTools")) {
+                if (!name.isTextual() || name.textValue().isBlank() || !names.add(name.textValue())) return false;
+            }
+            return true;
         }
         if (!"board_overview".equals(functionName)) return true;
         return root != null && root.isObject()
@@ -103,6 +115,137 @@ public class ChatToolProgressPresenter {
                         arraySize(root, "devices"), arraySize(root, "rules"),
                         arraySize(root, "specs"), arraySize(root, "environmentVariables"));
             }
+            if ("prepare_tools".equals(functionName)) {
+                if (!hasValidKnownToolPayload(functionName, root)) return null;
+                return preferChinese
+                        ? String.format("已准备 %d 项相关操作。", root.path("count").intValue())
+                        : String.format("Prepared %d requested actions.", root.path("count").intValue());
+            }
+            if ("list_verification_runs".equals(functionName)) {
+                Integer count = nonNegativeInt(root.get("count"));
+                if (count == null || !hasArray(root, "runs") || arraySize(root, "runs") != count) return null;
+                int unavailable = 0;
+                for (JsonNode run : root.path("runs")) {
+                    if (!run.path("dataAvailable").isBoolean()) return null;
+                    if (!run.path("dataAvailable").booleanValue()) unavailable++;
+                }
+                return preferChinese
+                        ? String.format("已读取 %d 条保存的验证记录，其中 %d 条无法查看；这些记录对应保存时的场景。", count, unavailable)
+                        : String.format("Read %d saved verification records; %d unavailable. They describe their saved scenes.", count, unavailable);
+            }
+            if ("get_verification_run".equals(functionName)) {
+                if (!hasArray(root, "specResults") || !root.path("modelComplete").isBoolean()) return null;
+                int satisfied = 0, violated = 0, inconclusive = 0;
+                for (JsonNode spec : root.path("specResults")) {
+                    switch (spec.path("outcome").asText()) {
+                        case "SATISFIED" -> satisfied++;
+                        case "VIOLATED" -> violated++;
+                        case "INCONCLUSIVE" -> inconclusive++;
+                        default -> { return null; }
+                    }
+                }
+                return preferChinese
+                        ? String.format("已读取保存的验证结果：%d 项满足、%d 项违反、%d 项尚无结论；%s。", satisfied, violated, inconclusive,
+                        root.path("modelComplete").booleanValue() ? "模型完整，结论仅适用于保存时的场景" : "模型不完整，不能据此判断整个场景通过")
+                        : String.format("Read the saved verification result: %d satisfied, %d violated, %d inconclusive; %s.", satisfied, violated, inconclusive,
+                        root.path("modelComplete").booleanValue() ? "complete model, conclusions apply only to the saved scene" : "incomplete model, no whole-scene pass can be inferred");
+            }
+            if ("read_run_model".equals(functionName)) {
+                Integer total = nonNegativeInt(root.get("totalCharacters"));
+                Integer offset = nonNegativeInt(root.get("offset"));
+                Integer returned = nonNegativeInt(root.get("returnedCharacters"));
+                if (total == null || offset == null || returned == null || !root.path("modelText").isTextual()
+                        || !root.path("hasMore").isBoolean() || !"SAVED_RUN".equals(root.path("modelSource").asText())
+                        || (long) offset + returned > total || offset > total
+                        || returned != root.path("modelText").textValue().codePointCount(0, root.path("modelText").textValue().length())
+                        || root.path("hasMore").booleanValue() != ((long) offset + returned < total)
+                        || (root.path("hasMore").booleanValue()
+                            && !Integer.valueOf(offset + returned).equals(nonNegativeInt(root.get("nextOffset"))))) return null;
+                if (returned == 0) return preferChinese
+                        ? "本页位于保存模型的末尾，没有可显示的内容。"
+                        : "This page is at the end of the saved model; there is no text to display.";
+                return preferChinese
+                        ? String.format("已读取保存模型第 %d–%d 个字符（共 %d）%s。", offset + 1, offset + returned, total,
+                        root.path("hasMore").booleanValue() ? "，还有后续内容" : "，已到模型末尾")
+                        : String.format("Read characters %d–%d of %d in the saved model%s.", offset + 1, offset + returned, total,
+                        root.path("hasMore").booleanValue() ? "; more text remains" : "; reached the model's end");
+            }
+            if ("list_traces".equals(functionName)) {
+                Integer count = nonNegativeInt(root.get("count"));
+                if (count == null || (root.has("traces")
+                        && (!hasArray(root, "traces") || arraySize(root, "traces") != count))) return null;
+                if (count == 0) {
+                    return preferChinese ? "没有已保存的反例记录；这不代表已经通过验证。"
+                            : "No saved counterexample records; this does not mean verification passed.";
+                }
+                Integer available = nonNegativeInt(root.get("availableCount"));
+                Integer unavailable = nonNegativeInt(root.get("unavailableCount"));
+                if (!hasArray(root, "traces") || available == null || unavailable == null
+                        || (long) available + unavailable != count) return null;
+                return preferChinese
+                        ? String.format("已读取 %d 条反例记录，其中 %d 条无法查看；记录对应保存时的画布。", count, unavailable)
+                        : String.format("Read %d saved counterexample records; %d unavailable. They describe the saved Board snapshot.",
+                        count, unavailable);
+            }
+            if ("read_conversation_activity".equals(functionName)) {
+                Integer count = nonNegativeInt(root.get("count"));
+                if (count == null || !hasArray(root, "activities") || arraySize(root, "activities") != count
+                        || !root.path("hasMore").isBoolean()) return null;
+                boolean hasMore = root.path("hasMore").booleanValue();
+                int drafts = 0, previews = 0, changes = 0;
+                for (JsonNode activity : root.path("activities")) {
+                    if (!"AVAILABLE".equals(activity.path("evidenceStatus").asText())) continue;
+                    boolean changed = activity.path("appliedAction").isTextual()
+                            && !activity.path("appliedAction").textValue().isBlank();
+                    if (activity.path("draftStored").isBoolean() && activity.path("draftStored").booleanValue()) drafts++;
+                    if (!changed && activity.path("requiresUserConfirmation").isBoolean()
+                            && activity.path("requiresUserConfirmation").booleanValue()) previews++;
+                    if (changed) changes++;
+                }
+                List<String> stages = new ArrayList<>();
+                if (drafts > 0) stages.add(preferChinese ? "保存草稿 " + drafts + " 次" : drafts + " saved drafts");
+                if (previews > 0) stages.add(preferChinese ? "确认预览 " + previews + " 次" : previews + " confirmation previews");
+                if (changes > 0) stages.add(preferChinese ? "历史改动 " + changes + " 次" : changes + " historical changes");
+                String coverage = preferChinese
+                        ? String.format("已核对 %d 条已保存的会话操作记录%s。", count,
+                        hasMore ? "，还有更早的记录需要读取" : "，已读到最早记录")
+                        : String.format("Read %d saved conversation operation records%s.", count,
+                        hasMore ? "; older records remain" : "; reached the earliest record");
+                return stages.isEmpty() ? coverage : coverage
+                        + (preferChinese ? "本页明确记录：" : " This page records: ")
+                        + String.join(preferChinese ? "；" : "; ", stages) + (preferChinese ? "。" : ".");
+            }
+            if ("fix_violation".equals(functionName)) {
+                Integer count = nonNegativeInt(root.get("suggestionCount"));
+                if (count == null || !root.path("fixable").isBoolean()
+                        || root.path("fixable").booleanValue() != (count > 0)
+                        || (count > 0 && !hasArray(root, "suggestions"))
+                        || (root.has("suggestions")
+                            && (!hasArray(root, "suggestions") || arraySize(root, "suggestions") != count))) return null;
+                String summary = preferChinese
+                        ? (count == 0 ? "本次检查未提供可直接应用的方案；画布未改变。"
+                        : String.format("已读取修复检查结果：%d 个候选方案，尚未应用。", count))
+                        : (count == 0 ? "This analysis returned no directly applicable suggestion; the Board was not changed."
+                        : String.format("Read the repair analysis: %d candidate suggestion(s); nothing was applied.", count));
+                // Keep concrete thresholds visible even when an unsupported model claim is replaced
+                // by this authoritative read summary. A proposal is still not a mutation receipt.
+                for (int i = 0; i < count; i++) {
+                    JsonNode parameters = root.path("suggestions").get(i).path("parameterAdjustments");
+                    if (!parameters.isArray()) continue;
+                    List<String> values = new ArrayList<>();
+                    for (JsonNode parameter : parameters) {
+                        if (!List.of("attribute", "relation", "originalValue", "newValue").stream()
+                                .allMatch(field -> parameter.path(field).isTextual())) continue;
+                        values.add(parameter.path("attribute").textValue() + " "
+                                + parameter.path("relation").textValue() + " "
+                                + parameter.path("originalValue").textValue() + " → "
+                                + parameter.path("newValue").textValue());
+                    }
+                    if (!values.isEmpty()) summary += (preferChinese ? " 方案 " : " Option ")
+                            + (i + 1) + ": " + String.join("; ", values) + ".";
+                }
+                return compactToolProgressDetail(summary);
+            }
             if ("add_device".equals(functionName) && "created".equals(root.path("operation").asText())) {
                 JsonNode device = root.path("device");
                 String label = device.path("label").asText("").trim();
@@ -155,10 +298,12 @@ public class ChatToolProgressPresenter {
                             ? "已调整规则执行顺序，共 " + root.path("ruleCount").asInt(0) + " 条规则。"
                             : "Reordered " + root.path("ruleCount").asInt(0) + " rule(s).");
                 }
-                if (Set.of("created", "deleted").contains(operation)) {
+                if (Set.of("created", "updated", "deleted").contains(operation)) {
                     String action = "created".equals(operation)
                             ? (preferChinese ? "已创建规则" : "Created rule")
-                            : (preferChinese ? "已删除规则" : "Deleted rule");
+                            : "updated".equals(operation)
+                                ? (preferChinese ? "已修改规则" : "Updated rule")
+                                : (preferChinese ? "已删除规则" : "Deleted rule");
                     return compactToolProgressDetail(description.isBlank()
                             ? action + (preferChinese ? "。" : ".")
                             : action + (preferChinese ? "：" : ": ") + description);
@@ -236,6 +381,24 @@ public class ChatToolProgressPresenter {
                 String name = root.path("scenarioName").asText("").trim();
                 boolean preview = "preview".equals(root.path("operation").asText());
                 if (preview) {
+                    if (List.of("currentDeviceCount", "currentEnvironmentVariableCount", "currentRuleCount",
+                            "currentSpecificationCount", "replacementDeviceCount", "replacementEnvironmentVariableCount",
+                            "replacementRuleCount", "replacementSpecificationCount", "editHistoryEntryCount")
+                            .stream().allMatch(field -> nonNegativeInt(root.get(field)) != null)) {
+                        return compactToolProgressDetail(preferChinese
+                                ? String.format("场景%s替换预览：设备 %d→%d，共享环境变量 %d→%d，规则 %d→%d，规约 %d→%d；将清除 %d 条撤销/重做记录。尚未写入，等待确认。",
+                                quotedName(name), root.path("currentDeviceCount").intValue(), root.path("replacementDeviceCount").intValue(),
+                                root.path("currentEnvironmentVariableCount").intValue(), root.path("replacementEnvironmentVariableCount").intValue(),
+                                root.path("currentRuleCount").intValue(), root.path("replacementRuleCount").intValue(),
+                                root.path("currentSpecificationCount").intValue(), root.path("replacementSpecificationCount").intValue(),
+                                root.path("editHistoryEntryCount").intValue())
+                                : String.format("Scenario%s replacement preview: devices %d→%d, shared variables %d→%d, rules %d→%d, specifications %d→%d; %d undo/redo entries would be cleared. Nothing was written; confirmation is pending.",
+                                quotedName(name), root.path("currentDeviceCount").intValue(), root.path("replacementDeviceCount").intValue(),
+                                root.path("currentEnvironmentVariableCount").intValue(), root.path("replacementEnvironmentVariableCount").intValue(),
+                                root.path("currentRuleCount").intValue(), root.path("replacementRuleCount").intValue(),
+                                root.path("currentSpecificationCount").intValue(), root.path("replacementSpecificationCount").intValue(),
+                                root.path("editHistoryEntryCount").intValue()));
+                    }
                     return compactToolProgressDetail(preferChinese
                             ? String.format("已生成场景%s的全量替换预览，尚未写入，正在等待确认。", quotedName(name))
                             : String.format("Prepared a full-board replacement preview for scenario%s; nothing was written and confirmation is required.", quotedName(name)));
@@ -356,10 +519,15 @@ public class ChatToolProgressPresenter {
                         ? "工具操作结果：" + operation + "。"
                         : "Tool operation result: " + operation + ".");
             }
-            return preferChinese ? "工具已返回结构化结果。" : "The tool returned a structured result.";
+            return null;
         } catch (Exception e) {
             return preferChinese ? "工具结果无法生成摘要。" : "The tool result could not be summarized.";
         }
+    }
+
+    private Integer nonNegativeInt(JsonNode value) {
+        return value != null && value.isIntegralNumber() && value.canConvertToInt() && value.intValue() >= 0
+                ? value.intValue() : null;
     }
 
     /** One authoritative user-visible receipt and the client data it invalidates. */
@@ -388,8 +556,7 @@ public class ChatToolProgressPresenter {
 
     private boolean isGenericSummary(String summary, boolean preferChinese) {
         if (summary == null || summary.isBlank()) return true;
-        return summary.equals(preferChinese ? "工具已返回结构化结果。" : "The tool returned a structured result.")
-                || summary.startsWith(preferChinese ? "工具操作结果：" : "Tool operation result: ");
+        return summary.startsWith(preferChinese ? "工具操作结果：" : "Tool operation result: ");
     }
 
     public List<String> potentialRefreshTargets(String functionName) {
@@ -418,7 +585,7 @@ public class ChatToolProgressPresenter {
             case "add_device" -> "created".equals(operation) ? "DEVICE_ADDED" : null;
             case "delete_device" -> "deleted".equals(operation) ? "DEVICE_DELETED" : null;
             case "edit_device" -> Set.of("updated", "renamed").contains(operation) ? "DEVICE_UPDATED" : null;
-            case "manage_rule" -> Set.of("created", "deleted", "reordered").contains(operation)
+            case "manage_rule" -> Set.of("created", "updated", "deleted", "reordered").contains(operation)
                     ? "RULES_UPDATED" : null;
             case "apply_fix" -> "applied".equals(operation) ? "REPAIR_APPLIED" : null;
             case "manage_spec" -> Set.of("created", "deleted").contains(operation)
@@ -454,6 +621,36 @@ public class ChatToolProgressPresenter {
             case "clear_board" -> "cleared".equals(operation) ? "BOARD_CLEARED" : null;
             default -> null;
         };
+    }
+
+    /** Confirmation must expose canonical modeling choices even when the model omits them. */
+    public String scenarioEnvironmentAssumptions(String previewJson, boolean preferChinese) {
+        if (previewJson == null || previewJson.isBlank()) return null;
+        try {
+            JsonNode root = objectMapper.readTree(previewJson);
+            JsonNode variables = root.path("replacementScene").path("environmentVariables");
+            Integer count = nonNegativeInt(root.get("replacementEnvironmentVariableCount"));
+            if (!"preview".equals(root.path("operation").asText())
+                    || !root.path("requiresUserConfirmation").isBoolean()
+                    || !root.path("requiresUserConfirmation").booleanValue()
+                    || count == null || count == 0 || !variables.isArray() || variables.size() != count) return null;
+            int trusted = 0, publicInputs = 0;
+            for (JsonNode variable : variables) {
+                String trust = variable.path("trust").asText();
+                String privacy = variable.path("privacy").asText();
+                if (!List.of("trusted", "untrusted").contains(trust)
+                        || !List.of("public", "private").contains(privacy)) return null;
+                if ("trusted".equals(trust)) trusted++;
+                if ("public".equals(privacy)) publicInputs++;
+            }
+            return preferChinese
+                    ? String.format("本草稿的环境输入设置：%d 项按可信来源建模，%d 项按不可信来源建模；%d 项公开，%d 项私密。这些是建模假设，尚未验证。",
+                    trusted, count - trusted, publicInputs, count - publicInputs)
+                    : String.format("Draft environment inputs: %d modeled as trusted sources, %d untrusted; %d public, %d private. These are modeling assumptions, not verification conclusions.",
+                    trusted, count - trusted, publicInputs, count - publicInputs);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            return null;
+        }
     }
 
     public record ActionReceipt(String assistantAction, String summary, List<String> refreshTargets) {

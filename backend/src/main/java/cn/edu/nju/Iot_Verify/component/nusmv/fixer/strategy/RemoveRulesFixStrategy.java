@@ -7,6 +7,7 @@ import cn.edu.nju.Iot_Verify.component.nusmv.executor.NusmvExecutor;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvGenerator;
 import cn.edu.nju.Iot_Verify.dto.fix.FixSuggestionDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
+import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -48,17 +49,30 @@ public class RemoveRulesFixStrategy implements FixStrategy {
     public StrategyOutcome tryFix(FixContext ctx) {
         List<RuleDto> allRules = ctx.getAllRules();
         int maxAttempts = ctx.getMaxAttempts() > 0 ? ctx.getMaxAttempts() : 20;
+        int specIndex = ctx.getViolatedSpecIndex();
+        SpecificationDto violatedSpec = specIndex >= 0 && specIndex < ctx.getSpecs().size()
+                ? ctx.getSpecs().get(specIndex) : null;
+        Set<String> propertyDevices = FixStrategyUtils.propertyDeviceVariables(violatedSpec, ctx.getDeviceSmvMap());
 
         // The repair scope includes rules that stayed dormant in this trace but can influence the
         // property: one of them may take over once the localized rule is gone, so a minimal removal
         // set must be able to contain it.
         List<Integer> candidates = ctx.getRepairRuleIndices().stream()
                 .filter(index -> index != null && index >= 0 && index < allRules.size())
+                // A shared domain can pull several rooms into scope. Keep the fault-first order
+                // within each priority, but reach the property's primary/backup pair before the
+                // bounded pair search spends its quota on combinations from another room.
+                .sorted(Comparator.comparingInt(index -> {
+                    RuleDto rule = allRules.get(index);
+                    String target = rule == null || rule.getCommand() == null ? null
+                            : FixStrategyUtils.resolveVarNameSafe(rule.getCommand().getDeviceName(), ctx.getDeviceSmvMap());
+                    return target != null && propertyDevices.contains(target) ? 0 : 1;
+                }))
                 .toList();
         if (candidates.isEmpty()) {
             return StrategyOutcome.none();
         }
-        ctx.initializeStrategySearch(NAME, maxAttempts);
+        ctx.initializeStrategySearch(NAME, maxAttempts, Collections.nCopies(candidates.size(), 2L));
 
         // Smallest removals first: a combination containing a listed one is then never checked.
         FixAlternatives alternatives = new FixAlternatives(ctx);
@@ -132,7 +146,7 @@ public class RemoveRulesFixStrategy implements FixStrategy {
                 .collect(Collectors.toList());
         return FixSuggestionDto.builder()
                 .strategy(NAME)
-                .description("Permanently remove " + removal.size() + " automation rule(s): "
+                .description("Remove " + removal.size() + " automation rule(s): "
                         + String.join(", ", ruleDescriptions))
                 .removedRuleIndices(removal)
                 .removedRuleDescriptions(ruleDescriptions)

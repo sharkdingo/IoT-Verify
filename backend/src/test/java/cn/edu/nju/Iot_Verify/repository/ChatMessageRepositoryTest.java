@@ -169,6 +169,25 @@ class ChatMessageRepositoryTest {
         });
     }
 
+    @Test
+    void activityPagesUseExactSessionRoleAndIdCursorWithoutLosingOlderToolEvidence() {
+        ChatMessagePo request = messageRepository.saveAndFlush(message("activity-owner", null, "assistant", "e1"));
+        ChatMessagePo older = messageRepository.saveAndFlush(message("activity-owner", null, "tool", "e1"));
+        ChatMessagePo newer = messageRepository.saveAndFlush(message("activity-owner", null, "tool", "e1"));
+        messageRepository.saveAndFlush(message("activity-owner", "visible", "user", "e2"));
+        messageRepository.saveAndFlush(message("activity-other", null, "tool", "e3"));
+        var page = org.springframework.data.domain.PageRequest.of(0, 1);
+
+        assertEquals(List.of(newer.getId()), messageRepository.findToolActivityPage("activity-owner", null, page)
+                .stream().map(ChatMessagePo::getId).toList());
+        assertEquals(List.of(older.getId()), messageRepository.findToolActivityPage("activity-owner", newer.getId(), page)
+                .stream().map(ChatMessagePo::getId).toList());
+        assertTrue(messageRepository.findToolActivityPage("activity-owner", older.getId(), page).isEmpty());
+        assertEquals(request.getId(), messageRepository
+                .findFirstBySessionIdAndIdLessThanAndRoleOrderByIdDesc("activity-owner", newer.getId(), "assistant")
+                .orElseThrow().getId());
+    }
+
     private ChatMessagePo message(
             String sessionId, String turnId, String role, String executionId) {
         ChatMessagePo message = new ChatMessagePo();

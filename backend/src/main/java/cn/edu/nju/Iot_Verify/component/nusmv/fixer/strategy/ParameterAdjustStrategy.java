@@ -33,9 +33,9 @@ import java.util.stream.Collectors;
  *
  * <p>Parameterizes numeric thresholds of the rules that can influence the violated property as
  * FROZENVARs, uses NuSMV with the negated spec (¬ρ) on the pinned counterexample to find corrective
- * values — first one threshold at a time, then jointly — and forward-verifies each candidate on the
- * complete model before refining it toward the original values. It lists every minimal set of moved
- * thresholds it verifies (see {@link FixAlternatives}).</p>
+ * values — first individual thresholds and coordinated trigger groups, then jointly — and
+ * forward-verifies each candidate on the complete model before refining it toward the original
+ * values. It lists every minimal set of moved thresholds it verifies (see {@link FixAlternatives}).</p>
  */
 @Slf4j
 @Component
@@ -117,9 +117,15 @@ public class ParameterAdjustStrategy implements FixStrategy {
                 String key = "r" + ruleIdx + "_c" + condIdx;
                 String targetId = PreferredRangeSelection.targetIdFor(ctx.getTraceId(), ruleIdx, condIdx);
                 String frozenVarName = "param_" + key;
+                // Bounds and display labels belong to the same frozen device, rather than later Board edits.
+                DeviceSmvData sourceDevice = DeviceReferenceResolver.resolve(cond.getDeviceName(), deviceSmvMap);
+                String deviceLabel = sourceDevice.getDeviceLabel() != null && !sourceDevice.getDeviceLabel().isBlank()
+                        ? sourceDevice.getDeviceLabel() : cond.getDeviceName();
                 eligibleTargetCount++;
                 ctx.registerParameterTarget(ParameterTarget.builder()
                         .targetId(targetId)
+                        .rulePosition(ruleIdx + 1)
+                        .deviceLabel(deviceLabel)
                         .ruleIndex(ruleIdx)
                         .conditionIndex(condIdx)
                         .attribute(cond.getAttribute())
@@ -163,6 +169,8 @@ public class ParameterAdjustStrategy implements FixStrategy {
 
                 adjustmentTemplate.add(ParameterAdjustment.builder()
                         .targetId(targetId)
+                        .rulePosition(ruleIdx + 1)
+                        .deviceLabel(deviceLabel)
                         .ruleIndex(ruleIdx)
                         .conditionIndex(condIdx)
                         .attribute(cond.getAttribute())
@@ -188,7 +196,8 @@ public class ParameterAdjustStrategy implements FixStrategy {
             return StrategyOutcome.none();
         }
 
-        ctx.initializeStrategySearch(NAME, maxAttempts);
+        ctx.initializeStrategySearch(NAME, maxAttempts, thresholds.values().stream()
+                .map(info -> (long) info.getUpperBound() - info.getLowerBound() + 1).toList());
         log.info("ParameterAdjustStrategy: found {} parameterizable threshold(s)", thresholds.size());
         return new ThresholdSearch(ctx, allRules, thresholds, adjustmentTemplate).run(maxAttempts);
     }
@@ -221,21 +230,46 @@ public class ParameterAdjustStrategy implements FixStrategy {
         }
 
         StrategyOutcome run(int maxAttempts) {
-            // Phase 1: one threshold at a time. A repair that moves a single value is the easiest for a
-            // user to judge, so those are found first. Each probe is one ¬ρ solve on the pinned
-            // counterexample: UNSAT settles a threshold in a single NuSMV call, and only a returned
-            // value pays for a full-model verification. Half the budget is reserved for the joint phase.
-            // It needs every original value inside its search range: a preferred range that excludes
-            // a threshold's original obliges that threshold to move, and a single-threshold solve holds
-            // it at its original, so it would list repairs outside the range the user asked for.
-            if (thresholds.size() > 1 && maxAttempts > 1 && originalsWithinRanges()
-                    && !searchEachAlone(Math.max(1, maxAttempts / 2))) {
-                return alternatives.outcome(false);
+            // Reserve half the budget for the unrestricted search. Small probes hold every other
+            // threshold unchanged, so they are admissible only when all originals meet user ranges.
+            if (thresholds.size() > 1 && maxAttempts > 1 && originalsWithinRanges()) {
+                int phaseBudget = Math.max(1, maxAttempts / 2);
+                List<Set<String>> coordinated = coordinatedConfigurations();
+                int singleBudget = coordinated.isEmpty() ? phaseBudget : Math.max(1, phaseBudget / 2);
+                List<Set<String>> singles = thresholds.keySet().stream().map(Set::of).toList();
+                if (!searchConfigurations(singles, singleBudget)
+                        || !searchConfigurations(coordinated, phaseBudget - singleBudget)) {
+                    return alternatives.outcome(false);
+                }
             }
-            // Phase 2: all thresholds jointly. Redundant rules need this: moving either one alone
-            // leaves the other able to reproduce the violation. Only its UNSAT proves that no other
-            // repair exists.
+            // Only the unrestricted model's UNSAT proves that no other repair exists.
             return searchJointly();
+        }
+
+        private List<Set<String>> coordinatedConfigurations() {
+            Map<String, LinkedHashSet<String>> groups = new LinkedHashMap<>();
+            for (ParameterAdjustment target : adjustmentTemplate) {
+                RuleDto rule = allRules.get(target.getRuleIndex());
+                String command = FixStrategyUtils.commandFingerprint(rule, ctx.getDeviceSmvMap());
+                String shape = FixStrategyUtils.conditionShapeFingerprint(
+                        rule.getConditions().get(target.getConditionIndex()), ctx.getDeviceSmvMap());
+                if (command != null && shape != null) {
+                    groups.computeIfAbsent(command + "\u0000" + shape, ignored -> new LinkedHashSet<>())
+                            .add("r" + target.getRuleIndex() + "_c" + target.getConditionIndex());
+                }
+            }
+            List<Set<String>> configurations = new ArrayList<>();
+            for (LinkedHashSet<String> keys : groups.values()) {
+                if (keys.size() < 2) continue;
+                // A later same-action rule may implement a required response. Try the fault-first
+                // primary/backup pair before moving that entire group; enumerate no power set.
+                if (keys.size() > 2) {
+                    configurations.add(keys.stream().limit(2)
+                            .collect(Collectors.toCollection(LinkedHashSet::new)));
+                }
+                if (keys.size() < thresholds.size()) configurations.add(keys);
+            }
+            return configurations;
         }
 
         private boolean originalsWithinRanges() {
@@ -245,24 +279,24 @@ public class ParameterAdjustStrategy implements FixStrategy {
             });
         }
 
-        /** Each threshold alone, the others at their original values, in repair-scope order. */
-        private boolean searchEachAlone(int phaseBudget) {
+        /** Free only the selected thresholds; hold every other threshold at its original value. */
+        private boolean searchConfigurations(List<Set<String>> configurations, int phaseBudget) {
             int used = 0;
-            for (String key : thresholds.keySet()) {
-                Map<String, ParameterizationConfig.ParamInfo> alone = Map.of(key, thresholds.get(key));
+            for (Set<String> keys : configurations) {
+                Map<String, ParameterizationConfig.ParamInfo> selected = new LinkedHashMap<>();
+                keys.forEach(key -> selected.put(key, thresholds.get(key)));
                 while (used < phaseBudget && canSolve()) {
                     used++;
                     ctx.addStrategyAttempts(NAME, 1);
-                    SolveResult solved = solve(allRules, alone, exclusions(alone), ctx);
+                    SolveResult solved = solve(allRules, selected, exclusions(selected), ctx);
                     if (solved.status() == SolveStatus.GENERATION_FAILED) return false;
                     if (solved.failed()) {
                         FixStrategyUtils.recordSolverFailure(ctx, NAME, solved.error());
                         // A refused permit says nothing about the model, so the same solve is retried.
                         if (solved.status() == SolveStatus.BUSY) continue;
                     }
-                    // UNSAT: this threshold alone cannot help. Any other failure: move on rather than
-                    // repeat the identical solve; the joint phase still covers this threshold. A listed
-                    // repair: other values of this threshold are only variants of it.
+                    // A failed small probe remains covered by the unrestricted phase. A listed
+                    // repair ends this probe; the unrestricted exclusions retain other minimal edits.
                     if (solved.status() != SolveStatus.CANDIDATE || offer(solved.values())) break;
                 }
                 if (used >= phaseBudget) break;
@@ -436,6 +470,8 @@ public class ParameterAdjustStrategy implements FixStrategy {
             ParameterAdjustment template, int value, List<RuleDto> allRules) {
         ParameterAdjustment adjustment = ParameterAdjustment.builder()
                 .targetId(template.getTargetId())
+                .rulePosition(template.getRulePosition())
+                .deviceLabel(template.getDeviceLabel())
                 .ruleIndex(template.getRuleIndex())
                 .conditionIndex(template.getConditionIndex())
                 .attribute(template.getAttribute())

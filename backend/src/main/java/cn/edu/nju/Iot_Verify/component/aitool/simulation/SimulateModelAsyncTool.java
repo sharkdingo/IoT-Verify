@@ -2,11 +2,7 @@ package cn.edu.nju.Iot_Verify.component.aitool.simulation;
 
 import cn.edu.nju.Iot_Verify.component.ai.model.LlmToolSpec;
 import cn.edu.nju.Iot_Verify.component.aitool.AbstractAiTool;
-import cn.edu.nju.Iot_Verify.util.mapper.BoardDataConverter;
-import cn.edu.nju.Iot_Verify.util.mapper.BoardDataConverter.ModelInputSnapshot;
-import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
 import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
-import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.dto.simulation.SimulationRequestDto;
 import cn.edu.nju.Iot_Verify.exception.AsyncTaskDispatchOutcomeUnknownException;
 import cn.edu.nju.Iot_Verify.exception.BaseException;
@@ -29,14 +25,11 @@ import java.util.Set;
 @Component
 public class SimulateModelAsyncTool extends AbstractAiTool {
 
-    private final BoardDataConverter boardDataConverter;
     private final SimulationService simulationService;
 
-    public SimulateModelAsyncTool(BoardDataConverter boardDataConverter,
-                                  SimulationService simulationService,
+    public SimulateModelAsyncTool(SimulationService simulationService,
                                   ObjectMapper objectMapper) {
         super(objectMapper);
-        this.boardDataConverter = boardDataConverter;
         this.simulationService = simulationService;
     }
 
@@ -73,23 +66,11 @@ public class SimulateModelAsyncTool extends AbstractAiTool {
             AttackScenarioDto attackScenario = attackScenarioArg(args, false);
             boolean enablePrivacy = booleanArg(args, "enablePrivacy", false);
 
-            ModelInputSnapshot board = boardDataConverter.getModelInputSnapshot(userId);
-            List<DeviceVerificationDto> devices = board.devices();
-            List<RuleDto> rules = board.rules();
-
-            if (devices.isEmpty()) {
-                return errorJson("No devices found on the board. Please add devices first.",
-                        "VALIDATION_ERROR", 400);
-            }
-
-            // The service reads the scene from the same board this tool just inspected, so the
-            // request carries only run parameters.
             SimulationRequestDto request = new SimulationRequestDto();
             request.setSteps(steps);
             request.setAttackScenario(attackScenario);
             request.setEnablePrivacy(enablePrivacy);
-            Long taskId = simulationService.submitSimulationWithTemplateSnapshot(
-                    userId, request, board.templateManifests());
+            Long taskId = simulationService.submitSimulation(userId, request);
             if (taskId == null || taskId <= 0) {
                 throw new IllegalStateException("Simulation submission returned no usable task id");
             }

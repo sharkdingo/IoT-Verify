@@ -5,7 +5,7 @@ response envelope, the authentication scheme, and the error/status codes. This i
 **single source of truth** for these three things — every other API document links
 here instead of restating them.
 
-Verified against code on 2026-07-25. Source: `dto/Result.java`,
+Verified against code on 2026-10-15. Source: `dto/Result.java`,
 `exception/GlobalExceptionHandler.java`, `configure/JacksonConfig.java`,
 `configure/ApplicationTimeConfig.java`,
 `component/model/ModelRequestParser.java`, `security/`.
@@ -20,6 +20,9 @@ successfully established SSE stream from `POST /api/chat/completions` (see
 the client accepts neither JSON nor an endpoint's success representation. Synchronous setup
 errors from the chat endpoint still use a JSON `Result<T>` envelope and their original HTTP
 status, including when the request advertises only `Accept: text/event-stream`.
+
+Successful SMV downloads return a `text/plain` attachment; their errors use the JSON
+envelope. See the [download contract](verification.md#downloading-the-smv-model--one-model-per-run-addressed-by-run).
 
 ```json
 {
@@ -76,20 +79,27 @@ Per-endpoint status semantics stay with each endpoint's own doc.
 
 ## Authentication
 
-Stateless JWT (HS256). Obtain a token via `POST /api/auth/login` (see
+Signed JWT (HS256), checked against the current account credentials. Obtain a token via `POST /api/auth/login` (see
 [auth.md](auth.md)), then send it on every authenticated request:
 
 ```
 Authorization: Bearer <token>
 ```
 
-- The filter chain extracts the user id from the token;
-  `JwtAuthenticationFilter.getUserIdFromToken()` is wrapped in try-catch, so a
-  malformed token is treated as unauthenticated (leads to `401`).
-- A valid token only establishes authentication when its user id still exists in the
-  `app_user` table. This makes account deletion effective even if Redis blacklist checks
-  are temporarily unavailable.
-- Tokens have a lifetime of `JWT_EXPIRATION` (default 24h — see
+- `JwtUtil.parseIdentity` validates the signature, expiry, stable user-id subject, and
+  non-negative integer `authVersion` claim in one parse. Tokens missing the credential
+  version or carrying malformed identity are unauthenticated; obsolete tokens require
+  a new login rather than a compatibility fallback.
+- The filter reads the account once and authenticates only when its persisted
+  `authVersion` matches the token. `app_user.auth_version` starts at zero and advances
+  in the same transaction as a password change. This invalidates older credentials
+  across backend instances and survives Redis unavailability. A missing account also
+  rejects its tokens. The version is internal and is not returned in account profiles.
+- Each newly issued token has its own random `jti`, so separate logins in the same
+  second do not accidentally share logout revocation.
+- Infrastructure failures during account lookup retain their server-error response;
+  they do not become invalid-credential responses or trigger a session-expired logout.
+- Token lifetime is configured by `JWT_EXPIRATION` (see
   [../getting-started/configuration.md](../getting-started/configuration.md)).
 - Logout blacklists the token in Redis. The blacklist is **fail-open**: if Redis is
   down the app keeps serving, but logout-revocation degrades.
@@ -97,8 +107,7 @@ Authorization: Bearer <token>
   argument; it is never taken from the request body.
 
 The public endpoints (no token required) are `POST /api/auth/register` and
-`POST /api/auth/login`. `POST /api/auth/logout` and `DELETE /api/auth/account` live
-under `/api/auth` but still require a valid bearer token at both the security-filter and
+`POST /api/auth/login`. Every other `/api/auth` operation requires a valid bearer token at both the security-filter and
 `@CurrentUser` ownership boundaries. The application excludes Spring Boot's generated
 default user because authentication is JWT-only.
 
@@ -114,17 +123,17 @@ exceptions and their statuses:
 
 | HTTP | Exception | Meaning |
 | :--- | :--- | :--- |
-| 400 | `BadRequestException` | Malformed request / invalid argument |
+| 400 | `BadRequestException`, `AccountChangeException` | Malformed request / invalid argument; account changes may return a typed field rejection |
 | 401 | `UnauthorizedException` | Missing/invalid/expired token |
 | 403 | `ForbiddenException` | Authenticated but not allowed (e.g. another user's resource) |
 | 404 | `ResourceNotFoundException` | Resource does not exist |
 | 405 | `HttpRequestMethodNotSupportedException` | The path exists but does not support the requested HTTP method |
 | 406 | `HttpMediaTypeNotAcceptableException` | No acceptable representation can be produced; the response body is intentionally empty |
-| 409 | `ConflictException`, `ChatSessionBusyException`, `TemplateDeletionConflictException`, `DeviceRuntimeConflictException`, `EnvironmentVariableConflictException`, `DataIntegrityViolationException` | State/uniqueness conflict; specialized conflicts include structured reason data |
+| 409 | `ConflictException`, `BoardContentConflictException`, `AccountChangeException`, `ChatSessionBusyException`, `TemplateDeletionConflictException`, `DeviceRuntimeConflictException`, `EnvironmentVariableConflictException`, `DataIntegrityViolationException` | State/uniqueness conflict; specialized conflicts and [registration uniqueness conflicts](auth.md#post-apiauthregister) include structured reason data |
 | 413 | `RequestBodySizeFilter` | JSON request body exceeds the configured byte limit and is rejected before DTO binding |
 | 415 | `HttpMediaTypeNotSupportedException` | The request content type is unsupported |
 | 422 | `ValidationException` | Semantic validation failure |
-| 429 | `FuzzTaskQuotaExceededException`, `FuzzTaskStorageQuotaExceededException`, `AsyncTaskQuotaExceededException`, `UserOperationBusyException`, `AuthRateLimitException`, `ChatHistoryQuotaExceededException` | Per-user active/stored background-task limit, per-user synchronous-operation limit, public authentication attempt limit, or stored chat-history capacity reached. Operation admission returns `USER_FORMAL_OPERATION_BUSY` or `USER_CHAT_OPERATION_BUSY`; authentication limits return an `AUTH_*_RATE_LIMIT_REACHED` reason, `ACCOUNT`, `SOURCE`, or `CAPACITY` scope, retry delay, and `Retry-After` header. Chat capacity returns `CHAT_HISTORY_LIMIT_REACHED` as documented in [chat-sse.md](chat-sse.md). |
+| 429 | `FuzzTaskQuotaExceededException`, `FuzzTaskStorageQuotaExceededException`, `AsyncTaskQuotaExceededException`, `UserOperationBusyException`, `AuthRateLimitException`, `ChatHistoryQuotaExceededException` | Per-user active/stored background-task limit, per-user synchronous-operation limit, authentication or credential-change attempt limit, or stored chat-history capacity reached. Operation admission returns `USER_FORMAL_OPERATION_BUSY` or `USER_CHAT_OPERATION_BUSY`; authentication limits return an `AUTH_*_RATE_LIMIT_REACHED` reason, `ACCOUNT`, `SOURCE`, or `CAPACITY` scope, retry delay, and `Retry-After` header. Chat capacity returns `CHAT_HISTORY_LIMIT_REACHED` as documented in [chat-sse.md](chat-sse.md). |
 | 500 | `InternalServerException`, `SmvGenerationException`, `PersistedDataIntegrityException` (and uncaught) | Server-side failure or unusable persisted semantic data |
 | 502 | `BadGatewayException` | The configured AI provider replied, but its output could not be parsed as the requested structured result |
 | 503 | `ServiceUnavailableException`, `AsyncTaskDispatchOutcomeUnknownException`, `FixApplyPreflightUnavailableException` | Service temporarily unavailable; an async task dispatch whose cleanup could not be confirmed; or an automatic-fix apply preflight that could not confirm model equality. Unknown async dispatch returns `data={ reasonCode: "TASK_DISPATCH_OUTCOME_UNKNOWN", taskKind, taskId }` so the caller can reconcile before retrying. The specialized fix rejection includes `data.reasonCode=FIX_APPLY_PREFLIGHT_UNAVAILABLE` and is guaranteed to occur before the board write. |
@@ -133,6 +142,19 @@ exceptions and their statuses:
 Additional mappings: missing required query parameters, bean-validation failures (`@Valid`,
 `@NotNull`, etc.), and malformed JSON map to `400`; `IllegalArgumentException` is masked
 to a generic `400` and `IllegalStateException` to `500`, so internal detail is not leaked.
+
+Interactive AI execution preserves typed runtime failures. Unexpected checked worker failures
+and JVM errors are internal failures, not temporary-capacity `503` responses. Their original
+cause and request id are retained in server diagnostics; HTTP error bodies keep the masking
+rules above.
+
+Boundary rejections with field diagnostics include `data.errors`, a field-path to actionable-reason
+map, while retaining their original HTTP status. This includes diagnosed `BadRequestException`
+responses (`400`) and `ValidationException` responses (`422`); a rejection without trustworthy field
+diagnostics may omit this map. Specialized content conflicts include `data.reasonCode` and
+`data.errors`, with domain-specific details defined by the
+[Board import and mutation contract](board.md). Callers must preserve both the stated reason and
+field path rather than infer an error category from English message text or HTTP status alone.
 
 JSON scalar coercion is disabled for REST request DTOs. Integer fields require JSON
 integer numbers (not quoted strings, booleans, or floats), floating-point fields require
@@ -145,10 +167,8 @@ it does not echo the rejected value or a Java implementation type.
 Unknown JSON fields are also rejected rather than silently discarded. This applies to
 ordinary board mutations, authentication, chat, automatic-fix requests, and other typed
 REST request bodies. Their `400` response identifies the unknown field and its nested
-path. Verification and simulation use a dedicated strict parser because
-an ignored nested field could change the checked model; their `400` message identifies
-the exact unsupported path (for example `devices[0].currentStateTrsut`) and explains
-that the request was not executed. Template-manifest endpoints additionally validate the
+path. Verification and simulation use a dedicated strict parser that rejects scene
+fields and unknown run options (for example `attackScenario.mod`). Template-manifest endpoints additionally validate the
 raw object against `backend/device-template-schema.json` before DTO conversion.
 
 **Message suppression**: `application.yaml` sets `server.error.include-message: never`

@@ -4,7 +4,6 @@ import { useI18n } from 'vue-i18n'
 import type { InteractiveOperationStage } from '@/types/task'
 
 const props = defineProps<{
-  kind: 'rule' | 'device' | 'spec' | 'scenario'
   elapsedSeconds: number
   stage: InteractiveOperationStage
   templateCount: number
@@ -15,7 +14,6 @@ const props = defineProps<{
 
 const { t } = useI18n()
 
-const toolLabel = computed(() => t(`app.recommendationProgressTool_${props.kind}`))
 const phaseLabel = computed(() => {
   switch (props.stage) {
     case 'QUEUED': return t('app.recommendationProgressQueued')
@@ -32,7 +30,7 @@ const phaseLabel = computed(() => {
   <div class="recommendation-progress" role="status" aria-live="polite">
     <div class="recommendation-progress__heading">
       <span class="material-symbols-outlined recommendation-progress__spinner" aria-hidden="true">progress_activity</span>
-      <strong>{{ t('app.recommendationProgressTitle') }}</strong>
+      <strong class="board-section-title">{{ t('app.recommendationProgressTitle') }}</strong>
       <span>{{ t('app.recommendationProgressElapsed', { seconds: elapsedSeconds }) }}</span>
     </div>
     <p>
@@ -43,7 +41,6 @@ const phaseLabel = computed(() => {
         specs: specCount
       }) }}
     </p>
-    <p>{{ t('app.recommendationProgressTool', { tool: toolLabel }) }}</p>
     <p class="recommendation-progress__phase">{{ phaseLabel }}</p>
   </div>
 </template>
@@ -51,10 +48,10 @@ const phaseLabel = computed(() => {
 <style scoped>
 .recommendation-progress {
   border-left: 3px solid var(--info);
-  background: color-mix(in srgb, var(--info) 7%, white);
-  padding: 0.65rem 0.75rem;
+  background: var(--surface-muted);
+  padding: var(--iot-space-md);
   color: var(--text-muted);
-  font-size: 0.75rem;
+  font-size: var(--iot-font-caption);
   line-height: 1.45;
 }
 
@@ -77,7 +74,7 @@ const phaseLabel = computed(() => {
 
 .recommendation-progress__phase {
   color: var(--info);
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .recommendation-progress__spinner {

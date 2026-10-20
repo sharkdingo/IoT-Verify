@@ -2,7 +2,6 @@ package cn.edu.nju.Iot_Verify.component.aitool.verification;
 
 import cn.edu.nju.Iot_Verify.component.ai.model.LlmToolSpec;
 import cn.edu.nju.Iot_Verify.component.aitool.AbstractAiTool;
-import cn.edu.nju.Iot_Verify.component.aitool.ModelTraceToolPresenter;
 import cn.edu.nju.Iot_Verify.dto.trace.TraceSummaryDto;
 import cn.edu.nju.Iot_Verify.dto.verification.VerificationRunSummaryDto;
 import cn.edu.nju.Iot_Verify.exception.BaseException;
@@ -62,21 +61,13 @@ public class ListTracesTool extends AbstractAiTool {
                     if (trace == null) continue;
                     boolean available = Boolean.TRUE.equals(run.getDataAvailable())
                             && Boolean.TRUE.equals(trace.getDataAvailable());
-                    Map<String, Object> summary = new LinkedHashMap<>();
-                    summary.put("traceId", trace.getId());
-                    summary.put("runId", run.getId());
-                    summary.put("dataAvailable", available);
-                    summary.put("createdAt", trace.getCreatedAt());
-                    if (!available) {
-                        summary.put("unavailableReasonCode", "PERSISTED_SEMANTIC_DATA_INVALID");
-                    } else {
-                        summary.put("violatedSpecification",
-                                ModelTraceToolPresenter.violatedSpecification(trace.getViolatedSpec()));
+                    Map<String, Object> summary = VerificationToolPresenter.traceSummary(
+                            trace, run.getId(), Boolean.TRUE.equals(run.getDataAvailable()));
+                    if (available) {
                         summary.put("modelComplete", run.getModelComplete());
                         summary.put("disabledRuleCount", run.getDisabledRuleCount());
                         summary.put("skippedSpecCount", run.getSkippedSpecCount());
                         summary.put("generationIssues", run.getGenerationIssues());
-                        summary.put("stateCount", trace.getStateCount());
                     }
                     summaries.add(summary);
                 }

@@ -1,6 +1,8 @@
 package cn.edu.nju.Iot_Verify.dto.model;
 
 import org.junit.jupiter.api.Test;
+import cn.edu.nju.Iot_Verify.dto.verification.SpecResultDto;
+import cn.edu.nju.Iot_Verify.dto.verification.SpecificationSnapshotDto;
 
 import java.io.IOException;
 import java.lang.reflect.Field;
@@ -66,6 +68,14 @@ class ModelSnapshotDocumentationTest {
     @Test
     void everyRunSnapshotFieldAppearsInTheApiReference() throws IOException {
         assertEveryFieldDocumented(ModelRunSnapshotDto.class, doc());
+    }
+
+    @Test
+    void everySpecificationResultFieldAppearsInTheApiReference() throws IOException {
+        String doc = doc();
+        assertEveryFieldDocumented(SpecResultDto.class, doc);
+        assertEveryFieldDocumented(SpecificationSnapshotDto.class, doc);
+        assertEveryFieldDocumented(SpecificationSnapshotDto.Device.class, doc);
     }
 
     @Test

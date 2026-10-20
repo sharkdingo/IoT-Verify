@@ -2,6 +2,7 @@ package cn.edu.nju.Iot_Verify.component.aitool.verification;
 
 import cn.edu.nju.Iot_Verify.component.ai.model.LlmToolSpec;
 import cn.edu.nju.Iot_Verify.component.aitool.AbstractAiTool;
+import cn.edu.nju.Iot_Verify.component.aitool.AiTaskStatusWaiter;
 import cn.edu.nju.Iot_Verify.dto.verification.VerificationTaskDto;
 import cn.edu.nju.Iot_Verify.exception.BaseException;
 import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
@@ -16,6 +17,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
 
 @Slf4j
 @Component
@@ -37,12 +39,13 @@ public class VerifyTaskStatusTool extends AbstractAiTool {
     public LlmToolSpec getDefinition() {
         FunctionParameterSchema schema = new FunctionParameterSchema(
                 "object",
-                Map.of("taskId", Map.of("type", "integer", "description", "Verification task ID returned by verify_model_async.")),
+                Map.of("taskId", Map.of("type", "integer", "description", "Verification task ID returned by verify_model_async."),
+                        "waitMs", AiTaskStatusWaiter.waitMsSchema()),
                 List.of("taskId")
         );
 
         return LlmToolSpec.of(getName(),
-                "Query async verification task status and progress by taskId. A completed task exposes its runId for get_verification_run. Raw NuSMV output and execution logs are intentionally omitted.",
+                "Query async verification task status and progress by taskId, waiting briefly for active work rather than repeatedly polling through the model. PENDING or RUNNING means keep waiting, not a verification conclusion. A completed task exposes its runId for get_verification_run. Raw NuSMV output and execution logs are intentionally omitted.",
                 schema);
     }
 
@@ -55,11 +58,12 @@ public class VerifyTaskStatusTool extends AbstractAiTool {
             } catch (ArgParseException e) {
                 return e.getErrorResponse();
             }
-            requireOnlyFields(args, "arguments", Set.of("taskId"));
+            requireOnlyFields(args, "arguments", Set.of("taskId", "waitMs"));
             long taskId = positiveLongArg(args, "taskId");
-
-            VerificationTaskDto task = verificationService.getTask(userId, taskId);
-            int progress = verificationService.getTaskProgress(userId, taskId);
+            int waitMs = taskStatusWaitMsArg(args);
+            VerificationTaskDto task = AiTaskStatusWaiter.await(
+                    () -> verificationService.getTask(userId, taskId), VerificationTaskDto::getStatus, waitMs);
+            int progress = task.getProgress();
 
             Map<String, Object> body = new LinkedHashMap<>();
             body.put("taskId", taskId);
@@ -72,6 +76,13 @@ public class VerifyTaskStatusTool extends AbstractAiTool {
             return readOnlySuccessJson(body, "Verification task status retrieved.");
         } catch (ArgValidationException e) {
             return e.getErrorResponse();
+        } catch (CancellationException e) {
+            return errorJson("Verification status waiting stopped; the verification task was not cancelled.",
+                    "TASK_STATUS_WAIT_CANCELLED", 499);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return errorJson("Verification status waiting stopped; the verification task was not cancelled.",
+                    "TASK_STATUS_WAIT_CANCELLED", 499);
         } catch (ServiceUnavailableException e) {
             log.warn("verify_task_status busy: {}", e.getMessage());
             return errorJson(e.getMessage(), "SERVICE_UNAVAILABLE", 503);

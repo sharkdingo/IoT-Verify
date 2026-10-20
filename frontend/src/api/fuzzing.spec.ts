@@ -42,16 +42,6 @@ const task = {
 describe('fuzzing API', () => {
   beforeEach(() => vi.clearAllMocks())
 
-  it('loads and validates the current semantic model fingerprint', async () => {
-    vi.mocked(http.get).mockResolvedValue(envelope('a'.repeat(64)))
-
-    await expect(fuzzingApi.getCurrentModelFingerprint()).resolves.toBe('a'.repeat(64))
-    expect(http.get).toHaveBeenCalledWith('/fuzz/model-fingerprint')
-
-    vi.mocked(http.get).mockResolvedValue(envelope('not-a-fingerprint'))
-    await expect(fuzzingApi.getCurrentModelFingerprint()).rejects.toThrow('fingerprint is invalid')
-  })
-
   it('previews the paper input domain without creating a task', async () => {
     vi.mocked(http.post).mockResolvedValue(envelope({
       pathLength: 20,
@@ -137,7 +127,6 @@ describe('fuzzing API', () => {
 
   it('uses the accepted task id for polling and cancellation', async () => {
     vi.mocked(http.get)
-      .mockResolvedValueOnce(envelope(35))
       .mockResolvedValueOnce(envelope({ ...task, status: 'RUNNING', progress: 35 }))
     vi.mocked(http.post).mockResolvedValue(envelope({
       taskId: 9,
@@ -147,11 +136,9 @@ describe('fuzzing API', () => {
       executionMayStillBeStopping: true
     }))
 
-    await expect(fuzzingApi.getTaskProgress(9)).resolves.toBe(35)
     await expect(fuzzingApi.getTask(9)).resolves.toMatchObject({ status: 'RUNNING' })
     await expect(fuzzingApi.cancelTask(9)).resolves.toMatchObject({ cancellationAccepted: true })
-    expect(http.get).toHaveBeenNthCalledWith(1, '/fuzz/tasks/9/progress')
-    expect(http.get).toHaveBeenNthCalledWith(2, '/fuzz/tasks/9')
+    expect(http.get).toHaveBeenCalledWith('/fuzz/tasks/9')
     expect(http.post).toHaveBeenCalledWith('/fuzz/tasks/9/cancel')
   })
 

@@ -25,7 +25,7 @@ import { describe, expect, it } from 'vitest'
  * Two exemptions, both narrow and both with a named owner rather than a blanket allowance:
  *
  * - **Focus rings** answer to `focusIndicator.spec.ts`, which measures them against WCAG 1.4.11's 3:1 for a
- *   non-text indicator. Two survivors here (`RuleBuilderDialog` select, the Landing auth input) are the same
+ *   non-text indicator. Two survivors here (`RuleBuilder` select, the Landing auth input) are the same
  *   class of hardcoded blue that spec was written for — a contrast problem, not a token-plumbing one, so it
  *   belongs to that spec and fixing it blind here could lower a ring below its floor.
  * A `pulse-border` exemption used to sit here for dead code. The dead code is gone, so the exemption went
@@ -62,10 +62,6 @@ const isChromatic = (r: number, g: number, b: number) =>
 const EXEMPT = [
   { owner: 'select:focus', reason: 'focus ring — focusIndicator.spec.ts owns its contrast' },
   { owner: '.auth-form input:focus', reason: 'focus ring — focusIndicator.spec.ts owns its contrast' },
-  // The landing hero sits on a fixed dark video rather than a theme surface, so a role token would flip
-  // with a theme this section never adopts. Same reasoning as `.emphasis` in that file.
-  { owner: '.auth-request-error', reason: 'landing hero: fixed dark ground, not a theme surface' },
-  { owner: '.auth-request-error:focus', reason: 'landing hero: fixed dark ground, not a theme surface' },
 ]
 
 /** The selector or at-rule a line sits under, so an exemption can be scoped to it. */

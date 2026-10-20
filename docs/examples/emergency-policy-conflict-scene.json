@@ -1,0 +1,377 @@
+{
+  "schema": "iot-verify.board-scene",
+  "version": 5,
+  "templates": [
+    {
+      "name": "Dynamic Home Sensor",
+      "manifest": {
+        "Name": "Dynamic Home Sensor",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "home",
+            "IsInside": false,
+            "Reads": true,
+            "FalsifiableWhenCompromised": false,
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Values": [
+              "present",
+              "absent"
+            ]
+          }
+        ],
+        "Modes": [],
+        "InitState": "",
+        "WorkingStates": [],
+        "Transitions": [],
+        "APIs": []
+      }
+    },
+    {
+      "name": "Dynamic Smoke Sensor",
+      "manifest": {
+        "Name": "Dynamic Smoke Sensor",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "smoke",
+            "IsInside": false,
+            "Reads": true,
+            "FalsifiableWhenCompromised": false,
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Values": [
+              "detected",
+              "clear"
+            ]
+          }
+        ],
+        "Modes": [],
+        "InitState": "",
+        "WorkingStates": [],
+        "Transitions": [],
+        "APIs": []
+      }
+    },
+    {
+      "name": "Dynamic Alarm",
+      "manifest": {
+        "Name": "Dynamic Alarm",
+        "Description": "",
+        "InternalVariables": [],
+        "Modes": [
+          "SwitchState"
+        ],
+        "InitState": "off",
+        "Transitions": [],
+        "WorkingStates": [
+          {
+            "Name": "on",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          },
+          {
+            "Name": "off",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          }
+        ],
+        "APIs": [
+          {
+            "Name": "on",
+            "StartState": "",
+            "EndState": "on",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "off",
+            "StartState": "",
+            "EndState": "off",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ]
+      }
+    },
+    {
+      "name": "Dynamic Door",
+      "manifest": {
+        "Name": "Dynamic Door",
+        "Description": "",
+        "InternalVariables": [],
+        "Modes": [
+          "LockState"
+        ],
+        "InitState": "locked",
+        "Transitions": [],
+        "WorkingStates": [
+          {
+            "Name": "locked",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          },
+          {
+            "Name": "unlocked",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          }
+        ],
+        "APIs": [
+          {
+            "Name": "locked",
+            "StartState": "",
+            "EndState": "locked",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "unlocked",
+            "StartState": "",
+            "EndState": "unlocked",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ]
+      }
+    }
+  ],
+  "environmentVariables": [
+    {
+      "name": "home",
+      "value": "absent",
+      "trust": "trusted",
+      "privacy": "public"
+    },
+    {
+      "name": "smoke",
+      "value": "clear",
+      "trust": "trusted",
+      "privacy": "public"
+    }
+  ],
+  "devices": [
+    {
+      "id": "home_sensor",
+      "templateName": "Dynamic Home Sensor",
+      "label": "Home Sensor",
+      "position": {
+        "x": 70,
+        "y": 80
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "smoke_sensor",
+      "templateName": "Dynamic Smoke Sensor",
+      "label": "Smoke Sensor",
+      "position": {
+        "x": 530,
+        "y": 80
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "kitchen_alarm",
+      "templateName": "Dynamic Alarm",
+      "label": "Kitchen Alarm",
+      "position": {
+        "x": 70,
+        "y": 650
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "front_door",
+      "templateName": "Dynamic Door",
+      "label": "Front Door",
+      "position": {
+        "x": 760,
+        "y": 650
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "locked",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    }
+  ],
+  "rules": [
+    {
+      "name": "Smoke warning sounds",
+      "sources": [
+        {
+          "fromId": "smoke_sensor",
+          "fromApi": "smoke",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "detected"
+        }
+      ],
+      "toId": "kitchen_alarm",
+      "toApi": "on"
+    },
+    {
+      "name": "Clear smoke warning",
+      "sources": [
+        {
+          "fromId": "smoke_sensor",
+          "fromApi": "smoke",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "clear"
+        }
+      ],
+      "toId": "kitchen_alarm",
+      "toApi": "off"
+    },
+    {
+      "name": "Away door lock",
+      "sources": [
+        {
+          "fromId": "home_sensor",
+          "fromApi": "home",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "absent"
+        }
+      ],
+      "toId": "front_door",
+      "toApi": "locked"
+    },
+    {
+      "name": "Emergency exit unlock",
+      "sources": [
+        {
+          "fromId": "kitchen_alarm",
+          "fromApi": "SwitchState",
+          "itemType": "mode",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "toId": "front_door",
+      "toApi": "unlocked"
+    }
+  ],
+  "specs": [
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "kitchen_alarm",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "front_door",
+          "targetType": "mode",
+          "key": "LockState",
+          "relation": "=",
+          "value": "unlocked"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "home_sensor",
+          "targetType": "variable",
+          "key": "home",
+          "relation": "=",
+          "value": "absent",
+          "variableSource": "environment"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "front_door",
+          "targetType": "mode",
+          "key": "LockState",
+          "relation": "=",
+          "value": "locked"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "smoke_sensor",
+          "targetType": "variable",
+          "key": "smoke",
+          "relation": "=",
+          "value": "detected",
+          "variableSource": "environment"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "kitchen_alarm",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "smoke_sensor",
+          "targetType": "variable",
+          "key": "smoke",
+          "relation": "=",
+          "value": "clear",
+          "variableSource": "environment"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "kitchen_alarm",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "off"
+        }
+      ]
+    }
+  ]
+}

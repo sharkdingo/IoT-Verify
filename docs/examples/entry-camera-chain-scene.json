@@ -1,0 +1,400 @@
+{
+  "schema": "iot-verify.board-scene",
+  "version": 5,
+  "templates": [
+    {
+      "name": "Dynamic Motion Sensor",
+      "manifest": {
+        "Name": "Dynamic Motion Sensor",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "motion",
+            "IsInside": false,
+            "Reads": true,
+            "FalsifiableWhenCompromised": false,
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Values": [
+              "detected",
+              "clear"
+            ]
+          }
+        ],
+        "Modes": [],
+        "InitState": "",
+        "WorkingStates": [],
+        "Transitions": [],
+        "APIs": []
+      }
+    },
+    {
+      "name": "Dynamic Light",
+      "manifest": {
+        "Name": "Dynamic Light",
+        "Description": "",
+        "InternalVariables": [],
+        "Modes": [
+          "SwitchState"
+        ],
+        "InitState": "off",
+        "Transitions": [],
+        "WorkingStates": [
+          {
+            "Name": "on",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          },
+          {
+            "Name": "off",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          }
+        ],
+        "APIs": [
+          {
+            "Name": "on",
+            "StartState": "",
+            "EndState": "on",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "off",
+            "StartState": "",
+            "EndState": "off",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ]
+      }
+    },
+    {
+      "name": "Privacy Camera Power",
+      "manifest": {
+        "Name": "Privacy Camera Power",
+        "Description": "",
+        "InternalVariables": [],
+        "Modes": [
+          "SwitchState"
+        ],
+        "InitState": "off",
+        "Transitions": [],
+        "WorkingStates": [
+          {
+            "Name": "on",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          },
+          {
+            "Name": "off",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          }
+        ],
+        "APIs": [
+          {
+            "Name": "on",
+            "StartState": "",
+            "EndState": "on",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "off",
+            "StartState": "",
+            "EndState": "off",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ]
+      }
+    }
+  ],
+  "environmentVariables": [
+    {
+      "name": "motion",
+      "value": "clear",
+      "trust": "trusted",
+      "privacy": "public"
+    }
+  ],
+  "devices": [
+    {
+      "id": "motion_sensor",
+      "templateName": "Dynamic Motion Sensor",
+      "label": "Motion Sensor",
+      "position": {
+        "x": 300,
+        "y": 80
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "entry_light",
+      "templateName": "Dynamic Light",
+      "label": "Entry Light",
+      "position": {
+        "x": 70,
+        "y": 250
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "relay_light_1",
+      "templateName": "Dynamic Light",
+      "label": "Relay Light 1",
+      "position": {
+        "x": 300,
+        "y": 250
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "relay_light_2",
+      "templateName": "Dynamic Light",
+      "label": "Relay Light 2",
+      "position": {
+        "x": 530,
+        "y": 250
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "relay_light_3",
+      "templateName": "Dynamic Light",
+      "label": "Relay Light 3",
+      "position": {
+        "x": 760,
+        "y": 250
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "relay_light_4",
+      "templateName": "Dynamic Light",
+      "label": "Relay Light 4",
+      "position": {
+        "x": 70,
+        "y": 440
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "relay_light_5",
+      "templateName": "Dynamic Light",
+      "label": "Relay Light 5",
+      "position": {
+        "x": 300,
+        "y": 440
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "camera_power",
+      "templateName": "Privacy Camera Power",
+      "label": "Camera Power",
+      "position": {
+        "x": 530,
+        "y": 440
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    }
+  ],
+  "rules": [
+    {
+      "name": "Motion turns on the entry light",
+      "sources": [
+        {
+          "fromId": "motion_sensor",
+          "fromApi": "motion",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "detected"
+        }
+      ],
+      "toId": "entry_light",
+      "toApi": "on"
+    },
+    {
+      "name": "Relay entry_light to relay_light_1",
+      "sources": [
+        {
+          "fromId": "entry_light",
+          "fromApi": "SwitchState",
+          "itemType": "mode",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "toId": "relay_light_1",
+      "toApi": "on"
+    },
+    {
+      "name": "Relay relay_light_1 to relay_light_2",
+      "sources": [
+        {
+          "fromId": "relay_light_1",
+          "fromApi": "SwitchState",
+          "itemType": "mode",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "toId": "relay_light_2",
+      "toApi": "on"
+    },
+    {
+      "name": "Relay relay_light_2 to relay_light_3",
+      "sources": [
+        {
+          "fromId": "relay_light_2",
+          "fromApi": "SwitchState",
+          "itemType": "mode",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "toId": "relay_light_3",
+      "toApi": "on"
+    },
+    {
+      "name": "Relay relay_light_3 to relay_light_4",
+      "sources": [
+        {
+          "fromId": "relay_light_3",
+          "fromApi": "SwitchState",
+          "itemType": "mode",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "toId": "relay_light_4",
+      "toApi": "on"
+    },
+    {
+      "name": "Relay relay_light_4 to relay_light_5",
+      "sources": [
+        {
+          "fromId": "relay_light_4",
+          "fromApi": "SwitchState",
+          "itemType": "mode",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "toId": "relay_light_5",
+      "toApi": "on"
+    },
+    {
+      "name": "Unwanted camera power link",
+      "sources": [
+        {
+          "fromId": "relay_light_5",
+          "fromApi": "SwitchState",
+          "itemType": "mode",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "toId": "camera_power",
+      "toApi": "on"
+    }
+  ],
+  "specs": [
+    {
+      "templateId": "3",
+      "aConditions": [
+        {
+          "deviceId": "camera_power",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "ifConditions": [],
+      "thenConditions": []
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "motion_sensor",
+          "targetType": "variable",
+          "key": "motion",
+          "relation": "=",
+          "value": "detected",
+          "variableSource": "environment"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "entry_light",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ]
+    }
+  ]
+}

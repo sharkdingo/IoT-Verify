@@ -3,6 +3,8 @@ import { computed, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useModalAccessibility } from '@/composables/useModalAccessibility'
 import { normalizeAccountIdentifier } from '@/utils/accountIdentifier'
+import FailureDetails from '@/components/FailureDetails.vue'
+import { technicalErrorLines, type ApiErrorDetails } from '@/utils/userMessage'
 
 const { t } = useI18n()
 
@@ -11,6 +13,7 @@ const props = withDefaults(defineProps<{
   username?: string
   phone?: string
   loading?: boolean
+  failure?: { message: string; diagnostics: ApiErrorDetails } | null
 }>(), {
   username: '',
   phone: '',
@@ -21,6 +24,7 @@ const emit = defineEmits<{
   'update:visible': [value: boolean]
   'confirm': [payload: { password: string; confirmation: string }]
   'cancel': []
+  'clear-failure': []
 }>()
 
 const form = reactive({
@@ -50,6 +54,7 @@ const canConfirm = computed(() => confirmationWasEdited.value
  * assignment fires a plain `Event` with no `inputType`, which is what this rejects.
  */
 const confirmConfirmationEdited = (event: Event) => {
+  emit('clear-failure')
   if (event instanceof InputEvent && event.inputType) confirmationWasEdited.value = true
 }
 
@@ -63,6 +68,7 @@ const handleCancel = () => {
   if (props.loading) return
   emit('cancel')
   emit('update:visible', false)
+  emit('clear-failure')
   resetForm()
 }
 
@@ -107,7 +113,6 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
             </div>
             <div class="iot-dialog__heading">
               <h2 id="account-delete-title" class="iot-dialog__title">{{ t('app.deleteAccountTitle') }}</h2>
-              <p class="iot-dialog__subtitle">{{ t('app.deleteAccountMessage') }}</p>
             </div>
           </div>
 
@@ -117,29 +122,15 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
             <span>{{ t('app.deleteAccountDataWarning') }}</span>
           </div>
 
-          <!--
-            What can still be saved, stated honestly.
-
-            The product already has a scene export — `buildSceneExport` writes templates, devices, the
-            Environment Pool, rules and specifications to a portable JSON file — and this dialog never mentioned
-            it. All three reviews asked for exactly that: "there is no visible export/download or backup action
-            before irreversible deletion. I would want a way to export boards, rules, specifications, runs, and
-            counterexamples."
-
-            Two of those cannot be exported, so the note says so rather than implying a full backup. Run history
-            and counterexamples are *results* — reproducible by re-running against an exported design, but not
-            themselves portable. Offering "export everything" here would be the more comforting message and the
-            false one, and on the one screen where a user is deciding whether to destroy their work, an overstated
-            reassurance is worse than none.
-          -->
           <p class="account-delete-export-note" data-testid="account-delete-export-note">
             <span class="material-symbols-outlined" aria-hidden="true">download</span>
             <span>{{ t('app.deleteAccountExportHint') }}</span>
           </p>
 
-          <label class="account-delete-field">
+          <label class="account-delete-field board-form-label">
             <span>{{ t('app.deleteAccountConfirmationLabel') }}</span>
             <input
+              class="board-field mt-1.5"
               v-model="form.confirmation"
               type="text"
               autocomplete="off"
@@ -147,27 +138,33 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
               data-testid="account-delete-confirmation"
               data-1p-ignore
               data-lpignore="true"
-              :placeholder="t('app.deleteAccountConfirmationPlaceholder')"
               :aria-invalid="Boolean(form.confirmation) && !confirmationMatches"
+              aria-describedby="account-delete-confirmation-hint"
               :disabled="loading"
               @input="confirmConfirmationEdited"
             >
-            <small :class="{ danger: form.confirmation && !confirmationMatches }">
+            <small id="account-delete-confirmation-hint" :class="{ danger: form.confirmation && !confirmationMatches }">
               {{ confirmationHint }}
             </small>
           </label>
 
-          <label class="account-delete-field">
-            <span>{{ t('auth.password') }}</span>
+          <label class="account-delete-field board-form-label">
+            <span>{{ t('account.currentPassword') }}</span>
             <input
+              class="board-field mt-1.5"
               v-model="form.password"
               type="password"
               autocomplete="current-password"
               data-testid="account-delete-password"
-              :placeholder="t('app.deleteAccountPasswordPlaceholder')"
               :disabled="loading"
+              @input="emit('clear-failure')"
             >
           </label>
+
+          <div v-if="failure" class="account-delete-rejection" role="alert" data-testid="account-delete-rejection">
+            <p>{{ failure.message }}</p>
+            <FailureDetails :message="failure.message" :details="technicalErrorLines(failure.diagnostics)" suggestion="" />
+          </div>
 
           </div>
 
@@ -190,9 +187,10 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
               class="iot-dialog-btn iot-dialog-btn--danger account-delete-confirm"
               data-testid="account-delete-confirm"
               :disabled="!canConfirm"
+              :aria-busy="loading ? 'true' : undefined"
             >
               <span v-if="loading" class="iot-dialog-btn__spinner" aria-hidden="true"></span>
-              <span v-else>{{ t('app.deleteAccountConfirm') }}</span>
+              <span>{{ loading ? t('app.deleting') : t('app.deleteAccountConfirm') }}</span>
             </button>
           </div>
         </form>
@@ -217,7 +215,7 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
   border-radius: 0 var(--iot-radius-control) var(--iot-radius-control) 0;
   background: var(--danger-surface);
   color: var(--danger);
-  font-size: 0.8125rem;
+  font-size: var(--iot-font-control);
   line-height: 1.5;
 }
 
@@ -238,7 +236,7 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
   border-radius: 0 var(--iot-radius-control) var(--iot-radius-control) 0;
   background: var(--surface-muted);
   color: var(--text-muted);
-  font-size: 0.8125rem;
+  font-size: var(--iot-font-control);
   line-height: 1.5;
 }
 
@@ -247,57 +245,28 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
   font-size: 1.05rem;
 }
 
-/* Label weight is 600, not 700, and the radius is the action step rather than the well step: these fields sit
-   inside a dialog body, so they are controls, not containers. The heavier label competed with the dialog title
-   two rows above it. */
 .account-delete-field {
   display: block;
-  margin-top: 1rem;
-  font-size: 0.8125rem;
-  font-weight: 600;
-  color: var(--text-muted);
-}
-
-.account-delete-field input {
-  width: 100%;
-  margin-top: 0.375rem;
-  padding: 0.625rem 0.75rem;
-  border: 1px solid var(--field-border);
-  border-radius: var(--iot-radius-action);
-  background: var(--field-bg);
-  color: var(--text);
-  font-size: 0.875rem;
-  font-weight: 400;
-  outline: none;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
-}
-
-/* The accent, not danger: an empty field the user has not filled in yet is not an error, and ringing every
-   focus in red on this form made the whole dialog read as one continuous alarm. Invalid input below still
-   goes red — that distinction is the point. */
-.account-delete-field input:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
-}
-
-.account-delete-field input[aria-invalid="true"] {
-  border-color: var(--danger);
-}
-
-.account-delete-field input[aria-invalid="true"]:focus {
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 16%, transparent);
+  margin-top: var(--iot-space-lg);
 }
 
 .account-delete-field small {
   display: block;
   margin-top: 0.35rem;
   color: var(--text-muted);
-  font-weight: 500;
-  line-height: 1.4;
+  font-size: var(--iot-font-caption);
+  font-weight: 400;
+  line-height: 1.5;
 }
 
 .account-delete-field small.danger {
   color: var(--danger);
+}
+
+.account-delete-rejection {
+  color: var(--danger);
+  font-size: var(--iot-font-label);
+  line-height: 1.6;
 }
 
 /* A disarmed destructive button must look disarmed.

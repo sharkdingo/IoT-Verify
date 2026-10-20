@@ -51,21 +51,21 @@ public class InteractiveFixExecutionService {
         purgeExpiredStatuses();
         String id = validateRequestId(requestId);
         RequestKey key = new RequestKey(userId, id);
-        DistributedInteractiveExecutionStore.Lease distributedLease;
+        ActiveExecution<T> execution = new ActiveExecution<>(key, operation);
+        if (active.putIfAbsent(key, execution) != null) {
+            throw new BadRequestException("A fix request with this requestId is already active.");
+        }
+        boolean dispatched = false;
         try {
-            distributedLease = distributedStore == null ? null
-                    : distributedStore.acquire("fix", userId, id, false);
+            // Registration is observable as WAITING while Redis confirms ownership. The checker
+            // cannot run until confirmation, and a stop in this window must release a late lease.
+            execution.registerDistributedLease(distributedStore == null ? null
+                    : distributedStore.acquire("fix", userId, id, false));
+            executor.execute(execution.task);
+            dispatched = true;
+            return execution.task.get();
         } catch (DistributedInteractiveExecutionStore.BusyException e) {
             throw new BadRequestException("A fix request with this requestId is already active.");
-        }
-        ActiveExecution<T> execution = new ActiveExecution<>(key, operation, distributedLease);
-        if (active.putIfAbsent(key, execution) != null) {
-            if (distributedStore != null) distributedStore.abandon(distributedLease);
-            throw new BadRequestException("A fix request with this requestId is already active.");
-        }
-        try {
-            executor.execute(execution.task);
-            return execution.task.get();
         } catch (RejectedExecutionException e) {
             execution.cancel();
             throw new ServiceUnavailableException("Automatic-fix capacity is currently full.", e);
@@ -80,6 +80,7 @@ public class InteractiveFixExecutionService {
             if (cause instanceof RuntimeException runtime) throw runtime;
             throw new ServiceUnavailableException("Automatic-fix search failed.", cause);
         } finally {
+            if (!dispatched) execution.finishBeforeStart();
             if (executor.getThreadPoolExecutor() != null) executor.getThreadPoolExecutor().purge();
         }
     }
@@ -107,7 +108,8 @@ public class InteractiveFixExecutionService {
         String id = validateRequestId(requestId);
         RequestKey key = new RequestKey(userId, id);
         ActiveExecution<?> execution = active.get(key);
-        if (execution != null && !execution.usesDistributedLease()) return execution.status();
+        if (execution != null && !execution.usesDistributedLease()
+                && (distributedStore == null || execution.distributedLease != null)) return execution.status();
         if (distributedStore != null) {
             var distributed = distributedStore.getStatus("fix", userId, id);
             if (distributed.isPresent()) return distributed.get();
@@ -120,7 +122,8 @@ public class InteractiveFixExecutionService {
 
     public void markStage(Long userId, String requestId, InteractiveOperationStage stage) {
         ActiveExecution<?> execution = active.get(new RequestKey(userId, validateRequestId(requestId)));
-        if (execution != null) {
+        if (execution != null && !execution.task.isCancelled()
+                && execution.state.get() != ExecutionState.FINISHED) {
             InteractiveOperationStage next = Objects.requireNonNull(stage);
             InteractiveOperationStage effective = execution.stage.updateAndGet(current ->
                     current == InteractiveOperationStage.CANCELLING ? current : next);
@@ -133,9 +136,7 @@ public class InteractiveFixExecutionService {
     @Scheduled(fixedDelay = 1000L)
     public void pollDistributedCancellation() {
         if (distributedStore == null) return;
-        active.values().forEach(execution -> {
-            if (distributedStore.shouldStop(execution.distributedLease)) execution.cancel(false);
-        });
+        active.values().forEach(ActiveExecution::pollDistributedCancellation);
     }
 
     private String validateRequestId(String requestId) {
@@ -175,14 +176,12 @@ public class InteractiveFixExecutionService {
         private final AtomicBoolean distributedCompletionPublished = new AtomicBoolean(false);
         private final AtomicReference<InteractiveOperationStage> stage =
                 new AtomicReference<>(InteractiveOperationStage.QUEUED);
-        private final DistributedInteractiveExecutionStore.Lease distributedLease;
+        private volatile DistributedInteractiveExecutionStore.Lease distributedLease;
         private final long createdAtNanos = System.nanoTime();
         private final FutureTask<T> task;
 
-        private ActiveExecution(RequestKey key, Callable<T> operation,
-                                DistributedInteractiveExecutionStore.Lease distributedLease) {
+        private ActiveExecution(RequestKey key, Callable<T> operation) {
             this.key = key;
-            this.distributedLease = distributedLease;
             this.task = new FutureTask<>(() -> {
                 if (!state.compareAndSet(ExecutionState.WAITING, ExecutionState.RUNNING)) {
                     throw new CancellationException("Automatic-fix search was cancelled before it started.");
@@ -193,10 +192,7 @@ public class InteractiveFixExecutionService {
                 }
                 try {
                     T result = operation.call();
-                    if (distributedStore != null) {
-                        distributedStore.completeSuccessfully(distributedLease, stage.get());
-                        distributedCompletionPublished.set(true);
-                    }
+                    completeSuccessfully();
                     return result;
                 } finally {
                     state.set(ExecutionState.FINISHED);
@@ -205,11 +201,44 @@ public class InteractiveFixExecutionService {
             });
         }
 
+        private synchronized void registerDistributedLease(DistributedInteractiveExecutionStore.Lease lease) {
+            if (state.get() == ExecutionState.FINISHED || task.isCancelled()) {
+                if (distributedStore != null) distributedStore.abandon(lease);
+                throw new CancellationException("Automatic-fix search was cancelled during registration.");
+            }
+            distributedLease = lease;
+        }
+
+        private void finishBeforeStart() {
+            if (state.compareAndSet(ExecutionState.WAITING, ExecutionState.FINISHED)) {
+                task.cancel(false);
+                cleanup();
+            }
+        }
+
         private boolean cancel() {
             return cancel(true);
         }
 
-        private boolean cancel(boolean publishDistributed) {
+        // Polling and local cancellation must not mistake a successful fence's released owner for lease loss.
+        private synchronized void completeSuccessfully() {
+            if (task.isCancelled()) {
+                throw new CancellationException("Automatic-fix search was cancelled before completion.");
+            }
+            if (distributedStore != null) {
+                distributedStore.completeSuccessfully(distributedLease, stage.get());
+                distributedCompletionPublished.set(true);
+            }
+            state.set(ExecutionState.FINISHED);
+        }
+
+        private synchronized void pollDistributedCancellation() {
+            if (state.get() != ExecutionState.FINISHED
+                    && distributedStore.shouldStop(distributedLease)) cancel(false);
+        }
+
+        private synchronized boolean cancel(boolean publishDistributed) {
+            if (state.get() == ExecutionState.FINISHED) return false;
             stage.set(InteractiveOperationStage.CANCELLING);
             if (publishDistributed && distributedStore != null) {
                 distributedStore.requestCancellation("fix", key.userId(), key.requestId());

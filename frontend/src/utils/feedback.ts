@@ -1,8 +1,9 @@
-import type { VNode } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { h, type VNode } from 'vue'
+import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
 
 import { i18n } from '@/assets/i18n'
 import { openModalDepth, registerModalSurface } from '@/composables/useBodyScrollLock'
+import FailureDetails from '@/components/FailureDetails.vue'
 
 /**
  * The one place user feedback is produced.
@@ -24,14 +25,8 @@ const DURATION = { short: 2600, normal: 3600, long: 5200 } as const
 const TOAST_GAP = 16
 
 /**
- * Where a toast's top edge goes: just below the top chrome the user can currently reach.
- *
- * Element Plus pins the first toast 16px from the viewport top, which is inside the board's fixed nav,
- * and a centred toast up to 26rem wide covers the undo and redo buttons there -- exactly when the user
- * wants them, right after the action the toast reports. Top chrome opts in with `data-toast-anchor`:
- * the headers, and the board's persistent alerts, which a transient toast must not hide. The lowest
- * one wins. Under an open modal that chrome is inert behind the scrim, while the dialog is centred and
- * can reach near the top, so the toast keeps the viewport-top slot rather than dropping onto the dialog.
+ * Place toasts below the lowest header or persistent alert marked with `data-toast-anchor`.
+ * An open modal makes those anchors unreachable, so retain the viewport-top slot to avoid the dialog.
  */
 const toastOffset = (): number => {
   if (openModalDepth.value > 0) return TOAST_GAP
@@ -64,6 +59,42 @@ export const notifyError = (message: string) => {
   ElMessage.error({ message, duration: DURATION.long, grouping: true, offset: toastOffset() })
 }
 
+/** A local result stays available until opened, discarded, or its owning view is torn down. */
+export const notifyAvailableResult = (options: {
+  title: string | (() => string)
+  message: string | (() => string)
+  actionLabel: string | (() => string)
+  discardLabel: string | (() => string)
+  onAction: () => boolean
+  onClose: () => void
+}): (() => void) => {
+  const text = (value: string | (() => string)) => typeof value === 'function' ? value() : value
+  const notification = ElNotification({
+    duration: 0,
+    showClose: false,
+    position: 'bottom-right',
+    customClass: 'iot-result-notification',
+    // Element Plus accepts only plain title text; the retained notice needs one reactive render owner.
+    message: h(() => h('div', [
+      h('h2', { class: 'el-notification__title' }, text(options.title)),
+      text(options.message) !== text(options.title) ? h('p', text(options.message)) : null,
+      h('div', { class: 'iot-result-notification__actions' }, [
+        h('button', {
+          type: 'button', class: 'iot-result-notification__button',
+          'data-testid': 'available-result-discard', onClick: () => notification.close()
+        }, text(options.discardLabel)),
+        h('button', {
+          type: 'button', class: 'iot-result-notification__button is-primary',
+          'data-testid': 'available-result-open',
+          onClick: () => { if (options.onAction()) notification.close() }
+        }, text(options.actionLabel))
+      ])
+    ])),
+    onClose: options.onClose
+  })
+  return () => notification.close()
+}
+
 /**
  * Clears every open toast. Used when the board changes context wholesale (scene replacement,
  * playback teardown) and older toasts would describe a state that no longer exists.
@@ -72,17 +103,22 @@ export const dismissAllNotifications = () => {
   ElMessage.closeAll()
 }
 
+/** A new form interaction retires earlier completion notices without discarding errors or warnings. */
+export const dismissCompletionNotifications = () => {
+  ElMessage.closeAll('success')
+  ElMessage.closeAll('info')
+}
+
 type ConfirmOptions = {
   title: string
   /**
-   * Plain text, or a VNode when the surface needs structure (per-field diagnostics with the
-   * raw cause tucked into a "Technical Details" disclosure rather than shown inline).
+   * Plain text, or a VNode when the surface needs structured correction diagnostics.
    */
   message: string | VNode
   /** Defaults to a generic "Confirm"; name the action instead where possible. */
   confirmText?: string
   cancelText?: string
-  /** Only for surfaces that need extra layout (the full-scene replacement preview). */
+  /** For structured content that needs bounded scrolling, such as scene previews or rule-removal lists. */
   customClass?: string
 }
 
@@ -114,6 +150,7 @@ export const confirmDestructive = async (options: ConfirmOptions): Promise<boole
     await ElMessageBox.confirm(options.message, options.title, {
       ...BASE_BOX,
       type: 'warning',
+      autofocus: false,
       confirmButtonText: options.confirmText ?? t('app.confirm'),
       cancelButtonText: options.cancelText ?? t('app.cancel'),
       confirmButtonClass: 'el-button--danger',
@@ -211,4 +248,33 @@ export const acknowledge = async (
   } finally {
     releaseModalSurface()
   }
+}
+
+export interface FailureAcknowledgementOptions {
+  title: string
+  message: string
+  suggestion: string
+  cause?: string
+  details?: readonly string[]
+  fields?: Readonly<Record<string, string>>
+  confirmText?: string
+}
+
+/** A failed action remains readable until acknowledged; diagnostics are rendered as text. */
+export const acknowledgeFailure = async (options: FailureAcknowledgementOptions): Promise<void> => {
+  return acknowledge({
+    title: options.title,
+    message: h('div', [
+      options.message !== options.title ? h('p', { 'data-testid': 'failure-summary' }, options.message) : null,
+      h(FailureDetails, {
+        message: options.message,
+        suggestion: options.suggestion,
+        cause: options.cause,
+        details: options.details,
+        fields: options.fields
+      })
+    ]),
+    tone: 'error',
+    confirmText: options.confirmText
+  })
 }

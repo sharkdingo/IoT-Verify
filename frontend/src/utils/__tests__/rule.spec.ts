@@ -10,6 +10,17 @@ import {
 } from '../rule'
 import { i18n } from '@/assets/i18n'
 import type { DuplicateRuleReasonCode, RuleSimilarityReasonCode } from '@/types/rule'
+import type { DeviceNode } from '@/types/node'
+
+const expectNodeBoundary = (point: DeviceNode['position'], node: DeviceNode) => {
+  const { x, y } = node.position
+  expect(point.x).toBeGreaterThanOrEqual(x - 1e-6)
+  expect(point.x).toBeLessThanOrEqual(x + node.width + 1e-6)
+  expect(point.y).toBeGreaterThanOrEqual(y - 1e-6)
+  expect(point.y).toBeLessThanOrEqual(y + node.height + 1e-6)
+  expect(Math.min(Math.abs(point.x - x), Math.abs(point.x - x - node.width),
+    Math.abs(point.y - y), Math.abs(point.y - y - node.height))).toBeLessThan(1e-6)
+}
 
 describe('rule utils', () => {
   it('getNodeCenter should compute center correctly', () => {
@@ -28,6 +39,45 @@ describe('rule utils', () => {
     expect(fromPoint.x).toBeLessThanOrEqual(from.position.x + from.width)
     expect(toPoint.x).toBeGreaterThanOrEqual(to.position.x)
     expect(toPoint.x).toBeLessThanOrEqual(to.position.x + to.width)
+  })
+
+  it.each([
+    ['horizontal', { x: 420, y: 30 }],
+    ['vertical', { x: 10, y: 340 }],
+    ['downward diagonal', { x: 420, y: 340 }],
+    ['upward diagonal', { x: 420, y: -240 }],
+    ['leftward diagonal', { x: -320, y: 340 }]
+  ] as const)('anchors both directions on differently sized nodes along a %s line', (_name, position) => {
+    const from: DeviceNode = { id: 'from', templateName: 'Light', label: 'Source',
+      position: { x: 20, y: 40 }, state: 'off', width: 100, height: 80 }
+    const to: DeviceNode = { ...from, id: 'to', position: { ...position }, width: 120, height: 100 }
+    const forward = getLinkPoints(from, to, 25)
+    const reverse = getLinkPoints(to, from, 25)
+    expectNodeBoundary(forward.fromPoint, from)
+    expectNodeBoundary(forward.toPoint, to)
+    expectNodeBoundary(reverse.fromPoint, to)
+    expectNodeBoundary(reverse.toPoint, from)
+
+    const origin = getNodeCenter(from)
+    const target = getNodeCenter(to)
+    const side = (point: DeviceNode['position']) =>
+      (target.x - origin.x) * (point.y - origin.y) - (target.y - origin.y) * (point.x - origin.x)
+    expect(side(forward.fromPoint)).toBeGreaterThan(0)
+    expect(side(reverse.toPoint)).toBeLessThan(0)
+    expect(side(forward.fromPoint)).toBeCloseTo(side(forward.toPoint))
+    expect(side(reverse.fromPoint)).toBeCloseTo(side(reverse.toPoint))
+  })
+
+  it('bounds lane separation for small nodes and preserves a coincident center', () => {
+    const from: DeviceNode = { id: 'from', templateName: 'Light', label: 'Source',
+      position: { x: 0, y: 0 }, state: 'off', width: 80, height: 60 }
+    const to: DeviceNode = { ...from, id: 'to', position: { x: 300, y: 300 } }
+    const { fromPoint, toPoint } = getLinkPoints(from, to, 100)
+    expectNodeBoundary(fromPoint, from)
+    expectNodeBoundary(toPoint, to)
+    expect(getLinkPoints(from, { ...from, id: 'overlapping' }, 25)).toEqual({
+      fromPoint: getNodeCenter(from), toPoint: getNodeCenter(from)
+    })
   })
 
   it('getSelfLoopPath should return a valid path string', () => {

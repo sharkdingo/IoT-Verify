@@ -9,8 +9,8 @@ Detailed reference lives in [../docs/](../docs/README.md); when code and docs di
 
 Vue 3 + TypeScript single-page app (Vite) for the IoT-Verify platform. What it is and how it fits
 the backend: [../docs/architecture/overview.md](../docs/architecture/overview.md); the stack is in
-`package.json`. Both Ant Design Vue and Element Plus are present — match whichever the neighbouring
-component already uses rather than picking one.
+`package.json`. UI components use Element Plus with Ant Design icons; match the neighbouring
+component's conventions.
 
 This project is in active development and has no released compatibility contract.
 Unless the user explicitly requests a migration path, remove superseded client contracts
@@ -100,14 +100,15 @@ single owner of the "session gone → login" location.
 - **The board's URL owns "which run is open", and nothing else.** `run=<kind>:<id>` plus
   `trace`/`finding` are the only deep-linked state; panel layout, widths, `activeSection`,
   and canvas pan/zoom are persisted server-side per user via `BoardLayoutDto`, so putting
-  them in the URL would create a second authority. Openers navigate and a single watcher
-  applies the URL — never assign result state and the URL separately. Opening is `push`,
+  them in the URL would create a second authority. History openers and URL restoration use the
+  same loaders; verification completion adopts its received result and saved address together.
+  Never add a separate URL writer beside a result adoption. Opening is `push`,
   correcting/clearing is `replace`. Rules and the full inventory:
   [../docs/guides/frontend-ui-conventions.md](../docs/guides/frontend-ui-conventions.md).
 - **A disabled submit must say why, inline.** Derive the disabled state and the message from
   one `*BlockedReason` computed and link it with `aria-describedby`; never also toast what the
   form already shows. Result-surface closers come in pairs: `close*` for internal transitions
-  (which must not touch the URL) and `dismiss*` for a user-facing close (which clears the deep
+  (which must not touch the URL) and `dismiss*` for a user-facing close (which clears its owned deep
   link). Getting this backwards makes a replay strip its own link, or leaves `run=` behind so
   the sync reopens the surface the user just closed.
 - **Validate response cross-field invariants in both directions.** A one-way check leaves the
@@ -214,17 +215,11 @@ single owner of the "session gone → login" location.
   minimum at every viewport. Compute what the preferred term evaluates to at the container's real
   size, and never exempt a pattern from `typographyFloor.spec.ts` on a claim you have not measured.
   Both, with the numbers: [../docs/guides/frontend-ui-conventions.md](../docs/guides/frontend-ui-conventions.md) §7.
-- **A semantic role has an ink half and a paper half.** `--accent`/`--danger`/`--warning`/`--success` are
-  tuned as *text*, so the dark theme lightens them — and a fill under light ink inverts that (measured 1.44 to
-  2.54:1 across 60 sites, light theme passing throughout, which is why a light-only check misses it). Fill with
-  `--<role>-fill`; a fill carrying no ink keeps the bare role. Disable by desaturating, never by fading
-  opacity, which fades the label with it. Structural neutrals have a floor: `slate-400` is 2.56:1 on white.
-  The neutral control hovers with `hover:board-control-hover`, never a Tailwind `hover:bg-slate-*` — those
-  land in `@layer utilities`, which loses to every unlayered `board.css` rule at any specificity, so the
-  hover either did nothing (11.82:1 rest and hovered) or painted near-white ink-on-ink at 1.13:1. On a
-  `board-text-muted`/`board-chip-neutral` control, pair it with `hover:board-text-strong`: the light ground
-  leaves muted ink at 4.23:1, because `--text-muted` is tuned against the *resting* control.
-  Values, tables and the reasoning:
+- **A semantic role has an ink half and a paper half.** Fill under light labels with
+  `--<role>-fill`; bare roles are text inks that lighten in dark mode. Disabled controls keep opaque
+  labels. Use `hover:board-control-hover` with `hover:board-text-strong` for muted neutral controls:
+  unlayered board rules outrank Tailwind utilities, and muted light-theme ink needs the stronger role
+  on hover. Color ownership, neutral utility usage and contrast requirements:
   [../docs/guides/frontend-ui-conventions.md](../docs/guides/frontend-ui-conventions.md) §6.
 - **A `position: fixed` overlay cannot read a variable scoped to the board.** The `--board-*` width
   and gap variables live on `.iot-board`, and the timeline hosts are siblings of it, so inside them
@@ -239,7 +234,8 @@ single owner of the "session gone → login" location.
 - **Side panels are optionally controlled.** `ControlCenter` / `SystemInspector` accept
   `activeSection` but must not declare a default for it: a default makes the prop look
   permanently "controlling", which silently discards internal selection changes when no
-  parent is managing it.
+  parent is managing it. Their optional Boolean `collapsed` prop needs an explicit
+  `undefined` default; Vue otherwise casts absence to `false` and blocks local collapse.
 
 - **Base URL comes from one place, relative by default.** Both `http.ts` (axios,
   appends `/api`) and `chat.ts` (SSE) read `import.meta.env.VITE_API_BASE_URL`. Empty
@@ -251,7 +247,7 @@ single owner of the "session gone → login" location.
   `response.body.getReader()`, so it sets the `Authorization` header manually and the
   axios interceptors do not apply. Protocol:
   [../docs/api/chat-sse.md](../docs/api/chat-sse.md).
-- **Rule references are node-id authoritative.** `RuleBuilderDialog` stores new rule
+- **Rule references are node-id authoritative.** `RuleBuilder` stores new rule
   source/target device references as canonical `DeviceNode.id` values; labels are only
   shown to users. Never synthesize dummy trigger conditions in `board.ts`; validate and
   surface an error instead.
@@ -264,16 +260,21 @@ single owner of the "session gone → login" location.
   `turnId`: "load older messages" prepends a page and shifts every array index, which sent chunks
   and terminal status into an archived message. Browsing history during a stream is legitimate — do
   not "fix" this class of bug by disabling the operation.
-- **Staleness belongs to the run, not to the dialog showing it.** `lastSimulationResult` survives
-  every dialog close while `simulationResult` does not, so flag and clear against the surviving run.
+- **Staleness belongs to the run, not to the surface showing it.** `lastSimulationResult` remains
+  the playback manifest when the terminal is hidden or closed, so flag and clear against that run.
   Closing a surface is not a fresh result and must not clear a stale flag; only a new run is.
   That ref is also the manifest the replay bar describes — its attack/privacy chips, step counts and
-  `modelSnapshot` — while the states it animates come from `savedSimulationStates`, so the two are
-  written as a pair by `adoptSimulationRunResult` and never separately. A run completing behind an
-  open replay is **deferred, not adopted** (with `notifyAutomaticPlaybackDeferred`), because adopting
-  it repainted the visible trajectory's header with another run's semantics and pointed Run details at
-  the wrong run. Reachable in ordinary use: playback admission does not consider `isSimulating`, so
+  `modelSnapshot` — and `savedSimulationStates` derives directly from that same result.
+  The adopter updates the result and staleness; callers do not maintain a separate state copy.
+  A deferred background run may update the result while no replay is visible.
+  A run completing behind an open replay is **deferred, not adopted**
+  (with `notifyAutomaticPlaybackDeferred`), because adopting
+  it replaced the visible trajectory and header while the canvas still belonged to the selected
+  replay's frozen scene. Reachable in ordinary use: playback admission does not consider `isSimulating`, so
   replaying history while an async run finishes is normal.
+- **Logout belongs to its initiating session.** Capture its token and account-page ownership
+  before settlement; check both after every await and before local logout/navigation.
+  The logout API must receive that pinned token, even if the current session changes.
 - **A replay on screen outranks every arriving run.** The rule above generalises to all three kinds,
   because playback admission considers none of `isSimulating`/`isVerifying`/`isFuzzing`: an arriving
   run must not present a surface while `isModelPlaybackActive`. Verification is the sharpest case —
@@ -282,6 +283,8 @@ single owner of the "session gone → login" location.
   instead, and in every kind say where the run went (run history for verification and simulation, the
   task notification for exploration) at the severity the outcome deserves — a deferral must not read
   as a quieter result, and a budget-exhausted or violated run stays flagged as one.
+  An arriving failure still emits its error notice, but opens an error surface only while playback
+  is absent. Dismissing a result clears only its own URL target and preserves another run's replay.
 - **A displayed verdict only describes the model that was verified.** Any semantic board
   change (applying a fix, editing rules/specs/devices from the inspector or chat) makes an
   open verification result stale: `Board.vue` flags it from the single semantic-scene-change

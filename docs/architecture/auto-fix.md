@@ -11,9 +11,9 @@ repaired rules back to the board (see [Applying a suggestion](#applying-a-sugges
 API contract (`fault-rules`, `fix`, `fix/apply`) → [../api/verification.md](../api/verification.md).
 Spec formulas → [spec-templates.md](spec-templates.md).
 
-Verified against code on 2026-09-29. Source: `component/nusmv/fixer/` — `RuleFixer`,
+Verified against code on 2026-10-13. Source: `component/nusmv/fixer/` — `RuleFixer`,
 `localize/{FaultLocalizer, RuleInfluenceScope}`, `strategy/{ParameterAdjustStrategy, ConditionAdjustStrategy,
-RemoveRulesFixStrategy, FixAlternatives, FixStrategyUtils, FixStrategyApplier}`, `BoardSemanticFingerprint`,
+RemoveRulesFixStrategy, FixAlternatives, CommandEffects, FixStrategyUtils, FixStrategyApplier}`, `BoardSemanticFingerprint`,
 `parameterize/{ParameterExtractor, CounterexampleInitialStateConstraints}`;
 `service/impl/FixServiceImpl` (apply flow),
 `component/aitool/verification/ApplyFixTool` (conversational adapter), and
@@ -35,16 +35,24 @@ RemoveRulesFixStrategy, FixAlternatives, FixStrategyUtils, FixStrategyApplier}`,
    write different target values to at least one shared device mode. Commands that update
    disjoint modes are independent and are not labeled as conflicts.
 2. **Repair scope** (`localize/RuleInfluenceScope`): a rule-level cone of influence of the
-   violated property. The property's devices are relevant; a device brings every environment
+   violated property. Device-state, reported-value, trust, and privacy conditions seed their devices.
+   A plain shared-pool value condition seeds only its named environment domain; another reading
+   on the same sensor is not a dependency. Template `7` additionally seeds the selected device,
+   because it also observes that device's propagated trust label. A device brings every environment
    domain it declares, and a domain brings every device that declares an impact on it; a rule
    whose command targets a relevant device is relevant, and everything it reads (condition
    devices, content device) becomes relevant; repeat to a fixpoint. The cone deliberately
    over-approximates, because missing a relevant rule would make a strategy report "no repair"
    for a repairable model. Fault rules are the fired rules inside the cone; a fired rule outside
-   it cannot change the property's truth value, so it is neither reported nor searched. If no
-   fired rule is in the cone, every strategy is `SKIPPED_NO_FAULT_RULES`. The repair scope that
-   all three strategies search is the fault rules first, then the cone's dormant rules (a
-   dormant backup automation can take over once the fired one is changed). When the property
+   it cannot change the property's truth value, so it is neither reported nor searched. The repair scope that
+   all three strategies search is the fault rules first, then the cone's dormant rules. A rule
+   that fires too late or has an excessive trigger condition can prevent a violation without
+   firing on the original trace (Salus §5.1's ventilation example). A recorded trace therefore
+   searches the cone even when localization returns no fired faults, except a one-state safety
+   counterexample: its initial state fails before any rule can execute. A one-state liveness
+   cycle can still be repaired by a dormant rule. The API's explicit
+   [skip outcomes](../api/verification.md#5-auto-fix) distinguish those cases.
+   When the property
    references no modeled device, the scope is unknown and the fired rules are kept unfiltered.
 3. **Strategy attempts**: run the requested strategies in order. The default order is
    `parameter → condition → remove`: the first two implement Salus §5.1/§5.2, while
@@ -55,6 +63,12 @@ RemoveRulesFixStrategy, FixAlternatives, FixStrategyUtils, FixStrategyApplier}`,
    below), and the user chooses one. Results accumulate into `FixResultDto`; `strategyAttempts`
    records a status and reason for every requested strategy, including those skipped
    before execution.
+
+`FixServiceImpl` loads the trace and its same-user completed verification-run owner.
+`TraceMapper` validates and decodes the owner's request once; fix reuses that request and
+the owner's versioned manifest/token-source bundle. It does not read a second per-trace
+request or reconstruct historical context from current Board templates. Persisted ownership
+and context are defined by the [data authority model](data-authority-model.md#trace).
 
 Before strategy search, `FixServiceImpl` checks the counterexample's source-generation
 metadata. If any rule or specification was omitted, no strategy is run: the result has
@@ -101,10 +115,11 @@ statuses in [../api/verification.md](../api/verification.md).
 
 ## Listing alternatives (`FixAlternatives`)
 
-Forward verification proves the submitted specifications, not an unstated preference such as
-"keep this event trigger", so several formally equivalent repairs can differ in what the user
-actually wants. A strategy therefore lists every minimal repair it verifies, up to five, smallest
-change first, instead of returning whichever one its search order reached first.
+Forward verification checks the target and guards against newly broken specifications, not an
+unstated preference such as "keep this event trigger", so formally equivalent repairs can differ in what the user
+actually wants. A strategy lists verified change sets, removes supersets of listed
+repairs, and orders them by change count. The list is exhaustive only when `alternativesComplete`
+is true; an interrupted search may not reach a smaller repair.
 
 - **Identity.** A repair is identified by its change set: the thresholds it moves, the conditions
   it removes or adds, or the rules it removes. The same thresholds at other values, or an added
@@ -116,9 +131,17 @@ change first, instead of returning whichever one its search order reached first.
   exhausted its search space and every candidate whose forward verification was inconclusive is
   covered by a listed repair; such a candidate might have been a repair. The listing limit, the
   attempt budget, the time share, or an error make it `false`.
-- **Time share.** Once a strategy has its first repair, it looks for further alternatives for as
-  long again as that repair took, but at least ten seconds, so the wait for the others stays
-  proportional to the wait for the first answer. It never gets more than an equal share of the
+- **Affordable enumeration.** All strategies use `FixContext` to multiply their actual search-domain
+  sizes with saturation: threshold ranges, condition booleans plus free candidate-value domains,
+  or rule-removal booleans. A request with a deadline and at most 256 assignments prefers a complete
+  enumeration for up to 30 seconds measured from that strategy's start. It may exceed the nominal attempt
+  budget and five-choice limit; a conservative finite attempt ceiling also covers small probes and
+  the final exhaustion check. Child solves beyond the nominal budget also receive only that window's
+  remaining time; nominal discovery retains the request budget. If its measured cost grows beyond that window, the ordinary limits
+  apply again. A standalone search without a deadline retains its finite limits.
+- **Time share.** A larger search lists up to five choices. Once it has its first repair, it looks
+  for further alternatives for as long again as that repair took, but at least three seconds.
+  Affordable enumeration uses the remainder of its measured window instead. Neither gets more than an equal share of the
   remaining `FIX_TIMEOUT_MS` among itself and the strategies still to run, so enumerating
   alternatives cannot starve a later strategy.
   A strategy stopped by its share with something listed is `VERIFIED`; only one that listed nothing
@@ -135,16 +158,20 @@ thresholds of the repair-scope rules, fault rules first. The search phases are s
 every NuSMV call in them is one `¬ρ` check on the pinned counterexample, and only a value the
 solver returns pays for a complete-model forward verification.
 
-1. **One threshold at a time** (multi-threshold scope only, at most half of
-   `FIX_MAX_ATTEMPTS`): each threshold becomes the only `FROZENVAR` while the others keep their
-   original values. `¬ρ` holding (UNSAT) settles that threshold in one call; a returned value
-   that fails forward verification is excluded and the threshold is solved again. Once a
-   threshold is listed, the search moves to the next one, since its other values are only
-   variants. One-value edits come first because they are the easiest for a user to judge. A
-   [failed solve](#pipeline-rulefixer) moves on to the next threshold; the joint solve still
-   covers it. The phase is skipped when a preferred range excludes some threshold's original
-   value: that threshold must move, and holding it at its original would list repairs outside
-   the range the user asked for.
+1. **Small probes** (multi-threshold scope only, at most half of `FIX_MAX_ATTEMPTS`):
+   first free one threshold at a time, holding the others at their original values. When
+   coordinated groups exist, roughly half of this phase's budget is reserved for them.
+   Groups share the complete resolved command and numeric clause shape, excluding the
+   threshold literal. A group with more than two targets first frees its fault-first pair,
+   then the whole group; the latter is omitted when it would duplicate the unrestricted
+   model. This checks a primary/backup pair without unnecessarily moving a later required
+   response and adds at most two probes per group, rather than enumerating a power set.
+   `¬ρ` holding (UNSAT) settles only the selected probe; a returned tuple that fails forward
+   verification is excluded and that probe is solved again. A listed repair or a
+   [failed solve](#pipeline-rulefixer) moves to the next probe. Joint search retains all
+   other assignments and alone can settle overall exhaustion. The small-probe phase is
+   skipped when a preferred range excludes any original threshold: holding it unchanged
+   would violate the user's requested range.
 2. **Joint solve**: all thresholds are `FROZENVAR`s together, which redundant rules need
    (moving either alone leaves the other able to reproduce the violation). A returned tuple
    that fails forward verification is excluded exactly, and a listed repair by an `INVAR`
@@ -219,13 +246,12 @@ any model that disables a rule or skips a specification.
   because narrowing cannot turn "no value works" into a repair. A proof within narrowed rows
   keeps them and says the values outside them were not checked. When the current strategy has
   nothing to apply or retry, the footer offers the next strategy that has not been tried yet.
-- Bounded by `FIX_MAX_ATTEMPTS` (`¬ρ` solves in phases 1–2), `FIX_MAX_REFINE_ATTEMPTS`
+- Bounded by the [shared search policy](#listing-alternatives-fixalternatives) (`¬ρ` solves in phases 1–2), `FIX_MAX_REFINE_ATTEMPTS`
   (refinement iterations per listed repair), and the overall `FIX_TIMEOUT_MS` deadline. Distance and
   refinement-window arithmetic uses `long` intermediates so the full signed 32-bit manifest
   domain cannot overflow.
-- Emits API-facing `ParameterAdjustment` entries: `{ targetId, attribute, relation,
-  originalValue, newValue, lowerBound, upperBound, description }`. Internal rule and
-  condition positions remain inside the fixer and are not serialized to REST or AI callers.
+- Emits structured parameter edits following the [fix response contract](../api/verification.md#5-auto-fix).
+  Internal rule/condition indices remain application locators; the public snapshot order is display metadata.
   A strict `> upperBound` or `< lowerBound` result makes its rule unreachable and is labeled
   explicitly in the Board. Non-strict `>= upperBound` and `<= lowerBound` results still match
   one domain value and are not described as disabled.
@@ -259,15 +285,37 @@ policy value because their persisted rule semantics are not a single scalar doma
 and privacy conditions remain specification-only because the persisted rule language has
 no corresponding trigger type.
 
+Candidate pruning distinguishes possible propagation from an unambiguous command outcome.
+The command-effect closure follows every potentially triggered link, but a guard is excluded as
+an outcome only when all recorded effects on its device establish it. If a feedback chain can
+both turn a device on and turn it off, either state may be a necessary precondition; neither
+is discarded merely because the chain can produce it later. Complete forward verification
+still decides whether the proposed conditions repair the target and preserve passing requirements.
+
 Before the unrestricted lambda search, the strategy tries bounded deterministic
-configurations. It first adds one policy-derived guard to a localized rule while retaining
-every existing trigger, then tries removing one existing trigger while adding none. For
+configurations. Individual probes add one policy-derived guard to a localized rule while
+retaining every existing trigger, or remove one existing trigger while adding none. For
 redundant rules issuing the same command, it also tries adding the same candidate-clause
-shape to those rules together; this handles a dormant backup rule without asking NuSMV to
-enumerate the full lambda product. Expanded-rule single additions remain available after
-those higher-value probes. Each selected free guard may still solve over its declared `Y`
-domain. A configuration that contains a listed repair is skipped, since it can only yield
-supersets of it. Only after those configurations are unsatisfiable, fail complete-model forward
+shape to those rules together. A group with more than two rules first guards its fault-first
+primary/backup pair, retaining the later same-action rules that may implement required
+responses, before trying the whole group. This handles a dormant backup rule without asking
+NuSMV to enumerate the full lambda product. Groups whose command targets occur in the
+violated property's structured conditions are checked first; other groups remain eligible.
+For a policy protecting several actuators, the same context guard is also tried across
+their rule groups. Only commands on the property's own devices participate, and guards
+reading a device that any scene rule commands are excluded from this grouping. This
+handles occupancy or sleep conditions shared by several lights without creating an
+output-to-output guard chain. The proposed group still needs complete forward verification;
+it neither replaces the general search nor certifies that a group is a repair.
+When coordinated configurations exist, individual probes receive at most half of this
+deterministic phase's quota before coordinated probes begin, so unrelated single edits cannot
+consume the entire quota. Remaining individual probes and expanded-rule single additions
+follow those coordinated probes. Each selected free guard may still solve over its declared `Y`
+domain. Deterministic probes carry fixed lambda values as typed metadata; the generator
+uses constants rather than free switches, including inside learned exclusions. The
+[generated representation and witness extraction](nusmv-model.md) preserve active free-value
+domains and complete assignments. A configuration that contains a listed
+repair is skipped, since it can only yield supersets of it. Only after those configurations are unsatisfiable, fail complete-model forward
 verification, or are covered does the strategy search unrestricted joint add/remove
 combinations, where each listed repair adds an `INVAR` forbidding every assignment that makes
 at least its changes. An unsatisfiable joint solve exhausts the search, which makes the listing
@@ -281,6 +329,14 @@ prioritized phase receives at most half of `FIX_MAX_ATTEMPTS`; the remaining bud
 available to joint search, and removal probes that would necessarily empty a one-condition
 rule are not generated. As in parameter coordination, command equality includes target,
 action, content device, and content value.
+
+If full verification finds that a candidate repairs the target but breaks an originally
+satisfied property, its attributed counterexample guides the next deterministic probes.
+The strategy combines the rejected candidate's changes with existing primary/backup groups
+on that property's devices. Shared environment effects can require such edits across areas,
+even when each area has already been repaired separately. These combined probes use only the
+remaining deterministic quota, retain prior exclusions, and still require full verification;
+they neither increase the attempt limit nor replace the unrestricted joint search.
 
 Free-value candidates are deduplicated by clause shape (resolved device/domain, target
 type, attribute, and relation), not by the policy's placeholder literal. Search exclusions
@@ -319,13 +375,13 @@ candidate on the command target is also rejected when it is provably false under
 state allowed by the API `StartState`; wildcard start-state segments remain eligible instead of
 being treated as contradictions. A rule with no meaningful condition adjustment is reported as
 having no condition fix; the user should revise the property, adjust a genuine precondition, or
-choose permanent rule removal.
+choose rule removal.
 
 Condition adjustment is not a hidden form of rule removal. It keeps the rule and its command and
 must leave at least one valid trigger condition. Although an always-false trigger could resemble
 removal at the level of one state transition, empty or synthetic trigger conditions are not a
 valid persisted rule representation: the DTO rejects an empty condition list and SMV generation
-fails closed for one. Permanent rule removal operates on the rule set itself, deletes the complete
+fails closed for one. Rule removal operates on the rule set itself, deletes the complete
 automation, and therefore has a separate destructive confirmation and search strategy.
 
 ### Paper alignment boundaries
@@ -341,7 +397,8 @@ Two further points go beyond the paper. The paper parametrizes the rules that sh
 domains with the violated policy together with the rules on the violating transitions; the
 [repair scope](#pipeline-rulefixer) follows command targets instead, so a fired rule that writes
 nothing the property depends on is left out, and a dormant rule is searched only when it can reach
-the property. The paper re-verifies a solved configuration against the violated policy under every
+the property. Dormant rules in that scope remain searchable when no relevant rule fired, matching
+the paper's prevention use case. The paper re-verifies a solved configuration against the violated policy under every
 initial state; [forward verification](#forward-verification-fixstrategyutilsforwardverify) also
 checks every other submitted specification and separates the ones the original rules already
 violated.
@@ -362,22 +419,26 @@ unmodeled user intent. Acceptance scenarios must select the concrete edit they e
 listed options rather than take the first one, and users must review that signed edit before
 apply.
 
-## Strategy 3 — permanent rule removal (`RemoveRulesFixStrategy`)
+## Strategy 3 — rule removal (`RemoveRulesFixStrategy`)
 
 Destructive fallback. Lists the minimal sets of rules to remove: it checks candidate sets
-smallest first, in lexicographic order, regenerating the model without those rules and
+smallest first, in the ordered candidate sequence, regenerating the model without those rules and
 re-verifying each. A set containing a listed one is never checked. Emits readable
 `removedRuleDescriptions` so a user can review what will be permanently deleted;
 internal rule positions are not part of the external contract. The product has no
 persisted enabled/disabled rule state, so this action must never be described as
 "disable" or imply that it can later be re-enabled. The candidate rules are the
-[repair scope](#pipeline-rulefixer), fault rules first; its dormant rules are needed because a
+[repair scope](#pipeline-rulefixer). Rules commanding a device named in the violated property's
+structured conditions are ordered first, preserving the scope's fault-first order within each
+priority. Other rules remain eligible, and every single removal is still checked before pairs.
+This lets a bounded pair search reach a target area's primary/backup rules when shared domains
+also bring other areas into scope. Its dormant rules are needed because a
 lower-priority automation may take over only after the executed rule is removed. Under an exact attack
 scenario, the strategy skips every removal set that would remove a selected automation-link
 point or make a selected device cease to be behavior-changing. Request validation and every
 fix candidate use the same exact-point-versus-attack-surface validator, so deleting the last
 rule targeting a selected actuator cannot silently disable that actuator's attack variable.
-Reaching `FIX_MAX_ATTEMPTS` while combinations remain is reported as budget exhaustion when
+Reaching the [shared search budget](#listing-alternatives-fixalternatives) while combinations remain is reported as budget exhaustion when
 nothing was listed, and as an incomplete listing otherwise. Every combination is judged by forward
 verification or the attack-scenario check, and no pinned-counterexample step rules any out
 earlier. A complete search that listed nothing is therefore `ALL_CANDIDATES_REJECTED`.
@@ -413,7 +474,7 @@ baseline outcomes are not failures and are not kept: a capacity refusal, which i
 run cut off by the deadline or a cancellation, which is reported through the strategy's
 `TIMED_OUT` status and which a later strategy's time may still complete.
 
-This is why a returned `FixSuggestionDto` means the proposal passed
+This is why a returned `FixSuggestionDto` means the proposal met the acceptance rule in
 the complete generated model used by that fix attempt; it remains a model-level result,
 not a guarantee about unmodelled physical behavior. The ordinary UI therefore presents
 this state as **passed recomputation in the current complete formal model**, rather than
@@ -454,8 +515,10 @@ and token. Any edit, replay in another context, or expired token rejects with `4
 same proposal is applied. This removes the second expensive strategy search and prevents apply
 from silently choosing a different valid suggestion than the one the user reviewed.
 
-The assistant's `apply_fix` tool uses the same boundary. Its first call verifies the exact
-signed suggestion and returns a no-write impact preview. The session-scoped confirmation
+The assistant's `apply_fix` tool uses the same boundary, resolving the selected signed proposal
+from its server-side conversation record rather than asking the model to reproduce it.
+The [AI tool contract](../api/ai-tools.md) owns the selector and argument details.
+Its first call verifies the exact signature and returns a no-write impact preview. The session-scoped confirmation
 guard stores that complete request for 15 minutes, so the confirmed call does not reconstruct
 security-sensitive suggestion data from truncated model history. A later explicit confirmation
 consumes the request once and calls `FixService.applyFix`; it does not call a lower-level rule
@@ -521,7 +584,7 @@ expired or superseded lease from committing a repair after another formal operat
 claimed the user.
 
 **Per-strategy effect** (`FixStrategyApplier.apply`): `parameter` overwrites the target
-condition's value (and relation); `condition` adds/removes conditions; `remove` permanently deletes
+condition's value (and relation); `condition` adds/removes conditions; `remove` deletes
 the flagged rules. Parameter and condition fixes regenerate each touched rule's
 `ruleString` from the persisted typed conditions and command so board lists, history, AI
 context, and scene export do not keep showing the pre-fix text. A `condition` fix that
@@ -553,7 +616,7 @@ can report; the client rejects the whole response unless `verificationEvidenceRe
 `canUndo`/`canRedo` are exactly `true`/`false`, and `appliedSuggestion` is the alternative the user
 submitted, compared field by field without its token.
 The localized UI derives its success explanation from these structured fields instead
-of displaying the backend's English `message`; it states both the all-submitted-spec
-scope and the unmodelled-real-world limitation.
+of displaying the backend's English `message`; it states that the target holds, no originally
+satisfied specification is broken, and the evidence applies only to the formal model.
 Full request/response field tables and the exact `400`-vs-`503` semantics are in
 [../api/verification.md](../api/verification.md).

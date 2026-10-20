@@ -296,21 +296,6 @@ public class VerificationController {
         return ranges;
     }
 
-    /*
-     * There is deliberately no trace-keyed SMV download.
-     *
-     * `GET /api/verify/traces/{id}/smv` existed and was removed, because it could only ever return a
-     * byte-identical copy of what `runs/{id}/smv` returns. One model string is generated per run and
-     * written to the run row and to every trace of that run, so a run with three violated
-     * specifications answered the same bytes from four addresses. Its stated justification — that a
-     * counterexample stays self-contained after its run is deleted — was false: `deleteRunInternal`
-     * deletes every trace and then the run in one transaction, so a trace cannot outlive its run.
-     * Nothing called it: no client method, no test, no script.
-     *
-     * The run-keyed endpoint strictly dominates it, and is the only one that works for a run where
-     * every specification holds, which has no counterexample to key on.
-     */
-
     /**
      * Download the exact SMV model a run checked. The only SMV download for verification.
      *

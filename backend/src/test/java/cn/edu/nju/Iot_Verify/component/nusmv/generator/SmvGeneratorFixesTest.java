@@ -227,6 +227,68 @@ class SmvGeneratorFixesTest {
     }
 
     @Test
+    void mainBuilder_fixedConditionSwitchesAreConstantsEvenInsideLearnedExclusions() {
+        String model = fixedConditionProbeModel(false);
+        assertTrue(model.contains("lambda_r0_c0 := TRUE;"), model);
+        assertTrue(model.contains("lambda_r0_c1 := FALSE;"), model);
+        assertFalse(model.contains("lambda_r0_c0: boolean;"), model);
+        assertFalse(model.contains("lambda_r0_c1: boolean;"), model);
+    }
+
+    @Test
+    void mainBuilder_fixedConditionProbe_foldsGuardsAndRetainsCompleteWitnessVariables() {
+        String disabled = fixedConditionProbeModel(false);
+        assertTrue(disabled.contains("lambda_r0_c0 := TRUE;"), disabled);
+        assertTrue(disabled.contains("lambda_r0_c1 := FALSE;"), disabled);
+        assertTrue(disabled.contains("condition_value_r0_c1: 0..100;"), disabled);
+        assertFalse(disabled.contains("!lambda_r"), disabled);
+        assertFalse(disabled.contains("sensor_1.humidity<condition_value_r0_c1"), disabled);
+        assertTrue(disabled.contains("sensor_1.temperature>=30"), disabled);
+
+        String enabled = fixedConditionProbeModel(true);
+        assertTrue(enabled.contains("lambda_r0_c1 := TRUE;"), enabled);
+        assertTrue(enabled.contains("sensor_1.humidity<condition_value_r0_c1"), enabled);
+        assertTrue(enabled.contains("condition_value_r0_c1: 0..100;"), enabled);
+        assertFalse(enabled.contains("!lambda_r"), enabled);
+    }
+
+    private String fixedConditionProbeModel(boolean enabled) {
+        List<DeviceManifest.InternalVariable> variables = List.of(
+                numericVar("temperature", true, 0, 100), numericVar("humidity", true, 0, 100));
+        DeviceManifest sensorManifest = DeviceManifest.builder()
+                .modes(List.of()).internalVariables(variables).build();
+        DeviceManifest lightManifest = DeviceManifest.builder().modes(List.of("Power"))
+                .workingStates(List.of(
+                        DeviceManifest.WorkingState.builder().name("off").trust("trusted").build(),
+                        DeviceManifest.WorkingState.builder().name("on").trust("trusted").build()))
+                .apis(List.of(DeviceManifest.API.builder().name("turnOn")
+                        .startState("off").endState("on").build())).build();
+        DeviceSmvData sensor = buildSmvData("sensor_1", "Meter", List.of(), Map.of(),
+                variables, sensorManifest);
+        DeviceSmvData light = buildSmvData("light_1", "Light", List.of("Power"),
+                Map.of("Power", List.of("off", "on")), List.of(), lightManifest);
+        RuleDto rule = RuleDto.builder().conditions(List.of(
+                RuleDto.Condition.builder().deviceName("sensor_1").targetType("variable")
+                        .attribute("temperature").relation(">=").value("30").build(),
+                RuleDto.Condition.builder().deviceName("sensor_1").targetType("variable")
+                        .attribute("humidity").relation("<").value("60").build()))
+                .command(RuleDto.Command.builder().deviceName("light_1").action("turnOn").build()).build();
+        Map<String, String> lambdas = new LinkedHashMap<>();
+        lambdas.put("r0_c0", "lambda_r0_c0");
+        lambdas.put("r0_c1", "lambda_r0_c1");
+        Map<String, Boolean> fixed = new LinkedHashMap<>();
+        fixed.put("r0_c0", true);
+        fixed.put("r0_c1", enabled);
+        ParameterizationConfig config = ParameterizationConfig.builder().conditionLambdas(lambdas)
+                .fixedConditionLambdas(fixed)
+                .candidateConditionValues(Map.of("r0_c1", ParameterizationConfig.ConditionValueInfo.builder()
+                        .frozenVarName("condition_value_r0_c1").lowerBound(0).upperBound(100).build())).build();
+        return mainBuilder.buildParameterized(1L,
+                List.of(device("sensor_1", "Meter"), device("light_1", "Light")), List.of(rule),
+                Map.of("sensor_1", sensor, "light_1", light), AttackScenarioDto.none(), false, config);
+    }
+
+    @Test
     @DisplayName("Trace probes record the ordered rule branch that drives the next state")
     void mainBuilder_ruleExecutionProbes_areDeterministicAndRespectCasePriority() {
         DeviceManifest sensorManifest = DeviceManifest.builder()

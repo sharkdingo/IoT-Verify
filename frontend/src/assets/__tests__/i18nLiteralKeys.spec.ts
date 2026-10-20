@@ -1,6 +1,8 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { extname, join, relative } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { baseCompile } from '@intlify/message-compiler'
+import { createSourceFile, forEachChild, isObjectLiteralExpression, ScriptTarget, type Node } from 'typescript'
 
 import { i18n } from '@/assets/i18n'
 
@@ -11,8 +13,7 @@ const TRANSLATION_CALL = /(?<![\w$])(?:\$t|t)\(\s*(['"])([^'"\r\n]+)\1/g
 // the bundle while the unit spec passed against its own stub dictionary. A dotted literal under a
 // real message namespace is a key claim regardless of what consumes it, so audit the literals.
 // The namespaces come from the bundle rather than a hand-kept list, so adding one to i18n.ts cannot
-// leave a whole namespace unaudited — an earlier draft hardcoded `app|specTemplates` and silently
-// excluded all 43 `auth.*` keys.
+// leave a whole namespace unaudited.
 const messageNamespaces = (): string[] =>
   Object.keys((i18n.global.messages.value as Record<string, Record<string, unknown>>)['zh-CN'])
 const KEY_LITERAL = new RegExp(
@@ -28,6 +29,12 @@ const sourceFiles = (directory: string): string[] => readdirSync(directory, { wi
   })
 
 const LOCALES = ['zh-CN', 'en'] as const
+
+const messageEntries = (value: unknown, path: string[] = []): Array<[string, string]> =>
+  value !== null && typeof value === 'object'
+    ? Object.entries(value as Record<string, unknown>)
+      .flatMap(([key, child]) => messageEntries(child, [...path, key]))
+    : [[path.join('.'), String(value)]]
 
 /** Every key the pattern claims, with the locales it fails to resolve in. */
 const unresolvedKeys = (pattern: RegExp) => {
@@ -54,8 +61,37 @@ const unresolvedKeys = (pattern: RegExp) => {
 }
 
 describe('literal i18n calls', () => {
-  // Both patterns are kept because neither subsumes the other. KEY_LITERAL currently finds every key
-  // TRANSLATION_CALL does and 423 more, but it is anchored to namespaces that exist, so it cannot see
+  it('use the same keys and parameters in both languages, with valid message syntax', () => {
+    const messages = i18n.global.messages.value as Record<string, unknown>
+    const zh = Object.fromEntries(messageEntries(messages['zh-CN']))
+    const en = Object.fromEntries(messageEntries(messages.en))
+    expect(Object.keys(en).sort()).toEqual(Object.keys(zh).sort())
+    const parameters = (text: string) => [...new Set([...text.matchAll(/\{([A-Za-z]\w*)\}/g)].map(match => match[1]))].sort()
+    const errors: string[] = []
+    for (const [key, text] of Object.entries(zh)) {
+      expect(parameters(en[key]), key).toEqual(parameters(text))
+      for (const [locale, message] of [['zh-CN', text], ['en', en[key]]]) {
+        baseCompile(message, { onError: error => { errors.push(`${locale}.${key}: ${error.message}`) } })
+      }
+    }
+    expect(errors).toEqual([])
+  })
+
+  it('does not silently overwrite duplicate message definitions', () => {
+    const source = createSourceFile('i18n.ts', readFileSync(join(process.cwd(), 'src/assets/i18n.ts'), 'utf8'), ScriptTarget.Latest, true)
+    const duplicates: string[] = []
+    const visit = (node: Node) => {
+      if (isObjectLiteralExpression(node)) {
+        const names = node.properties.filter(property => property.name).map(property => property.name!.getText(source))
+        duplicates.push(...names.filter((name, index) => names.indexOf(name) !== index))
+      }
+      forEachChild(node, visit)
+    }
+    visit(source)
+    expect(duplicates).toEqual([])
+  })
+  // Both patterns are kept because neither subsumes the other. KEY_LITERAL is anchored to namespaces
+  // that exist, so it cannot see
   // `t('typo.somekey')` under a namespace that does not — which TRANSLATION_CALL reports as missing.
   it('resolve in both supported languages', () => {
     const { missing, scanned } = unresolvedKeys(TRANSLATION_CALL)
@@ -72,35 +108,13 @@ describe('literal i18n calls', () => {
     expect(missing, `Key literals with no translation:\n${missing.join('\n')}`).toEqual([])
   })
 
-  /*
-   * The reverse direction: every key defined is a key something claims.
-   *
-   * The two assertions above check "a key a source file names must resolve", which is the direction that
-   * prevents a raw `app.something` reaching a user. Nothing checked the other way, and **35 orphaned keys
-   * had accumulated** — including a family of four (`runBoardInput*Short`) and six added and abandoned in
-   * a single refactor (`keyMetrics`, `specificationResults`, `traceSummary`, `verificationContext`,
-   * `specResultsSummary`, `viewTrace`). Each was translated twice and rendered nowhere, so a reader
-   * looking for the string that produces a label finds a plausible unused one.
-   *
-   * Dynamically built keys are the reason this direction is harder, and they are handled by construction
-   * rather than by an allowlist: any template literal of the form `namespace.prefix${…}` contributes its
-   * prefix, and every key under a contributed prefix counts as claimed. The bare `app.${…}` form is
-   * narrowed to the four trust/privacy values its call sites can actually produce — verified at
-   * `CanvasBoard.vue` and `ControlCenter.vue`, whose interpolations are typed to closed four-value sets.
-   * Widening that to "any app key" would make this test unable to fail.
-   */
+  // Dynamic families count by prefix; bare app.${...} lookups have a finite trust/privacy domain.
+  // Lookup tables store full keys so unrelated leaf strings cannot count as product usage.
   it('are all claimed by some source file', () => {
-    /*
-     * `e2e/` counts as a claimant, and that is not padding. An E2E spec addresses the product the way a
-     * user does — several assert on rendered sentences (`'Move earlier'`, `'Replace in full'`) rather
-     * than on keys — so a key used only by an E2E selector would look orphaned to a `src/`-only scan and
-     * be deleted, breaking the suite in a way no unit test could see. Scanning only `src/` was a real gap
-     * in the sweep that removed 35 keys; it happened to hit nothing, which is luck, not a method.
-     */
-    const corpus = [
-      ...sourceFiles(join(process.cwd(), 'src')).filter(file => !file.endsWith('i18n.ts')),
-      ...sourceFiles(join(process.cwd(), 'e2e'))
-    ]
+    // Tests and coincidentally matching leaf names cannot make an unused production message necessary.
+    const corpus = sourceFiles(join(process.cwd(), 'src'))
+      .filter(file => !file.endsWith('i18n.ts') && !file.includes('__tests__')
+        && !file.endsWith('.spec.ts') && !file.endsWith('.test.ts'))
       .map(file => readFileSync(file, 'utf8'))
       .join('\n')
 
@@ -121,13 +135,12 @@ describe('literal i18n calls', () => {
       (i18n.global.messages.value as Record<string, unknown>)['zh-CN'])
     expect(defined.length, 'the bundle should have been walked').toBeGreaterThan(1000)
 
+    const literalKeys = new Set([...corpus.matchAll(KEY_LITERAL)].map(match => match[2]))
     const orphans = defined.filter(key =>
-      !corpus.includes(key)
+      !literalKeys.has(key)
       && !bareDynamic.has(key)
       && !dynamicPrefixes.some(prefix => key.startsWith(prefix))
-      // A lookup table may map data to a leaf and build the key from it; the bare leaf appearing as a
-      // quoted string elsewhere is weak evidence of that, so it is tolerated rather than reported.
-      && !new RegExp(`['"\`]${key.split('.').pop()}['"\`]`).test(corpus))
+    )
 
     expect(orphans, `i18n keys defined but claimed by nothing:\n${orphans.join('\n')}`).toEqual([])
   })

@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { contrast, luminance, readThemeTokens, themeColor } from './themeTokens'
 
 /**
  * Colour ownership, enforced rather than remembered.
@@ -333,96 +334,40 @@ describe('semantic colour ownership', () => {
     expect(offenders).toEqual([])
   })
 
-  it('defines every role fill as a theme-stable token', () => {
-    // The point of the pair is that the fill does *not* flip with the theme, so one ink is correct in both.
-    // The panel banner proved why: it used `--accent`, so black ink measured 4.06 in light and 8.26 in dark
-    // while white measured the reverse — meaning no single markup could be right, and one panel title
-    // rendered at 1.44:1. A fill token that differs between the light and dark blocks recreates that trap.
-    const base = readFileSync(join(__dirname, '../base.css'), 'utf8')
-    const valuesOf = (token: string) => [...base.matchAll(new RegExp(`--${token}:\\s*(#[0-9a-f]{6})`, 'gi'))]
-      .map(m => m[1].toLowerCase())
-
-    // No `info` here: nothing in the product puts light ink on an info fill, so an `--info-fill` token would be
-    // speculative — I added one for symmetry and removed it on review. The lines above still *check* for `info`
-    // misuse, which costs nothing and would catch the first real one.
-    // `danger-fill-hover` and `warning-fill-hover` are included, unlike `accent-fill-hover`. That is not a
-    // symmetry choice: `--accent-fill` has headroom to brighten in dark theme, `--danger-fill` (4.83 under
-    // white ink) does not — #ef4444 measures 3.76 — so both roles must darken in both themes, and a later
-    // "the dark theme should brighten this, like accent does" edit would put them under AA. Pinned here so
-    // the constraint is checked rather than only explained in `base.css`.
-    const drifted: string[] = []
-    for (const token of ['accent-fill', 'danger-fill', 'warning-fill', 'success-fill',
-      'danger-fill-hover', 'warning-fill-hover']) {
-      const values = valuesOf(token)
-      // Three theme blocks declare each token (light, dark, and the explicit light reset).
-      if (values.length !== 3) { drifted.push(`--${token} declared ${values.length}x, expected 3`); continue }
-      if (new Set(values).size !== 1) drifted.push(`--${token} differs by theme: ${values.join(', ')}`)
+  it('keeps danger and warning fills stable across palettes and modes', () => {
+    const reference = readThemeTokens('light', 'copper')
+    for (const palette of ['copper', 'monochrome'] as const) {
+      for (const theme of ['light', 'dark'] as const) {
+        const tokens = readThemeTokens(theme, palette)
+        for (const role of ['danger', 'warning']) {
+          const fill = themeColor(tokens, `--${role}-fill`)
+          const hover = themeColor(tokens, `--${role}-fill-hover`)
+          expect(fill, `${palette} ${theme} ${role} fill`).toBe(themeColor(reference, `--${role}-fill`))
+          expect(hover, `${palette} ${theme} ${role} hover`).toBe(themeColor(reference, `--${role}-fill-hover`))
+          expect(luminance(hover), `${role} hover must not lighten under white ink`).toBeLessThan(luminance(fill))
+        }
+      }
     }
-
-    expect(drifted).toEqual([])
   })
 
   it('keeps white ink above AA on every fill token, including the hover and disabled states', () => {
-    // The values themselves, checked arithmetically. The rules above enforce that the right *token* is used
-    // and that the base fill does not flip; neither would notice if someone edited a fill to a value white
-    // text cannot sit on — which is precisely the original defect, one layer down.
-    //
-    // `--accent-fill-hover` is deliberately excluded from the theme-stability rule above, because "darker" and
-    // "brighter" swap meaning with the ground: light darkens, dark brightens. It is *not* excluded from this
-    // one. A hover is where the old defect was worst (`--accent-strong` at 1.80:1), so both values are
-    // checked, and my own first dark hover pick was #3b74ee at **4.27** — plausible, and under the line.
-    const base = readFileSync(join(__dirname, '../base.css'), 'utf8')
-    const channel = (v: number) => {
-      const x = v / 255
-      return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4
-    }
-    const whiteInkRatio = (hex: string) => {
-      const [r, g, b] = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16))
-      const lum = 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
-      return (1.05) / (lum + 0.05)
-    }
-
-    const tokens = ['accent-fill', 'accent-fill-hover', 'accent-fill-disabled',
+    const fills = ['accent-fill', 'accent-fill-hover', 'accent-fill-disabled',
       'danger-fill', 'danger-fill-hover', 'warning-fill', 'warning-fill-hover', 'success-fill']
-
-    const failures: string[] = []
-    for (const token of tokens) {
-      const values = [...base.matchAll(new RegExp(`--${token}:\\s*(#[0-9a-f]{6})`, 'gi'))].map(m => m[1])
-      expect(values.length, `--${token} should be declared in all three theme blocks`).toBe(3)
-      for (const value of values) {
-        const ratio = whiteInkRatio(value)
-        if (ratio < 4.5) failures.push(`--${token}: ${value} gives white ink ${ratio.toFixed(2)}:1`)
+    for (const palette of ['copper', 'monochrome'] as const) {
+      for (const theme of ['light', 'dark'] as const) {
+        const tokens = readThemeTokens(theme, palette)
+        for (const fill of fills) {
+          const value = themeColor(tokens, `--${fill}`)
+          expect(contrast('#ffffff', value), `${palette} ${theme} ${fill}: ${value}`).toBeGreaterThanOrEqual(4.5)
+        }
       }
     }
-
-    expect(failures).toEqual([])
   })
 
   it('keeps the device-runtime box from swallowing its own accent icon', () => {
-    /*
-     * A component's scoped CSS carries the `[data-v-…]` attribute, so a broad element selector inside it
-     * outranks any global class rule — and `color: inherit` on a bare element name is as broad as it gets.
-     *
-     * `ControlCenter` had `.device-runtime-box span { color: inherit }` to neutralise the Tailwind slate
-     * utilities its markup still carries. That also matched the one span asking for `board-text-accent`, so the
-     * accent icon painted `rgb(148,163,184)` instead of the accent (measured; now 5.17:1 light / 4.91:1 dark
-     * against the box). The defect is invisible from either side in review: the global rule looks correct and
-     * the scoped rule looks like ordinary theme normalisation. Two attempted fixes failed before CDP
-     * matched-styles named the winner — adding `.iot-board` for specificity did not help, and neither did
-     * appending an identical rule last, because equal specificity was never the problem.
-     *
-     * This pins the one real instance rather than trying to detect the pattern generally. A general check needs
-     * to prove DOM containment between a scoped ancestor and an ink-carrying element, which the two attempts
-     * before this could not do from source text: both produced false positives on selectors that cannot meet
-     * the inks they were accused of swallowing, and a guard that cries wolf is worse than none.
-     */
     const control = readFileSync(join(COMPONENT_DIR, 'ControlCenter.vue'), 'utf8')
-    expect(control, 'the accent icon should still be there to protect').toContain('board-text-accent')
-
-    const at = control.indexOf('.device-runtime-box summary')
-    expect(at, 'the runtime-box normaliser should exist').toBeGreaterThan(-1)
-    const rule = control.slice(at, control.indexOf('}', at))
-    expect(rule, 'the blanket span rule must exempt the role ink')
-      .toMatch(/span:not\(\.board-text-accent\)/)
+    expect(control).toContain('board-text-accent')
+    const styles = control.slice(control.indexOf('<style scoped>')).replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(styles).not.toMatch(/\.device-runtime-box\s+(?:summary|p|span)(?:[\s:{,])/)
   })
 })

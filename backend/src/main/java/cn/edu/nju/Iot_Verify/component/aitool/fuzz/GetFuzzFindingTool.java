@@ -47,7 +47,7 @@ public class GetFuzzFindingTool extends AbstractAiTool {
                         "stateOffset", Map.of("type", "integer",
                                 "description", "Non-negative zero-based state-sequence offset (default 0)."),
                         "stateLimit", Map.of("type", "integer",
-                                "description", "Number of states to return, 1-10 (default 10).")),
+                                "description", "Maximum states to return, 1-10 (default 10). The byte budget may return fewer; continue from nextStateOffset.")),
                 List.of("findingId"));
         return LlmToolSpec.of(getName(),
                 "Get one counterexample-search finding, including its violated specification, first violation step, and a bounded state/input-event window. Page states with stateOffset and stateLimit. A finding is heuristic candidate evidence, not a formal counterexample; never route it into fix_violation or apply_fix.",

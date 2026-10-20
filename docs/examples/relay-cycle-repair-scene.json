@@ -1,0 +1,219 @@
+{
+  "schema": "iot-verify.board-scene",
+  "version": 5,
+  "templates": [
+    {
+      "name": "Dynamic Light",
+      "manifest": {
+        "Name": "Dynamic Light",
+        "Description": "",
+        "InternalVariables": [],
+        "Modes": [
+          "SwitchState"
+        ],
+        "InitState": "off",
+        "Transitions": [],
+        "WorkingStates": [
+          {
+            "Name": "on",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          },
+          {
+            "Name": "off",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          }
+        ],
+        "APIs": [
+          {
+            "Name": "on",
+            "StartState": "",
+            "EndState": "on",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "off",
+            "StartState": "",
+            "EndState": "off",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ]
+      }
+    }
+  ],
+  "environmentVariables": [],
+  "devices": [
+    {
+      "id": "heating_relay",
+      "templateName": "Dynamic Light",
+      "label": "Heating Relay",
+      "position": {
+        "x": 80,
+        "y": 200
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "cooling_relay",
+      "templateName": "Dynamic Light",
+      "label": "Cooling Relay",
+      "position": {
+        "x": 400,
+        "y": 200
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    }
+  ],
+  "rules": [
+    {
+      "name": "cooling_relay off commands heating_relay on",
+      "sources": [
+        {
+          "fromId": "cooling_relay",
+          "fromApi": "SwitchState",
+          "itemType": "mode",
+          "relation": "=",
+          "value": "off"
+        }
+      ],
+      "toId": "heating_relay",
+      "toApi": "on"
+    },
+    {
+      "name": "heating_relay on commands cooling_relay on",
+      "sources": [
+        {
+          "fromId": "heating_relay",
+          "fromApi": "SwitchState",
+          "itemType": "mode",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "toId": "cooling_relay",
+      "toApi": "on"
+    },
+    {
+      "name": "cooling_relay on commands heating_relay off",
+      "sources": [
+        {
+          "fromId": "cooling_relay",
+          "fromApi": "SwitchState",
+          "itemType": "mode",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "toId": "heating_relay",
+      "toApi": "off"
+    },
+    {
+      "name": "heating_relay off commands cooling_relay off",
+      "sources": [
+        {
+          "fromId": "heating_relay",
+          "fromApi": "SwitchState",
+          "itemType": "mode",
+          "relation": "=",
+          "value": "off"
+        }
+      ],
+      "toId": "cooling_relay",
+      "toApi": "off"
+    }
+  ],
+  "specs": [
+    {
+      "templateId": "3",
+      "aConditions": [
+        {
+          "deviceId": "heating_relay",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        },
+        {
+          "deviceId": "cooling_relay",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "ifConditions": [],
+      "thenConditions": []
+    },
+    {
+      "templateId": "2",
+      "aConditions": [
+        {
+          "deviceId": "heating_relay",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "ifConditions": [],
+      "thenConditions": []
+    },
+    {
+      "templateId": "2",
+      "aConditions": [
+        {
+          "deviceId": "cooling_relay",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "ifConditions": [],
+      "thenConditions": []
+    },
+    {
+      "templateId": "5",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "cooling_relay",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "heating_relay",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "off"
+        }
+      ]
+    }
+  ]
+}

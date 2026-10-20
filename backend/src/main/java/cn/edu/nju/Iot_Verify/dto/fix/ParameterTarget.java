@@ -14,6 +14,9 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 public class ParameterTarget {
     private String targetId;
+    /** One-based rule order in the frozen trace snapshot, for display only. */
+    private int rulePosition;
+    private String deviceLabel;
     /** Internal trace-snapshot locator used only to attach frozen template provenance. */
     @JsonIgnore
     private int ruleIndex;

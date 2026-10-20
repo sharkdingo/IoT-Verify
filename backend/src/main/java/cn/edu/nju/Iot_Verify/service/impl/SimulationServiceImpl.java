@@ -13,7 +13,6 @@ import cn.edu.nju.Iot_Verify.dto.Result;
 import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
-import cn.edu.nju.Iot_Verify.dto.model.EnvironmentValueProvenanceDto;
 import cn.edu.nju.Iot_Verify.dto.model.ModelGenerationIssueDto;
 import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
 import cn.edu.nju.Iot_Verify.dto.model.ModelRunSnapshotDto;
@@ -60,6 +59,7 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.File;
@@ -69,6 +69,9 @@ import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
+
+import static cn.edu.nju.Iot_Verify.service.impl.ModelRequestSnapshotSupport.copyOptionalList;
+import static cn.edu.nju.Iot_Verify.service.impl.ModelRequestSnapshotSupport.copyRequiredList;
 
 @Slf4j
 @Service
@@ -267,19 +270,6 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
         return result;
     }
 
-    @Override
-    public SimulationResultDto simulateWithTemplateSnapshot(
-            Long userId,
-            SimulationRequestDto request,
-            Map<String, DeviceManifest> templateManifests) {
-        return formalOperationAdmission.execute(userId, () -> {
-            SimulationInput input = validateAndNormalize(userId, request, templateManifests);
-            SimulationResultDto result = simulateInput(userId, input, SmvGenerator.TempModelContext.sync());
-            result.setHistoryPersistence(RunPersistenceDto.notRequested());
-            return result;
-        });
-    }
-
     private SimulationResultDto simulateInput(Long userId, SimulationInput input,
                                               SmvGenerator.TempModelContext tempModelContext) {
         log.info("Starting simulation: userId={}, devices={}, steps={}, attack={}, attackBudget={}",
@@ -325,21 +315,13 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
     }
 
     private SimulationInput validateAndNormalize(Long userId, SimulationRequestDto request) {
-        return validateAndNormalize(userId, request, null);
-    }
-
-    private SimulationInput validateAndNormalize(
-            Long userId,
-            SimulationRequestDto request,
-            Map<String, DeviceManifest> suppliedTemplateManifests) {
         if (request == null) {
             throw new ValidationException("request", "Simulation request cannot be null");
         }
         AttackScenarioDto attackScenario = AttackScenarioValidator.canonicalizeForSimulation(
                 request.getAttackScenario());
-        // The board defines WHAT is simulated; the request only selects run parameters. See
-        // VerificationServiceImpl for the authority inversion this closes. The board read precedes
-        // snapshotRequest so the frozen snapshot deep-copies the board scene rather than aliasing it.
+        // Capture scene and templates together, then deep-copy the scene before workers receive it.
+        // The request supplies run options; every entry point uses this same board authority.
         ModelInputSnapshot board = boardDataConverter.getModelInputSnapshot(userId);
         request.setDevices(board.devices());
         request.setRules(board.rules());
@@ -366,11 +348,16 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
         Map<String, String> errors = NusmvRequestValidator.newErrors();
         NusmvRequestValidator.validateDevices(devices, errors);
         NusmvRequestValidator.validateRules(rules, devices, errors);
-        ModelBoundaryInput modelInput = validateModelSemantics(
-                userId, devices, rules, environmentVariables, snapshot.isAttack(),
-                suppliedTemplateManifests, errors);
+        ModelRunPreparation.PreparedModel modelInput = ModelRunPreparation.prepare(
+                smvGenerator, provenanceCollector,
+                devices, rules, List.of(), environmentVariables, snapshot.isAttack(),
+                board.templateManifests(), errors);
         snapshot.setEnvironmentVariables(modelInput.environmentVariables());
         NusmvRequestValidator.throwIfErrors(errors);
+
+        modelInput.modelSnapshot().setModelFingerprint(modelFingerprint.simulationFingerprint(
+                new ModelInputSnapshot(board.nodes(), devices, environmentVariables, rules, List.of(),
+                        modelInput.templateManifests())));
 
         try {
             snapshot.setPlaybackNodes(ModelPlaybackSceneSnapshot.canonicalize(
@@ -388,65 +375,6 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
                 modelInput.templateManifests(), modelInput.modelSnapshot(), attackSurface);
     }
 
-    private ModelBoundaryInput validateModelSemantics(Long userId,
-                                                      List<DeviceVerificationDto> devices,
-                                                      List<RuleDto> rules,
-                                                      List<BoardEnvironmentVariableDto> environmentVariables,
-                                                      boolean isAttack,
-                                                      Map<String, DeviceManifest> suppliedTemplateManifests,
-                                                      Map<String, String> errors) {
-        if (!errors.isEmpty()) {
-            return new ModelBoundaryInput(devices, environmentVariables, new AttackSurface(Set.of(), 0, 0),
-                    Map.of(), Map.of(), null);
-        }
-        try {
-            SmvGenerator.CapturedDeviceModel capturedDeviceModel = suppliedTemplateManifests == null
-                    ? smvGenerator.captureDeviceModel(userId, devices)
-                    : smvGenerator.captureDeviceModelFromTemplateSnapshots(
-                            devices, suppliedTemplateManifests);
-            Map<String, DeviceSmvData> deviceSmvMap = capturedDeviceModel.deviceSmvMap();
-            LocalDateTime capturedAt = LocalDateTime.now();
-            NusmvRequestValidator.validateDeviceSemantics(devices, deviceSmvMap, errors);
-            NusmvRequestValidator.validateEnvironmentVariableOverrides(
-                    environmentVariables, deviceSmvMap, errors);
-            List<BoardEnvironmentVariableDto> mergedEnvironmentVariables =
-                    NusmvEnvironmentPool.mergeWithDefaults(environmentVariables, deviceSmvMap);
-            NusmvRequestValidator.validateEnvironmentVariables(mergedEnvironmentVariables, deviceSmvMap, errors);
-            NusmvRequestValidator.validateMainNamespace(devices, rules, deviceSmvMap, isAttack, errors);
-            NusmvRequestValidator.validateRuleSemantics(rules, deviceSmvMap, errors);
-            NusmvRequestValidator.validateAttackHasModeledEffect(isAttack, rules, deviceSmvMap, errors);
-            AttackSurface attackSurface = AttackSurface.analyze(rules, deviceSmvMap);
-            if (!errors.isEmpty()) {
-                return new ModelBoundaryInput(devices, mergedEnvironmentVariables, attackSurface,
-                        Map.of(), capturedDeviceModel.templateManifests(), null);
-            }
-            List<DeviceVerificationDto> expandedDevices = NusmvEnvironmentPool.expandDevices(
-                    devices, mergedEnvironmentVariables, deviceSmvMap);
-            Map<String, DeviceSmvData> expandedDeviceSmvMap =
-                    smvGenerator.buildDeviceSmvMapFromTemplateSnapshots(
-                            expandedDevices, capturedDeviceModel.templateManifests());
-            List<EnvironmentValueProvenanceDto> environmentProvenance =
-                    provenanceCollector.collectEnvironmentProvenance(
-                            mergedEnvironmentVariables, expandedDevices, expandedDeviceSmvMap);
-            ModelRunSnapshotDto modelSnapshot = ModelRunSnapshotDto.captured(
-                    capturedAt,
-                    expandedDevices.size(),
-                    rules != null ? rules.size() : 0,
-                    0,
-                    mergedEnvironmentVariables.size(),
-                    capturedDeviceModel.templateManifests().size())
-                    .toBuilder()
-                    .environmentProvenance(environmentProvenance)
-                    .build();
-            return new ModelBoundaryInput(expandedDevices, mergedEnvironmentVariables, attackSurface,
-                    expandedDeviceSmvMap, capturedDeviceModel.templateManifests(), modelSnapshot);
-        } catch (SmvGenerationException e) {
-            errors.putIfAbsent("devices", e.getMessage());
-            return new ModelBoundaryInput(devices, environmentVariables, new AttackSurface(Set.of(), 0, 0),
-                    Map.of(), Map.of(), null);
-        }
-    }
-
     private SimulationRequestDto snapshotRequest(SimulationRequestDto request,
                                                  AttackScenarioDto attackScenario) {
         try {
@@ -458,30 +386,6 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
         } catch (IllegalArgumentException e) {
             throw new ValidationException("request", "Simulation request cannot be snapshotted");
         }
-    }
-
-    private <T> List<T> copyRequiredList(List<T> values, String field, String emptyMessage) {
-        if (values == null || values.isEmpty()) {
-            throw new ValidationException(field, emptyMessage);
-        }
-        return copyList(values, field);
-    }
-
-    private <T> List<T> copyOptionalList(List<T> values, String field) {
-        if (values == null || values.isEmpty()) {
-            return List.of();
-        }
-        return copyList(values, field);
-    }
-
-    private <T> List<T> copyList(List<T> values, String field) {
-        List<T> copy = new ArrayList<>(values);
-        for (int i = 0; i < copy.size(); i++) {
-            if (copy.get(i) == null) {
-                throw new ValidationException(field + "[" + i + "]", "must not be null");
-            }
-        }
-        return copy;
     }
 
     // Service-internal: task creation is only reachable through submitSimulation and
@@ -594,14 +498,6 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
     @Override
     public Long submitSimulation(Long userId, SimulationRequestDto request) {
         return submitSimulationInput(userId, validateAndNormalize(userId, request));
-    }
-
-    @Override
-    public Long submitSimulationWithTemplateSnapshot(
-            Long userId,
-            SimulationRequestDto request,
-            Map<String, DeviceManifest> templateManifests) {
-        return submitSimulationInput(userId, validateAndNormalize(userId, request, templateManifests));
     }
 
     private Long submitSimulationInput(Long userId, SimulationInput input) {
@@ -823,13 +719,6 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
         }
     }
 
-    private record ModelBoundaryInput(List<DeviceVerificationDto> devices,
-                                       List<BoardEnvironmentVariableDto> environmentVariables,
-                                       AttackSurface attackSurface,
-                                       Map<String, DeviceSmvData> deviceSmvMap,
-                                       Map<String, DeviceManifest> templateManifests,
-                                       ModelRunSnapshotDto modelSnapshot) {}
-
     @Override
     @Transactional(readOnly = true)
     public SimulationTaskDto getTask(Long userId, Long taskId) {
@@ -880,7 +769,13 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
     @Override
     @Transactional(readOnly = true)
     public int getTaskProgress(Long userId, Long taskId) {
-        return super.getTaskProgress(userId, taskId);
+        var task = simulationTaskRepository.findProgressByIdAndUserId(taskId, userId)
+                .orElseThrow(() -> new ResourceNotFoundException("SimulationTask", taskId));
+        var status = task.getStatus();
+        return resolveTaskProgress(taskId, task.getProgress(),
+                status == SimulationTaskPo.TaskStatus.COMPLETED
+                        || status == SimulationTaskPo.TaskStatus.FAILED
+                        || status == SimulationTaskPo.TaskStatus.CANCELLED);
     }
 
     @Override
@@ -957,19 +852,23 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
     }
 
     @Override
-    @Transactional(readOnly = true)
+    @Transactional(readOnly = true, propagation = Propagation.SUPPORTS)
     public List<SimulationTraceSummaryDto> getUserSimulations(Long userId) {
-        return simulationTraceMapper.toSummaryProjectionDtoList(
-                simulationTraceRepository.findSummariesByUserId(
-                        userId, PageRequest.of(0, taskAdmissionLimits.getMaxStoredTasksPerUser())));
+        var readTransaction = new TransactionTemplate(transactionTemplate.getTransactionManager());
+        readTransaction.setReadOnly(true);
+        var rows = readTransaction.execute(status -> simulationTraceRepository.findSummariesByUserId(
+                userId, PageRequest.of(0, taskAdmissionLimits.getMaxStoredTasksPerUser())));
+        return simulationTraceMapper.toSummaryProjectionDtoList(rows);
     }
 
     @Override
-    @Transactional(readOnly = true)
+    @Transactional(readOnly = true, propagation = Propagation.SUPPORTS)
     public SimulationTraceDto getSimulation(Long userId, Long id) {
-        return simulationTraceRepository.findByIdAndUserId(id, userId)
-                .map(simulationTraceMapper::toDto)
-                .orElseThrow(() -> new ResourceNotFoundException("SimulationTrace", id));
+        var readTransaction = new TransactionTemplate(transactionTemplate.getTransactionManager());
+        readTransaction.setReadOnly(true);
+        SimulationTracePo row = readTransaction.execute(status -> simulationTraceRepository.findByIdAndUserId(id, userId)
+                .orElseThrow(() -> new ResourceNotFoundException("SimulationTrace", id)));
+        return simulationTraceMapper.toDto(row);
     }
 
     @Override
@@ -1435,6 +1334,11 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
     @Override
     protected Optional<SimulationTaskPo> findTaskByIdAndUserId(Long id, Long userId) {
         return simulationTaskRepository.findByIdAndUserId(id, userId);
+    }
+
+    @Override
+    protected Optional<SimulationTaskPo> findTaskByIdAndUserIdForUpdate(Long id, Long userId) {
+        return simulationTaskRepository.findByIdAndUserIdForUpdate(id, userId);
     }
 
     @Override

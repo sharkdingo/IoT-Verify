@@ -20,14 +20,15 @@
  * `aria-checked="false"`, the `v-if`-gated attack section never rendered, and the run failed 180s
  * later waiting for `verification-attack-budget`.
  *
- * Moving the pointer away first lets the popper close, so the click reaches the control. The move
- * target is the viewport origin: the top-left corner holds the "Reset workspace" heading, which
+ * Move the pointer away and blur focused tooltip triggers while waiting, so delayed focus or popper
+ * mounting cannot keep an observed hint open after a single early blur. The move
+ * target is the viewport origin: the top-left corner holds the product heading, which
  * carries no tooltip of its own, so parking there cannot open a second popper.
  * `authority-model-audit.spec.ts` already uses `page.mouse.move(4, 4)` to retract a canvas hover
  * for the same reason.
  *
- * The wait is on the popper being gone rather than a fixed sleep, so it costs ~80ms in the normal
- * case and still holds under CI load. `aria-hidden` is the state Element Plus toggles while the
+ * The wait is on the popper being gone rather than a fixed sleep, so it follows the hide transition
+ * and still holds under CI load. `aria-hidden` is the state Element Plus toggles while the
  * element itself stays in the DOM (`HintTooltipDisabled.spec.ts` records the same distinction), so
  * a plain visibility check is not enough.
  */
@@ -39,7 +40,18 @@ const openPoppers = (page: Page): Locator =>
 
 export const dismissHintTooltips = async (page: Page): Promise<void> => {
   await page.mouse.move(4, 4)
-  await expect(openPoppers(page)).toHaveCount(0, { timeout: 5_000 })
+  await expect.poll(async () => {
+    // Focus-triggered hints survive pointer parking. Leave unrelated input drafts focused.
+    await page.evaluate(() => {
+      const trigger = document.activeElement
+      if (!(trigger instanceof HTMLElement)) return
+      const descriptions = trigger.getAttribute('aria-describedby')?.split(/\s+/) || []
+      if (descriptions.some(id => document.getElementById(id)?.matches('.iot-info-tooltip-popper'))) {
+        trigger.blur()
+      }
+    })
+    return openPoppers(page).count()
+  }, { timeout: 5_000 }).toBe(0)
 }
 
 /** Dismiss any open hint popper, then click normally — with the hit-target check intact. */

@@ -1,10 +1,23 @@
 import type {
     DeviceManifest,
+    DeviceTemplate,
     InternalVariable
 } from '../types/device'
 import type { DeviceNode } from '../types/node'
 import { REQUEST_LIMITS } from '../constants/requestLimits'
 import { PRIVACY_VALUE_SET, TRUST_VALUE_SET } from './deviceRuntime'
+
+/** Preserve Array.find's first alias match while sharing constant-time template lookups. */
+export const indexDeviceTemplates = (templates: readonly DeviceTemplate[]) => {
+    const index = new Map<string, DeviceTemplate>()
+    for (const template of templates) {
+        for (const alias of [template.name, template.manifest?.Name]) {
+            const key = String(alias || '').trim().toLowerCase()
+            if (key && !index.has(key)) index.set(key, template)
+        }
+    }
+    return index
+}
 
 // --- 图标与路径 ---
 
@@ -34,14 +47,6 @@ const escapeXml = (value: string): string =>
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
 
-const hashString = (value: string): number => {
-    let hash = 0
-    for (let i = 0; i < value.length; i++) {
-        hash = (hash * 31 + value.charCodeAt(i)) >>> 0
-    }
-    return hash
-}
-
 const getTemplateInitials = (name: string): string => {
     const words = String(name || 'Device')
         .replace(/[_-]+/g, ' ')
@@ -55,13 +60,12 @@ const getTemplateInitials = (name: string): string => {
     return initials.toUpperCase()
 }
 
-const createGeneratedDeviceIcon = (deviceType: string, state?: string): string => {
+export const createGeneratedDeviceIcon = (deviceType: string, state?: string): string => {
     const name = String(deviceType || 'Device').replace(/_/g, ' ')
-    const hash = hashString(name)
-    const hue = hash % 360
-    const accent = `hsl(${hue} 78% 52%)`
-    const soft = `hsl(${hue} 88% 94%)`
-    const mid = `hsl(${hue} 72% 72%)`
+    // SVG images are separate documents: host CSS variables cannot supply their paint.
+    const accent = 'hsl(20 36% 42%)'
+    const soft = 'hsl(38 28% 94%)'
+    const mid = 'hsl(28 24% 70%)'
     const initials = escapeXml(getTemplateInitials(name))
     const stateLabel = escapeXml(normalizeStateName(state || '').slice(0, 14))
     const showState = stateLabel && stateLabel.toLowerCase() !== 'working'
@@ -72,7 +76,7 @@ const createGeneratedDeviceIcon = (deviceType: string, state?: string): string =
   <rect x="18" y="18" width="36" height="27" rx="6" fill="white" stroke="${mid}" stroke-width="3"/>
   <path d="M25 28h22M25 35h16" stroke="${accent}" stroke-width="3" stroke-linecap="round"/>
   <circle cx="49" cy="51" r="8" fill="${accent}"/>
-  <text x="36" y="59" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="${showState ? 8 : 13}" font-weight="800" fill="#0f172a">${showState ? stateLabel : initials}</text>
+  <text x="36" y="59" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="${showState ? 8 : 13}" font-weight="800" fill="hsl(30 11% 14%)">${showState ? stateLabel : initials}</text>
 </svg>`)
 }
 
@@ -122,16 +126,14 @@ const getBundledDeviceIconPath = (folder: string, state: string): string | null 
     return null
 }
 
-const getFirstBundledDeviceIconPath = (folder: string): string | null => {
-    const normalizedFolder = normalizeAssetFolder(folder)
-    const prefix = `../assets/${normalizedFolder}/`
-    const firstKey = Object.keys(deviceIconModules)
-        .filter(key => key.startsWith(prefix))
-        .sort((a, b) => a.localeCompare(b))
-        .find(Boolean)
-
-    return firstKey ? deviceIconModules[firstKey] : null
+const firstBundledIconByFolder = new Map<string, string>()
+for (const path of Object.keys(deviceIconModules).sort((a, b) => a.localeCompare(b))) {
+    const folder = path.slice('../assets/'.length, path.lastIndexOf('/'))
+    if (!firstBundledIconByFolder.has(folder)) firstBundledIconByFolder.set(folder, deviceIconModules[path])
 }
+
+const getFirstBundledDeviceIconPath = (folder: string): string | null =>
+    firstBundledIconByFolder.get(normalizeAssetFolder(folder)) || null
 
 const isSafeManifestIcon = (icon: string | undefined | null): icon is string => {
     if (!icon || typeof icon !== 'string') return false

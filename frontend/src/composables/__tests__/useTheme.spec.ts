@@ -66,24 +66,48 @@ describe('useTheme', () => {
     expect(theme.value).toBe('dark')
   })
 
-  it('cycles light -> dark -> system and clears storage on the system step', async () => {
-    localStorage.setItem(THEME_KEY, 'light')
+  it('makes explicit light, dark and system choices independent of palette', async () => {
     prefersDark = true
     const { useTheme } = await loadTheme()
-    const { theme, followsSystem, cycleThemeMode } = useTheme()
-
-    cycleThemeMode()
+    const { theme, palette, followsSystem, setTheme, setPalette, resetThemeToSystem } = useTheme()
+    setPalette('monochrome')
+    expect(followsSystem.value).toBe(true)
+    setTheme('light')
+    expect(theme.value).toBe('light')
+    expect(localStorage.getItem(THEME_KEY)).toBe('light')
+    setTheme('dark')
     expect(theme.value).toBe('dark')
-    expect(localStorage.getItem(THEME_KEY)).toBe('dark')
-
-    cycleThemeMode()
+    resetThemeToSystem()
     expect(followsSystem.value).toBe(true)
     expect(theme.value).toBe('dark')
     expect(localStorage.getItem(THEME_KEY)).toBeNull()
+    expect(palette.value).toBe('monochrome')
+    expect(document.documentElement.dataset.palette).toBe('monochrome')
+    expect(localStorage.getItem('iot_verify_palette')).toBe('monochrome')
+  })
 
-    cycleThemeMode()
-    expect(followsSystem.value).toBe(false)
-    expect(theme.value).toBe('light')
-    expect(localStorage.getItem(THEME_KEY)).toBe('light')
+  it('restores a palette before applying the first theme and retains it across system changes', async () => {
+    localStorage.setItem('iot_verify_palette', 'monochrome')
+    const { useTheme } = await loadTheme()
+    const { palette, followsSystem } = useTheme()
+    expect(palette.value).toBe('monochrome')
+    expect(document.documentElement.dataset.palette).toBe('monochrome')
+    expect(followsSystem.value).toBe(true)
+    prefersDark = true
+    listeners.forEach(handler => handler())
+    expect(document.documentElement.dataset.theme).toBe('dark')
+    expect(document.documentElement.dataset.palette).toBe('monochrome')
+  })
+
+  it('shares palette selection between consumers and restores copper explicitly', async () => {
+    const { useTheme } = await loadTheme()
+    const first = useTheme()
+    const second = useTheme()
+    first.setPalette('monochrome')
+    expect(second.palette.value).toBe('monochrome')
+    second.setPalette('copper')
+    expect(first.palette.value).toBe('copper')
+    expect(document.documentElement.dataset.palette).toBe('copper')
+    expect(localStorage.getItem('iot_verify_palette')).toBe('copper')
   })
 })

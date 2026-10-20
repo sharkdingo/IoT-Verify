@@ -53,6 +53,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: 'IoT-Verify' }
   },
   {
+    path: '/account',
+    name: 'account',
+    component: () => import('../views/Account.vue'),
+    meta: { title: 'IoT-Verify' }
+  },
+  {
     path: '/404',
     name: '404',
     component: () => import('../views/NotFound.vue'),

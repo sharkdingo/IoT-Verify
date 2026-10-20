@@ -14,6 +14,22 @@ class AiToolResultContractTest {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Test
+    void ruleUpdateNeedsACompleteSavedRuleAndExplicitUnverifiedStatus() throws Exception {
+        String valid = """
+                {"operation":"updated","verificationStatus":"NOT_VERIFIED","executionOrder":1,"totalRules":2,
+                 "rule":{"ruleId":11,"conditions":[{}],"command":{"action":"cool"}}}
+                """;
+        assertTrue(AiToolResultContract.hasValidKnownToolPayload("manage_rule", objectMapper.readTree(valid)));
+        assertFalse(AiToolResultContract.hasValidKnownToolPayload("manage_rule",
+                objectMapper.readTree("{\"operation\":\"updated\"}")));
+        for (String field : java.util.List.of("rule", "verificationStatus", "executionOrder", "totalRules")) {
+            var incomplete = (com.fasterxml.jackson.databind.node.ObjectNode) objectMapper.readTree(valid);
+            incomplete.remove(field);
+            assertFalse(AiToolResultContract.hasValidKnownToolPayload("manage_rule", incomplete), field);
+        }
+    }
+
+    @Test
     void everyMutationCapableToolHasARecognizedAuthoritativeResultMarker() throws Exception {
         Map<String, String> examples = Map.ofEntries(
                 Map.entry("add_device", "{\"operation\":\"created\"}"),

@@ -5,6 +5,7 @@ import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvGenerationContext;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvData;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
+import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -98,9 +99,50 @@ class SmvMainModuleBuilderPropertyTest {
         DeviceVerificationDto targetDto = new DeviceVerificationDto();
         targetDto.setVarName(target.getVarName());
         StringBuilder result = new StringBuilder();
-        method.invoke(builder, result, List.of(targetDto), rules, devices, false,
-                dimension, null, SmvGenerationContext.noop());
+        Method grouping = SmvMainModuleBuilder.class.getDeclaredMethod(
+                "groupRulesByResolvedTarget", List.class, Map.class);
+        grouping.setAccessible(true);
+        method.invoke(builder, result, List.of(targetDto), grouping.invoke(builder, rules, devices), devices,
+                false, dimension, null, SmvGenerationContext.noop(), new LinkedHashMap<>());
         return result.toString();
+    }
+
+    @Test
+    void buildsRecomputeBranchesForChangedInputsAndWarningContexts() {
+        DeviceSmvData source = buildVariableDevice();
+        source.setModuleName("Sensor");
+        DeviceSmvData target = buildRuleTarget(List.of(DeviceManifest.API.builder()
+                .name("on").endState("on").signal(false).build()));
+        target.setModuleName("Target");
+        Map<String, DeviceSmvData> model = Map.of(source.getVarName(), source, target.getVarName(), target);
+        DeviceVerificationDto sourceDto = new DeviceVerificationDto();
+        sourceDto.setVarName(source.getVarName());
+        DeviceVerificationDto targetDto = new DeviceVerificationDto();
+        targetDto.setVarName(target.getVarName());
+        List<DeviceVerificationDto> devices = List.of(sourceDto, targetDto);
+        RuleDto rule = commandRule("temperature", "on");
+        List<RuleDto> rules = List.of(rule);
+
+        String initial = builder.build(1L, devices, rules, model, AttackScenarioDto.none(), false);
+        assertTrue(initial.replace(" ", "").contains("sensor_1.temperature>30"));
+        rule.getConditions().get(0).setValue("31");
+        String changed = builder.build(1L, devices, rules, model, AttackScenarioDto.none(), true);
+        assertTrue(changed.replace(" ", "").contains("sensor_1.temperature>31"));
+        assertFalse(changed.replace(" ", "").contains("sensor_1.temperature>30"));
+        assertTrue(changed.contains("next(target_1.privacy_Power_on)"));
+
+        rule.getCommand().setAction("missing");
+        SmvGenerationContext invalidContext = SmvGenerationContext.collecting();
+        String disabled = builder.build(1L, devices, rules, model, AttackScenarioDto.none(), true, invalidContext);
+        assertEquals(1, invalidContext.warningsSnapshot().disabledRuleCount());
+        assertEquals(1, invalidContext.warningsSnapshot().generationIssues().size());
+        assertTrue(disabled.contains("next(iot_verify_rule_fired_0) := FALSE;"));
+
+        rule.getCommand().setAction("on");
+        SmvGenerationContext validContext = SmvGenerationContext.collecting();
+        String restored = builder.build(1L, devices, rules, model, AttackScenarioDto.none(), true, validContext);
+        assertEquals(0, validContext.warningsSnapshot().disabledRuleCount());
+        assertTrue(restored.replace(" ", "").contains("sensor_1.temperature>31"));
     }
 
     private static DeviceSmvData buildRuleTarget(List<DeviceManifest.API> apis) {

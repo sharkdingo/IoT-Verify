@@ -351,7 +351,7 @@ class BoardStorageServiceImplTemplatePrecheckTest {
         assertEquals(422, ex.getCode());
         org.assertj.core.api.Assertions.assertThat(ex.getErrors())
                 .containsEntry("nodes[0].templateName", "Unknown device template: Missing Template");
-        verify(nodeRepo, never()).deleteByUserId(1L);
+        verify(nodeRepo, never()).deleteAll(any());
     }
 
     @Test
@@ -403,7 +403,7 @@ class BoardStorageServiceImplTemplatePrecheckTest {
 
         org.assertj.core.api.Assertions.assertThat(ex.getErrors())
                 .containsEntry("nodes[0].state", "Illegal state value for device template: broken");
-        verify(nodeRepo, never()).deleteByUserId(1L);
+        verify(nodeRepo, never()).deleteAll(any());
     }
 
     @Test
@@ -419,7 +419,7 @@ class BoardStorageServiceImplTemplatePrecheckTest {
 
         org.assertj.core.api.Assertions.assertThat(ex.getErrors())
                 .containsEntry("nodes[0].state", "State is required for device templates with modes");
-        verify(nodeRepo, never()).deleteByUserId(1L);
+        verify(nodeRepo, never()).deleteAll(any());
     }
 
     @Test
@@ -441,7 +441,7 @@ class BoardStorageServiceImplTemplatePrecheckTest {
         org.assertj.core.api.Assertions.assertThat(ex.getErrors())
                 .containsEntry("nodes[0].variables[0].value",
                         "Variable value out of range for 'temperature': 80 (allowed 0..50)");
-        verify(nodeRepo, never()).deleteByUserId(1L);
+        verify(nodeRepo, never()).deleteAll(any());
     }
 
     @Test
@@ -463,7 +463,7 @@ class BoardStorageServiceImplTemplatePrecheckTest {
         org.assertj.core.api.Assertions.assertThat(ex.getErrors())
                 .containsEntry("nodes[0].variables[0].name",
                         "Unknown runtime variable for device template: SwitchState");
-        verify(nodeRepo, never()).deleteByUserId(1L);
+        verify(nodeRepo, never()).deleteAll(any());
     }
 
     @Test
@@ -484,7 +484,7 @@ class BoardStorageServiceImplTemplatePrecheckTest {
         org.assertj.core.api.Assertions.assertThat(ex.getErrors())
                 .containsEntry("nodes[0].privacies[0].privacy", "Value must be public or private: secret")
                 .containsEntry("nodes[0].privacies[0].name", "Unknown device-local variable privacy target: missing");
-        verify(nodeRepo, never()).deleteByUserId(1L);
+        verify(nodeRepo, never()).deleteAll(any());
     }
 
     @Test
@@ -505,7 +505,7 @@ class BoardStorageServiceImplTemplatePrecheckTest {
         org.assertj.core.api.Assertions.assertThat(ex.getErrors())
                 .containsEntry("nodes[0].currentStateTrust",
                         "currentStateTrust is only valid for device templates with modes");
-        verify(nodeRepo, never()).deleteByUserId(1L);
+        verify(nodeRepo, never()).deleteAll(any());
     }
 
     @Test
@@ -525,7 +525,7 @@ class BoardStorageServiceImplTemplatePrecheckTest {
         org.assertj.core.api.Assertions.assertThat(ex.getErrors())
                 .containsEntry("nodes[0].state",
                         "No-mode device state must be omitted or the UI placeholder 'Working'");
-        verify(nodeRepo, never()).deleteByUserId(1L);
+        verify(nodeRepo, never()).deleteAll(any());
     }
 
     @Test
@@ -543,7 +543,7 @@ class BoardStorageServiceImplTemplatePrecheckTest {
 
         org.assertj.core.api.Assertions.assertThat(ex.getErrors())
                 .containsEntry("nodes[1].id", "Device ID collides after NuSMV normalization: ac_1 -> ac_1");
-        verify(nodeRepo, never()).deleteByUserId(1L);
+        verify(nodeRepo, never()).deleteAll(any());
     }
 
     @Test

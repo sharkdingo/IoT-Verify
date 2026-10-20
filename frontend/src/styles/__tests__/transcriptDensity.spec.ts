@@ -35,7 +35,7 @@ describe('transcript density', () => {
    */
   const checkLogBlock = () => {
     const source = boardVue().replace(/<!--[\s\S]*?-->/g, '')
-    const anchor = source.indexOf("t('app.checkLogs')")
+    const anchor = source.indexOf("t('app.executionLogs')")
     expect(anchor, 'the check-log block should exist in Board.vue').toBeGreaterThan(-1)
     // From the heading to the end of the list: enough to cover the rendered rows.
     const end = source.indexOf('</ol>', anchor)
@@ -66,8 +66,8 @@ describe('transcript density', () => {
     // The fix is about *per-line* framing, not about removing structure. The enclosing section keeps its border,
     // which is what tells a reader these lines belong together — one frame doing the job seven were doing.
     const source = boardVue()
-    const anchor = source.indexOf("t('app.checkLogs')")
-    const sectionStart = source.lastIndexOf('<div', anchor)
+    const anchor = source.indexOf("t('app.executionLogs')")
+    const sectionStart = source.lastIndexOf('<details', anchor)
     const section = source.slice(sectionStart, anchor)
     expect(section, 'the check-log section keeps a single enclosing border').toMatch(/border/)
   })

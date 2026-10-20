@@ -1,12 +1,14 @@
 // @vitest-environment jsdom
-import { mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { flushPromises, mount } from '@vue/test-utils'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import SystemInspector from '../SystemInspector.vue'
 import { i18n } from '@/assets/i18n'
 import type { DeviceNode } from '@/types/node'
 import type { DeviceTemplate } from '@/types/device'
 import type { RuleForm } from '@/types/rule'
 import type { Specification } from '@/types/spec'
+import * as modelPresentation from '@/utils/modelPresentation'
+import * as specPresentation from '@/utils/spec'
 
 const devices: DeviceNode[] = [
   {
@@ -29,6 +31,279 @@ const devices: DeviceNode[] = [
   }
 ]
 
+describe('SystemInspector overview placement', () => {
+  it('counts inactive inventories without formatting them until their tab is opened', async () => {
+    const formatRule = vi.spyOn(modelPresentation, 'presentRule')
+    const formatSpec = vi.spyOn(specPresentation, 'buildSpecFormulaPreview')
+    const specification: Specification = {
+      id: 'spec-1', templateId: '1',
+      templateLabel: 'Always', aConditions: [], ifConditions: [], thenConditions: []
+    }
+    const rule: RuleForm = {
+      id: 'rule-1', name: 'Turn on light',
+      sources: [{ fromId: 'sensor-1', fromApi: 'motion', itemType: 'api' }],
+      toId: 'light-1', toApi: 'on'
+    }
+    const wrapper = mount(SystemInspector, {
+      props: { activeSection: 'devices', collapsed: false, devices,
+        rules: [rule], specifications: [specification] },
+      global: { plugins: [i18n] }
+    })
+    try {
+      expect(wrapper.get('[data-testid="inspector-tab-rules"] .board-section-tab__count').text()).toBe('1')
+      expect(wrapper.get('[data-testid="inspector-tab-specs"] .board-section-tab__count').text()).toBe('1')
+      expect(formatRule).not.toHaveBeenCalled()
+      expect(formatSpec).not.toHaveBeenCalled()
+      await wrapper.setProps({ activeSection: 'rules' })
+      expect(wrapper.find('[data-rule-id="rule-1"]').exists()).toBe(true)
+      expect(formatRule).toHaveBeenCalledOnce()
+      expect(formatSpec).not.toHaveBeenCalled()
+      await wrapper.setProps({ activeSection: 'specs' })
+      expect(wrapper.find('[data-spec-id="spec-1"]').exists()).toBe(true)
+      expect(formatSpec).toHaveBeenCalledOnce()
+      expect(wrapper.get('.board-inventory-count').text()).toBe('1/1')
+    } finally {
+      wrapper.unmount()
+      formatRule.mockRestore()
+      formatSpec.mockRestore()
+    }
+  })
+
+  it('distinguishes an unreceived inventory from a confirmed empty inventory in every tab', async () => {
+    const wrapper = mount(SystemInspector, {
+      props: { collapsed: false, dataLoading: true },
+      global: { plugins: [i18n] }
+    })
+    try {
+      for (const activeSection of ['devices', 'rules', 'specs', 'environment']) {
+        await wrapper.setProps({ activeSection, dataLoading: true, dataUnavailable: false })
+        expect(wrapper.get('.board-inventory-empty p').text()).toBe(i18n.global.t('app.boardSnapshotLoading'))
+        expect(wrapper.get('.board-section-tab[aria-selected="true"] .board-section-tab__count').text()).toBe('—')
+        expect(wrapper.get('.board-inventory-count').text()).toBe('—')
+        await wrapper.setProps({ dataLoading: false, dataUnavailable: true })
+        expect(wrapper.get('.board-inventory-empty p').text()).toBe(i18n.global.t('app.boardDataUnavailableShort'))
+        await wrapper.setProps({ dataUnavailable: false })
+        expect(wrapper.get('.board-section-tab[aria-selected="true"] .board-section-tab__count').text()).toBe('0')
+        expect(wrapper.get('.board-inventory-count').text()).toBe('0/0')
+        expect(wrapper.get('.board-inventory-empty p').text()).not.toBe(i18n.global.t('app.boardSnapshotLoading'))
+        expect(wrapper.get('.board-inventory-empty p').text()).not.toBe(i18n.global.t('app.boardDataUnavailableShort'))
+      }
+    } finally { wrapper.unmount() }
+  })
+
+  it('keeps the overview below the inventory scroll region across all four tabs', async () => {
+    const wrapper = mount(SystemInspector, {
+      props: { activeSection: 'devices', collapsed: false },
+      slots: { overview: '<div data-testid="overview-probe">Overview</div>' },
+      global: { plugins: [i18n] }
+    })
+    try {
+      const overview = wrapper.get('[data-testid="overview-probe"]').element
+      const dock = wrapper.get('[data-testid="inspector-overview-dock"]').element
+      expect(overview.closest('.board-panel-body')).toBeNull()
+      expect(dock.contains(overview)).toBe(true)
+      expect(wrapper.get('.board-panel-body').element.compareDocumentPosition(dock) & Node.DOCUMENT_POSITION_FOLLOWING)
+        .toBeTruthy()
+      for (const activeSection of ['rules', 'specs', 'environment', 'devices']) {
+        wrapper.get('.board-panel-body').element.scrollTop = 72
+        await wrapper.setProps({ activeSection })
+        expect(wrapper.get('.board-panel-body').element.scrollTop).toBe(0)
+        expect(wrapper.get('.board-panel-body').element.firstElementChild)
+          .toBe(wrapper.get(`[data-testid="inspector-section-${activeSection}"]`).element)
+        expect(wrapper.get('[data-testid="overview-probe"]').element).toBe(overview)
+      }
+      await wrapper.setProps({ collapsed: true })
+      expect(wrapper.find('[data-testid="inspector-overview-dock"]').exists()).toBe(false)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+})
+
+const mountEnvironmentEditor = async (attachTo?: HTMLElement) => {
+  const template: DeviceTemplate = { name: 'Thermometer', manifest: { Name: 'Thermometer', InternalVariables: [{
+    Name: 'temperature', IsInside: false, LowerBound: 0, UpperBound: 100, Trust: 'trusted', Privacy: 'private',
+    FalsifiableWhenCompromised: false
+  }] } }
+  const wrapper = mount(SystemInspector, { attachTo, props: { activeSection: 'devices', deviceTemplates: [template],
+    devices: [{ ...devices[0], templateName: template.name }],
+    environmentVariables: [{ name: 'temperature', value: '20', trust: 'trusted', privacy: 'private' }] },
+    global: { plugins: [i18n] } })
+  await wrapper.setProps({ activeSection: 'environment' })
+  await wrapper.get('article button').trigger('click')
+  return wrapper
+}
+
+describe('environment value correction ownership', () => {
+  beforeEach(() => { i18n.global.locale.value = 'en' })
+  it.each(['', '101', '1.5'])('keeps invalid value %s beside its input without emitting a save', async value => {
+    const wrapper = await mountEnvironmentEditor()
+    await wrapper.get('[data-testid="environment-value-temperature"]').setValue(value)
+    expect(wrapper.emitted('save-environment')).toBeUndefined()
+    const input = wrapper.get('[data-testid="environment-value-temperature"]')
+    expect(input.attributes('aria-invalid')).toBe('true')
+    expect(input.attributes('aria-describedby')).toBe('environment-value-failure-temperature')
+    expect(wrapper.get('#environment-value-failure-temperature').isVisible()).toBe(true)
+    expect(wrapper.get('[data-testid="environment-value-failure-temperature"]').text())
+      .toContain(value ? 'Enter an integer from 0 to 100.' : 'Enter a value.')
+    expect(wrapper.get('[data-testid="environment-value-failure-temperature"] [data-testid="failure-cause"]').isVisible()).toBe(true)
+    await wrapper.setProps({ environmentSaving: true })
+    await wrapper.setProps({ environmentSaving: false })
+    expect(wrapper.get('[data-testid="environment-value-temperature"]').element).toHaveProperty('value', value)
+    wrapper.unmount()
+  })
+
+  it('reveals only the focused field diagnostic without stealing focus', async () => {
+    const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView')
+    const reveal = vi.fn()
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: reveal })
+    const wrapper = await mountEnvironmentEditor(document.body)
+    try {
+      const input = wrapper.get<HTMLInputElement>('[data-testid="environment-value-temperature"]')
+      input.element.focus()
+      await input.setValue('101')
+      expect(reveal).toHaveBeenCalledWith({ block: 'nearest' })
+      expect(reveal.mock.contexts[0]).toBe(wrapper.get('#environment-value-failure-temperature').element)
+      expect(document.activeElement).toBe(input.element)
+      await input.setValue('20')
+      const search = wrapper.get<HTMLInputElement>('[data-testid="inspector-search-environment"]')
+      search.element.focus()
+      reveal.mockClear()
+      await input.setValue('')
+      expect(reveal).not.toHaveBeenCalled()
+      expect(document.activeElement).toBe(search.element)
+    } finally {
+      wrapper.unmount()
+      if (original) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', original)
+      else Reflect.deleteProperty(HTMLElement.prototype, 'scrollIntoView')
+    }
+  })
+
+  it('keeps a known rejection with its current draft, then clears it on correction', async () => {
+    const wrapper = await mountEnvironmentEditor()
+    const input = wrapper.get('[data-testid="environment-value-temperature"]')
+    await input.setValue('25')
+    const [updates, complete] = wrapper.emitted('save-environment')!.at(-1)! as any[]
+    expect(typeof complete).toBe('function')
+    expect(updates[0]).toEqual({ name: 'temperature', expected: { value: '20', trust: 'trusted', privacy: 'private' }, desired: { value: '25' } })
+    await wrapper.setProps({ environmentSaving: true })
+    await wrapper.setProps({ environmentSaving: false })
+    complete(false, { details: ['Rejected'], fields: { 'environmentVariables[0].value': 'Allowed range 0..100' } })
+    await flushPromises()
+    expect(input.element).toHaveProperty('value', '25')
+    expect(wrapper.get('[data-testid="environment-value-failure-temperature"]').text()).toContain('Allowed range 0..100')
+    await input.setValue('26')
+    expect(input.attributes('aria-invalid')).toBeUndefined()
+    expect(input.attributes('aria-describedby')).toBeUndefined()
+    complete(false, { details: ['Late old rejection'] })
+    await flushPromises()
+    expect(wrapper.find('[data-testid="environment-value-failure-temperature"]').exists()).toBe(false)
+    expect(input.element).toHaveProperty('value', '26')
+    wrapper.unmount()
+  })
+
+  it('does not clear a newer value draft when an older save succeeds', async () => {
+    const wrapper = await mountEnvironmentEditor()
+    const input = wrapper.get('[data-testid="environment-value-temperature"]')
+    await input.setValue('25')
+    const complete = wrapper.emitted('save-environment')!.at(-1)![1] as Function
+    expect(typeof complete).toBe('function')
+    await input.setValue('26')
+    complete(true)
+    await flushPromises()
+    expect(input.element).toHaveProperty('value', '26')
+    expect(wrapper.props('environmentVariables')).toEqual([{ name: 'temperature', value: '20', trust: 'trusted', privacy: 'private' }])
+    wrapper.unmount()
+  })
+  it('preserves an invalid value draft when saving only its trust label', async () => {
+    const wrapper = await mountEnvironmentEditor()
+    const input = wrapper.get('[data-testid="environment-value-temperature"]')
+    await input.setValue('101')
+    await wrapper.get('[data-testid="environment-trust-temperature"]').setValue('untrusted')
+    const [updates, complete] = wrapper.emitted('save-environment')!.at(-1)! as any[]
+    expect(updates[0].desired).toEqual({ trust: 'untrusted' })
+    complete(true)
+    await flushPromises()
+    expect(input.element).toHaveProperty('value', '101')
+    expect(wrapper.get('[data-testid="environment-value-failure-temperature"] [data-testid="failure-cause"]').text())
+      .toContain('Enter an integer from 0 to 100.')
+    expect(wrapper.props('environmentVariables')![0].value).toBe('20')
+    wrapper.unmount()
+  })
+})
+
+describe('inspector environment inventory', () => {
+  beforeEach(() => { i18n.global.locale.value = 'en' })
+
+  it('opens Environment as a peer tab and keeps it out of the device inventory', async () => {
+    const wrapper = await mountEnvironmentEditor()
+    await wrapper.setProps({ activeSection: undefined })
+    expect(wrapper.find('[data-testid="environment-pool"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="inspector-section-devices"]').exists()).toBe(true)
+    const tab = wrapper.get('[data-testid="inspector-tab-environment"]')
+    expect(wrapper.findAll('[role="tab"]')).toHaveLength(4)
+    expect(tab.text()).toContain('1')
+    await tab.trigger('click')
+    expect(wrapper.emitted('update:active-section')?.at(-1)).toEqual(['environment'])
+    expect(tab.attributes('aria-selected')).toBe('true')
+    expect(tab.attributes('aria-controls')).toBe('inspector-panel-environment')
+    expect(wrapper.get('#inspector-panel-environment').attributes('aria-labelledby')).toBe(tab.attributes('id'))
+    expect(wrapper.find('[data-testid="inspector-section-devices"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="environment-pool"]').text()).toContain('traces do not overwrite')
+    wrapper.unmount()
+  })
+
+  it('retains an invalid initial-value draft across tabs and searches related devices', async () => {
+    const wrapper = await mountEnvironmentEditor()
+    await wrapper.get('[data-testid="environment-value-temperature"]').setValue('101')
+    await wrapper.setProps({ activeSection: 'devices' })
+    await wrapper.setProps({ activeSection: 'environment' })
+    expect((wrapper.get('[data-testid="environment-value-temperature"]').element as HTMLInputElement).value).toBe('101')
+    expect(wrapper.get('[data-testid="environment-value-failure-temperature"]').text()).toContain('0 to 100')
+    vi.useFakeTimers()
+    try {
+      await wrapper.get('[data-testid="inspector-search-environment"]').setValue('Hall sensor')
+      await vi.advanceTimersByTimeAsync(200)
+      expect(wrapper.findAll('[data-environment-name]')).toHaveLength(1)
+      await wrapper.get('[data-testid="inspector-search-environment"]').setValue('absent')
+      await vi.advanceTimersByTimeAsync(200)
+      expect(wrapper.findAll('[data-environment-name]')).toHaveLength(0)
+      expect(wrapper.text()).toContain('No matching environment variables')
+      expect(wrapper.emitted('save-environment')).toBeUndefined()
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
+  })
+
+  it('groups reader and affect-only device links separately for one shared value', async () => {
+    const definition = { Name: 'temperature', IsInside: false, Reads: true,
+      LowerBound: 0, UpperBound: 100, NaturalChangeRate: '0', Trust: 'trusted', Privacy: 'public',
+      FalsifiableWhenCompromised: false }
+    const reader: DeviceTemplate = { name: 'Reader', manifest: { Name: 'Reader', InternalVariables: [definition] } }
+    const writer: DeviceTemplate = { name: 'Writer', manifest: { Name: 'Writer',
+      InternalVariables: [{ ...definition, Reads: false }], ImpactedVariables: ['temperature'] } }
+    const wrapper = mount(SystemInspector, { props: { activeSection: 'environment',
+      deviceTemplates: [reader, writer], devices: [
+        { ...devices[0], templateName: reader.name, label: 'Thermometer' },
+        { ...devices[1], templateName: writer.name, label: 'Heater' }
+      ], environmentVariables: [{ name: 'temperature', value: '20', trust: 'trusted', privacy: 'public' }] },
+      global: { plugins: [i18n] } })
+    expect(wrapper.findAll('[data-environment-name]')).toHaveLength(1)
+    expect(wrapper.get('.board-environment-labels').text()).toContain('1 reading · 1 affecting')
+    await wrapper.get('[data-environment-name] button').trigger('click')
+    const groups = wrapper.findAll('.board-environment-sources > div')
+    expect(groups[0].text()).toContain('Reading devices')
+    expect(groups[0].text()).toContain('Thermometer')
+    expect(groups[0].text()).not.toContain('Heater')
+    expect(groups[1].text()).toContain('Affecting devices')
+    expect(groups[1].text()).toContain('Heater')
+    await groups[1].get('button').trigger('click')
+    expect(wrapper.emitted('device-click')).toEqual([['light-1']])
+    wrapper.unmount()
+  })
+})
+
 const rule = (id: string, name: string, action: string): RuleForm => ({
   id,
   name,
@@ -46,6 +321,55 @@ const rule = (id: string, name: string, action: string): RuleForm => ({
 describe('SystemInspector rule execution order', () => {
   beforeEach(() => {
     i18n.global.locale.value = 'en'
+  })
+
+  it.each(['en', 'zh-CN'] as const)('separates all conditions, target action and label source in %s', locale => {
+    i18n.global.locale.value = locale
+    const entry = rule('1', 'Hall lighting', 'on')
+    entry.sources.push({ fromId: 'sensor-1', fromApi: 'alarm', itemType: 'api' })
+    entry.contentDevice = 'sensor-1'
+    entry.content = 'motion'
+    const wrapper = mount(SystemInspector, {
+      props: { activeSection: 'rules', devices, rules: [entry] },
+      global: { plugins: [i18n] }
+    })
+    try {
+      const card = wrapper.get('[data-rule-id="1"]')
+      expect(card.get('dt').text()).toBe(locale === 'zh-CN' ? '触发条件 · 全部满足' : 'Trigger conditions · all required')
+      expect(card.findAll('dt')[1]!.text()).toBe(locale === 'zh-CN' ? '执行动作' : 'Action to execute')
+      expect(card.findAll('[data-testid="inspector-rule-conditions"] li').map(item => item.text()))
+        .toEqual(['Hall sensor motion = detected', `Hall sensor ${i18n.global.t('app.triggers')} alarm`])
+      expect(card.get('[data-testid="inspector-rule-command"]').findAll('p').map(item => item.text()))
+        .toEqual(['Hall light', 'on'])
+      expect(card.get('[data-testid="inspector-rule-content-source"]').text()).toBe('Hall sensor motion')
+      const ordering = card.get('[role="group"]')
+      expect(ordering.attributes('aria-label')).toBe(i18n.global.t('app.ruleExecutionOrder'))
+      expect(ordering.findAll('button')).toHaveLength(2)
+      expect(card.get(`button[aria-label="${i18n.global.t('app.deleteRule')}"]`).element.closest('[role="group"]')).toBeNull()
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it.each(['devices', 'rules', 'specs'] as const)('only mounts the %s search tooltip when its clear control exists', async section => {
+    const warnings = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const wrapper = mount(SystemInspector, {
+      props: { activeSection: section, devices, rules: [rule('1', 'Hall light', 'on')] },
+      global: { plugins: [i18n] }
+    })
+    try {
+      const clearSelector = `button[aria-label="${i18n.global.t('app.clearSearch')}"]`
+      expect(wrapper.find(clearSelector).exists()).toBe(false)
+      const input = wrapper.get(`[data-testid="inspector-search-${section}"]`)
+      await input.setValue('Hall')
+      await wrapper.get(clearSelector).trigger('click')
+      expect((input.element as HTMLInputElement).value).toBe('')
+      expect(wrapper.find(clearSelector).exists()).toBe(false)
+      expect(warnings.mock.calls.flat().map(String).join('\n')).not.toContain('ElOnlyChild')
+    } finally {
+      wrapper.unmount()
+      warnings.mockRestore()
+    }
   })
 
   it('shows first-match semantics and emits an explicit complete-order move intent', async () => {
@@ -72,7 +396,7 @@ describe('SystemInspector rule execution order', () => {
     expect(wrapper.emitted('move-rule')).toEqual([['2', 'up']])
   })
 
-  it('lets keyboard users focus and select a device while revealing its action', async () => {
+  it('lets keyboard users select a device and keeps its delete action discoverable without hover', async () => {
     const wrapper = mount(SystemInspector, {
       props: {
         activeSection: 'devices',
@@ -90,7 +414,7 @@ describe('SystemInspector rule execution order', () => {
     expect(wrapper.emitted('device-click')).toEqual([['sensor-1']])
 
     const deleteButton = device.get('button[aria-label="Remove device"]')
-    expect(deleteButton.classes()).toContain('group-focus-within:opacity-100')
+    expect(deleteButton.classes()).not.toContain('opacity-0')
   })
 
   it('implements roving tab focus and links each tab to its panel', async () => {
@@ -122,8 +446,8 @@ describe('SystemInspector rule execution order', () => {
 
     await wrapper.setProps({ activeSection: 'devices' })
     await wrapper.get('[data-testid="inspector-tab-devices"]').trigger('keydown', { key: 'End' })
-    expect(document.activeElement).toBe(wrapper.get('[data-testid="inspector-tab-specs"]').element)
-    expect(wrapper.emitted('update:active-section')?.at(-1)).toEqual(['specs'])
+    expect(document.activeElement).toBe(wrapper.get('[data-testid="inspector-tab-environment"]').element)
+    expect(wrapper.emitted('update:active-section')?.at(-1)).toEqual(['environment'])
 
     await wrapper.setProps({ activeSection: 'specs' })
     await wrapper.get('[data-testid="inspector-tab-specs"]').trigger('keydown', { key: 'Home' })
@@ -172,10 +496,10 @@ describe('SystemInspector rule execution order', () => {
       global: { plugins: [i18n] }
     })
 
-    await wrapper.get('[data-testid="toggle-environment-pool"]').trigger('click')
+    await wrapper.setProps({ activeSection: 'environment' })
     await wrapper.get('article button').trigger('click')
     const evolution = wrapper.get('[data-testid="environment-evolution-airQuality"]').text()
-    expect(evolution).toContain('Device-written')
+    expect(evolution).toContain('Written by device dynamics')
     expect(evolution).not.toContain('External input')
 
     // Reads=false must not be presented as a read, which is the claim the generator contradicts by
@@ -231,8 +555,8 @@ describe('SystemInspector rule execution order', () => {
 
     expect(wrapper.text()).toContain('关闭')
     expect(wrapper.text()).toContain('ecoBoost')
+    await wrapper.setProps({ activeSection: 'environment' })
     expect(wrapper.text()).toContain('温度')
-    await wrapper.get('[data-testid="toggle-environment-pool"]').trigger('click')
     await wrapper.get('article button').trigger('click')
     // This fixture's `temperature` has an enum domain and no device declaring it writes the value,
     // so it is an exogenous input and the panel must say so -- including that the free choice is a
@@ -249,14 +573,14 @@ describe('SystemInspector rule execution order', () => {
     expect(wrapper.get('[data-testid="environment-privacy-temperature"]').attributes('disabled')).toBeDefined()
     await wrapper.setProps({ environmentSaving: false })
     await valueSelect.setValue('on')
-    expect(wrapper.emitted('save-environment')?.at(-1)).toEqual([[
+    expect(wrapper.emitted('save-environment')?.at(-1)?.[0]).toEqual([
       {
         name: 'temperature',
         // Missing labels use the same template fallbacks in the visible row and CAS baseline.
         expected: { value: 'off', trust: 'trusted', privacy: 'private' },
         desired: { value: 'on' }
       }
-    ]])
+    ])
   })
 
   // The range chip had its own single-bound rule: it accepted either bound and printed the missing
@@ -312,7 +636,7 @@ describe('SystemInspector rule execution order', () => {
       global: { plugins: [i18n] }
     })
 
-    await wrapper.get('[data-testid="toggle-environment-pool"]').trigger('click')
+    await wrapper.setProps({ activeSection: 'environment' })
     const chips = wrapper.findAll('[data-testid="environment-pool"] article button span[data-full-text]')
       .map(chip => chip.attributes('data-full-text'))
     expect(chips).toContain('15 - 35')
@@ -356,7 +680,7 @@ describe('SystemInspector rule execution order', () => {
       global: { plugins: [i18n] }
     })
 
-    await wrapper.get('[data-testid="toggle-environment-pool"]').trigger('click')
+    await wrapper.setProps({ activeSection: 'environment' })
     await wrapper.get('[data-testid="environment-pool"] article button').trigger('click')
     const valueSelect = wrapper.get('[data-testid="environment-value-signal"]')
     expect((valueSelect.element as HTMLSelectElement).value).toBe('off')
@@ -404,14 +728,15 @@ describe('SystemInspector rule execution order', () => {
       global: { plugins: [i18n] }
     })
 
-    await wrapper.get('[data-testid="toggle-environment-pool"]').trigger('click')
+    await wrapper.setProps({ activeSection: 'environment' })
     await wrapper.get('[data-testid="environment-pool"] article button').trigger('click')
     const evolution = wrapper.get('[data-testid="environment-evolution-temperature"]')
-    expect(wrapper.get('label').text()).toContain('Model initial value')
+    expect(wrapper.get('[data-testid="environment-value-temperature"]').element.closest('label')?.textContent)
+      .toContain('Model initial value')
     expect(evolution.text()).toContain('[-1, 1]')
     expect(evolution.text()).toContain('-1, 0, +1')
     expect(evolution.text()).toContain('Hall heater · on: rate 2 per step')
-    expect(evolution.text()).toContain('never written back')
+    expect(evolution.text()).toContain('does not write the trace back')
   })
 
   it('shows conflicting active definitions and prevents every environment edit', async () => {
@@ -444,7 +769,7 @@ describe('SystemInspector rule execution order', () => {
       global: { plugins: [i18n] }
     })
 
-    await wrapper.get('[data-testid="toggle-environment-pool"]').trigger('click')
+    await wrapper.setProps({ activeSection: 'environment' })
     await wrapper.get('[data-testid="environment-pool"] article button').trigger('click')
     expect(wrapper.get('[data-testid="environment-conflict-temperature"]').text())
       .toContain('natural change rates differ')
@@ -456,7 +781,7 @@ describe('SystemInspector rule execution order', () => {
     expect(wrapper.emitted('save-environment')).toBeUndefined()
   })
 
-  it('keeps device navigation available while mutation controls are read-only', async () => {
+  it('keeps device and panel navigation available while mutation controls are read-only', async () => {
     const wrapper = mount(SystemInspector, {
       props: {
         activeSection: 'devices',
@@ -470,10 +795,16 @@ describe('SystemInspector rule execution order', () => {
     expect(wrapper.get('[data-testid="inspector-add-device"]').attributes('disabled')).toBeDefined()
     const deviceButton = wrapper.get('[data-device-id="sensor-1"] button[aria-label="Hall sensor"]')
     expect(deviceButton.attributes('disabled')).toBeUndefined()
+    expect(deviceButton.element.closest('[aria-disabled="true"]')).toBeNull()
     await deviceButton.trigger('click')
     expect(wrapper.emitted('device-click')).toEqual([['sensor-1']])
     expect(wrapper.get('[data-device-id="sensor-1"] button[aria-label="Remove device"]')
       .attributes('disabled')).toBeDefined()
+    const collapse = wrapper.get('button[aria-label="Collapse System Inspector"]')
+    expect(collapse.element.closest('[aria-disabled="true"]')).toBeNull()
+    await collapse.trigger('click')
+    expect(wrapper.emitted('update:collapsed')).toEqual([[true]])
+    wrapper.unmount()
   })
 
   it('localizes the synthetic lowercase state field in bundled rule summaries', () => {
@@ -563,7 +894,7 @@ describe('SystemInspector rule execution order', () => {
       global: { plugins: [i18n] }
     })
 
-    await wrapper.get('[data-testid="toggle-environment-pool"]').trigger('click')
+    await wrapper.setProps({ activeSection: 'environment' })
     expect(wrapper.get('[data-testid="environment-pool"]').text()).toContain('temperature')
     await wrapper.get('article button').trigger('click')
     const valueSelect = wrapper.get('[data-testid="environment-value-temperature"]')

@@ -13,7 +13,7 @@ const FOCUSABLE_SELECTOR = [
 ].join(',')
 
 const isActuallyFocusable = (element: HTMLElement): boolean => {
-  if (element.matches(':disabled') || element.tabIndex < 0) return false
+  if (element.matches(':disabled')) return false
   if (element.closest('[hidden], [inert], [aria-hidden="true"]')) return false
 
   const closedDetails = element.closest('details:not([open])')
@@ -34,11 +34,12 @@ const isActuallyFocusable = (element: HTMLElement): boolean => {
 export const useModalAccessibility = (
   isOpen: Ref<boolean>,
   close: () => void,
-  fallbackFocus?: () => HTMLElement | null,
+  fallbackFocus?: (opener: HTMLElement | null) => HTMLElement | null,
   options: { trapFocus?: boolean; shouldRestoreFocus?: () => boolean } = {}
 ) => {
   const dialogRef = ref<HTMLElement | null>(null)
   let previousActiveElement: HTMLElement | null = null
+  let unmounting = false
 
   // A focus-trapping surface is a real modal: the page behind it must not scroll.
   // Non-modal tool panels (trapFocus: false) leave the page scrollable on purpose.
@@ -50,7 +51,7 @@ export const useModalAccessibility = (
     const dialog = dialogRef.value
     if (!dialog) return []
     return Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
-      .filter(isActuallyFocusable)
+      .filter(element => element.tabIndex >= 0 && isActuallyFocusable(element))
   }
 
   const setDialogRef = (element: unknown) => {
@@ -60,8 +61,10 @@ export const useModalAccessibility = (
   const focusInitialElement = () => {
     const dialog = dialogRef.value
     if (!dialog) return
-    const [firstFocusable] = getFocusableElements()
-    ;(firstFocusable ?? dialog).focus()
+    const focusableElements = getFocusableElements()
+    const preferred = dialog.hasAttribute('autofocus')
+      ? dialog : focusableElements.find(element => element.hasAttribute('autofocus'))
+    ;(preferred ?? focusableElements[0] ?? dialog).focus()
   }
 
   const restoreFocus = () => {
@@ -78,8 +81,15 @@ export const useModalAccessibility = (
       target.focus()
       return document.activeElement === target
     }
-    if (!focusIfAvailable(previousActiveElement)) {
-      focusIfAvailable(fallbackFocus?.())
+    if (!focusIfAvailable(previousActiveElement) && !focusIfAvailable(fallbackFocus?.(previousActiveElement))) {
+      const returnTarget = previousActiveElement
+      const focusAtClose = document.activeElement
+      // A result can hide its toolbar until the parent renders the closed state.
+      void nextTick(() => {
+        if ((!unmounting && isOpen.value) || options.shouldRestoreFocus?.() === false) return
+        if (document.activeElement !== document.body && document.activeElement !== focusAtClose) return
+        if (!focusIfAvailable(returnTarget)) focusIfAvailable(fallbackFocus?.(returnTarget))
+      })
     }
     previousActiveElement = null
   }
@@ -109,7 +119,8 @@ export const useModalAccessibility = (
     const activeElement = document.activeElement as HTMLElement | null
     const activeInsideDialog = !!activeElement && !!dialogRef.value?.contains(activeElement)
 
-    if (event.shiftKey && (!activeInsideDialog || activeElement === firstElement)) {
+    if (event.shiftKey && (!activeInsideDialog
+      || activeElement === dialogRef.value || activeElement === firstElement)) {
       event.preventDefault()
       lastElement.focus()
       return
@@ -133,10 +144,14 @@ export const useModalAccessibility = (
   const ownedDepth = options.trapFocus === false ? 0 : 1
   let ownModalDepth = 0
 
+  // Capture before the originating panel is removed by the same render that opens this surface.
+  watch(isOpen, open => {
+    if (open) previousActiveElement = document.activeElement as HTMLElement | null
+  }, { flush: 'sync', immediate: true })
+
   watch(isOpen, open => {
     if (open) {
       ownModalDepth = Math.max(openModalDepth.value, ownedDepth)
-      previousActiveElement = document.activeElement as HTMLElement | null
       void nextTick(focusInitialElement)
     } else {
       restoreFocus()
@@ -173,7 +188,11 @@ export const useModalAccessibility = (
   onMounted(() => document.addEventListener('keydown', handleDocumentEscape))
   onBeforeUnmount(() => document.removeEventListener('keydown', handleDocumentEscape))
 
-  onBeforeUnmount(restoreFocus)
+  onBeforeUnmount(() => {
+    // A v-if removal leaves its last visible prop true even after the dialog is gone.
+    unmounting = true
+    restoreFocus()
+  })
 
   return {
     setDialogRef,

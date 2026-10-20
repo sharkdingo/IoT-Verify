@@ -88,7 +88,8 @@ public class ResetDefaultTemplatesTool extends AbstractAiTool {
                     "domainImpactToken", domainImpactToken);
             if (!confirmed || !UserContextHolder.isDefaultTemplateResetConfirmed()) {
                 String confirmationToken = destructiveActionGuard.issue(
-                        userId, getName(), TARGET_KEY, bindingSnapshot, domainImpactToken);
+                        userId, getName(), TARGET_KEY,
+                        "Bundled default templates", bindingSnapshot, domainImpactToken);
                 previewView.put("impactToken", confirmationToken);
                 return readOnlySuccessJson(Map.of(
                         "message", "No changes were made. Confirm this exact preview to refresh the bundled default templates.",
@@ -102,7 +103,8 @@ public class ResetDefaultTemplatesTool extends AbstractAiTool {
                     userId, getName(), TARGET_KEY, suppliedToken, bindingSnapshot);
             if (!confirmation.approved()) {
                 String freshToken = destructiveActionGuard.issue(
-                        userId, getName(), TARGET_KEY, bindingSnapshot, domainImpactToken);
+                        userId, getName(), TARGET_KEY,
+                        "Bundled default templates", bindingSnapshot, domainImpactToken);
                 previewView.put("impactToken", freshToken);
                 return errorJson(confirmation.message(), confirmation.errorCode(), 409, Map.of(
                         "requiresUserConfirmation", true,

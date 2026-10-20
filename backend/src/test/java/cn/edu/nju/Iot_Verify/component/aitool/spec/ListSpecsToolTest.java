@@ -1,6 +1,7 @@
 package cn.edu.nju.Iot_Verify.component.aitool.spec;
 
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
+import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import cn.edu.nju.Iot_Verify.security.UserContextHolder;
@@ -18,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 class ListSpecsToolTest {
@@ -46,12 +48,15 @@ class ListSpecsToolTest {
         condition.setRelation("=");
         condition.setValue("open");
         spec.setAConditions(List.of(condition));
-        when(storage.getSpecs(1L)).thenReturn(List.of(spec));
-        when(storage.getNodes(1L)).thenReturn(List.of(node));
+        when(storage.getSemanticSnapshot(1L)).thenReturn(new BoardSemanticSnapshotDto(
+                List.of(node), List.of(), List.of(), List.of(spec), List.of()));
         UserContextHolder.setUserId(1L);
 
         JsonNode response = new ObjectMapper().readTree(
                 new ListSpecsTool(storage, new ObjectMapper()).execute("{\"keyword\":\"Front door\"}"));
+
+        verify(storage).getSemanticSnapshot(1L);
+        verifyNoMoreInteractions(storage);
 
         assertEquals(1, response.path("count").asInt());
         JsonNode presented = response.path("specs").get(0);
@@ -73,6 +78,6 @@ class ListSpecsToolTest {
                 new ListSpecsTool(storage, new ObjectMapper()).execute("{\"keyword\":true}"));
 
         assertEquals("VALIDATION_ERROR", response.path("errorCode").asText());
-        verify(storage, never()).getSpecs(1L);
+        verify(storage, never()).getSemanticSnapshot(1L);
     }
 }

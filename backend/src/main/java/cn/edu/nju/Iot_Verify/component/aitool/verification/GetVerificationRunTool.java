@@ -37,7 +37,7 @@ public class GetVerificationRunTool extends AbstractAiTool {
     @Override
     public LlmToolSpec getDefinition() {
         return LlmToolSpec.of(getName(),
-                "Read one completed formal-verification run with its per-spec conclusions, completeness, model snapshot, and generation issues. Raw NuSMV stdout is intentionally omitted; use get_trace for counterexample steps.",
+                "Read one completed formal-verification run with its per-spec conclusions, completeness, model snapshot, generation issues, and exact counterexample references. Use an available counterexamples[].traceId with get_trace or fix_violation; runId is not traceId. Raw NuSMV stdout is intentionally omitted.",
                 new FunctionParameterSchema("object", Map.of(
                         "runId", Map.of("type", "integer", "description", "Run ID from list_verification_runs.")),
                         List.of("runId")));
@@ -61,6 +61,8 @@ public class GetVerificationRunTool extends AbstractAiTool {
             response.put("modelComplete", run.getModelComplete());
             response.put("violatedSpecCount", run.getViolatedSpecCount());
             response.put("counterexampleCount", run.getCounterexampleCount());
+            response.put("counterexamples", safeList(run.getCounterexamples()).stream()
+                    .map(trace -> VerificationToolPresenter.traceSummary(trace, run.getId(), true)).toList());
             response.put("disabledRuleCount", run.getDisabledRuleCount());
             response.put("skippedSpecCount", run.getSkippedSpecCount());
             response.put("modelSemantics", run.getModelSemantics());

@@ -3,6 +3,7 @@ import { mount } from '@vue/test-utils'
 import { createI18n } from 'vue-i18n'
 import { describe, expect, it } from 'vitest'
 import FuzzingPanel from '../FuzzingPanel.vue'
+import InfoTooltip from '../common/InfoTooltip.vue'
 import type { Specification } from '@/types/spec'
 import type { FuzzPaperDomainPreview } from '@/types/fuzzing'
 import { i18n as appI18n } from '@/assets/i18n'
@@ -15,6 +16,7 @@ const i18n = createI18n({
       app: {
         fuzzSearch: 'Counterexample Search',
         fuzzSearchSubtitle: 'Search for candidate paths',
+        runFailureNextStep: 'Inspect the run history and task status before retrying.',
         fuzzBudgetProductHint: 'Total work = iteration budget × path length × candidate paths × board complexity.',
         fuzzExplorationMode: 'Exploration initial state',
         fuzzModeBoard: 'Board snapshot',
@@ -22,7 +24,6 @@ const i18n = createI18n({
         fuzzModeBoardDescription: 'Starts from the frozen Board initial state.',
         fuzzModePaperDescription: 'Starts from a legal random state and searches reproducible inputs; it is not a proof.',
         fuzzPaperDomainTitle: 'Random-state and event range',
-        fuzzPaperDomainDescription: 'Each candidate starts from a legal random state and reproducible inputs.',
         fuzzPaperDomainLoading: 'Loading input ranges',
         fuzzPaperDomainSummary: '{devices} device initial-state items, {locals} local items, {environments} environment items, positions 1 through {length}',
         fuzzPaperInspectDomains: 'Inspect initial-state and input choices',
@@ -39,7 +40,8 @@ const i18n = createI18n({
         fuzzLimitationUnknown: 'Unknown boundary.',
         refresh: 'Refresh',
         fuzzTargetSpecifications: 'Target specifications',
-        fuzzTargetSpecificationsHint: 'Leave empty for all specifications.',
+        fuzzTargetSpecificationsHint: 'Use formal verification for unsupported specifications.',
+        showHelpFor: 'Help for {topic}',
         fuzzEligibilitySummary: '{eligible} of {total} eligible, {selected} selected',
         fuzzEligibilityUnsupportedTemplate: 'This template is not supported by the finite explorer.',
         fuzzEligibilityTrustPrivacyUnsupported: 'Trust and privacy propagation require formal verification.',
@@ -57,18 +59,19 @@ const i18n = createI18n({
         traceConditionAnd: ' AND ',
         traceSpecAlways: 'Always: {condition}',
         fuzzMaxIterations: 'Iteration budget',
-        fuzzPathLength: 'Path length',
-        fuzzStatesPerPath: 'states/path',
+        fuzzPathLength: 'Path length (states)',
         fuzzAdvancedSettings: 'Advanced settings',
         fuzzPopulationSize: 'Candidate paths per iteration',
         fuzzPathsPerIteration: 'paths/iteration',
         fuzzSeed: 'Random seed',
         fuzzSeedAuto: 'Generated automatically',
-        fuzzAdvancedSettingsHint: 'Advanced search controls.',
+        fuzzSeedHint: 'A fixed model, settings, and seed reproduce inputs and order; time limits can affect completion.',
         taskInitializing: 'Initializing',
         fuzzTaskId: 'Task #{id}',
-        fuzzWorkloadPreview: 'Workload {workload} / {limit} ({iterations} × {path} × {population} × {complexity} board complexity)',
+        fuzzWorkloadPreview: 'Workload {workload} / {limit}',
+        fuzzModelComplexity: 'Board complexity: {complexity}',
         fuzzWorkloadLoading: 'Confirming available budget',
+        fuzzConfigurationBlocked: 'Adjust the parameters before starting.',
         retry: 'Retry',
         fuzzBudgetProgress: 'Budget progress',
         fuzzProgressNotCoverage: 'Not coverage.',
@@ -96,6 +99,54 @@ const specification: Specification = {
 }
 
 describe('FuzzingPanel', () => {
+  it.each(['en', 'zh-CN'])('explains stale targets once and selects only explorable targets in %s', async locale => {
+    const translations = createI18n({ legacy: false, locale, messages: {
+      en: appI18n.global.getLocaleMessage('en'),
+      'zh-CN': appI18n.global.getLocaleMessage('zh-CN')
+    } })
+    const message = translations.global.t('app.fuzzTargetSelectionChanged', { count: 1 })
+    const form = { explorationMode: 'BOARD_SNAPSHOT' as const, targetSelectionMode: 'EXPLICIT' as 'ALL' | 'EXPLICIT',
+      targetSpecIds: ['deleted-spec'], maxIterations: 200, pathLength: 20, populationSize: 10, seed: null }
+    const wrapper = mount(FuzzingPanel, {
+      props: { form, specifications: [specification, { ...specification, id: 'unsupported', templateId: '2' }],
+        running: false, progress: 0, status: '', taskId: null, cancelling: false, configurationError: message },
+      global: { plugins: [translations] }
+    })
+    try {
+      expect(wrapper.text().split(message)).toHaveLength(2)
+      expect(wrapper.get('details').attributes('open')).toBeUndefined()
+      const resolve = wrapper.get('[data-testid="fuzz-invalid-target-selection"] button')
+      expect(resolve.text()).toBe(translations.global.t('app.fuzzSelectCurrentTargets'))
+      await resolve.trigger('click')
+      expect(form.targetSelectionMode).toBe('ALL')
+      const targets = wrapper.findAll('input[type="checkbox"]')
+      expect((targets[0].element as HTMLInputElement).checked).toBe(true)
+      expect((targets[1].element as HTMLInputElement).checked).toBe(false)
+      expect(targets[1].attributes('disabled')).toBeDefined()
+      await wrapper.setProps({ configurationError: '' })
+      expect(wrapper.get('[data-testid="run-fuzzing"]').attributes('disabled')).toBeUndefined()
+    } finally { wrapper.unmount() }
+  })
+
+  it('shows the run failure once while retaining separate technical evidence', () => {
+    const message = 'The exploration task failed.'
+    const wrapper = mount(FuzzingPanel, {
+      props: {
+        form: { explorationMode: 'BOARD_SNAPSHOT', targetSpecIds: [], maxIterations: 200,
+          pathLength: 20, populationSize: 10, seed: null },
+        specifications: [specification], running: false, progress: 0, status: '',
+        taskId: null, cancelling: false, error: message,
+        failureDetails: { cause: message, details: [message, 'HTTP 500'], fields: {} }
+      },
+      global: { plugins: [i18n] }
+    })
+    try {
+      expect(wrapper.text().split(message)).toHaveLength(2)
+      expect(wrapper.find('[data-testid="failure-cause"]').exists()).toBe(false)
+      expect(wrapper.get('[data-testid="failure-technical-details"]').text()).toContain('HTTP 500')
+    } finally { wrapper.unmount() }
+  })
+
   it('blocks submission while the backend workload check is pending and allows retry', async () => {
     const wrapper = mount(FuzzingPanel, {
       props: {
@@ -182,7 +233,9 @@ describe('FuzzingPanel', () => {
     expect(wrapper.get('[data-testid="fuzz-max-iterations"]').attributes('max')).toBe('5000')
     expect(wrapper.get('[data-testid="fuzz-path-length"]').attributes('max')).toBe('50')
     expect(wrapper.get('[data-testid="fuzz-population-size"]').attributes('max')).toBe('50')
-    expect(wrapper.text()).toContain('Combined workload exceeds the limit.')
+    expect(wrapper.text().split('Combined workload exceeds the limit.')).toHaveLength(2)
+    expect(wrapper.get('[data-testid="run-fuzzing"]').attributes('aria-describedby')).toBe('fuzz-configuration-error')
+    expect(wrapper.get('#fuzz-configuration-error').text()).toBe('Combined workload exceeds the limit.')
     // The rejection names "candidate paths per iteration" as a remedy, and that input lives inside the
     // Advanced settings disclosure. A blocked user must be able to see the control they are told to change.
     expect(wrapper.get('details').attributes('open')).toBeDefined()
@@ -194,7 +247,7 @@ describe('FuzzingPanel', () => {
     expect(wrapper.emitted('submit')).toBeUndefined()
   })
 
-  it('shows the board complexity factor and never calls a rejected workload confirmed', async () => {
+  it('keeps workload diagnostics in advanced settings and hides a rejected estimate', async () => {
     const preview = {
       maxIterations: 500,
       pathLength: 20,
@@ -229,18 +282,15 @@ describe('FuzzingPanel', () => {
       global: { plugins: [i18n] }
     })
 
-    // The multiplier has to be on screen: without it the three visible knobs multiply to 100,000 while
-    // the reported workload is 15,100,000, and the arithmetic cannot be reconciled by the reader.
-    expect(wrapper.text()).toContain('151')
-
-    // Before the error, the "confirmed against the current Board" estimate is present...
-    expect(wrapper.text()).toContain('board complexity)')
-
-    // ...and it must disappear once a rejection is showing, rather than sitting under it saying the same
-    // number was confirmed. Asserting on the estimate's own wording, so this fails if the line survives.
+    expect(wrapper.get('details [data-testid="fuzz-model-complexity"]').text()).toContain('151')
+    expect(wrapper.find('details #fuzz-budget-help').exists()).toBe(true)
+    const seedHelp = wrapper.findAllComponents(InfoTooltip).find(help => help.props('testId') === 'fuzz-seed-help')
+    expect(seedHelp?.props('text')).toContain('time limits can affect completion')
+    expect(wrapper.text()).not.toContain('time limits can affect completion')
+    expect(wrapper.text()).toContain('Workload 15,100,000 / 30,000,000')
     await wrapper.setProps({ configurationError: 'Workload is above the limit.' })
     expect(wrapper.text()).toContain('Workload is above the limit.')
-    expect(wrapper.text()).not.toContain('board complexity)')
+    expect(wrapper.text()).not.toContain('Workload 15,100,000 / 30,000,000')
   })
 
   it('does not offer a misleading select-all action above the target limit', () => {
@@ -405,6 +455,10 @@ describe('FuzzingPanel', () => {
     })
 
     const checkboxes = wrapper.findAll('input[type="checkbox"]')
+    const targetHelp = wrapper.findAllComponents(InfoTooltip).find(help => help.props('testId') === 'fuzz-targets-help')!
+    expect(targetHelp.props('text')).toBe('Use formal verification for unsupported specifications.')
+    expect(wrapper.get('[data-testid="fuzz-targets-help"]').attributes('aria-label')).toBe('Help for Target specifications')
+    expect(wrapper.text()).not.toContain('Use formal verification for unsupported specifications.')
     expect((checkboxes[0].element as HTMLInputElement).checked).toBe(true)
     expect((checkboxes[1].element as HTMLInputElement).checked).toBe(false)
     expect(checkboxes[1].attributes('disabled')).toBeDefined()
@@ -456,7 +510,7 @@ describe('FuzzingPanel', () => {
     expect(wrapper.get('[data-testid="fuzz-eligibility-summary"]').text()).toContain('1 of 2 eligible')
   })
 
-  it('disables search when no specification has a supported template', () => {
+  it('keeps every rejection reason visible when no specification can be explored', () => {
     const wrapper = mount(FuzzingPanel, {
       props: {
         form: {
@@ -478,6 +532,9 @@ describe('FuzzingPanel', () => {
     })
 
     expect(wrapper.text()).toContain('No eligible specifications.')
+    expect(wrapper.text()).toContain('This template is not supported by the finite explorer.')
+    expect(wrapper.text()).toContain('Formal only')
+    expect(wrapper.get('input[type="checkbox"]').attributes('disabled')).toBeDefined()
     expect(wrapper.get('[data-testid="run-fuzzing"]').attributes('disabled')).toBeDefined()
   })
 
@@ -532,7 +589,8 @@ describe('FuzzingPanel', () => {
     const progressbar = wrapper.get('[role="progressbar"]')
     expect(progressbar.attributes('aria-label')).toBe('Budget progress')
     expect(progressbar.attributes('aria-valuenow')).toBe('37')
-    expect(wrapper.text()).toContain('Not coverage.')
+    expect(wrapper.findAllComponents(InfoTooltip).find(help => help.props('testId') === 'fuzz-progress-help')?.props('text')).toBe('Not coverage.')
+    expect(wrapper.findAll('p').some(line => line.text() === 'Not coverage.')).toBe(false)
   })
 
   it('uses an accessible segmented mode control and locks it while running', async () => {
@@ -630,7 +688,13 @@ describe('FuzzingPanel', () => {
       global: { plugins: [i18n] }
     })
 
-    expect(wrapper.get('[data-testid="paper-domain-preview"]').text()).toContain('Each candidate starts')
+    const preview = wrapper.get('[data-testid="paper-domain-preview"]')
+    expect(wrapper.get('[data-testid="fuzz-path-length"]').element.compareDocumentPosition(preview.element)
+      & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(preview.get<HTMLDetailsElement>('[data-testid="paper-domain-choices"]').element.open).toBe(false)
+    expect(preview.get<HTMLDetailsElement>('[data-testid="paper-domain-boundaries"]').element.open).toBe(false)
+    expect(preview.get('[data-testid="paper-domain-boundaries"]').text()).toContain('structured temporal specifications')
+    expect(preview.text()).not.toContain('Each candidate starts')
     expect(wrapper.get('[data-testid="paper-domain-preview"]').text()).toContain('1 device initial-state items')
     expect(wrapper.get('[data-testid="paper-local-variable-domains"]').text()).toContain('Front door.battery')
     expect(wrapper.get('[data-testid="paper-local-variable-domains"]').text()).toContain('0..2000')
@@ -882,7 +946,7 @@ describe('FuzzingPanel', () => {
     expect(wrapper.find('[data-testid="run-fuzzing"]').exists()).toBe(false)
   })
 
-  it('focuses the close command, closes with Escape, and restores the opener', async () => {
+  it('focuses the panel without triggering a close hint, closes with Escape, and restores the opener', async () => {
     const opener = document.createElement('button')
     document.body.appendChild(opener)
     opener.focus()
@@ -907,7 +971,7 @@ describe('FuzzingPanel', () => {
       global: { plugins: [i18n] }
     })
     await new Promise(resolve => setTimeout(resolve, 0))
-    expect(document.activeElement).toBe(wrapper.get('[data-testid="close-fuzzing-panel"]').element)
+    expect(document.activeElement).toBe(wrapper.get('[data-testid="fuzzing-panel"]').element)
     await wrapper.get('[data-testid="fuzzing-panel"]').trigger('keydown', { key: 'Escape' })
     expect(wrapper.emitted('close')).toHaveLength(1)
     wrapper.unmount()

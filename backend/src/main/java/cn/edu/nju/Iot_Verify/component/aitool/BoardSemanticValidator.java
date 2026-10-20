@@ -1,6 +1,8 @@
 package cn.edu.nju.Iot_Verify.component.aitool;
 
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvRelationUtils;
+import cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics;
+
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvDataFactory;
 import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
@@ -21,6 +23,12 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
 
+import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics.cleanEnumLiteral;
+import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics.findApi;
+import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics.findConditionVariable;
+import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics.findDeclaredVariable;
+import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics.hasSignalApi;
+
 /**
  * Template-aware validation shared by AI mutation tools.
  *
@@ -31,7 +39,6 @@ import java.util.function.Function;
  */
 public final class BoardSemanticValidator {
 
-    private static final Set<String> ENUM_RELATIONS = Set.of("=", "!=", "in", "not in");
 
     private BoardSemanticValidator() {
     }
@@ -110,7 +117,7 @@ public final class BoardSemanticValidator {
                     : prefix + " references unknown or non-signal API '" + attribute + "'.";
         }
         if ("variable".equals(targetType)) {
-            DeviceTemplateDto.DeviceManifest.InternalVariable variable = findVariable(template.getManifest(), attribute);
+            DeviceTemplateDto.DeviceManifest.InternalVariable variable = findConditionVariable(template.getManifest(), attribute);
             if (variable == null) {
                 return prefix + " references unknown template variable '" + attribute + "'.";
             }
@@ -287,9 +294,13 @@ public final class BoardSemanticValidator {
             return validateModeValue(prefix, template.getManifest(), mode, relation, value);
         }
         if ("variable".equals(targetType)) {
-            DeviceTemplateDto.DeviceManifest.InternalVariable variable = findVariableOrEnvKey(template.getManifest(), key);
+            DeviceTemplateDto.DeviceManifest.InternalVariable variable = findConditionVariable(template.getManifest(), key);
             if (variable == null) {
                 return prefix + " references unknown template variable '" + key + "'.";
+            }
+            if ("environment".equals(normalize(condition.getVariableSource()))
+                    && Boolean.TRUE.equals(variable.getIsInside())) {
+                return prefix + " cannot read device-local variable '" + key + "' from the environment.";
             }
             return validateVariableValue(prefix, variable, relation, value);
         }
@@ -476,7 +487,7 @@ public final class BoardSemanticValidator {
             String variableName = keyGetter.apply(first).trim();
             DeviceTemplateDto template = templateForDevice(context, deviceId);
             DeviceTemplateDto.DeviceManifest.InternalVariable variable = template == null
-                    ? null : findVariable(template.getManifest(), variableName);
+                    ? null : findConditionVariable(template.getManifest(), variableName);
             if (variable == null) {
                 continue;
             }
@@ -957,7 +968,7 @@ public final class BoardSemanticValidator {
             String normalized = cleanEnumLiteral(rawValue).toLowerCase(Locale.ROOT);
             boolean legal = variable.getValues().stream()
                     .filter(BoardSemanticValidator::hasText)
-                    .map(BoardSemanticValidator::cleanEnumLiteral)
+                    .map(ManifestConditionSemantics::cleanEnumLiteral)
                     .map(value -> value.toLowerCase(Locale.ROOT))
                     .anyMatch(normalized::equals);
             if (!legal) return false;
@@ -1042,38 +1053,20 @@ public final class BoardSemanticValidator {
             return prefix + " relation '" + relation + "' requires exactly one value.";
         }
 
-        if (variable.getValues() != null && !variable.getValues().isEmpty()) {
-            if (!ENUM_RELATIONS.contains(relation)) {
-                return prefix + " enum variable '" + variable.getName() + "' supports only =, !=, in, not in.";
-            }
-            Set<String> allowed = new HashSet<>();
-            for (String allowedValue : variable.getValues()) {
-                if (hasText(allowedValue)) {
-                    allowed.add(cleanEnumLiteral(allowedValue));
-                }
-            }
-            for (String candidate : candidates) {
-                if (!allowed.contains(cleanEnumLiteral(candidate))) {
-                    return prefix + " illegal enum value '" + candidate + "' for variable '" + variable.getName() + "'.";
-                }
-            }
-            return null;
+        if (variable.getValues() != null && !variable.getValues().isEmpty()
+                && !SmvRelationUtils.isEnumRelation(relation)) {
+            return prefix + " enum variable '" + variable.getName() + "' supports only =, !=, in, not in.";
         }
-
-        if (variable.getLowerBound() != null && variable.getUpperBound() != null) {
-            for (String candidate : candidates) {
-                try {
-                    int parsed = Integer.parseInt(candidate.trim());
-                    if (parsed < variable.getLowerBound() || parsed > variable.getUpperBound()) {
-                        return prefix + " variable '" + variable.getName() + "' value '" + candidate
-                                + "' is outside " + variable.getLowerBound() + ".." + variable.getUpperBound() + ".";
-                    }
-                } catch (NumberFormatException e) {
-                    return prefix + " variable '" + variable.getName() + "' requires an integer value.";
-                }
-            }
-        }
-        return null;
+        ManifestConditionSemantics.ValueIssue issue =
+                ManifestConditionSemantics.firstInvalidVariableValue(variable, candidates);
+        if (issue == null) return null;
+        return switch (issue.error()) {
+            case UNKNOWN_ENUM -> prefix + " illegal enum value '" + issue.candidate()
+                    + "' for variable '" + variable.getName() + "'.";
+            case OUT_OF_RANGE -> prefix + " variable '" + variable.getName() + "' value '" + issue.candidate()
+                    + "' is outside " + variable.getLowerBound() + ".." + variable.getUpperBound() + ".";
+            case NOT_INTEGER -> prefix + " variable '" + variable.getName() + "' requires an integer value.";
+        };
     }
 
     private static String validateModeValue(String prefix,
@@ -1081,7 +1074,7 @@ public final class BoardSemanticValidator {
                                             String mode,
                                             String relation,
                                             String value) {
-        if (!ENUM_RELATIONS.contains(relation)) {
+        if (!SmvRelationUtils.isEnumRelation(relation)) {
             return prefix + " mode conditions support only =, !=, in, not in.";
         }
         List<String> legalValues = modeValues(manifest).get(mode);
@@ -1102,7 +1095,7 @@ public final class BoardSemanticValidator {
                                              DeviceTemplateDto.DeviceManifest manifest,
                                              String relation,
                                              String value) {
-        if (!ENUM_RELATIONS.contains(relation)) {
+        if (!SmvRelationUtils.isEnumRelation(relation)) {
             return prefix + " state conditions support only =, !=, in, not in.";
         }
         List<String> modes = modeNames(manifest);
@@ -1119,7 +1112,7 @@ public final class BoardSemanticValidator {
             return prefix + " relation '" + relation + "' requires exactly one state value.";
         }
         for (String candidate : candidates) {
-            if (!isLegalState(manifest, candidate)) {
+            if (!ManifestConditionSemantics.isLegalState(candidate, modeNames(manifest), modeValues(manifest))) {
                 return prefix + " illegal state value '" + candidate + "'.";
             }
         }
@@ -1131,7 +1124,7 @@ public final class BoardSemanticValidator {
                                                String value,
                                                Set<String> allowed,
                                                String label) {
-        if (!ENUM_RELATIONS.contains(relation)) {
+        if (!SmvRelationUtils.isEnumRelation(relation)) {
             return prefix + " supports only =, !=, in, not in.";
         }
         List<String> candidates = splitValues(value, relation);
@@ -1139,7 +1132,7 @@ public final class BoardSemanticValidator {
             return prefix + " value must be " + label + ".";
         }
         for (String candidate : candidates) {
-            boolean found = allowed.stream().anyMatch(item -> item.equalsIgnoreCase(candidate.trim()));
+            boolean found = ManifestConditionSemantics.matchesLiteral(candidate, allowed);
             if (!found) {
                 return prefix + " value must be " + label + ": " + candidate + ".";
             }
@@ -1149,33 +1142,6 @@ public final class BoardSemanticValidator {
 
     private static boolean hasApi(DeviceTemplateDto.DeviceManifest manifest, String apiName) {
         return findApi(manifest, apiName) != null;
-    }
-
-    private static DeviceTemplateDto.DeviceManifest.API findApi(
-            DeviceTemplateDto.DeviceManifest manifest, String apiName) {
-        if (manifest == null || manifest.getApis() == null || !hasText(apiName)) {
-            return null;
-        }
-        String target = apiName.trim();
-        for (DeviceTemplateDto.DeviceManifest.API api : manifest.getApis()) {
-            if (api != null && target.equals(api.getName())) {
-                return api;
-            }
-        }
-        return null;
-    }
-
-    private static boolean hasSignalApi(DeviceTemplateDto.DeviceManifest manifest, String apiName) {
-        if (manifest == null || manifest.getApis() == null || !hasText(apiName)) {
-            return false;
-        }
-        String target = apiName.trim();
-        for (DeviceTemplateDto.DeviceManifest.API api : manifest.getApis()) {
-            if (api != null && target.equals(api.getName()) && Boolean.TRUE.equals(api.getSignal())) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private static boolean hasContent(DeviceTemplateDto.DeviceManifest manifest, String contentName) {
@@ -1189,61 +1155,6 @@ public final class BoardSemanticValidator {
             }
         }
         return false;
-    }
-
-    /**
-     * Resolves a variable an assistant-authored rule or specification may use as a condition source.
-     *
-     * <p>Excludes an affect-only shared declaration ({@code Reads=false}) for the same reason the rule
-     * builder hides it and {@code NusmvRequestValidator} refuses it: the generator emits no
-     * {@code device.name := a_name} mirror, so the condition would reference a value the device never
-     * observes. An assistant is another product interface, not a compatibility layer, so it must be
-     * held to the capability rule a person clicking through the UI is held to — otherwise the same
-     * intention produces a different model depending on who expressed it.
-     */
-    private static DeviceTemplateDto.DeviceManifest.InternalVariable findVariable(
-            DeviceTemplateDto.DeviceManifest manifest,
-            String name) {
-        if (manifest == null || manifest.getInternalVariables() == null || !hasText(name)) {
-            return null;
-        }
-        DeviceTemplateDto.DeviceManifest.InternalVariable variable = declaredVariable(manifest, name);
-        if (variable == null) {
-            return null;
-        }
-        boolean affectOnlyShared = !Boolean.TRUE.equals(variable.getIsInside())
-                && Boolean.FALSE.equals(variable.getReads());
-        return affectOnlyShared ? null : variable;
-    }
-
-    /**
-     * Any declared variable, regardless of read capability — for questions about a variable's
-     * <em>existence</em> rather than its eligibility as a condition source. {@link #findVariable} is
-     * this lookup plus one documented narrowing, so the two cannot drift apart.
-     */
-    private static DeviceTemplateDto.DeviceManifest.InternalVariable declaredVariable(
-            DeviceTemplateDto.DeviceManifest manifest,
-            String name) {
-        if (manifest == null || manifest.getInternalVariables() == null || !hasText(name)) {
-            return null;
-        }
-        String target = name.trim();
-        for (DeviceTemplateDto.DeviceManifest.InternalVariable variable : manifest.getInternalVariables()) {
-            if (variable != null && target.equals(variable.getName())) {
-                return variable;
-            }
-        }
-        return null;
-    }
-
-    private static DeviceTemplateDto.DeviceManifest.InternalVariable findVariableOrEnvKey(
-            DeviceTemplateDto.DeviceManifest manifest,
-            String key) {
-        if (!hasText(key)) {
-            return null;
-        }
-        String target = key.trim();
-        return findVariable(manifest, target);
     }
 
     private static String validatePropertyReference(String prefix,
@@ -1260,7 +1171,7 @@ public final class BoardSemanticValidator {
             // affect-only value is something the generated model really permits. Asking about a label is
             // not reading the value, and narrowing here would refuse the assistant a specification the
             // UI offers and NuSMV would decide.
-            return declaredVariable(manifest, key) == null
+            return findDeclaredVariable(manifest, key) == null
                     ? prefix + " references unknown property variable '" + key + "'."
                     : null;
         }
@@ -1281,48 +1192,6 @@ public final class BoardSemanticValidator {
             }
         }
         return null;
-    }
-
-    private static boolean isLegalState(DeviceTemplateDto.DeviceManifest manifest, String rawCandidate) {
-        if (!hasText(rawCandidate)) {
-            return false;
-        }
-        List<String> modes = modeNames(manifest);
-        Map<String, List<String>> statesByMode = modeValues(manifest);
-        if (modes.isEmpty() || statesByMode.isEmpty()) {
-            return false;
-        }
-
-        String candidate = rawCandidate.trim();
-        if (candidate.contains(";")) {
-            String[] segments = candidate.split(";", -1);
-            if (segments.length != modes.size()) {
-                return false;
-            }
-            boolean hasConcreteSegment = false;
-            for (int i = 0; i < modes.size(); i++) {
-                String cleaned = DeviceSmvDataFactory.cleanStateName(segments[i]);
-                if (!hasText(cleaned) || "_".equals(cleaned)) {
-                    continue;
-                }
-                List<String> legalStates = statesByMode.get(modes.get(i));
-                if (legalStates == null || !legalStates.contains(cleaned)) {
-                    return false;
-                }
-                hasConcreteSegment = true;
-            }
-            return hasConcreteSegment;
-        }
-
-        String cleaned = DeviceSmvDataFactory.cleanStateName(candidate);
-        int matches = 0;
-        for (String mode : modes) {
-            List<String> states = statesByMode.get(mode);
-            if (states != null && states.contains(cleaned)) {
-                matches++;
-            }
-        }
-        return matches == 1;
     }
 
     private static List<String> modeNames(DeviceTemplateDto.DeviceManifest manifest) {
@@ -1387,10 +1256,6 @@ public final class BoardSemanticValidator {
             return SmvRelationUtils.splitRuleValues(value);
         }
         return value == null ? List.of() : List.of(value.trim());
-    }
-
-    private static String cleanEnumLiteral(String value) {
-        return value == null ? "" : value.trim().replace(" ", "");
     }
 
     private static String normalizeKey(String value) {

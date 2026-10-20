@@ -1,0 +1,39 @@
+{
+  "csv": "templateName,label,state,currentStateTrust,currentStatePrivacy,variable:steps,trust:steps,privacy:steps,variable:location,trust:location,privacy:location\r\nMobile Phone,\"客厅, \"\"主手机\"\"\r\n二楼\",on,untrusted,private,0,trusted,public,home,trusted,private\r\nMobile Phone,备用手机,,,,,,,,,\r\n",
+  "devices": [
+    {
+      "templateName": "Mobile Phone",
+      "label": "客厅, \"主手机\"\r\n二楼",
+      "state": "on",
+      "currentStateTrust": "untrusted",
+      "currentStatePrivacy": "private",
+      "variables": [
+        {
+          "name": "steps",
+          "value": "0",
+          "trust": "trusted"
+        },
+        {
+          "name": "location",
+          "value": "home",
+          "trust": "trusted"
+        }
+      ],
+      "privacies": [
+        {
+          "name": "steps",
+          "privacy": "public"
+        },
+        {
+          "name": "location",
+          "privacy": "private"
+        }
+      ]
+    },
+    {
+      "templateName": "Mobile Phone",
+      "label": "备用手机"
+    }
+  ],
+  "gb18030Base64": "dGVtcGxhdGVOYW1lLGxhYmVsLHN0YXRlLGN1cnJlbnRTdGF0ZVRydXN0LGN1cnJlbnRTdGF0ZVByaXZhY3ksdmFyaWFibGU6c3RlcHMsdHJ1c3Q6c3RlcHMscHJpdmFjeTpzdGVwcyx2YXJpYWJsZTpsb2NhdGlvbix0cnVzdDpsb2NhdGlvbixwcml2YWN5OmxvY2F0aW9uDQpNb2JpbGUgUGhvbmUsIr/NzPwsICIi1vfK1rv6IiINCrb+wqUiLG9uLHVudHJ1c3RlZCxwcml2YXRlLDAsdHJ1c3RlZCxwdWJsaWMsaG9tZSx0cnVzdGVkLHByaXZhdGUNCk1vYmlsZSBQaG9uZSyxuNPDyta7+iwsLCwsLCwsLA0K"
+}

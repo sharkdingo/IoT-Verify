@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed, nextTick, onBeforeUnmount, reactive, ref, shallowRef, watch } from 'vue'
+import { useRoute, useRouter, type RouteLocationRaw } from 'vue-router'
 import { useI18n } from 'vue-i18n'
+import TopologyShowcase from '@/components/common/TopologyShowcase.vue'
 import PublicHeader from '@/components/common/PublicHeader.vue'
 import { authApi } from '@/api/auth'
 import { useAuth } from '@/stores/auth'
-import { localizedErrorMessage, localizedTextOrFallback } from '@/utils/userMessage'
+import { errorDetails, technicalErrorLines, type ApiErrorDetails } from '@/utils/userMessage'
+import FailureDetails from '@/components/FailureDetails.vue'
 import { isValidNormalizedUsername, normalizeAccountIdentifier } from '@/utils/accountIdentifier'
 import { CREDENTIAL_LIMITS } from '@/constants/requestLimits'
 import HintTooltip from '@/components/common/HintTooltip.vue'
@@ -14,11 +16,16 @@ type AuthMode = 'login' | 'register'
 
 const router = useRouter()
 const route = useRoute()
-const { t, locale } = useI18n()
-const { login } = useAuth()
+const { t } = useI18n()
+const auth = useAuth()
+const { login } = auth
 
 const loading = ref(false)
-const requestError = ref('')
+const requestError = shallowRef<{ key: string; error?: unknown } | null>(null)
+const requestDiagnostics = shallowRef<ApiErrorDetails | null>(null)
+const workspaceNavigation = shallowRef<{ token: string; target: RouteLocationRaw } | null>(null)
+let disposed = false
+let authRequestEpoch = 0
 const requestErrorRef = ref<HTMLElement | null>(null)
 const loginIdentifierRef = ref<HTMLInputElement | null>(null)
 const loginPasswordRef = ref<HTMLInputElement | null>(null)
@@ -26,17 +33,14 @@ const registerPhoneRef = ref<HTMLInputElement | null>(null)
 const registerUsernameRef = ref<HTMLInputElement | null>(null)
 const registerPasswordRef = ref<HTMLInputElement | null>(null)
 const confirmPasswordRef = ref<HTMLInputElement | null>(null)
-const mouseX = ref(0)
-const mouseY = ref(0)
-const prefersReducedMotion = ref(
-  typeof window !== 'undefined'
-    && typeof window.matchMedia === 'function'
-    && window.matchMedia('(prefers-reduced-motion: reduce)').matches
-)
-const videoUnavailable = ref(false)
-let reducedMotionQuery: MediaQueryList | null = null
 const authMode = ref<AuthMode>(route.query.mode === 'register' ? 'register' : 'login')
 const showAuthPanel = ref(Boolean(route.query.mode || route.query.redirect))
+
+const workflowSteps = [
+  { number: '01', title: 'app.landingModelTitle', description: 'app.landingModelDescription' },
+  { number: '02', title: 'app.landingCheckTitle', description: 'app.landingCheckDescription' },
+  { number: '03', title: 'app.landingTraceTitle', description: 'app.landingTraceDescription' }
+]
 
 const loginForm = reactive({
   identifier: '',
@@ -53,16 +57,18 @@ const registerForm = reactive({
 const formErrors = reactive<Record<string, string>>({})
 
 const isRegisterMode = computed(() => authMode.value === 'register')
-const panelTitle = computed(() => isRegisterMode.value ? t('auth.getStarted') : t('auth.welcomeBack'))
-const panelSubtitle = computed(() => isRegisterMode.value ? t('auth.getStartedSubtitle') : t('auth.welcomeBackSubtitle'))
-/**
- * The session ended rather than the user choosing to sign in.
- *
- * `loginRedirectTarget` sets this only when it also sets `redirect`, i.e. when a rejected token ejected someone
- * from an authenticated route. Reading the query rather than any client state keeps a single owner: the redirect
- * helper decides, this only reports.
- */
+const panelTitle = computed(() => isRegisterMode.value ? t('auth.register') : t('auth.login'))
+const accountDeletionUnknown = computed(() => route.query.reason === 'account-deletion-unknown' && !isRegisterMode.value)
+// loginRedirectTarget owns the expiry reason; this surface only reports it.
 const sessionExpired = computed(() => route.query.reason === 'session-expired' && !isRegisterMode.value)
+const passwordChangeNotice = computed(() => {
+  if (isRegisterMode.value) return ''
+  return route.query.reason === 'password-changed'
+    ? t('account.passwordChangedNotice')
+    : route.query.reason === 'password-change-unknown'
+      ? t('account.passwordChangeUnknownNotice')
+      : ''
+})
 const loadingLabel = computed(() => isRegisterMode.value ? t('auth.creatingAccount') : t('auth.signingIn'))
 // Only same-origin absolute paths are honoured, and the login-surface parameters are
 // stripped so a successful sign-in always lands on a clean workspace URL instead of
@@ -81,6 +87,9 @@ const redirectTarget = computed(() => {
 watch(
   () => [route.query.mode, route.query.redirect],
   ([mode, redirect]) => {
+    // Browser navigation abandons the form intent even when Landing stays mounted.
+    authRequestEpoch += 1
+    loading.value = false
     authMode.value = mode === 'register' ? 'register' : 'login'
     showAuthPanel.value = Boolean(mode || redirect)
     clearErrors()
@@ -91,12 +100,15 @@ const clearErrors = () => {
   for (const key of Object.keys(formErrors)) {
     delete formErrors[key]
   }
-  requestError.value = ''
+  requestError.value = null
+  requestDiagnostics.value = null
+  workspaceNavigation.value = null
 }
 
 const clearFieldError = (key: string) => {
   delete formErrors[key]
-  requestError.value = ''
+  requestError.value = null
+  requestDiagnostics.value = null
 }
 
 const focusRequestError = async () => {
@@ -104,14 +116,47 @@ const focusRequestError = async () => {
   requestErrorRef.value?.focus()
 }
 
+const openAuthenticatedWorkspace = async (token: string, target: RouteLocationRaw) => {
+  const navigation = { token, target }
+  workspaceNavigation.value = navigation
+  try {
+    await router.push(target)
+  } catch (error) {
+    if (disposed || workspaceNavigation.value !== navigation || !auth.isCurrentSessionToken(token)) return
+    requestError.value = { key: 'auth.workspaceOpenFailed' }
+    requestDiagnostics.value = { details: errorDetails(error).details, fields: {} }
+    await focusRequestError()
+  }
+}
+
+const retryWorkspace = () => {
+  const navigation = workspaceNavigation.value
+  if (disposed || loading.value || !navigation || !auth.isCurrentSessionToken(navigation.token)) return
+  loading.value = true
+  // A failed native module import remains cached for this document.
+  window.history.replaceState(null, '', router.resolve(navigation.target).href)
+  window.location.reload()
+}
+
+watch(() => auth.state.token, () => {
+  loading.value = false
+  requestError.value = null
+  requestDiagnostics.value = null
+  if (workspaceNavigation.value && !auth.isCurrentSessionToken(workspaceNavigation.value.token)) {
+    workspaceNavigation.value = null
+  }
+}, { flush: 'sync' })
+onBeforeUnmount(() => { disposed = true })
+
 const closeAuthPanel = () => {
-  if (loading.value) return
+  if (loading.value || workspaceNavigation.value) return
   showAuthPanel.value = false
   clearErrors()
   void router.replace({ path: '/' })
 }
 
 const setAuthMode = (mode: AuthMode) => {
+  if (loading.value || workspaceNavigation.value) return
   showAuthPanel.value = true
   if (authMode.value === mode && route.query.mode === mode) return
   const query = { ...route.query, mode }
@@ -130,18 +175,14 @@ const openAuthPanel = () => {
   setAuthMode('login')
 }
 
-// The pattern comes from `CREDENTIAL_LIMITS`, which mirrors `RequestLimits.PHONE_PATTERN`.
-//
-// It used to be a regex literal here with a comment asking the reader to "keep the two in step" — the same
-// instruction-instead-of-enforcement pattern this audit kept finding. `credentialLimitsMirror.spec.ts` now checks
-// that the two files agree, so the request no longer depends on being remembered.
+// credentialLimitsMirror.spec.ts checks this shared limit against RequestLimits.PHONE_PATTERN.
 const validatePhone = (phone: string, key: string) => {
   if (!phone.trim()) {
-    formErrors[key] = t('auth.phoneRequired')
+    formErrors[key] = 'auth.phoneRequired'
     return false
   }
   if (!CREDENTIAL_LIMITS.phonePattern.test(phone.trim())) {
-    formErrors[key] = t('auth.phoneInvalid')
+    formErrors[key] = 'auth.phoneInvalid'
     return false
   }
   return true
@@ -150,10 +191,10 @@ const validatePhone = (phone: string, key: string) => {
 const validateLogin = () => {
   clearErrors()
   if (!normalizeAccountIdentifier(loginForm.identifier)) {
-    formErrors.loginIdentifier = t('auth.accountRequired')
+    formErrors.loginIdentifier = 'auth.accountRequired'
   }
   if (!loginForm.password) {
-    formErrors.loginPassword = t('auth.passwordRequired')
+    formErrors.loginPassword = 'auth.passwordRequired'
   }
   const valid = !formErrors.loginIdentifier && !formErrors.loginPassword
   if (!valid) {
@@ -172,26 +213,28 @@ const validateRegister = () => {
   const usernameLength = Array.from(username).length
 
   if (!username) {
-    formErrors.registerUsername = t('auth.usernameRequired')
+    formErrors.registerUsername = 'auth.usernameRequired'
   } else if (usernameLength < CREDENTIAL_LIMITS.minUsernameDisplayLength
       || usernameLength > CREDENTIAL_LIMITS.maxUsernameDisplayLength) {
-    formErrors.registerUsername = t('auth.usernameLength')
+    formErrors.registerUsername = 'auth.usernameLength'
   } else if (!isValidNormalizedUsername(username)) {
-    formErrors.registerUsername = t('auth.usernameInvalidCharacters')
+    formErrors.registerUsername = 'auth.usernameInvalidCharacters'
+  } else if (CREDENTIAL_LIMITS.phonePattern.test(username)) {
+    formErrors.registerUsername = 'account.usernamePhoneReserved'
   }
 
   if (!registerForm.password) {
-    formErrors.registerPassword = t('auth.passwordRequired')
+    formErrors.registerPassword = 'auth.passwordRequired'
   } else if (registerForm.password.length < CREDENTIAL_LIMITS.minPasswordLength
       || registerForm.password.length > CREDENTIAL_LIMITS.maxPasswordLength
       || new TextEncoder().encode(registerForm.password).length > CREDENTIAL_LIMITS.maxPasswordBcryptBytes) {
-    formErrors.registerPassword = t('auth.passwordLength')
+    formErrors.registerPassword = 'auth.passwordLength'
   }
 
   if (!registerForm.confirmPassword) {
-    formErrors.confirmPassword = t('auth.confirmPasswordRequired')
+    formErrors.confirmPassword = 'auth.confirmPasswordRequired'
   } else if (registerForm.confirmPassword !== registerForm.password) {
-    formErrors.confirmPassword = t('auth.passwordMismatch')
+    formErrors.confirmPassword = 'auth.passwordMismatch'
   }
 
   const valid = validPhone &&
@@ -209,9 +252,10 @@ const validateRegister = () => {
   return valid
 }
 
-const authRequestErrorMessage = (error: any, fallback: string) => {
+const authRequestErrorMessage = (error: any, fallbackKey: string) => {
+  const status = Number(error?.response?.status ?? error?.response?.data?.code)
   const data = error?.response?.data?.data
-  if (error?.response?.status === 429
+  if (status === 429
     && typeof data?.reasonCode === 'string'
     && data.reasonCode.startsWith('AUTH_')) {
     const seconds = Number(data.retryAfterSeconds)
@@ -220,48 +264,70 @@ const authRequestErrorMessage = (error: any, fallback: string) => {
       : 'auth.rateLimitReached'
     return Number.isInteger(seconds) && seconds > 0
       ? t(messageKey, { seconds })
-      : t('auth.rateLimitReachedGeneric')
+      : t(data.scope === 'CAPACITY' ? 'auth.rateLimitCapacityReachedGeneric' : 'auth.rateLimitReachedGeneric')
   }
-  return localizedErrorMessage(error, fallback, locale.value)
+  if (fallbackKey === 'auth.loginFailed' && status === 401) return t('auth.invalidCredentials')
+  if (fallbackKey === 'auth.registerFailed' && (!Number.isInteger(status) || status >= 500)) {
+    return t('auth.registerOutcomeUnknown')
+  }
+  return t(fallbackKey)
 }
+const requestErrorMessage = computed(() => requestError.value
+  ? authRequestErrorMessage(requestError.value.error, requestError.value.key) : '')
 
 const handleLogin = async () => {
+  if (loading.value || workspaceNavigation.value) return
   if (!validateLogin()) return
+  const requestEpoch = ++authRequestEpoch
+  let requestToken = auth.getToken()
+  const requestCurrent = () => !disposed && requestEpoch === authRequestEpoch && auth.isCurrentSessionToken(requestToken)
 
-  requestError.value = ''
+  requestError.value = null
+  requestDiagnostics.value = null
   loading.value = true
   try {
     const res = await authApi.login({
       identifier: normalizeAccountIdentifier(loginForm.identifier),
       password: loginForm.password
     })
+    if (!requestCurrent()) return
 
     if (res.code === 200) {
       if (!res.data) {
         throw new Error(t('auth.loginFailed'))
       }
+      requestToken = res.data.token
       login(res.data.token, {
         userId: res.data.userId,
         phone: res.data.phone,
         username: res.data.username
       })
-      await router.push(redirectTarget.value)
+      loading.value = true
+      await openAuthenticatedWorkspace(res.data.token, redirectTarget.value)
     } else {
-      requestError.value = localizedTextOrFallback(res.message, t('auth.loginFailed'), locale.value)
+      requestError.value = { key: 'auth.loginFailed', error: { response: { data: res } } }
+      requestDiagnostics.value = errorDetails({ response: { data: res } })
       await focusRequestError()
     }
   } catch (error: any) {
-    requestError.value = authRequestErrorMessage(error, t('auth.loginFailed'))
+    if (!requestCurrent()) return
+    requestError.value = { key: 'auth.loginFailed', error }
+    requestDiagnostics.value = errorDetails(error)
     await focusRequestError()
   } finally {
-    loading.value = false
+    if (requestCurrent()) loading.value = false
   }
 }
 
 const handleRegister = async () => {
+  if (loading.value || workspaceNavigation.value) return
   if (!validateRegister()) return
+  const requestEpoch = ++authRequestEpoch
+  let requestToken = auth.getToken()
+  const requestCurrent = () => !disposed && requestEpoch === authRequestEpoch && auth.isCurrentSessionToken(requestToken)
 
-  requestError.value = ''
+  requestError.value = null
+  requestDiagnostics.value = null
   loading.value = true
   try {
     const res = await authApi.register({
@@ -269,873 +335,749 @@ const handleRegister = async () => {
       username: normalizeAccountIdentifier(registerForm.username),
       password: registerForm.password
     })
+    if (!requestCurrent()) return
 
     if (res.code === 200) {
       if (!res.data) {
         throw new Error(t('auth.registerFailed'))
       }
+      requestToken = res.data.token
       login(res.data.token, {
         userId: res.data.userId,
         phone: res.data.phone,
         username: res.data.username
       })
-      await router.push(redirectTarget.value)
+      loading.value = true
+      await openAuthenticatedWorkspace(res.data.token, redirectTarget.value)
     } else {
-      requestError.value = localizedTextOrFallback(res.message, t('auth.registerFailed'), locale.value)
+      requestError.value = { key: 'auth.registerFailed', error: { response: { data: res } } }
+      requestDiagnostics.value = errorDetails({ response: { data: res } })
       await focusRequestError()
     }
   } catch (error: any) {
-    requestError.value = authRequestErrorMessage(error, t('auth.registerFailed'))
-    await focusRequestError()
+    if (!requestCurrent()) return
+    requestDiagnostics.value = errorDetails(error)
+    if (requestDiagnostics.value.reasonCode === 'PHONE_ALREADY_EXISTS') {
+      formErrors.registerPhone = 'auth.phoneAlreadyExists'
+    } else if (requestDiagnostics.value.reasonCode === 'USERNAME_ALREADY_EXISTS') {
+      formErrors.registerUsername = 'account.usernameExists'
+    } else {
+      requestError.value = { key: 'auth.registerFailed', error }
+      await focusRequestError()
+    }
   } finally {
-    loading.value = false
+    if (requestCurrent()) {
+      loading.value = false
+      await nextTick()
+      if (requestCurrent()) {
+        if (formErrors.registerPhone) registerPhoneRef.value?.focus()
+        else if (formErrors.registerUsername) registerUsernameRef.value?.focus()
+      }
+    }
   }
 }
-
-const handleMouseMove = (e: MouseEvent) => {
-  const x = (e.clientX / window.innerWidth - 0.5) * 2
-  const y = (e.clientY / window.innerHeight - 0.5) * 2
-  mouseX.value = x
-  mouseY.value = y
-}
-
-const handleReducedMotionChange = (event: MediaQueryListEvent | MediaQueryList) => {
-  prefersReducedMotion.value = event.matches
-  mouseX.value = 0
-  mouseY.value = 0
-  if (event.matches) {
-    window.removeEventListener('mousemove', handleMouseMove)
-  } else {
-    window.addEventListener('mousemove', handleMouseMove)
-  }
-}
-
-onMounted(() => {
-  if (typeof window.matchMedia !== 'function') {
-    window.addEventListener('mousemove', handleMouseMove)
-    return
-  }
-  reducedMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)')
-  handleReducedMotionChange(reducedMotionQuery)
-  reducedMotionQuery.addEventListener('change', handleReducedMotionChange)
-})
-
-onUnmounted(() => {
-  window.removeEventListener('mousemove', handleMouseMove)
-  reducedMotionQuery?.removeEventListener('change', handleReducedMotionChange)
-  reducedMotionQuery = null
-})
 </script>
 
 <template>
-  <div
-    class="landing-wrapper"
-    :style="{
-      '--mouse-x': mouseX,
-      '--mouse-y': mouseY
-    }"
-  >
-    <video
-      v-if="!prefersReducedMotion && !videoUnavailable"
-      class="video-bg"
-      autoplay
-      loop
-      muted
-      playsinline
-      preload="auto"
-      poster="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1920 1080'%3E%3Crect fill='%230b1722' width='1920' height='1080'/%3E%3C/svg%3E"
-      @error="videoUnavailable = true"
-    >
-      <source src="/videos/landing-bg.mp4" type="video/mp4">
-    </video>
+  <div class="landing-wrapper">
+    <PublicHeader />
 
-    <div class="video-overlay"></div>
-
-    <PublicHeader
-      variant="transparent"
-      :show-theme="false"
-    />
-
-    <section
-      class="hero-section"
-      :class="{ 'hero-section--with-auth': showAuthPanel }"
-      aria-labelledby="landing-title"
-    >
-      <h1 id="landing-title" class="hero-title animate-fade-rise">
-        {{ t('app.landingHeroLead') }}
-        <em class="emphasis">{{ t('app.landingHeroEmphasis') }}</em>
-        {{ t('app.landingHeroTail') }}
-      </h1>
-
-      <p class="hero-subtext animate-fade-rise-delay">
-        {{ t('app.landingHeroSubtext') }}
-      </p>
-
-      <button
-        v-if="!showAuthPanel"
-        class="hero-cta liquid-glass animate-fade-rise-delay-2"
-        type="button"
-        @click="openAuthPanel"
-      >
-        {{ t('app.getStarted') }}
-      </button>
-
-      <section
-        v-show="showAuthPanel"
-        class="auth-panel"
-        :aria-busy="loading"
-        :aria-labelledby="isRegisterMode ? 'register-title' : 'login-title'"
-      >
-        <div class="auth-panel__topbar">
-          <HintTooltip :content="t('auth.backToOverview')">
-            <button
-              type="button"
-              class="auth-panel__back"
-              :aria-label="t('auth.backToOverview')"
-              :disabled="loading"
-              @click="closeAuthPanel"
-            >
-              <span class="material-symbols-outlined" aria-hidden="true">arrow_back</span>
-            </button>
-          </HintTooltip>
-          <div class="auth-tabs" role="tablist" :aria-label="t('auth.getStarted')">
-            <button
-              id="auth-tab-login"
-              type="button"
-              role="tab"
-              aria-controls="login-panel"
-              :aria-selected="!isRegisterMode"
-              :tabindex="isRegisterMode ? -1 : 0"
-              :disabled="loading"
-              :class="{ active: !isRegisterMode }"
-              @click="setAuthMode('login')"
-              @keydown.right.prevent="setAuthModeFromKeyboard('register')"
-            >
-              {{ t('auth.login') }}
-            </button>
-            <button
-              id="auth-tab-register"
-              type="button"
-              role="tab"
-              aria-controls="register-panel"
-              :aria-selected="isRegisterMode"
-              :tabindex="isRegisterMode ? 0 : -1"
-              :disabled="loading"
-              :class="{ active: isRegisterMode }"
-              @click="setAuthMode('register')"
-              @keydown.left.prevent="setAuthModeFromKeyboard('login')"
-            >
-              {{ t('auth.register') }}
-            </button>
-          </div>
-          <span aria-hidden="true"></span>
-        </div>
-
-        <div class="auth-heading">
-          <h2 :id="isRegisterMode ? 'register-title' : 'login-title'">{{ panelTitle }}</h2>
-          <p>{{ panelSubtitle }}</p>
-        </div>
-
-        <!--
-          Why the user is on this screen, when they did not choose to be.
-
-          A rejected token redirects here with the route they were on, and until now nothing said the session had
-          ended: verified that a real 401 lands on `#/?mode=login&redirect=/board` with the token cleared and no
-          explanation anywhere. Two reviews of a mid-task ejection reported the same consequence — "it is unclear
-          whether the board and any edits are safe, and what action is required next" — and one observed that an
-          empty Run History after the interruption "could be mistaken for lost verification results".
-
-          The reassurance is the substance, not the notice: this says the work is still there. `role="status"`
-          rather than `alert`, because an expired session is expected and recoverable, not an error to escalate.
-        -->
-        <p
-          v-if="sessionExpired"
-          class="auth-session-notice"
-          role="status"
-          data-testid="auth-session-expired"
-        >
-          <span class="material-symbols-outlined" aria-hidden="true">schedule</span>
-          <span>{{ t('auth.sessionExpiredNotice') }}</span>
-        </p>
-
-        <div
-          v-if="requestError"
-          ref="requestErrorRef"
-          class="auth-request-error"
-          role="alert"
-          tabindex="-1"
-        >
-          <span class="material-symbols-outlined" aria-hidden="true">error</span>
-          <span>{{ requestError }}</span>
-        </div>
-
-        <form
-          v-if="!isRegisterMode"
-          id="login-panel"
-          class="auth-form"
-          role="tabpanel"
-          aria-labelledby="auth-tab-login"
-          @submit.prevent="handleLogin"
-        >
-          <label>
-            <span>{{ t('auth.account') }}</span>
-            <input
-              ref="loginIdentifierRef"
-              v-model="loginForm.identifier"
-              type="text"
-              autocomplete="username"
-              :placeholder="t('auth.accountPlaceholder')"
-              :disabled="loading"
-              :aria-invalid="Boolean(formErrors.loginIdentifier)"
-              aria-describedby="login-account-hint"
-              @input="clearFieldError('loginIdentifier')"
-            />
-            <small
-              id="login-account-hint"
-              :role="formErrors.loginIdentifier ? 'alert' : undefined"
-              :class="{ 'auth-form__hint--error': formErrors.loginIdentifier }"
-            >
-              {{ formErrors.loginIdentifier || t('auth.accountHint') }}
-            </small>
-          </label>
-
-          <label>
-            <span>{{ t('auth.password') }}</span>
-            <input
-              ref="loginPasswordRef"
-              v-model="loginForm.password"
-              type="password"
-              autocomplete="current-password"
-              :placeholder="t('auth.passwordPlaceholder')"
-              :disabled="loading"
-              :aria-invalid="Boolean(formErrors.loginPassword)"
-              aria-describedby="login-password-hint"
-              @input="clearFieldError('loginPassword')"
-            />
-            <small
-              id="login-password-hint"
-              :role="formErrors.loginPassword ? 'alert' : undefined"
-              :class="{ 'auth-form__hint--error': formErrors.loginPassword }"
-            >
-              {{ formErrors.loginPassword || t('auth.loginPasswordHint') }}
-            </small>
-          </label>
-
-          <button
-            class="auth-submit"
-            :class="{ 'auth-submit--busy': loading }"
-            type="submit"
-            :disabled="loading"
-            :aria-busy="loading ? 'true' : undefined"
-          >
-            <span v-if="loading" class="material-symbols-outlined auth-submit__spinner" aria-hidden="true">progress_activity</span>
-            {{ loading ? loadingLabel : t('auth.signInToConsole') }}
-          </button>
-        </form>
-
-        <form
-          v-else
-          id="register-panel"
-          class="auth-form"
-          role="tabpanel"
-          aria-labelledby="auth-tab-register"
-          @submit.prevent="handleRegister"
-        >
-          <label>
-            <span>{{ t('auth.phoneNumber') }}</span>
-            <input
-              ref="registerPhoneRef"
-              v-model="registerForm.phone"
-              type="tel"
-              inputmode="numeric"
-              autocomplete="tel"
-              :placeholder="t('auth.phonePlaceholder')"
-              :disabled="loading"
-              :aria-invalid="Boolean(formErrors.registerPhone)"
-              aria-describedby="register-phone-hint"
-              @input="clearFieldError('registerPhone')"
-            />
-            <small
-              id="register-phone-hint"
-              :role="formErrors.registerPhone ? 'alert' : undefined"
-              :class="{ 'auth-form__hint--error': formErrors.registerPhone }"
-            >
-              {{ formErrors.registerPhone || t('auth.phoneHint') }}
-            </small>
-          </label>
-
-          <label>
-            <span>{{ t('auth.username') }}</span>
-            <input
-              ref="registerUsernameRef"
-              v-model="registerForm.username"
-              type="text"
-              autocomplete="username"
-              :placeholder="t('auth.usernamePlaceholder')"
-              :disabled="loading"
-              :aria-invalid="Boolean(formErrors.registerUsername)"
-              aria-describedby="register-username-hint"
-              @input="clearFieldError('registerUsername')"
-            />
-            <small
-              id="register-username-hint"
-              :role="formErrors.registerUsername ? 'alert' : undefined"
-              :class="{ 'auth-form__hint--error': formErrors.registerUsername }"
-            >
-              {{ formErrors.registerUsername || t('auth.usernameHint') }}
-            </small>
-          </label>
-
-          <label>
-            <span>{{ t('auth.password') }}</span>
-            <input
-              ref="registerPasswordRef"
-              v-model="registerForm.password"
-              type="password"
-              autocomplete="new-password"
-              :placeholder="t('auth.passwordPlaceholder')"
-              :disabled="loading"
-              :aria-invalid="Boolean(formErrors.registerPassword)"
-              aria-describedby="register-password-hint"
-              @input="clearFieldError('registerPassword')"
-            />
-            <small
-              id="register-password-hint"
-              :role="formErrors.registerPassword ? 'alert' : undefined"
-              :class="{ 'auth-form__hint--error': formErrors.registerPassword }"
-            >
-              {{ formErrors.registerPassword || t('auth.passwordHint') }}
-            </small>
-          </label>
-
-          <label>
-            <span>{{ t('auth.confirmPassword') }}</span>
-            <input
-              ref="confirmPasswordRef"
-              v-model="registerForm.confirmPassword"
-              type="password"
-              autocomplete="new-password"
-              :placeholder="t('auth.confirmPasswordPlaceholder')"
-              :disabled="loading"
-              :aria-invalid="Boolean(formErrors.confirmPassword)"
-              aria-describedby="register-confirm-password-hint"
-              @input="clearFieldError('confirmPassword')"
-            />
-            <small
-              id="register-confirm-password-hint"
-              :role="formErrors.confirmPassword ? 'alert' : undefined"
-              :class="{ 'auth-form__hint--error': formErrors.confirmPassword }"
-            >
-              {{ formErrors.confirmPassword || t('auth.confirmPasswordHint') }}
-            </small>
-          </label>
-
-          <button
-            class="auth-submit"
-            :class="{ 'auth-submit--busy': loading }"
-            type="submit"
-            :disabled="loading"
-            :aria-busy="loading ? 'true' : undefined"
-          >
-            <span v-if="loading" class="material-symbols-outlined auth-submit__spinner" aria-hidden="true">progress_activity</span>
-            {{ loading ? loadingLabel : t('auth.registerNow') }}
-          </button>
-        </form>
-
-        <p v-if="loading" class="sr-only" role="status" aria-live="polite">
-          {{ loadingLabel }}
-        </p>
+    <main class="hero-section" :class="{ 'hero-section--with-auth': showAuthPanel }">
+      <section v-if="!showAuthPanel" class="hero-copy" aria-labelledby="landing-title">
+        <p class="hero-eyebrow">{{ t('app.landingEyebrow') }}</p>
+        <h1 id="landing-title" class="hero-title">
+          {{ t('app.landingHeroLead') }}
+          <span class="emphasis">{{ t('app.landingHeroEmphasis') }}</span>
+        </h1>
+        <p class="hero-subtext">{{ t('app.landingHeroSubtext') }}</p>
+        <button class="hero-cta" type="button" @click="openAuthPanel">
+          {{ t('app.landingOpenWorkspace') }}
+          <span class="material-symbols-outlined" aria-hidden="true">arrow_forward</span>
+        </button>
+        <ol class="hero-workflow">
+          <li v-for="step in workflowSteps" :key="step.number">
+            <span class="hero-workflow__number" aria-hidden="true">{{ step.number }}</span>
+            <div>
+              <h2>{{ t(step.title) }}</h2>
+              <p>{{ t(step.description) }}</p>
+            </div>
+          </li>
+        </ol>
       </section>
-    </section>
+
+      <div class="landing-stage">
+        <TopologyShowcase v-if="!showAuthPanel" />
+        <section
+          v-if="showAuthPanel"
+          class="auth-panel"
+          :aria-busy="loading"
+          :aria-labelledby="isRegisterMode ? 'register-title' : 'login-title'"
+        >
+          <div class="auth-panel__topbar">
+            <HintTooltip :content="t('auth.backToOverview')">
+              <button
+                type="button"
+                class="auth-panel__back"
+                :aria-label="t('auth.backToOverview')"
+                :disabled="loading || Boolean(workspaceNavigation)"
+                @click="closeAuthPanel"
+              >
+                <span class="material-symbols-outlined" aria-hidden="true">arrow_back</span>
+              </button>
+            </HintTooltip>
+            <div class="auth-tabs" role="tablist" :aria-label="t('auth.getStarted')">
+              <button
+                id="auth-tab-login"
+                type="button"
+                role="tab"
+                aria-controls="login-panel"
+                :aria-selected="!isRegisterMode"
+                :tabindex="isRegisterMode ? -1 : 0"
+                :disabled="loading || Boolean(workspaceNavigation)"
+                :class="{ active: !isRegisterMode }"
+                @click="setAuthMode('login')"
+                @keydown.right.prevent="setAuthModeFromKeyboard('register')"
+              >
+                {{ t('auth.login') }}
+              </button>
+              <button
+                id="auth-tab-register"
+                type="button"
+                role="tab"
+                aria-controls="register-panel"
+                :aria-selected="isRegisterMode"
+                :tabindex="isRegisterMode ? 0 : -1"
+                :disabled="loading || Boolean(workspaceNavigation)"
+                :class="{ active: isRegisterMode }"
+                @click="setAuthMode('register')"
+                @keydown.left.prevent="setAuthModeFromKeyboard('login')"
+              >
+                {{ t('auth.register') }}
+              </button>
+            </div>
+            <span aria-hidden="true"></span>
+          </div>
+
+          <div class="auth-heading">
+            <h1 :id="isRegisterMode ? 'register-title' : 'login-title'">{{ panelTitle }}</h1>
+          </div>
+
+          <!-- Session expiry is distinct from a failed sign-in attempt. -->
+          <p v-if="accountDeletionUnknown" class="auth-session-notice" role="status" data-testid="auth-account-deletion-notice">
+            <span class="material-symbols-outlined" aria-hidden="true">warning</span>
+            <span>{{ t('app.deleteAccountOutcomeUnknown') }}</span>
+          </p>
+          <p
+            v-if="sessionExpired"
+            class="auth-session-notice"
+            role="status"
+            data-testid="auth-session-expired"
+          >
+            <span class="material-symbols-outlined" aria-hidden="true">schedule</span>
+            <span>{{ t('auth.sessionExpiredNotice') }}</span>
+          </p>
+
+          <p
+            v-if="passwordChangeNotice"
+            class="auth-session-notice"
+            role="status"
+            data-testid="auth-password-change-notice"
+          >
+            <span class="material-symbols-outlined" aria-hidden="true">lock_reset</span>
+            <span>{{ passwordChangeNotice }}</span>
+          </p>
+
+          <div
+            v-if="requestError"
+            ref="requestErrorRef"
+            class="auth-request-error"
+            role="alert"
+            tabindex="-1"
+          >
+            <span class="material-symbols-outlined" aria-hidden="true">error</span>
+            <div>
+              <p>{{ requestErrorMessage }}</p>
+              <FailureDetails v-if="requestDiagnostics" :message="requestErrorMessage" :details="technicalErrorLines(requestDiagnostics)" suggestion="" />
+              <button v-if="workspaceNavigation" type="button" class="auth-submit"
+                data-testid="auth-workspace-retry" :disabled="loading" @click="retryWorkspace">{{ t('auth.retryWorkspace') }}</button>
+            </div>
+          </div>
+
+          <form
+            v-if="!workspaceNavigation && !isRegisterMode"
+            id="login-panel"
+            class="auth-form"
+            role="tabpanel"
+            aria-labelledby="auth-tab-login"
+            @submit.prevent="handleLogin"
+          >
+            <label>
+              <span id="login-account-label">{{ t('auth.account') }}</span>
+              <input
+                class="board-field"
+                ref="loginIdentifierRef"
+                v-model="loginForm.identifier"
+                type="text"
+                autocomplete="username"
+                aria-labelledby="login-account-label"
+                :disabled="loading"
+                :aria-invalid="Boolean(formErrors.loginIdentifier)"
+                :aria-describedby="formErrors.loginIdentifier ? 'login-account-hint' : undefined"
+                @input="clearFieldError('loginIdentifier')"
+              />
+              <small
+                v-if="formErrors.loginIdentifier"
+                id="login-account-hint"
+                :role="formErrors.loginIdentifier ? 'alert' : undefined"
+                :class="{ 'auth-form__hint--error': formErrors.loginIdentifier }"
+              >
+                {{ t(formErrors.loginIdentifier) }}
+              </small>
+            </label>
+
+            <label>
+              <span id="login-password-label">{{ t('auth.password') }}</span>
+              <input
+                class="board-field"
+                ref="loginPasswordRef"
+                v-model="loginForm.password"
+                type="password"
+                autocomplete="current-password"
+                aria-labelledby="login-password-label"
+                :disabled="loading"
+                :aria-invalid="Boolean(formErrors.loginPassword)"
+                :aria-describedby="formErrors.loginPassword ? 'login-password-hint' : undefined"
+                @input="clearFieldError('loginPassword')"
+              />
+              <small
+                v-if="formErrors.loginPassword"
+                id="login-password-hint"
+                :role="formErrors.loginPassword ? 'alert' : undefined"
+                :class="{ 'auth-form__hint--error': formErrors.loginPassword }"
+              >
+                {{ t(formErrors.loginPassword) }}
+              </small>
+            </label>
+
+            <button
+              class="auth-submit"
+              :class="{ 'auth-submit--busy': loading }"
+              type="submit"
+              :disabled="loading"
+              :aria-busy="loading ? 'true' : undefined"
+            >
+              <span v-if="loading" class="material-symbols-outlined auth-submit__spinner" aria-hidden="true">progress_activity</span>
+              {{ loading ? loadingLabel : t('auth.signInToConsole') }}
+            </button>
+          </form>
+
+          <form
+            v-else-if="!workspaceNavigation"
+            id="register-panel"
+            class="auth-form"
+            role="tabpanel"
+            aria-labelledby="auth-tab-register"
+            @submit.prevent="handleRegister"
+          >
+            <label>
+              <span id="register-phone-label">{{ t('auth.phoneNumber') }}</span>
+              <input
+                class="board-field"
+                ref="registerPhoneRef"
+                v-model="registerForm.phone"
+                type="tel"
+                inputmode="numeric"
+                autocomplete="tel"
+                aria-labelledby="register-phone-label"
+                :disabled="loading"
+                :aria-invalid="Boolean(formErrors.registerPhone)"
+                aria-describedby="register-phone-hint"
+                @input="clearFieldError('registerPhone')"
+              />
+              <small
+                id="register-phone-hint"
+                :role="formErrors.registerPhone ? 'alert' : undefined"
+                :class="{ 'auth-form__hint--error': formErrors.registerPhone }"
+              >
+                {{ t(formErrors.registerPhone || 'auth.phoneHint') }}
+              </small>
+            </label>
+
+            <label>
+              <span id="register-username-label">{{ t('auth.username') }}</span>
+              <input
+                class="board-field"
+                ref="registerUsernameRef"
+                v-model="registerForm.username"
+                type="text"
+                autocomplete="username"
+                aria-labelledby="register-username-label"
+                :disabled="loading"
+                :aria-invalid="Boolean(formErrors.registerUsername)"
+                aria-describedby="register-username-hint"
+                @input="clearFieldError('registerUsername')"
+              />
+              <small
+                id="register-username-hint"
+                :role="formErrors.registerUsername ? 'alert' : undefined"
+                :class="{ 'auth-form__hint--error': formErrors.registerUsername }"
+              >
+                {{ t(formErrors.registerUsername || 'auth.usernameLength') }}
+              </small>
+            </label>
+
+            <label>
+              <span id="register-password-label">{{ t('auth.password') }}</span>
+              <input
+                class="board-field"
+                ref="registerPasswordRef"
+                v-model="registerForm.password"
+                type="password"
+                autocomplete="new-password"
+                aria-labelledby="register-password-label"
+                :disabled="loading"
+                :aria-invalid="Boolean(formErrors.registerPassword)"
+                aria-describedby="register-password-hint"
+                @input="clearFieldError('registerPassword')"
+              />
+              <small
+                id="register-password-hint"
+                :role="formErrors.registerPassword ? 'alert' : undefined"
+                :class="{ 'auth-form__hint--error': formErrors.registerPassword }"
+              >
+                {{ t(formErrors.registerPassword || 'auth.passwordHint') }}
+              </small>
+            </label>
+
+            <label>
+              <span id="register-confirm-password-label">{{ t('auth.confirmPassword') }}</span>
+              <input
+                class="board-field"
+                ref="confirmPasswordRef"
+                v-model="registerForm.confirmPassword"
+                type="password"
+                autocomplete="new-password"
+                aria-labelledby="register-confirm-password-label"
+                :disabled="loading"
+                :aria-invalid="Boolean(formErrors.confirmPassword)"
+                :aria-describedby="formErrors.confirmPassword ? 'register-confirm-password-hint' : undefined"
+                @input="clearFieldError('confirmPassword')"
+              />
+              <small
+                v-if="formErrors.confirmPassword"
+                id="register-confirm-password-hint"
+                :role="formErrors.confirmPassword ? 'alert' : undefined"
+                :class="{ 'auth-form__hint--error': formErrors.confirmPassword }"
+              >
+                {{ t(formErrors.confirmPassword) }}
+              </small>
+            </label>
+
+            <button
+              class="auth-submit"
+              :class="{ 'auth-submit--busy': loading }"
+              type="submit"
+              :disabled="loading"
+              :aria-busy="loading ? 'true' : undefined"
+            >
+              <span v-if="loading" class="material-symbols-outlined auth-submit__spinner" aria-hidden="true">progress_activity</span>
+              {{ loading ? loadingLabel : t('auth.registerNow') }}
+            </button>
+          </form>
+
+          <FailureDetails v-if="requestDiagnostics && !requestError" :details="technicalErrorLines(requestDiagnostics)" suggestion="" />
+
+          <p v-if="loading" class="sr-only" role="status" aria-live="polite">
+            {{ loadingLabel }}
+          </p>
+        </section>
+      </div>
+    </main>
   </div>
 </template>
 
 <style scoped>
 .landing-wrapper {
-  position: relative;
-  width: 100%;
-  min-height: 100vh;
-  overflow-x: hidden;
-  overflow-y: auto;
-  background-color: hsl(201, 100%, 13%);
-  font-family: 'Inter Variable', 'Inter', sans-serif;
-  color: hsl(0, 0%, 100%);
-}
-
-.video-bg {
-  position: fixed;
-  top: calc(var(--mouse-y) * 10px);
-  left: calc(var(--mouse-x) * 10px);
-  width: calc(100% + 20px);
-  height: calc(100% + 20px);
-  object-fit: cover;
-  z-index: 0;
-  transition: transform 0.1s ease-out;
-}
-
-.video-overlay {
-  position: fixed;
-  inset: 0;
-  background: linear-gradient(
-    135deg,
-    rgba(10, 20, 35, 0.7) 0%,
-    rgba(20, 30, 50, 0.5) 50%,
-    rgba(10, 20, 35, 0.7) 100%
-  );
-  z-index: 1;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .landing-wrapper,
-  .hero-section,
-  .auth-panel {
-    scroll-behavior: auto;
-  }
-
-  .landing-wrapper *,
-  .landing-wrapper *::before,
-  .landing-wrapper *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-  }
-}
-
-.liquid-glass {
-  position: relative;
-  overflow: hidden;
-  border: none;
-  border-radius: var(--iot-radius-pill);
-  background: rgba(255, 255, 255, 0.01);
-  background-blend-mode: luminosity;
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
-  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.1);
-  color: hsl(0, 0%, 100%);
-  cursor: pointer;
-  transition: transform 0.2s;
-}
-
-.liquid-glass:hover {
-  transform: scale(1.03);
-}
-
-.liquid-glass::before,
-.auth-panel::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  padding: 1.4px;
-  background: linear-gradient(180deg, rgba(255,255,255,0.45) 0%, rgba(255,255,255,0.15) 20%, rgba(255,255,255,0) 40%, rgba(255,255,255,0) 60%, rgba(255,255,255,0.15) 80%, rgba(255,255,255,0.45) 100%);
-  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  pointer-events: none;
+  min-height: 100dvh;
+  background:
+    radial-gradient(ellipse at 75% 35%, color-mix(in srgb, var(--accent-surface) 60%, transparent), transparent 65%),
+    var(--iot-color-bg-canvas);
+  color: var(--text);
+  font-family: var(--iot-font-body);
 }
 
 .hero-section {
-  position: relative;
-  z-index: 10;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
   align-items: center;
-  justify-content: center;
-  min-height: 100vh;
-  padding: 8rem 1.5rem 4.5rem;
-  text-align: center;
+  gap: clamp(var(--iot-space-3xl), 5vw, 5rem);
+  width: min(100%, 1320px);
+  min-height: 100dvh;
+  margin: 0 auto;
+  padding: 8rem var(--iot-page-gutter) var(--iot-space-4xl);
+}
+
+.hero-copy,
+.landing-stage {
+  min-width: 0;
+}
+
+.hero-eyebrow {
+  margin: 0 0 var(--iot-space-xl);
+  display: flex;
+  align-items: center;
+  gap: var(--iot-space-md);
+  color: var(--text-muted);
+  font-size: var(--iot-font-label);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+
+.hero-eyebrow::before {
+  content: '';
+  width: 1.5rem;
+  height: 2px;
+  background: var(--accent);
 }
 
 .hero-section--with-auth {
-  align-items: flex-start;
-  padding-right: min(36rem, 38vw);
-  padding-left: clamp(2rem, 7vw, 7rem);
-  text-align: left;
-}
-
-.hero-section--with-auth .hero-title,
-.hero-section--with-auth .hero-subtext {
-  max-width: 46rem;
+  grid-template-columns: minmax(0, 1fr);
+  width: min(100%, 600px);
 }
 
 .hero-title {
-  max-width: 56rem;
   margin: 0;
-  font-family: 'Instrument Serif', serif;
-  font-size: 3rem;
-  font-weight: 400;
-  line-height: 0.95;
-  letter-spacing: 0;
-  color: hsl(0, 0%, 100%);
-  text-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
+  font-family: var(--iot-font-display);
+  font-size: clamp(2.5rem, 4.4vw, 4rem);
+  font-weight: 600;
+  line-height: 1.22;
+  letter-spacing: -0.045em;
+  text-wrap: balance;
 }
 
 .emphasis {
-  /* The landing hero sits on a fixed dark video, not on a theme surface, so this pair is deliberately
-     literal rather than tokenised — the role tokens would flip with a theme this section never adopts.
-     The glow derives from the ink beside it so the two cannot drift apart. */
-  --emphasis-ink: hsl(210, 100%, 70%);
-  color: var(--emphasis-ink);
-  font-style: normal;
-  text-shadow: 0 0 30px color-mix(in srgb, var(--emphasis-ink) 40%, transparent);
+  display: block;
+  color: var(--accent);
 }
 
 .hero-subtext {
-  max-width: 42rem;
-  margin-top: 2rem;
+  max-width: 34rem;
+  margin: var(--iot-space-xl) 0 0;
+  color: var(--text-muted);
   font-size: 1rem;
-  line-height: 1.625;
-  color: hsl(0, 0%, 85%);
-  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+  line-height: 1.85;
+  text-wrap: pretty;
+}
+
+.hero-cta,
+.auth-submit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--iot-space-md);
+  min-height: 48px;
+  border: 1px solid var(--accent-fill);
+  border-radius: var(--iot-radius-action);
+  background: var(--accent-fill);
+  padding: var(--iot-space-md) var(--iot-space-xl);
+  color: var(--text-on-fill);
+  cursor: pointer;
+  transition: background-color var(--iot-motion-fast) ease, border-color var(--iot-motion-fast) ease;
 }
 
 .hero-cta {
-  margin-top: 3rem;
-  padding: 1.25rem 3.5rem;
-  font-size: 1rem;
+  font-size: var(--iot-font-base);
+  font-weight: 600;
+  margin-top: var(--iot-space-2xl);
+}
+
+.hero-cta .material-symbols-outlined {
+  font-size: 20px;
+  transition: transform var(--iot-motion-fast) ease;
+}
+
+.hero-cta:hover .material-symbols-outlined {
+  transform: translateX(3px);
+}
+
+.hero-cta:hover,
+.auth-submit:not(:disabled):hover {
+  background: var(--accent-fill-hover);
+  border-color: var(--accent-fill-hover);
+}
+
+.hero-workflow {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--iot-space-lg);
+  margin: var(--iot-space-3xl) 0 0;
+  border-top: 1px solid var(--border);
+  padding: var(--iot-space-xl) 0 0;
+  list-style: none;
+}
+
+.hero-workflow li {
+  display: flex;
+  flex-direction: column;
+  gap: var(--iot-space-md);
+}
+
+.hero-workflow__number {
+  padding-top: 0.125rem;
+  color: var(--text-muted);
+  font-size: var(--iot-font-caption);
+  font-variant-numeric: tabular-nums;
+}
+
+.hero-workflow h2 {
+  margin: 0;
+  font-size: var(--iot-font-control);
+  font-weight: 600;
+}
+
+.hero-workflow p {
+  margin: var(--iot-space-xs) 0 0;
+  color: var(--text-muted);
+  font-size: var(--iot-font-label);
+  line-height: 1.6;
 }
 
 .auth-panel {
-  position: relative;
-  width: min(100%, 430px);
-  margin-top: 2.25rem;
+  width: min(100%, 440px);
+  margin-inline: auto;
+  border: 1px solid var(--border);
   border-radius: var(--iot-radius-surface);
-  background: rgba(8, 16, 24, 0.58);
-  background-blend-mode: luminosity;
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.12), 0 24px 80px rgba(0, 0, 0, 0.34);
-  padding: 1rem;
-  text-align: left;
+  background: var(--surface-panel);
+  box-shadow: var(--shadow-elevated);
+  padding: var(--iot-space-2xl);
 }
 
 .auth-panel__topbar {
   display: grid;
-  grid-template-columns: 38px minmax(0, 1fr) 38px;
+  grid-template-columns: var(--iot-target-min) minmax(0, 1fr) var(--iot-target-min);
   align-items: center;
-  gap: 0.5rem;
+  gap: var(--iot-space-sm);
 }
 
 .auth-panel__back {
   display: inline-flex;
-  width: 38px;
-  height: 38px;
+  width: var(--iot-target-min);
+  height: var(--iot-target-min);
   align-items: center;
   justify-content: center;
   border: 0;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.08);
-  color: rgba(255, 255, 255, 0.82);
+  border-radius: var(--iot-radius-action);
+  background: transparent;
+  color: var(--text-muted);
   cursor: pointer;
 }
 
 .auth-panel__back:not(:disabled):hover {
-  background: rgba(255, 255, 255, 0.16);
-  color: #ffffff;
+  background: var(--surface-control-hover);
+  color: var(--text);
 }
 
-.auth-panel__back:disabled {
+.auth-panel__back:disabled,
+.auth-tabs button:disabled {
   cursor: wait;
-  opacity: 0.45;
-}
-
-@media (min-width: 1101px) {
-  .auth-panel {
-    position: absolute;
-    top: 50%;
-    right: clamp(1.5rem, 5.5vw, 6rem);
-    width: min(31vw, 420px);
-    min-width: 360px;
-    margin-top: 0;
-    transform: translateY(-50%);
-    animation: auth-panel-rise 0.45s ease-out both;
-  }
 }
 
 .auth-tabs {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 6px;
-  border-radius: var(--iot-radius-pill);
-  background: rgba(255, 255, 255, 0.08);
-  padding: 4px;
+  gap: var(--iot-space-2xs);
+  padding: var(--iot-space-2xs);
+  border-radius: var(--iot-radius-well);
+  background: var(--surface-control);
 }
 
 .auth-tabs button {
-  min-height: 38px;
+  min-height: var(--iot-target-min);
   border: 0;
-  border-radius: var(--iot-radius-pill);
+  border-radius: var(--iot-radius-action);
   background: transparent;
-  color: rgba(255, 255, 255, 0.72);
+  color: var(--text-muted);
+  font-size: var(--iot-font-label);
+  font-weight: 600;
   cursor: pointer;
-  font-weight: 800;
+}
+
+.auth-tabs button:not(:disabled):hover {
+  color: var(--text);
 }
 
 .auth-tabs button.active {
-  background: rgba(255, 255, 255, 0.9);
-  color: hsl(0, 0%, 4%);
-}
-
-.auth-tabs button:disabled {
-  cursor: wait;
+  background: var(--surface-panel);
+  color: var(--accent);
+  box-shadow: var(--shadow-raised);
 }
 
 .auth-heading {
-  margin: 1rem 0;
-  text-align: center;
+  margin: var(--iot-space-xl) 0;
 }
 
-.auth-heading h2 {
+.auth-heading h1 {
   margin: 0;
-  font-size: 1.25rem;
-  letter-spacing: 0;
-}
-
-.auth-heading p {
-  margin: 0.35rem 0 0;
-  color: rgba(255, 255, 255, 0.72);
-  font-size: 0.86rem;
-  line-height: 1.5;
+  font-family: var(--iot-font-display);
+  font-size: 1.5rem;
+  font-weight: 600;
+  letter-spacing: -0.025em;
 }
 
 .auth-form {
   display: grid;
-  gap: 0.78rem;
+  gap: var(--iot-space-lg);
 }
 
 .auth-form label {
   display: grid;
-  gap: 0.35rem;
+  gap: var(--iot-space-sm);
 }
 
-.auth-form label span {
-  font-size: 0.76rem;
-  font-weight: 800;
-  color: rgba(255, 255, 255, 0.78);
-}
-
-.auth-form input {
-  width: 100%;
-  min-height: 40px;
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  border-radius: var(--iot-radius-well);
-  background: rgba(255, 255, 255, 0.10);
-  color: #ffffff;
-  padding: 0 0.75rem;
-  outline: none;
-}
-
-.auth-form input::placeholder {
-  color: rgba(255, 255, 255, 0.42);
-}
-
-.auth-form input:focus {
-  border-color: rgba(125, 211, 252, 0.9);
-  box-shadow: 0 0 0 3px rgba(125, 211, 252, 0.18);
-}
-
-.auth-form input[aria-invalid="true"] {
-  border-color: var(--danger-border);
+.auth-form label > span {
+  color: var(--text);
+  font-size: var(--iot-font-label);
+  font-weight: 600;
 }
 
 .auth-form input:disabled {
   cursor: wait;
-  opacity: 0.7;
 }
 
 .auth-form small {
-  color: rgba(255, 255, 255, 0.58);
-  font-size: 0.74rem;
-  line-height: 1.35;
+  color: var(--text-muted);
+  font-size: var(--iot-font-caption);
+  line-height: 1.5;
 }
 
-.auth-form__hint--error {
-  color: var(--danger-border) !important;
+.auth-form .auth-form__hint--error {
+  color: var(--danger);
 }
 
-/* Deliberately not styled like `.auth-request-error` below.
- *
- * An expired session is expected and recoverable, so it reads as information on the panel's own glass rather
- * than as a failure in danger red. Using the error treatment would tell the user something went wrong with
- * their sign-in attempt, when in fact nothing has gone wrong at all and their work is intact. */
-.auth-session-notice {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.5rem;
-  margin: 0 0 0.9rem;
-  border: 1px solid rgba(255, 255, 255, 0.22);
-  border-radius: var(--iot-radius-action);
-  background: rgba(255, 255, 255, 0.1);
-  padding: 0.65rem 0.75rem;
-  color: rgba(255, 255, 255, 0.92);
-  font-size: 0.8125rem;
-  line-height: 1.45;
-}
-
-.auth-session-notice .material-symbols-outlined {
-  flex: 0 0 auto;
-  font-size: 1.05rem;
-}
-
+.auth-session-notice,
 .auth-request-error {
   display: flex;
   align-items: flex-start;
-  gap: 0.5rem;
-  margin: 0 0 0.8rem;
-  border: 1px solid rgba(252, 165, 165, 0.5);
+  gap: var(--iot-space-sm);
+  margin: 0 0 var(--iot-space-xl);
+  border: 1px solid var(--accent-border);
   border-radius: var(--iot-radius-action);
-  background: rgba(127, 29, 29, 0.34);
-  padding: 0.65rem 0.75rem;
-  color: var(--danger-surface);
-  font-size: 0.78rem;
-  line-height: 1.45;
+  background: var(--accent-surface);
+  padding: var(--iot-space-md);
+  color: var(--accent);
+  font-size: var(--iot-font-control);
+  line-height: 1.6;
 }
 
-.auth-request-error:focus {
-  outline: 2px solid rgba(254, 202, 202, 0.8);
-  outline-offset: 2px;
+.auth-request-error {
+  border-color: var(--danger-border);
+  background: var(--danger-surface);
+  color: var(--danger);
 }
 
-.auth-request-error .material-symbols-outlined {
+.auth-request-error > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.auth-request-error .material-symbols-outlined,
+.auth-session-notice .material-symbols-outlined {
   flex: 0 0 auto;
-  font-size: 1rem;
+  font-size: 20px;
 }
 
 .auth-submit {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.45rem;
-  min-height: 42px;
-  margin-top: 0.1rem;
-  border: 0;
-  border-radius: var(--iot-radius-pill);
-  background: rgba(255, 255, 255, 0.9);
-  color: hsl(0, 0%, 4%);
-  cursor: pointer;
-  font-weight: 900;
+  min-height: var(--iot-target-min);
+  width: 100%;
+  margin-top: var(--iot-space-2xs);
 }
 
-.auth-submit__spinner {
-  font-size: 1rem;
-  animation: auth-spin 1s linear infinite;
-}
-
-@keyframes auth-spin {
-  to { transform: rotate(360deg); }
-}
-
-/* "Submitting" and "you cannot submit yet" are different states and must not look identical.
- *
- * Both used `:disabled` with `opacity: 0.72`, separated only by `cursor: wait` — invisible in a
- * screenshot and absent on touch. A review of the sign-in panel read the in-progress button as
- * disabled: "it reads somewhat like a disabled control, but the spinner and active status imply
- * progress". Waiting is not refusal, so the busy state keeps full opacity and its accent, and says so
- * through `aria-busy` as well as the spinner and the changed label. */
 .auth-submit:disabled {
+  background: var(--accent-fill-disabled);
+  border-color: var(--accent-fill-disabled);
+  opacity: 1;
   cursor: not-allowed;
-  opacity: 0.72;
 }
 
 .auth-submit--busy:disabled {
   cursor: progress;
-  opacity: 1;
-  background: var(--surface-elevated);
-  color: var(--accent);
 }
 
-.auth-submit:not(:disabled):hover {
-  background: var(--surface-elevated);
+.auth-submit__spinner {
+  font-size: 20px;
+  animation: auth-spin 1s linear infinite;
 }
 
-@keyframes fade-rise {
-  from {
-    opacity: 0;
-    transform: translateY(24px);
-  }
+.hero-cta:focus-visible,
+.auth-panel button:focus-visible,
+.auth-request-error:focus {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
+}
+
+@keyframes auth-spin {
   to {
-    opacity: 1;
-    transform: translateY(0);
+    transform: rotate(360deg);
   }
 }
 
-@keyframes auth-panel-rise {
-  from {
-    opacity: 0;
-    transform: translateY(-46%);
+@media (prefers-reduced-motion: reduce) {
+  .landing-wrapper *:not(.auth-submit__spinner),
+  .landing-wrapper *::before,
+  .landing-wrapper *::after {
+    animation: none !important;
+    transition: none !important;
   }
-  to {
-    opacity: 1;
-    transform: translateY(-50%);
-  }
-}
-
-.animate-fade-rise {
-  animation: fade-rise 0.8s ease-out both;
-}
-
-.animate-fade-rise-delay {
-  animation: fade-rise 0.8s ease-out 0.2s both;
-}
-
-.animate-fade-rise-delay-2 {
-  animation: fade-rise 0.8s ease-out 0.4s both;
-}
-
-@media (min-width: 640px) {
-  .hero-title {
-    font-size: 4.5rem;
-  }
-
-  .hero-subtext {
-    font-size: 1.125rem;
+  .auth-submit__spinner {
+    animation-duration: 2.4s;
+    animation-timing-function: steps(8);
   }
 }
 
-@media (min-width: 768px) {
-  .hero-title {
-    font-size: 5rem;
-  }
-}
-
-@media (max-width: 767.98px) {
+@media (max-width: 900px) {
   .hero-section {
-    padding-top: 7rem;
-    padding-bottom: 3rem;
-    justify-content: flex-start;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--iot-space-3xl);
+    min-height: auto;
+    padding-top: 8rem;
   }
-
-  .hero-title {
-    font-size: 2.5rem;
+  .hero-copy {
+    max-width: 38rem;
   }
-
-  .hero-subtext {
-    margin-top: 1.25rem;
+  .landing-stage {
+    width: min(100%, 600px);
   }
-
-  .hero-cta {
-    margin-top: 2rem;
-    padding: 1rem 2rem;
-  }
-
-  .auth-panel {
-    margin-top: 1.5rem;
-    padding: 0.85rem;
+  .hero-section--with-auth {
+    gap: var(--iot-space-2xl);
   }
 }
 
-@media (max-width: 1100.98px) {
-  .hero-section--with-auth {
-    align-items: center;
-    padding-right: 1.5rem;
-    padding-left: 1.5rem;
-    text-align: center;
+@media (max-width: 520px) {
+  .hero-section {
+    padding: 7rem var(--iot-space-lg) var(--iot-space-3xl);
   }
-
+  .hero-title {
+    font-size: 2.25rem;
+  }
+  .hero-section--with-auth {
+    gap: var(--iot-space-xl);
+  }
   .auth-panel {
-    width: min(100%, 430px);
-    min-width: 0;
-    animation: fade-rise 0.5s ease-out both;
+    padding: var(--iot-space-xl);
+  }
+  .auth-heading {
+    margin: var(--iot-space-xl) 0;
+  }
+  .auth-form {
+    gap: var(--iot-space-md);
+  }
+  .hero-workflow {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--iot-space-xl);
+  }
+  .hero-workflow li {
+    flex-direction: row;
+    gap: var(--iot-space-lg);
   }
 }
 </style>

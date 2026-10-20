@@ -13,7 +13,8 @@ export interface InternalVariable {
      * Only meaningful for a shared variable (IsInside=false): whether this device reads the value,
      * so its rules and specifications may use it as a condition source. Required on a shared declaration and rejected on a device-local one.
      * `false` is a device that only affects the value: it contributes the domain and its declared
-     * effect but gets no read mirror and no rule/specification source capability.
+     * effect but gets no read mirror or value-condition source capability. Specifications may still
+     * check its source or sensitivity labels.
      *
      * Required on a shared declaration and rejected on a device-local one, so a capability can never
      * come from a missing field.
@@ -144,7 +145,6 @@ export interface DeviceApiView {
 export interface DeviceDialogMeta {
     nodeId: string
     deviceName: string
-    description: string
     label: string
     manifest: DeviceManifest | null
     specs: Specification[]

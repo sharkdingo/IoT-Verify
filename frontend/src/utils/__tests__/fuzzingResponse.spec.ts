@@ -69,6 +69,10 @@ const run = {
     requestedSpecCount: 1,
     eligibleSpecCount: 1
   },
+  eligibleSpecifications: { 'spec-1': { id: 'spec-1', templateId: '1' as const, templateLabel: 'Always',
+    aConditions: [{ id: 'c1', side: 'a' as const, deviceId: 'sensor_1', deviceLabel: 'Sensor', targetType: 'state' as const, key: 'state', relation: '=', value: 'on' }],
+    ifConditions: [], thenConditions: [] } },
+  modelTokenSourcesByDeviceId: { sensor_1: 'BUNDLED' as const, alarm_1: 'CUSTOM' as const },
   limitations: [...FUZZ_BASE_LIMITATION_CODES],
   maxIterations: 500,
   pathLength: 20,
@@ -349,6 +353,26 @@ describe('fuzzing response contracts', () => {
 
   it('keeps budget exhaustion distinct from a verification success', () => {
     expect(validateFuzzingRun(run).outcome).toBe('BUDGET_EXHAUSTED')
+  })
+
+  it('requires complete frozen specification and token provenance for details and history', () => {
+    const malformed = [
+      { ...run, eligibleSpecifications: undefined },
+      { ...run, eligibleSpecifications: {} },
+      { ...run, modelTokenSourcesByDeviceId: undefined },
+      { ...run, modelTokenSourcesByDeviceId: { sensor_1: 'BUNDLED' } },
+      { ...run, modelTokenSourcesByDeviceId: { sensor_1: 'BUNDLED', alarm_1: 'INVENTED' } },
+      { ...run, modelTokenSourcesByDeviceId: { sensor_1: 'BUNDLED', 'sensor-1': 'CUSTOM' } },
+      { ...run, eligibleSpecifications: { 'spec-1': { ...run.eligibleSpecifications['spec-1'],
+        aConditions: [{ ...run.eligibleSpecifications['spec-1'].aConditions[0], deviceId: 'missing' }] } } }
+    ]
+    expect(validateFuzzingRun(run)).toEqual(run)
+    expect(validateFuzzingRunSummaryList([{ ...run, dataAvailable: true }])).toHaveLength(1)
+    for (const value of malformed) {
+      expect(() => validateFuzzingRun(value)).toThrowError(expect.objectContaining({ code: FUZZ_RESPONSE_INCOMPLETE_CODE }))
+      expect(() => validateFuzzingRunSummaryList([{ ...value, dataAvailable: true }]))
+        .toThrowError(expect.objectContaining({ code: FUZZ_RESPONSE_INCOMPLETE_CODE }))
+    }
   })
 
   it('keeps the run-detail contract free of the summary-only availability field', () => {

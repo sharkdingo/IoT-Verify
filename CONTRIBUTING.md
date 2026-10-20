@@ -8,22 +8,8 @@ the source of truth, and docs must not drift from it.**
 ## Documentation discipline
 
 Documentation lives under `docs/`, indexed by the Doc Map ([docs/README.md](docs/README.md)).
-Before editing docs, read the Doc Map's **Ownership rules** — each fact has exactly one
-home:
-
-1. **Endpoints** — index only in [docs/api/rest-endpoints.md](docs/api/rest-endpoints.md)
-   (method, path, controller, link; no field detail).
-2. **Endpoint detail** — field-level DTO contracts in one domain doc
-   (`docs/api/auth.md`, `board.md`, `verification.md`, `fuzzing.md`, `chat-sse.md`).
-3. **Configuration** — env vars/defaults only in
-   [docs/getting-started/configuration.md](docs/getting-started/configuration.md).
-4. **Global API conventions** — `Result<T>`, auth, error codes only in
-   [docs/api/overview.md](docs/api/overview.md); elsewhere a one-line pointer, never a
-   restatement.
-5. **Change history** — dated entries only in [CHANGELOG.md](CHANGELOG.md).
-
-If the same fact appears in two docs, one is wrong by construction: delete the copy and
-link to the owner.
+Before editing, follow the Doc Map's [ownership rules](docs/README.md#ownership-rules-how-duplication-is-prevented).
+Keep each fact in its owner document; replace duplicates with links.
 
 ### Doc-sync checklist (PR requirement)
 

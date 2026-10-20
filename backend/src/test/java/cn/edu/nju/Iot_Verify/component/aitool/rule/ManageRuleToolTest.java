@@ -2,6 +2,7 @@ package cn.edu.nju.Iot_Verify.component.aitool.rule;
 
 import cn.edu.nju.Iot_Verify.component.aitool.AiDestructiveActionGuard;
 import cn.edu.nju.Iot_Verify.dto.board.CollectionMutationResultDto;
+import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
 import cn.edu.nju.Iot_Verify.security.UserContextHolder;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
@@ -392,9 +393,11 @@ class ManageRuleToolTest {
         String preview = tool.execute("{\"action\":\"delete\",\"ruleId\":9,\"confirmed\":true}");
         JsonNode previewJson = new ObjectMapper().readTree(preview);
         assertTrue(previewJson.path("requiresUserConfirmation").asBoolean());
+        assertEquals("When smoke is detected, sound alarm", destructiveActionGuard
+                .pendingContext(1L, "rule-test-session").orElseThrow().displayTarget());
         verify(boardStorageService, never()).removeRuleIfUnchanged(anyLong(), anyLong(), any());
 
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", previewJson.path("impactToken").asText());
         String result = tool.execute("{\"action\":\"delete\",\"ruleId\":9,\"confirmed\":true,\"impactToken\":\""
                 + previewJson.path("impactToken").asText() + "\"}");
         JsonNode resultJson = new ObjectMapper().readTree(result);
@@ -496,6 +499,102 @@ class ManageRuleToolTest {
 
     private ObjectMapper objectMapper() {
         return new ObjectMapper();
+    }
+
+    @Test
+    void updateChangesOnlyTheRequestedRuleInPlaceAndKeepsItsNameAndOrder() throws Exception {
+        BoardSemanticSnapshotDto baseline = numericRuleSnapshot(28, 100);
+        when(boardStorageService.getSemanticSnapshot(1L)).thenReturn(baseline);
+        when(boardStorageService.updateRulesAgainstSnapshot(anyLong(), any())).thenAnswer(invocation -> {
+            java.util.function.Function<BoardSemanticSnapshotDto, List<RuleDto>> update = invocation.getArgument(1);
+            List<RuleDto> next = update.apply(baseline);
+            assertEquals(2, next.size());
+            assertEquals(List.of(11L, 12L), next.stream().map(RuleDto::getId).toList());
+            assertEquals("30", next.get(0).getConditions().get(0).getValue());
+            assertEquals(">", next.get(0).getConditions().get(0).getRelation());
+            assertEquals("Cooling threshold", next.get(0).getRuleString());
+            assertEquals(baseline.rules().get(1), next.get(1));
+            assertEquals("28", baseline.rules().get(0).getConditions().get(0).getValue());
+            return CollectionMutationResultDto.of("updated", null, next);
+        });
+
+        JsonNode result = objectMapper().readTree(tool.execute(updateArgs(baseline, "30")));
+        assertEquals("updated", result.path("operation").asText());
+        assertEquals(11L, result.path("rule").path("ruleId").asLong());
+        assertEquals(1, result.path("executionOrder").asInt());
+        assertEquals(2, result.path("totalRules").asInt());
+        assertEquals("NOT_VERIFIED", result.path("verificationStatus").asText());
+        verify(boardStorageService, never()).addRule(anyLong(), any());
+        verify(boardStorageService, never()).removeRuleIfUnchanged(anyLong(), anyLong(), any());
+    }
+
+    @Test
+    void updateRejectsAChangedRuleAtTheAtomicCommitBoundary() throws Exception {
+        BoardSemanticSnapshotDto baseline = numericRuleSnapshot(28, 100);
+        BoardSemanticSnapshotDto changed = numericRuleSnapshot(31, 100);
+        when(boardStorageService.getSemanticSnapshot(1L)).thenReturn(baseline);
+        when(boardStorageService.updateRulesAgainstSnapshot(anyLong(), any())).thenAnswer(invocation -> {
+            java.util.function.Function<BoardSemanticSnapshotDto, List<RuleDto>> update = invocation.getArgument(1);
+            return CollectionMutationResultDto.of("updated", null, update.apply(changed));
+        });
+        JsonNode result = objectMapper().readTree(tool.execute(updateArgs(baseline, "30")));
+        assertEquals(409, result.path("status").asInt());
+        assertFalse(result.has("operation"));
+        assertEquals("31", changed.rules().get(0).getConditions().get(0).getValue());
+    }
+
+    @Test
+    void updateRejectsAChangedTemplateDomainAtTheAtomicCommitBoundary() throws Exception {
+        BoardSemanticSnapshotDto baseline = numericRuleSnapshot(28, 100);
+        BoardSemanticSnapshotDto changed = numericRuleSnapshot(28, 20);
+        when(boardStorageService.getSemanticSnapshot(1L)).thenReturn(baseline);
+        when(boardStorageService.updateRulesAgainstSnapshot(anyLong(), any())).thenAnswer(invocation -> {
+            java.util.function.Function<BoardSemanticSnapshotDto, List<RuleDto>> update = invocation.getArgument(1);
+            return CollectionMutationResultDto.of("updated", null, update.apply(changed));
+        });
+        JsonNode result = objectMapper().readTree(tool.execute(updateArgs(baseline, "30")));
+        assertEquals(400, result.path("status").asInt());
+        assertFalse(result.has("operation"));
+        assertEquals("28", changed.rules().get(0).getConditions().get(0).getValue());
+    }
+
+    @Test
+    void updateRejectsInvalidValuesBeforeEnteringTheWriteBoundary() throws Exception {
+        BoardSemanticSnapshotDto baseline = numericRuleSnapshot(28, 100);
+        when(boardStorageService.getSemanticSnapshot(1L)).thenReturn(baseline);
+        JsonNode result = objectMapper().readTree(tool.execute(updateArgs(baseline, "101")));
+        assertEquals(400, result.path("status").asInt());
+        verify(boardStorageService, never()).updateRulesAgainstSnapshot(anyLong(), any());
+        verify(boardStorageService, never()).addRule(anyLong(), any());
+    }
+
+    private BoardSemanticSnapshotDto numericRuleSnapshot(int threshold, int upperBound) {
+        DeviceTemplateDto template = lightTemplate();
+        template.getManifest().setInternalVariables(List.of(DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
+                .name("temperature").isInside(true).lowerBound(0).upperBound(upperBound).build()));
+        RuleDto first = RuleDto.builder().id(11L).userId(1L).ruleString("Cooling threshold")
+                .conditions(List.of(RuleDto.Condition.builder().deviceName("Light_1").attribute("temperature")
+                        .targetType("variable").relation(">").value(String.valueOf(threshold)).build()))
+                .command(RuleDto.Command.builder().deviceName("Light_1").action("turnOn").build()).build();
+        RuleDto second = RuleDto.builder().id(12L).userId(1L).ruleString("Heating threshold")
+                .conditions(List.of(RuleDto.Condition.builder().deviceName("Light_1").attribute("temperature")
+                        .targetType("variable").relation("<").value("18").build()))
+                .command(RuleDto.Command.builder().deviceName("Light_1").action("turnOff").build()).build();
+        return new BoardSemanticSnapshotDto(List.of(node("Light_1", "Light")), List.of(),
+                List.of(first, second), List.of(), List.of(template));
+    }
+
+    private String updateArgs(BoardSemanticSnapshotDto baseline, String value) throws Exception {
+        var args = objectMapper().createObjectNode();
+        args.put("action", "update");
+        args.put("ruleId", 11);
+        args.set("expectedRule", objectMapper().valueToTree(RuleToolPresenter.present(baseline.rules().get(0), baseline.nodes())));
+        args.set("conditions", objectMapper().readTree("""
+                [{"deviceId":"Light_1","attribute":"temperature","targetType":"variable","relation":">","value":"30"}]
+                """));
+        ((com.fasterxml.jackson.databind.node.ObjectNode) args.path("conditions").get(0)).put("value", value);
+        args.set("command", objectMapper().readTree("{\"deviceId\":\"Light_1\",\"action\":\"turnOn\"}"));
+        return args.toString();
     }
 
     private DeviceNodeDto node(String id, String label) {

@@ -12,13 +12,12 @@ public class BoardLayoutMapper {
     private static final double DEFAULT_CONTROL_WIDTH = 320.0;
     private static final double DEFAULT_INSPECTOR_WIDTH = 320.0;
     private static final double DEFAULT_ZOOM = 1.0;
-    private static final double MIN_ZOOM = 0.4;
     private static final double MAX_ZOOM = 2.0;
     private static final double MAX_ABS_PAN = 1_000_000.0;
     private static final String DEFAULT_CONTROL_SECTION = "templates";
     private static final String DEFAULT_INSPECTOR_SECTION = "devices";
     private static final Set<String> CONTROL_SECTIONS = Set.of("devices", "templates", "rules", "specs");
-    private static final Set<String> INSPECTOR_SECTIONS = Set.of("devices", "rules", "specs");
+    private static final Set<String> INSPECTOR_SECTIONS = Set.of("devices", "rules", "specs", "environment");
 
     private static String text(String value, String defaultValue) {
         return value != null && !value.isBlank() ? value : defaultValue;
@@ -119,10 +118,10 @@ public class BoardLayoutMapper {
     }
 
     private double zoom(Double value) {
-        if (value == null || !Double.isFinite(value)) {
+        if (value == null || !Double.isFinite(value) || value <= 0) {
             return DEFAULT_ZOOM;
         }
-        return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value));
+        return Math.min(MAX_ZOOM, value);
     }
 
     private String panelActiveSection(BoardLayoutDto.PanelLayout panel, String defaultSection, Set<String> allowedSections) {

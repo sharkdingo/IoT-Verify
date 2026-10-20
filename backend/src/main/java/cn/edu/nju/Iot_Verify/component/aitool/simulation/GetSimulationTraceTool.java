@@ -44,13 +44,16 @@ public class GetSimulationTraceTool extends AbstractAiTool {
                         "stateOffset", Map.of("type", "integer",
                                 "description", "Non-negative zero-based state-sequence offset (default 0)."),
                         "stateLimit", Map.of("type", "integer",
-                                "description", "Number of states to return, 1-10 (default 10).")
+                                "description", "Maximum states to return, 1-10 (default 10). The byte budget may return fewer; continue from nextStateOffset.")
                 ),
                 List.of("simulationId")
         );
 
         return LlmToolSpec.of(getName(),
-                "Get a saved simulation trace by simulationId with a bounded state window. Page the sequence with stateOffset and stateLimit; use stateCount and nextStateOffset to inspect another window.",
+                "Get a saved simulation trace by simulationId with a bounded state window. "
+                        + "Page with stateOffset and stateLimit; use stateCount and nextStateOffset to inspect another window. "
+                        + "Simulation does not check specifications; modelSnapshot.specificationCount is the run's scope, "
+                        + "not the saved Board's specification count.",
                 schema);
     }
 
@@ -93,6 +96,8 @@ public class GetSimulationTraceTool extends AbstractAiTool {
             String message = trace.isModelComplete()
                     ? "Saved model-trace simulation loaded. It is one possible model trajectory, not a physical-home prediction."
                     : "Saved model-trace simulation loaded from an incomplete generated model; inspect generationIssues before interpreting it.";
+            message += " Simulation does not check specifications. modelSnapshot.specificationCount describes "
+                    + "the simulation model, not whether the saved Board has specifications. Use formal verification for specification outcomes.";
             body.put("message", message);
             return readOnlySuccessJson(body, message);
         } catch (ArgValidationException e) {

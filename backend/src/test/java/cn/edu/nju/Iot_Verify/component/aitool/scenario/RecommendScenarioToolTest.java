@@ -3,14 +3,23 @@ package cn.edu.nju.Iot_Verify.component.aitool.scenario;
 import cn.edu.nju.Iot_Verify.component.ai.PromptCompletionService;
 import cn.edu.nju.Iot_Verify.configure.ChatExecutionConfig;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
+import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
+import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
+import cn.edu.nju.Iot_Verify.dto.recommendation.ScenarioRecommendationRequestDto;
+import cn.edu.nju.Iot_Verify.dto.recommendation.ScenarioRecommendationResponseDto;
 import cn.edu.nju.Iot_Verify.security.UserContextHolder;
 import cn.edu.nju.Iot_Verify.service.BoardStorageService;
+import cn.edu.nju.Iot_Verify.service.recommendation.RecommendationResultParser;
+import cn.edu.nju.Iot_Verify.service.recommendation.RecommendationFailure;
+import cn.edu.nju.Iot_Verify.service.recommendation.ScenarioRecommendationService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -19,6 +28,8 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -27,6 +38,8 @@ import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 
 @ExtendWith(MockitoExtension.class)
 class RecommendScenarioToolTest {
@@ -45,21 +58,100 @@ class RecommendScenarioToolTest {
     private final ObjectMapper objectMapper = new ObjectMapper();
     private AiScenarioDraftStore draftStore;
     private ChatExecutionConfig chatExecutionConfig;
+    private ScenarioRecommendationService service;
+    private BoardSemanticSnapshotDto snapshot;
     private RecommendScenarioTool tool;
 
     @BeforeEach
     void setUp() {
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of());
+        lenient().when(boardStorageService.getSemanticSnapshot(1L)).thenAnswer(invocation -> snapshot);
         draftStore = new AiScenarioDraftStore();
         chatExecutionConfig = new ChatExecutionConfig();
-        tool = new RecommendScenarioTool(
+        service = new ScenarioRecommendationService(
                 promptCompletionService, boardStorageService, draftStore,
-                chatExecutionConfig, objectMapper);
+                chatExecutionConfig, objectMapper, new RecommendationResultParser(objectMapper));
+        tool = new RecommendScenarioTool(service, objectMapper);
         UserContextHolder.setUserId(1L);
     }
 
     @AfterEach
     void tearDown() {
         UserContextHolder.clear();
+    }
+
+    @Test
+    void restRecommendationDoesNotReadAmbientChatOrReplaceItsDraft() throws Exception {
+        UserContextHolder.setChatSessionId("session-1");
+        draftStore.saveDraft(1L, "session-1", "Previous", objectMapper.readTree(
+                "{\"devices\":[{\"id\":\"device_1\"}],\"rules\":[],\"specs\":[]}"));
+        DeviceTemplateDto template = sensorTemplate();
+        template.getManifest().setIcon("data:image/svg+xml;base64," + "A".repeat(6_000));
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of(template));
+        when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
+                .thenReturn("""
+                        {"scenarioName":"REST preview","scene":{
+                          "devices":[{"id":"sensor","templateName":"Noise Sensor","label":"Sensor"}],
+                          "environmentVariables":[],"rules":[],"specs":[]}}
+                        """);
+        chatExecutionConfig.setMaxToolResultBytes(4_096);
+
+        ScenarioRecommendationResponseDto response = service.recommend(1L,
+                objectMapper.readValue(DEFAULT_ARGS, ScenarioRecommendationRequestDto.class));
+
+        assertEquals("REST preview", response.getScenarioName());
+        assertEquals(1, response.getScene().getDevices().size());
+        assertNull(response.getDraftStored());
+        assertNull(response.getPreviousDraftRetained());
+        JsonNode json = objectMapper.valueToTree(response);
+        assertFalse(json.has("draftStored"));
+        assertFalse(json.has("previousDraftRetained"));
+        assertTrue(objectMapper.writeValueAsBytes(response).length > 4_096);
+        assertEquals("Previous", draftStore.latestDraft(1L, "session-1").orElseThrow().scenarioName());
+    }
+
+    @Test
+    void unusableProviderResultThrowsTypedFailureWithImmutableDetails() throws Exception {
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of(sensorTemplate()));
+        when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
+                .thenReturn("not-json");
+
+        RecommendationFailure failure = assertThrows(RecommendationFailure.class, () -> service.recommend(
+                1L, objectMapper.readValue(DEFAULT_ARGS, ScenarioRecommendationRequestDto.class)));
+
+        assertEquals(502, failure.getCode());
+        assertEquals("AI_RESPONSE_INVALID", failure.getErrorCode());
+        assertEquals("response_parse", failure.getDetails().get("phase"));
+        assertEquals(false, failure.getDetails().get("draftStored"));
+        assertThrows(UnsupportedOperationException.class, () -> failure.getDetails().put("phase", "changed"));
+    }
+
+    @Test
+    void promptAndValidationUseOneCapturedSceneEvenIfBoardChangesDuringCompletion() throws Exception {
+        DeviceNodeDto node = new DeviceNodeDto();
+        node.setId("captured-node");
+        node.setTemplateName("Noise Sensor");
+        node.setLabel("Captured sensor");
+        snapshot = new BoardSemanticSnapshotDto(List.of(node), List.of(), List.of(), List.of(),
+                List.of(sensorTemplate()));
+        when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
+                .thenAnswer(invocation -> {
+                    assertTrue(invocation.<String>getArgument(1).contains("captured-node"));
+                    snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of());
+                    return """
+                            {"scenarioName":"Captured template","scene":{
+                              "devices":[{"id":"sensor","templateName":"Noise Sensor","label":"Sensor"}],
+                              "environmentVariables":[],"rules":[],"specs":[]}}
+                            """;
+                });
+
+        ScenarioRecommendationResponseDto response = service.recommend(1L,
+                objectMapper.readValue(DEFAULT_ARGS, ScenarioRecommendationRequestDto.class));
+
+        assertEquals(1, response.getScene().getDevices().size());
+        assertEquals("Noise Sensor", response.getScene().getDevices().get(0).getTemplateName());
+        verify(boardStorageService).getSemanticSnapshot(1L);
+        verifyNoMoreInteractions(boardStorageService);
     }
 
     @Test
@@ -70,22 +162,91 @@ class RecommendScenarioToolTest {
     }
 
     @Test
+    void explicitTemplateScopeRetainsCompleteCapabilitiesAndValidatesAgainstThatScope() throws Exception {
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(),
+                List.of(sensorTemplate(), lightTemplate(), contentTemplate()));
+        when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
+                .thenAnswer(invocation -> {
+                    String prompt = invocation.getArgument(1);
+                    int start = prompt.indexOf("[{\"name\"");
+                    int end = prompt.indexOf("\n\n## 场景要求", start);
+                    JsonNode templates = objectMapper.readTree(prompt.substring(start, end));
+                    assertEquals(2, templates.size(), "Only explicitly selected templates enter the model context");
+                    assertEquals("Noise Sensor", templates.get(0).path("name").asText());
+                    assertEquals(objectMapper.valueToTree(cn.edu.nju.Iot_Verify.component.aitool.RecommendationCapabilityView
+                            .fromManifest(lightTemplate().getManifest())), templates.get(1).path("capabilities"));
+                    return """
+                            {"scenarioName":"Scoped","scene":{"devices":[
+                             {"id":"light","templateName":"Light","label":"Light","state":"off"},
+                             {"id":"phone","templateName":"Phone","label":"Phone"}],"environmentVariables":[],"rules":[],"specs":[]}}
+                            """;
+                });
+        ScenarioRecommendationRequestDto request = objectMapper.readValue(DEFAULT_ARGS, ScenarioRecommendationRequestDto.class);
+        request.setTemplateNames(List.of(" light ", "Noise Sensor"));
+        ScenarioRecommendationResponseDto result = service.recommend(1L, request);
+        assertEquals(1, result.getScene().getDevices().size());
+        assertEquals("Light", result.getScene().getDevices().get(0).getTemplateName());
+        assertEquals(1, result.getFilteredCount());
+        assertEquals("unknownTemplate", result.getFilteredItems().get(0).getReasonCode());
+        verify(boardStorageService).getSemanticSnapshot(1L);
+    }
+
+    @Test
+    void toolAcceptsExplicitTemplateNamesWithoutReplacingThemWithTheWholeCatalog() throws Exception {
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(),
+                List.of(sensorTemplate(), lightTemplate(), contentTemplate()));
+        when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
+                .thenReturn("""
+                        {"scenarioName":"Scoped","scene":{"devices":[{"id":"light","templateName":"Light","label":"Light","state":"off"}],
+                         "environmentVariables":[],"rules":[],"specs":[]}}
+                        """);
+        var args = (com.fasterxml.jackson.databind.node.ObjectNode) objectMapper.readTree(DEFAULT_ARGS);
+        args.putArray("templateNames").add("Light");
+        JsonNode result = objectMapper.readTree(tool.execute(args.toString()));
+        assertEquals("Scoped", result.path("scenarioName").asText());
+        assertEquals(1, result.path("scene").path("devices").size());
+        verify(promptCompletionService).completeRecommendation(anyString(), argThat(prompt ->
+                prompt.contains("\"name\":\"Light\"") && !prompt.contains("\"name\":\"Noise Sensor\"")
+                        && !prompt.contains("\"name\":\"Phone\"")), anyDouble(), anyInt());
+    }
+
+    @Test
+    void unknownScopedTemplateStopsBeforeAnyModelCall() throws Exception {
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of(lightTemplate()));
+        var args = (com.fasterxml.jackson.databind.node.ObjectNode) objectMapper.readTree(DEFAULT_ARGS);
+        args.putArray("templateNames").add("Light").add("Missing template");
+        JsonNode result = objectMapper.readTree(tool.execute(args.toString()));
+        assertEquals(422, result.path("status").asInt());
+        assertTrue(result.path("error").asText().contains("templateNames"));
+        verify(promptCompletionService, never()).completeRecommendation(anyString(), anyString(), anyDouble(), anyInt());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"null", "[]", "[4]", "[\"\"]", "[\"Light\",\"Light\"]"})
+    void malformedTemplateScopeIsRejectedBeforeReadingOrCallingTheModel(String names) throws Exception {
+        var args = (com.fasterxml.jackson.databind.node.ObjectNode) objectMapper.readTree(DEFAULT_ARGS);
+        args.set("templateNames", objectMapper.readTree(names));
+        JsonNode result = objectMapper.readTree(tool.execute(args.toString()));
+        assertEquals(400, result.path("status").asInt());
+        assertEquals("VALIDATION_ERROR", result.path("errorCode").asText());
+        assertTrue(result.path("error").asText().contains("templateNames"));
+        verify(boardStorageService, never()).getSemanticSnapshot(1L);
+        verify(promptCompletionService, never()).completeRecommendation(anyString(), anyString(), anyDouble(), anyInt());
+    }
+
+    @Test
     void execute_rejectsUnknownRequestFieldBeforeReadingBoardOrCallingAi() throws Exception {
         JsonNode json = objectMapper.readTree(tool.execute("{\"maxSpecification\":3}"));
 
         assertEquals("VALIDATION_ERROR", json.path("errorCode").asText());
         assertEquals("$ contains unsupported field(s): maxSpecification.", json.path("error").asText());
-        verify(boardStorageService, never()).getDeviceTemplates(1L);
+        verify(boardStorageService, never()).getSemanticSnapshot(1L);
         verify(promptCompletionService, never()).complete(anyString(), anyString(), anyDouble(), anyInt());
     }
 
     @Test
     void execute_withUnparseableAiResponse_returnsUpstreamErrorNotEmptyScene() throws Exception {
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(sensorTemplate()));
-        when(boardStorageService.getNodes(1L)).thenReturn(List.of());
-        when(boardStorageService.getEnvironmentVariables(1L)).thenReturn(List.of());
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of(sensorTemplate()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("not-json");
 
@@ -98,11 +259,7 @@ class RecommendScenarioToolTest {
 
     @Test
     void execute_whenAiReturnsNoSceneItems_reportsNoFiltering() throws Exception {
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(sensorTemplate()));
-        when(boardStorageService.getNodes(1L)).thenReturn(List.of());
-        when(boardStorageService.getEnvironmentVariables(1L)).thenReturn(List.of());
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of(sensorTemplate()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -132,7 +289,7 @@ class RecommendScenarioToolTest {
         UserContextHolder.setChatSessionId("session-1");
         draftStore.saveDraft(1L, "session-1", "Previous", objectMapper.readTree(
                 "{\"devices\":[{\"id\":\"device_1\"}],\"rules\":[],\"specs\":[]}"));
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of());
 
         JsonNode json = objectMapper.readTree(tool.execute("""
                 {"minDevices":1,"minRules":1,"minSpecs":1,
@@ -153,11 +310,7 @@ class RecommendScenarioToolTest {
         DeviceTemplateDto oversizedTemplate = sensorTemplate();
         oversizedTemplate.getManifest().setIcon(
                 "data:image/svg+xml;base64," + "A".repeat(6_000));
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(oversizedTemplate));
-        when(boardStorageService.getNodes(1L)).thenReturn(List.of());
-        when(boardStorageService.getEnvironmentVariables(1L)).thenReturn(List.of());
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of(oversizedTemplate));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -186,11 +339,7 @@ class RecommendScenarioToolTest {
     @Test
     void execute_generatesCoupledSceneAndKeepsPrefixLikeNamesLiteral() throws Exception {
         UserContextHolder.setChatSessionId("session-1");
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(sensorTemplate(), lightTemplate()));
-        when(boardStorageService.getNodes(1L)).thenReturn(List.of());
-        when(boardStorageService.getEnvironmentVariables(1L)).thenReturn(List.of());
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of(sensorTemplate(), lightTemplate()));
         when(promptCompletionService.completeRecommendation(
                 anyString(),
                 contains("全量替换 scene 草案"),
@@ -309,12 +458,7 @@ class RecommendScenarioToolTest {
 
     @Test
     void execute_normalizesEquivalentApiEventBooleanSyntaxButRejectsDifferentSemantics() throws Exception {
-        when(boardStorageService.getDeviceTemplates(1L))
-                .thenReturn(List.of(eventSourceTemplate(), eventTargetTemplate()));
-        when(boardStorageService.getNodes(1L)).thenReturn(List.of());
-        when(boardStorageService.getEnvironmentVariables(1L)).thenReturn(List.of());
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of(eventSourceTemplate(), eventTargetTemplate()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -371,11 +515,7 @@ class RecommendScenarioToolTest {
 
     @Test
     void execute_returnsFilteredItemsForInvalidSceneCandidates() throws Exception {
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(sensorTemplate(), lightTemplate()));
-        when(boardStorageService.getNodes(1L)).thenReturn(List.of());
-        when(boardStorageService.getEnvironmentVariables(1L)).thenReturn(List.of());
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of(sensorTemplate(), lightTemplate()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -430,11 +570,7 @@ class RecommendScenarioToolTest {
 
     @Test
     void execute_filtersWholeRuleOrSpecWhenAnyNestedCandidateWouldBeDropped() throws Exception {
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(sensorTemplate(), lightTemplate()));
-        when(boardStorageService.getNodes(1L)).thenReturn(List.of());
-        when(boardStorageService.getEnvironmentVariables(1L)).thenReturn(List.of());
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of(sensorTemplate(), lightTemplate()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -489,13 +625,91 @@ class RecommendScenarioToolTest {
         assertEquals("invalidSpecConditions", json.path("filteredItems").get(1).path("reasonCode").asText());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"missingSource", "unknownVariable", "invalidValue", "extraScope", "unknownDevice"})
+    void rejectedSpecConditionsExplainTheirLocationAndCauseWithoutKeepingAPartialSpec(String invalid) throws Exception {
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of(sensorTemplate()));
+        var response = (com.fasterxml.jackson.databind.node.ObjectNode) objectMapper.readTree("""
+                {"scene":{"devices":[{"id":"sensor_1","templateName":"Noise Sensor","label":"声音传感器"}],
+                  "rules":[],"specs":[{"templateId":"1","aConditions":[{"deviceId":"sensor_1",
+                    "targetType":"variable","key":"a_noise","variableSource":"reported","relation":"=","value":"high"}]}]}}
+                """);
+        var condition = (com.fasterxml.jackson.databind.node.ObjectNode) response.path("scene").path("specs")
+                .get(0).path("aConditions").get(0);
+        String explanation = switch (invalid) {
+            case "missingSource" -> { condition.remove("variableSource"); yield "请明确变量来源"; }
+            case "unknownVariable" -> { condition.put("key", "missing_variable"); yield "请按设备模板声明选择"; }
+            case "invalidValue" -> { condition.put("value", "outside_the_declared_domain"); yield "请按设备模板声明选择"; }
+            case "extraScope" -> { condition.put("propertyScope", "variable"); yield "普通条件多写了标签范围"; }
+            default -> { condition.put("deviceId", "not_in_this_draft"); yield "引用的设备不在草稿中"; }
+        };
+        when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
+                .thenReturn(response.toString());
+        var args = (com.fasterxml.jackson.databind.node.ObjectNode) objectMapper.readTree(DEFAULT_ARGS);
+        args.put("language", "zh-CN");
+        JsonNode result = objectMapper.readTree(tool.execute(args.toString()));
+
+        assertTrue(result.path("scene").path("specs").isEmpty());
+        assertEquals("PARTIAL", result.path("objectiveStatus").asText());
+        JsonNode rejected = result.path("filteredItems").get(0);
+        assertEquals("invalidSpecConditions", rejected.path("reasonCode").asText());
+        assertTrue(rejected.path("reason").asText().contains("检查条件第 1 项："));
+        assertTrue(rejected.path("reason").asText().contains(explanation));
+        verify(promptCompletionService).completeRecommendation(anyString(), anyString(), anyDouble(), anyInt());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void execute_preservesLabelsButFiltersWholeValueCandidatesForAffectOnlyDeclarations(boolean reads) throws Exception {
+        DeviceTemplateDto sensor = sensorTemplate();
+        sensor.getManifest().getInternalVariables().get(0).setReads(reads);
+        sensor.getManifest().getInternalVariables().get(0).setFalsifiableWhenCompromised(false);
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(),
+                List.of(sensor, lightTemplate()));
+        when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
+                .thenReturn("""
+                        {"scenarioName":"Read capability","scene":{
+                          "devices":[{"id":"sensor_1","templateName":"Noise Sensor","label":"Sensor"},
+                                     {"id":"light_1","templateName":"Light","label":"Light","state":"off"}],
+                          "environmentVariables":[{"name":"a_noise","value":"low","trust":"trusted","privacy":"public"}],
+                          "rules":[{"name":"Noise turns on light","sources":[
+                            {"fromId":"sensor_1","fromApi":"a_noise","itemType":"variable","relation":"=","value":"high"},
+                            {"fromId":"light_1","fromApi":"SwitchState","itemType":"mode","relation":"=","value":"off"}],
+                            "toId":"light_1","toApi":"turnOn"}],
+                          "specs":[{"templateId":"3","aConditions":[
+                            {"deviceId":"sensor_1","targetType":"variable","key":"a_noise","variableSource":"reported","relation":"=","value":"high"},
+                            {"deviceId":"sensor_1","targetType":"privacy","key":"a_noise","propertyScope":"variable","relation":"=","value":"public"}]},
+                            {"templateId":"3","aConditions":[
+                            {"deviceId":"sensor_1","targetType":"trust","key":"a_noise","propertyScope":"variable","relation":"=","value":"trusted"},
+                            {"deviceId":"sensor_1","targetType":"privacy","key":"a_noise","propertyScope":"variable","relation":"=","value":"public"}]}]}}
+                        """);
+
+        JsonNode result = objectMapper.readTree(tool.execute(DEFAULT_ARGS));
+        JsonNode scene = result.path("scene");
+
+        assertEquals(2, scene.path("devices").size());
+        assertEquals(1, scene.path("environmentVariables").size());
+        assertEquals(reads ? 1 : 0, scene.path("rules").size());
+        assertEquals(reads ? 2 : 1, scene.path("specs").size());
+        assertEquals(reads ? 0 : 2, result.path("filteredCount").asInt());
+        JsonNode labelConditions = scene.path("specs").get(reads ? 1 : 0).path("aConditions");
+        assertEquals(2, labelConditions.size());
+        assertEquals("trust", labelConditions.get(0).path("targetType").asText());
+        assertEquals("privacy", labelConditions.get(1).path("targetType").asText());
+        if (reads) {
+            assertEquals(2, scene.path("rules").get(0).path("sources").size());
+            assertEquals(2, scene.path("specs").get(0).path("aConditions").size());
+        } else {
+            assertEquals("invalidRuleSources", result.path("filteredItems").get(0).path("reasonCode").asText());
+            assertEquals("invalidSpecConditions", result.path("filteredItems").get(1).path("reasonCode").asText());
+        }
+        verify(boardStorageService).getSemanticSnapshot(1L);
+        verifyNoMoreInteractions(boardStorageService);
+    }
+
     @Test
     void execute_filtersUnknownEnvironmentVariablesInsteadOfReturningDriftingScene() throws Exception {
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(sensorTemplate()));
-        when(boardStorageService.getNodes(1L)).thenReturn(List.of());
-        when(boardStorageService.getEnvironmentVariables(1L)).thenReturn(List.of());
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of(sensorTemplate()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -532,11 +746,7 @@ class RecommendScenarioToolTest {
 
     @Test
     void execute_filtersDeviceWithInvalidInitialRuntimeInsteadOfDefaultingIt() throws Exception {
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(lightTemplate()));
-        when(boardStorageService.getNodes(1L)).thenReturn(List.of());
-        when(boardStorageService.getEnvironmentVariables(1L)).thenReturn(List.of());
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of(lightTemplate()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -570,12 +780,7 @@ class RecommendScenarioToolTest {
 
     @Test
     void execute_rejectsIncompleteRuleContentFlowInsteadOfSilentlyDroppingIt() throws Exception {
-        when(boardStorageService.getDeviceTemplates(1L))
-                .thenReturn(List.of(lightTemplate(), contentTemplate()));
-        when(boardStorageService.getNodes(1L)).thenReturn(List.of());
-        when(boardStorageService.getEnvironmentVariables(1L)).thenReturn(List.of());
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of(lightTemplate(), contentTemplate()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -610,11 +815,7 @@ class RecommendScenarioToolTest {
 
     @Test
     void execute_preservesValidatedLocalRuntimeLabelsAndRejectsEnvironmentOverridesOnDevices() throws Exception {
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(lightTemplate(), sensorTemplate()));
-        when(boardStorageService.getNodes(1L)).thenReturn(List.of());
-        when(boardStorageService.getEnvironmentVariables(1L)).thenReturn(List.of());
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of(lightTemplate(), sensorTemplate()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -679,11 +880,7 @@ class RecommendScenarioToolTest {
 
     @Test
     void execute_filtersDuplicateIdsAndInvalidProvidedLayoutInsteadOfSilentlyRewriting() throws Exception {
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(lightTemplate()));
-        when(boardStorageService.getNodes(1L)).thenReturn(List.of());
-        when(boardStorageService.getEnvironmentVariables(1L)).thenReturn(List.of());
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of(lightTemplate()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -715,11 +912,7 @@ class RecommendScenarioToolTest {
 
     @Test
     void execute_rewritesAiAliasAcrossDependenciesAndReportsEveryAppliedDefault() throws Exception {
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(lightTemplate()));
-        when(boardStorageService.getNodes(1L)).thenReturn(List.of());
-        when(boardStorageService.getEnvironmentVariables(1L)).thenReturn(List.of());
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of(lightTemplate()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -771,11 +964,7 @@ class RecommendScenarioToolTest {
 
     @Test
     void execute_keepsRuleWhenOptionalDisplayNameIsMissing() throws Exception {
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(lightTemplate()));
-        when(boardStorageService.getNodes(1L)).thenReturn(List.of());
-        when(boardStorageService.getEnvironmentVariables(1L)).thenReturn(List.of());
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of(lightTemplate()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -801,11 +990,7 @@ class RecommendScenarioToolTest {
 
     @Test
     void execute_rewritesAiAliasesSoModelNormalizationCannotMergeDevices() throws Exception {
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(lightTemplate()));
-        when(boardStorageService.getNodes(1L)).thenReturn(List.of());
-        when(boardStorageService.getEnvironmentVariables(1L)).thenReturn(List.of());
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of(lightTemplate()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -842,11 +1027,7 @@ class RecommendScenarioToolTest {
                 .apis(List.of(DeviceTemplateDto.DeviceManifest.API.builder()
                         .name("notify").signal(true).endState("notified").build()))
                 .build());
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(notifier));
-        when(boardStorageService.getNodes(1L)).thenReturn(List.of());
-        when(boardStorageService.getEnvironmentVariables(1L)).thenReturn(List.of());
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of(notifier));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -893,7 +1074,7 @@ class RecommendScenarioToolTest {
 
         assertEquals("VALIDATION_ERROR", json.path("errorCode").asText());
         assertEquals("minDevices is required.", json.path("error").asText());
-        verify(boardStorageService, never()).getDeviceTemplates(1L);
+        verify(boardStorageService, never()).getSemanticSnapshot(1L);
     }
 
     @Test
@@ -905,7 +1086,7 @@ class RecommendScenarioToolTest {
 
         assertEquals("VALIDATION_ERROR", json.path("errorCode").asText());
         assertEquals("Minimum devices must not exceed maximum devices.", json.path("error").asText());
-        verify(boardStorageService, never()).getDeviceTemplates(1L);
+        verify(boardStorageService, never()).getSemanticSnapshot(1L);
     }
 
     @Test
@@ -919,7 +1100,7 @@ class RecommendScenarioToolTest {
         assertEquals("VALIDATION_ERROR", json.path("errorCode").asText());
         assertEquals(400, json.path("status").asInt());
         assertEquals("maxDevices must be an integer between 1 and 10.", json.path("error").asText());
-        verify(boardStorageService, never()).getDeviceTemplates(1L);
+        verify(boardStorageService, never()).getSemanticSnapshot(1L);
         verify(promptCompletionService, never()).complete(anyString(), anyString(), anyDouble(), anyInt());
     }
 
@@ -932,7 +1113,7 @@ class RecommendScenarioToolTest {
 
         assertEquals("VALIDATION_ERROR", json.path("errorCode").asText());
         assertEquals("userRequirement must be a string.", json.path("error").asText());
-        verify(boardStorageService, never()).getDeviceTemplates(1L);
+        verify(boardStorageService, never()).getSemanticSnapshot(1L);
         verify(promptCompletionService, never()).complete(anyString(), anyString(), anyDouble(), anyInt());
     }
 

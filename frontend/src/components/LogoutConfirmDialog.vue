@@ -16,7 +16,6 @@ const emit = defineEmits<{
   'update:visible': [value: boolean]
   'confirm': []
   'cancel': []
-  'delete-account': []
 }>()
 
 const handleConfirm = () => {
@@ -27,12 +26,6 @@ const handleConfirm = () => {
 const handleCancel = () => {
   if (props.loading) return
   emit('cancel')
-  emit('update:visible', false)
-}
-
-const handleDeleteAccount = () => {
-  if (props.loading) return
-  emit('delete-account')
   emit('update:visible', false)
 }
 
@@ -52,6 +45,7 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
         <div
           :ref="setDialogRef"
           class="iot-dialog iot-dialog--sm"
+          data-testid="logout-dialog"
           role="dialog"
           aria-modal="true"
           aria-labelledby="logout-dialog-title"
@@ -66,26 +60,15 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
             </div>
           </div>
 
-          <div class="iot-dialog__body">{{ t('app.logoutMessage') }}</div>
+          <div class="iot-dialog__body">{{ t('account.sessionDescription') }}</div>
 
           <div class="iot-dialog__footer">
-            <!-- The only route to account deletion, so it needs to be addressable — but it is not one of
-                 the two answers to this question, so it sits apart from the pair. -->
-            <button
-              type="button"
-              class="iot-dialog-btn iot-dialog-btn--quiet iot-dialog__footer-aside"
-              data-testid="open-account-delete"
-              :disabled="loading"
-              @click="handleDeleteAccount"
-            >
-              {{ t('app.deleteAccountEntry') }}
-            </button>
-            <button type="button" class="iot-dialog-btn iot-dialog-btn--ghost" @click="handleCancel" :disabled="loading">
+            <button type="button" class="iot-dialog-btn iot-dialog-btn--ghost" data-testid="logout-cancel" autofocus @click="handleCancel" :disabled="loading">
               {{ t('app.cancel') }}
             </button>
-            <button type="button" class="iot-dialog-btn iot-dialog-btn--primary" @click="handleConfirm" :disabled="loading">
+            <button type="button" class="iot-dialog-btn iot-dialog-btn--primary" data-testid="logout-confirm" @click="handleConfirm" :disabled="loading" :aria-busy="loading ? 'true' : undefined">
               <span v-if="loading" class="iot-dialog-btn__spinner" aria-hidden="true"></span>
-              <span v-else>{{ t('app.logout') }}</span>
+              <span>{{ loading ? t('account.signingOut') : t('app.logout') }}</span>
             </button>
           </div>
         </div>

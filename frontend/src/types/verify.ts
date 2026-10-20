@@ -2,7 +2,7 @@
 
 import type { ModelPlaybackScene, RunInitiator } from './model'
 import type { ModelRunSnapshot, ModelSemantics } from './modelSemantics'
-import type { Specification } from './spec'
+import type { SpecCondition, Specification } from './spec'
 import type { AsyncTaskStatus, TaskProgressStage } from './task'
 import type { RunPersistence } from './runPersistence'
 import type { AttackScenario } from './attackScenario'
@@ -22,9 +22,24 @@ export interface SpecResult {
   templateId: string;
   specificationLabel: string;
   formulaPreview: string;
+  specificationSnapshot?: SpecificationSnapshot | null;
   formulaKind: 'CTL' | 'LTL';
   outcome: VerificationOutcome;
   expression: string;
+}
+
+/** The checked conditions and display identities, never resolved from the current board. */
+export interface SpecificationSnapshot {
+  id: string;
+  templateId: Specification['templateId'];
+  aConditions: SpecCondition[];
+  ifConditions: SpecCondition[];
+  thenConditions: SpecCondition[];
+  devices: Record<string, {
+    label: string;
+    modelTokenSource: ModelTokenSource;
+    modeCount: number | null;
+  }>;
 }
 
 export type VerificationOutcome = 'SATISFIED' | 'VIOLATED' | 'INCONCLUSIVE';
@@ -123,6 +138,7 @@ export interface AvailableTraceSummary {
   verificationTaskId: number
   violatedSpecId: string
   violatedSpec: Specification
+  modelTokenSourcesByDeviceId: Record<string, ModelTokenSource>
   stateCount: number
   createdAt: string
   dataAvailable: true
@@ -297,7 +313,7 @@ export interface UnavailableVerificationRunSummary {
 
 export type VerificationRunSummary = AvailableVerificationRunSummary | UnavailableVerificationRunSummary
 
-export interface VerificationRun extends Omit<AvailableVerificationRunSummary, 'dataAvailable' | 'counterexamples'> {
+export interface VerificationRun extends Omit<AvailableVerificationRunSummary, 'dataAvailable'> {
   specResults: SpecResult[]
   checkLogs: string[]
   nusmvOutput: string

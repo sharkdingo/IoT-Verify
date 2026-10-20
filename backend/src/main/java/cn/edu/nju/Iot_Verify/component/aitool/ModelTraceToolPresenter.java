@@ -6,12 +6,14 @@ import cn.edu.nju.Iot_Verify.dto.trace.TraceDeviceDto;
 import cn.edu.nju.Iot_Verify.dto.trace.TraceDto;
 import cn.edu.nju.Iot_Verify.dto.trace.TraceStateDto;
 import cn.edu.nju.Iot_Verify.dto.trace.TraceTriggeredRuleDto;
+import cn.edu.nju.Iot_Verify.dto.trace.TraceVariableDto;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 
 /** User-semantic projections for chat tools; persistence/model ids stay out of ordinary output. */
 public final class ModelTraceToolPresenter {
@@ -53,12 +55,23 @@ public final class ModelTraceToolPresenter {
     }
 
     public static List<Map<String, Object>> states(List<TraceStateDto> states) {
+        return states(states, null, true);
+    }
+
+    private static List<Map<String, Object>> states(List<TraceStateDto> states, TraceStateDto previous,
+                                                     boolean includePropertyLabels) {
         if (states == null || states.isEmpty()) return List.of();
         List<Map<String, Object>> presented = new ArrayList<>(states.size());
+        TraceStateDto previousLabelState = null;
         for (TraceStateDto state : states) {
             if (state == null) continue;
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("stateIndex", state.getStateIndex());
+            item.put("valueSnapshot", valueSnapshot(state));
+            if (previous != null && previous.getStateIndex() != null && state.getStateIndex() != null
+                    && (long) previous.getStateIndex() + 1 == state.getStateIndex()) {
+                item.put("changesFromPreviousState", stateChanges(previous, state));
+            }
             // A liveness counterexample's fault is its cycle, not any single state, and NuSMV closes the path by
             // re-printing the loop entry. Without these flags an assistant reads such a trace wrong in one of two
             // ways, depending on the cycle length (both measured on NuSMV 2.7.1): a one-state cycle prints no
@@ -73,13 +86,15 @@ public final class ModelTraceToolPresenter {
             // unchanged rather than gaining two always-false keys.
             if (Boolean.TRUE.equals(state.getLoopStart())) item.put("loopStart", true);
             if (Boolean.TRUE.equals(state.getLoopBack())) item.put("loopBack", true);
-            item.put("devices", devices(state.getDevices()));
+            item.put("devices", devices(state.getDevices(), includePropertyLabels, previousLabelState));
             item.put("triggeredRules", rules(state.getTriggeredRules()));
             item.put("compromisedAutomationLinks", rules(state.getCompromisedAutomationLinks()));
             item.put("trustPrivacies", safeList(state.getTrustPrivacies()));
             item.put("environmentVariables", safeList(state.getEnvVariables()));
             item.put("globalVariables", safeList(state.getGlobalVariables()));
             presented.add(item);
+            previous = state;
+            previousLabelState = state;
         }
         return List.copyOf(presented);
     }
@@ -88,6 +103,14 @@ public final class ModelTraceToolPresenter {
                                              List<TraceStateDto> states,
                                              int requestedOffset,
                                              int limit) {
+        return putStateWindow(target, states, requestedOffset, limit, true);
+    }
+
+    public static StateWindow putStateWindow(Map<String, Object> target,
+                                             List<TraceStateDto> states,
+                                             int requestedOffset,
+                                             int limit,
+                                             boolean includePropertyLabels) {
         List<TraceStateDto> source = states == null ? List.of() : states;
         int windowStart = Math.min(requestedOffset, source.size());
         int windowEnd = (int) Math.min(source.size(), (long) windowStart + limit);
@@ -100,14 +123,79 @@ public final class ModelTraceToolPresenter {
         if (windowEnd < source.size()) {
             target.put("nextStateOffset", windowEnd);
         }
-        target.put("states", states(source.subList(windowStart, windowEnd)));
+        target.put("states", states(source.subList(windowStart, windowEnd),
+                windowStart > 0 ? source.get(windowStart - 1) : null, includePropertyLabels));
         return window;
     }
 
     public record StateWindow(int startInclusive, int endExclusive) {
     }
 
-    private static List<Map<String, Object>> devices(List<TraceDeviceDto> devices) {
+    private static Map<String, Object> valueSnapshot(TraceStateDto state) {
+        List<Map<String, Object>> deviceStates = new ArrayList<>();
+        for (TraceDeviceDto device : safeList(state.getDevices())) {
+            Map<String, Object> value = new LinkedHashMap<>();
+            putText(value, "deviceLabel", device.getDeviceLabel());
+            putText(value, "mode", device.getMode());
+            putText(value, "state", device.getState());
+            deviceStates.add(value);
+        }
+        List<Map<String, Object>> environmentValues = new ArrayList<>();
+        for (TraceVariableDto variable : safeList(state.getEnvVariables())) {
+            Map<String, Object> value = new LinkedHashMap<>();
+            putText(value, "name", variable.getName());
+            value.put("observed", variable.isObserved());
+            if (variable.isObserved() && variable.getValue() != null) {
+                value.put("value", variable.getValue());
+            }
+            environmentValues.add(value);
+        }
+        // Keep the small chronological view beside its index, before labels and rule details.
+        // It belongs to this whole state, so byte-budget paging cannot detach it from that state.
+        return Map.of("deviceStates", deviceStates, "environmentValues", environmentValues);
+    }
+
+    private static Map<String, Object> stateChanges(TraceStateDto previous, TraceStateDto current) {
+        List<Map<String, Object>> deviceChanges = new ArrayList<>();
+        for (TraceDeviceDto device : safeList(current.getDevices())) {
+            if (device.getDeviceId() == null || device.getState() == null) continue;
+            TraceDeviceDto before = previousDevice(previous, device);
+            if (before == null || before.getState() == null
+                    || device.getState().equals(before.getState())) continue;
+            Map<String, Object> change = new LinkedHashMap<>();
+            putText(change, "deviceLabel", device.getDeviceLabel());
+            putText(change, "mode", device.getMode());
+            change.put("previousState", before.getState());
+            change.put("currentState", device.getState());
+            deviceChanges.add(change);
+        }
+        List<Map<String, Object>> environmentChanges = new ArrayList<>();
+        for (TraceVariableDto variable : safeList(current.getEnvVariables())) {
+            if (!variable.isObserved() || variable.getName() == null || variable.getValue() == null) continue;
+            TraceVariableDto before = safeList(previous.getEnvVariables()).stream()
+                    .filter(candidate -> variable.getName().equals(candidate.getName()))
+                    .findFirst().orElse(null);
+            if (before == null || !before.isObserved() || before.getValue() == null
+                    || variable.getValue().equals(before.getValue())) continue;
+            environmentChanges.add(Map.of("name", variable.getName(),
+                    "previousValue", before.getValue(), "currentValue", variable.getValue()));
+        }
+        // These are observed adjacent snapshots, not proof of when a command began or how long it lasts.
+        return Map.of("previousStateIndex", previous.getStateIndex(),
+                "deviceStates", deviceChanges, "environmentValues", environmentChanges);
+    }
+
+    private static TraceDeviceDto previousDevice(TraceStateDto previous, TraceDeviceDto device) {
+        if (previous == null || device.getDeviceId() == null) return null;
+        return safeList(previous.getDevices()).stream()
+                .filter(candidate -> device.getDeviceId().equals(candidate.getDeviceId())
+                        && Objects.equals(device.getMode(), candidate.getMode()))
+                .findFirst().orElse(null);
+    }
+
+    private static List<Map<String, Object>> devices(List<TraceDeviceDto> devices,
+                                                    boolean includePropertyLabels,
+                                                    TraceStateDto previousLabelState) {
         if (devices == null || devices.isEmpty()) return List.of();
         List<Map<String, Object>> presented = new ArrayList<>(devices.size());
         for (TraceDeviceDto device : devices) {
@@ -119,8 +207,18 @@ public final class ModelTraceToolPresenter {
             putText(item, "mode", device.getMode());
             if (device.getCompromised() != null) item.put("compromised", device.getCompromised());
             item.put("variables", safeList(device.getVariables()));
-            item.put("trustPrivacyLabels", safeList(device.getTrustPrivacy()));
-            item.put("privacyLabels", safeList(device.getPrivacies()));
+            if (includePropertyLabels) {
+                TraceDeviceDto before = previousDevice(previousLabelState, device);
+                if (before != null && previousLabelState.getStateIndex() != null
+                        && Objects.equals(device.getTrustPrivacy(), before.getTrustPrivacy())
+                        && Objects.equals(device.getPrivacies(), before.getPrivacies())) {
+                    // The baseline stays inside this page when the byte budget removes trailing states.
+                    item.put("propertyLabelsFromStateIndex", previousLabelState.getStateIndex());
+                } else {
+                    item.put("trustPrivacyLabels", safeList(device.getTrustPrivacy()));
+                    item.put("privacyLabels", safeList(device.getPrivacies()));
+                }
+            }
             presented.add(item);
         }
         return List.copyOf(presented);

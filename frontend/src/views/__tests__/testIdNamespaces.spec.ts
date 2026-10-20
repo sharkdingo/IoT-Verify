@@ -59,14 +59,15 @@ describe('test-id namespaces', () => {
     expect(collisions).toEqual([])
   })
 
-  it('keeps the step-values panels outside the step families', () => {
-    // The two that were wrong, pinned by name so a rename back is caught rather than re-measured.
+  it('keeps shared state evidence outside the numbered marker families', () => {
     const board = readFileSync(join(__dirname, '../Board.vue'), 'utf8')
     const timeline = readFileSync(join(__dirname, '../../components/SimulationTimeline.vue'), 'utf8')
 
-    expect(board).toContain('data-testid="trace-step-values"')
+    const evidence = readFileSync(join(__dirname, '../../components/PlaybackStateDetails.vue'), 'utf8')
+    expect(evidence).toContain('data-testid="playback-state-details"')
+    expect(board).toContain('<PlaybackStateDetails')
     expect(board).not.toContain('data-testid="trace-timeline-state-details"')
-    expect(timeline).toContain('data-testid="simulation-step-values"')
+    expect(timeline).toContain('<PlaybackStateDetails')
     expect(timeline).not.toContain('data-testid="simulation-timeline-state-details"')
   })
 
@@ -83,52 +84,27 @@ describe('test-id namespaces', () => {
     const board = readFileSync(join(__dirname, '../Board.vue'), 'utf8')
     const timeline = readFileSync(join(__dirname, '../../components/SimulationTimeline.vue'), 'utf8')
 
-    // Scope by region, not by attribute order: the deleted slider carried its testid *before*
-    // `type="range"`, so a pattern requiring that order could never match it back and the guard would
-    // pass by construction. Comments are stripped for the same reason -- both files now describe the
-    // slider they no longer render.
     const strip = (source: string) => source.replace(/<!--[\s\S]*?-->/g, '')
+    const terminal = readFileSync(join(__dirname, '../../components/PlaybackTerminal.vue'), 'utf8')
+    const template = strip(terminal.slice(terminal.indexOf('<template>')))
+    const railAt = template.indexOf(':data-testid="`${prefix}-track`"')
+    expect(railAt, 'the shared rail must exist').toBeGreaterThan(-1)
+    expect(template).not.toContain('type="range"')
+    const railTag = template.slice(template.lastIndexOf('<div', railAt), template.indexOf('>', railAt))
+    expect(railTag).toContain('role="group"')
+    expect(railTag).toContain('@pointerdown="scrub"')
+    expect(template).toContain('to="#board-playback-timeline"')
+    expect(template).not.toContain('<slot name="timeline"')
+    expect(template.indexOf('<slot name="details"')).toBeGreaterThan(railAt)
 
-    // The counterexample overlay, from its host element to the panel that follows it.
-    const boardMarkup = strip(board)
-    const overlayStart = boardMarkup.indexOf('board-timeline-host--trace')
-    expect(overlayStart, 'the trace overlay should be found').toBeGreaterThan(-1)
-    const overlay = boardMarkup.slice(overlayStart, boardMarkup.indexOf('<SimulationTimeline', overlayStart))
-    // The slice must actually contain the rail, or an empty window would assert nothing.
-    const railAt = overlay.indexOf('data-testid="trace-timeline-track"')
-    expect(railAt, 'the slice should contain the rail').toBeGreaterThan(-1)
-    expect(overlay, 'the counterexample rail must be the only x-axis control')
-      .not.toContain('type="range"')
-    // Positive assertion: the rail itself must NOT be a range input, and must carry the expected
-    // role. This catches a rename-and-reintroduce: if the rail were renamed to `trace-rail` and a
-    // new `<input type="range" data-testid="trace-timeline-track">` appeared, the testid check would
-    // pass but the element would be wrong.
-    const railTag = overlay.slice(Math.max(0, railAt - 220), railAt + 280)
-    expect(railTag, 'the rail must not be an input element').not.toContain('<input')
-    expect(railTag, 'the rail must be a group with pointer interaction').toContain('role="group"')
-
-    // Rail before the step values, matching the simulation timeline.
-    //
-    // The two rails had opposite reading orders: this one put the step's values above the rail, while
-    // `SimulationTimeline.vue` puts the rail first. Nothing defended either choice, and the same
-    // information in two sequences is the kind of drift a reader pays for without being able to name.
-    // Navigate-then-read is the order the sibling surface already used, so it is the one that stands.
-    const valuesAt = overlay.indexOf('data-testid="trace-step-values"')
-    expect(valuesAt, 'the slice should contain the step values').toBeGreaterThan(-1)
-    expect(railAt, 'the rail must precede the step values, as on the simulation timeline')
-      .toBeLessThan(valuesAt)
-
-    // The simulation timeline keeps its number input and +/-1 buttons: exact entry and discrete
-    // stepping are a different modality, not a second x-axis. Scoped to the template, because the
-    // script's own JSDoc names the deleted slider and `strip` only removes HTML comments -- matching
-    // that prose is how this assertion first failed against correct markup.
-    const timelineTemplate = strip(timeline.slice(timeline.indexOf('<template>')))
-    const simRailAt = timelineTemplate.indexOf('data-testid="simulation-timeline-track"')
-    expect(simRailAt, 'the simulation rail should be found').toBeGreaterThan(-1)
-    expect(timelineTemplate, 'the simulation rail must be the only x-axis control')
-      .not.toContain('type="range"')
-    const simRailTag = timelineTemplate.slice(Math.max(0, simRailAt - 220), simRailAt + 280)
-    expect(simRailTag, 'the simulation rail must not be an input element').not.toContain('<input')
-    expect(simRailTag, 'the simulation rail must be a group with pointer interaction').toContain('role="group"')
+    for (const owner of [board, timeline]) {
+      const start = owner.indexOf('<PlaybackTerminal')
+      expect(start, 'both replay owners must use the shared terminal').toBeGreaterThan(-1)
+      const end = owner.indexOf('</PlaybackTerminal>', start)
+      expect(end).toBeGreaterThan(start)
+      const markup = strip(owner.slice(start, end))
+      expect(markup).not.toContain('type="range"')
+      expect(markup).not.toContain('class="board-playback-rail"')
+    }
   })
 })

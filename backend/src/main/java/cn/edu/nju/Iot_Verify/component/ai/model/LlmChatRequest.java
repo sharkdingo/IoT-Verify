@@ -19,7 +19,8 @@ public record LlmChatRequest(List<LlmMessage> messages,
                              List<LlmToolSpec> tools,
                              String model,
                              Double temperature,
-                             Integer maxTokens) {
+                             Integer maxTokens,
+                             String reasoningEffort) {
 
     public LlmChatRequest {
         messages = messages == null ? List.of() : List.copyOf(messages);
@@ -40,6 +41,7 @@ public record LlmChatRequest(List<LlmMessage> messages,
         private String model;
         private Double temperature;
         private Integer maxTokens;
+        private String reasoningEffort;
 
         public Builder messages(List<LlmMessage> messages) {
             this.messages = messages;
@@ -66,8 +68,13 @@ public record LlmChatRequest(List<LlmMessage> messages,
             return this;
         }
 
+        public Builder reasoningEffort(String reasoningEffort) {
+            this.reasoningEffort = reasoningEffort;
+            return this;
+        }
+
         public LlmChatRequest build() {
-            return new LlmChatRequest(messages, tools, model, temperature, maxTokens);
+            return new LlmChatRequest(messages, tools, model, temperature, maxTokens, reasoningEffort);
         }
     }
 }

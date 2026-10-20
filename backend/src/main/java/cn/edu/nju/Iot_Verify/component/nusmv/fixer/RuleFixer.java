@@ -34,7 +34,7 @@ import java.util.stream.Collectors;
  * RuleFixer: orchestrates fault localization and fix strategy execution.
  *
  * <p>Default strategy order follows Salus paper §5:
- * parameter (§5.1) → condition (§5.2) → permanent rule removal (fallback).</p>
+ * parameter (§5.1) → condition (§5.2) → rule removal (fallback).</p>
  */
 @Slf4j
 @Component
@@ -97,7 +97,10 @@ public class RuleFixer {
         // Fault rules first so bounded searches start from the rules the counterexample exercised.
         Set<Integer> repairIndices = new LinkedHashSet<>();
         faults.forEach(fault -> repairIndices.add(fault.getRuleIndex()));
-        if (!faults.isEmpty()) {
+        // A late or over-constrained rule can prevent a violation without ever firing on its trace
+        // (Salus §5.1's ventilation threshold). Localization describes what ran, not what can repair it.
+        if (!faults.isEmpty() || (states != null && !states.isEmpty()
+                && !isInitialStateViolation(states, violatedSpec))) {
             influence.ifPresent(repairIndices::addAll);
         }
         return new RepairScope(faults, List.copyOf(repairIndices), !triggered.isEmpty());
@@ -105,6 +108,13 @@ public class RuleFixer {
 
     private record RepairScope(List<FaultRuleDto> faultRules, List<Integer> repairRuleIndices,
                                boolean anyRuleFired) {
+    }
+
+    private static boolean isInitialStateViolation(List<TraceStateDto> states, SpecificationDto spec) {
+        // A one-state AG counterexample fails before any command can run. A liveness cycle
+        // with one state is different: changing a dormant rule can still make it leave the cycle.
+        return states != null && states.size() == 1 && spec != null
+                && Set.of("1", "3", "7").contains(spec.getTemplateId());
     }
 
     /**
@@ -141,6 +151,26 @@ public class RuleFixer {
                             List<String> strategies,
                             int maxAttempts,
                             Map<String, PreferredRange> preferredRanges) {
+        return fix(traceId, violatedSpecId, states, rules, devices, environmentVariables, specs,
+                deviceSmvMap, userId, attackScenario, enablePrivacy, strategies, maxAttempts,
+                preferredRanges, () -> { });
+    }
+
+    public FixResultDto fix(Long traceId,
+                            String violatedSpecId,
+                            List<TraceStateDto> states,
+                            List<RuleDto> rules,
+                            List<DeviceVerificationDto> devices,
+                            List<BoardEnvironmentVariableDto> environmentVariables,
+                            List<SpecificationDto> specs,
+                            Map<String, DeviceSmvData> deviceSmvMap,
+                            Long userId,
+                            AttackScenarioDto attackScenario,
+                            boolean enablePrivacy,
+                            List<String> strategies,
+                            int maxAttempts,
+                            Map<String, PreferredRange> preferredRanges,
+                            Runnable onVerifiedRepair) {
 
         // Never clear the interrupt flag here: it is the search's only cancellation signal
         // (FixContext.isExpired reads it), and cancellation can already have arrived — fault
@@ -159,20 +189,25 @@ public class RuleFixer {
         log.info("Fault localization: {} fault rule(s), {} rule(s) in repair scope for trace {}",
                 faultRules.size(), scope.repairRuleIndices().size(), traceId);
 
-        if (faultRules.isEmpty()) {
+        if (scope.repairRuleIndices().isEmpty()) {
             String emptyReason;
-            // What is known is that no fired rule contributed; a rule that stayed idle might still have
-            // been able to prevent the violation, and the repair search starts only from fired rules.
-            if (scope.anyRuleFired()) {
+            boolean initialStateViolation = isInitialStateViolation(states,
+                    violatedSpecIndex < 0 ? null : specs.get(violatedSpecIndex));
+            // Without a usable trace or any rule that can affect the property, no strategy has an edit to search.
+            if (initialStateViolation) {
+                emptyReason = "The initial state already violates the safety specification, before any "
+                        + "automation command can run. Changing rules cannot change that initial state. "
+                        + "Review the scene's initial state and whether the requirement should allow a response step, "
+                        + "then verify the revised scene.";
+            } else if (scope.anyRuleFired()) {
                 emptyReason = "Automation rules fired in the counterexample, but none of them can influence the "
                         + "violated property: device or environment behaviour alone produced the violation. "
-                        + "Automatic fixes start from rules that contributed, so no repair was searched.";
+                        + "No rule adjustment can be searched from this trace and its relevant rule scope.";
             } else if (states == null || states.size() < 2) {
                 emptyReason = "Counterexample trace has fewer than 2 states; fault localization requires at least 2 states.";
             } else {
                 emptyReason = "No automation rule fired in the counterexample: device or environment behaviour "
-                        + "alone produced the violation. Automatic fixes start from rules that contributed, so "
-                        + "no repair was searched.";
+                        + "alone produced the violation, and no existing rule can affect the violated property.";
             }
             return FixResultDto.builder()
                     .traceId(traceId)
@@ -180,9 +215,9 @@ public class RuleFixer {
                     .faultRules(faultRules)
                     .suggestions(List.of())
                     .strategyAttempts(effectiveStrategies.stream()
-                            .map(strategy -> attempt(strategy, "SKIPPED_NO_FAULT_RULES",
-                                    "No rule that fired in the counterexample can influence the violated "
-                                            + "property, so this strategy was not run."))
+                            .map(strategy -> attempt(strategy, initialStateViolation
+                                            ? "SKIPPED_INITIAL_STATE_VIOLATION" : "SKIPPED_NO_FAULT_RULES",
+                                    emptyReason))
                             .toList())
                     .fixable(false)
                     .sourceModelComplete(true)
@@ -214,6 +249,7 @@ public class RuleFixer {
                 .counterexampleInitialState(states == null || states.isEmpty() ? null : states.get(0))
                 .requireCounterexampleReplay(true)
                 .deadline(Instant.now().plusMillis(fixConfig.getFixTimeoutMs()))
+                .onVerifiedRepair(Objects.requireNonNull(onVerifiedRepair, "onVerifiedRepair is required"))
                 .build();
 
         // Step 2: Attempt fix strategies via registry

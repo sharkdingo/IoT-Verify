@@ -143,7 +143,7 @@ reach storage by three routes and each was independently permissive:
 
 | Gate | Covers | Behaviour |
 | :--- | :--- | :--- |
-| `RuleBuilderDialog.getDeviceVariables` | a person building a rule | an affect-only value is not offered |
+| `RuleBuilder.getDeviceVariables` | a person building a rule | an affect-only value is not offered |
 | `ControlCenter.getAvailableKeys` | a person building a specification | an affect-only value is not offered |
 | `BoardSemanticValidator.findVariable` | the assistant's rule/spec tools, before writing | refused with an actionable reason |
 | `BoardStorageServiceImpl.conditionSourceVariable` | persist time — REST board endpoints, assistant tools, scene import | rejected with the variable named |

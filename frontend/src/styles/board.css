@@ -50,19 +50,9 @@
   height: var(--board-nav-height);
   box-sizing: border-box;
   justify-content: center;
-  padding: 0.75rem 2rem;
-  background: color-mix(in srgb, var(--surface-overlay) 92%, transparent);
-  backdrop-filter: blur(12px);
+  padding: var(--iot-space-md) var(--iot-page-gutter);
+  background: var(--surface-panel);
   border-bottom: 1px solid var(--border);
-  /*
-   * The floating step, not the panel step.
-   *
-   * The nav is edge-attached and full width, with its own bottom border already marking the boundary — a
-   * panel lift (18px/42px) under a bar that has nowhere to float *to* reads as a heavy smear across the
-   * whole viewport, and it is darker than the literal it replaced (0.16 against 0.08). What the shadow has
-   * to say here is only "content scrolls under this", which is the chip/floating depth.
-   */
-  box-shadow: var(--shadow-floating);
 }
 
 .board-nav-bar .nav-content {
@@ -72,7 +62,7 @@
   align-items: center;
   width: 100%;
   max-width: 100%;
-  padding: 0 1.5rem;
+  padding: 0;
 }
 
 /* The workspace title is a real <h1> for document structure; the brand button inside it
@@ -88,19 +78,21 @@
 
 .board-nav-bar .logo-left {
   display: inline-flex;
-  min-width: 44px;
-  min-height: 44px;
+  min-width: var(--iot-target-min);
+  min-height: var(--iot-target-min);
   align-items: center;
   justify-content: center;
-  font-family: 'Instrument Serif', serif;
-  font-size: 1.5rem;
-  letter-spacing: 0;
+  gap: var(--iot-space-sm);
+  font-family: var(--iot-font-display);
+  font-size: 1.125rem;
+  font-weight: 600;
+  letter-spacing: -0.035em;
   color: var(--text);
   background: transparent;
   border: 0;
   padding: 0;
   cursor: pointer;
-  transition: opacity 0.2s;
+  transition: opacity var(--iot-motion-fast) ease;
 }
 
 .board-nav-bar .logo-left:hover {
@@ -111,14 +103,9 @@
 .board-nav-bar .scene-action-btn:focus-visible,
 .board-nav-bar .scene-actions-menu__trigger:focus-visible,
 .board-nav-bar .ai-assistant-btn:focus-visible,
-.board-nav-bar .nav-logout-btn:focus-visible {
+.board-nav-bar .nav-account-btn:focus-visible {
   outline: 2px solid var(--accent-border);
   outline-offset: 3px;
-}
-
-.board-nav-bar .logo-sup {
-  font-size: 0.75rem;
-  vertical-align: super;
 }
 
 .board-nav-bar .logo-short {
@@ -128,7 +115,7 @@
 .board-nav-bar .nav-actions {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: var(--iot-space-sm);
   margin-left: auto;
 }
 
@@ -139,12 +126,12 @@
 
 .board-nav-bar .scene-actions-menu__trigger {
   display: flex;
-  width: 44px;
-  height: 44px;
+  width: var(--iot-target-min);
+  height: var(--iot-target-min);
   align-items: center;
   justify-content: center;
   border: 1px solid var(--border);
-  border-radius: 50%;
+  border-radius: var(--iot-radius-action);
   background: var(--surface-control);
   color: var(--text);
   cursor: pointer;
@@ -157,24 +144,24 @@
 
 .board-nav-bar .scene-actions-menu__popover {
   position: absolute;
-  top: calc(100% + 0.5rem);
+  top: calc(100% + var(--iot-space-sm));
   right: 0;
   display: grid;
   width: 11rem;
-  padding: 0.4rem;
+  padding: var(--iot-space-xs);
   border: 1px solid var(--border);
   border-radius: var(--iot-radius-action);
-  background: var(--surface-overlay);
+  background: var(--surface-panel);
   /* A menu popover floats above content, one step below the nav that owns it. */
   box-shadow: var(--shadow-floating);
 }
 
-.board-nav-bar .scene-actions-menu__popover button {
+.board-nav-bar .scene-actions-menu__popover button:not(.header-preference) {
   display: flex;
-  min-height: 44px;
+  min-height: var(--iot-target-min);
   align-items: center;
-  gap: 0.65rem;
-  padding: 0 0.75rem;
+  gap: var(--iot-space-sm);
+  padding: 0 var(--iot-space-md);
   border: 0;
   border-radius: var(--iot-radius-control);
   background: transparent;
@@ -183,15 +170,18 @@
   text-align: left;
 }
 
-.board-nav-bar .scene-actions-menu__popover button:hover,
-.board-nav-bar .scene-actions-menu__popover button:focus-visible {
-  background: var(--surface-muted);
-  outline: none;
+.board-nav-bar .scene-actions-menu__popover button:not(.header-preference):hover {
+  background: var(--surface-control-hover);
+}
+
+.board-nav-bar .scene-actions-menu__popover button:not(.header-preference):focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: -2px;
 }
 
 .board-nav-bar .scene-actions-menu__popover button:disabled {
   cursor: wait;
-  opacity: 0.55;
+  color: var(--text-muted);
 }
 
 .board-nav-bar .scene-actions-menu__popover .scene-actions-menu__danger {
@@ -216,21 +206,21 @@
 .board-nav-bar .ai-assistant-btn {
   display: flex;
   align-items: center;
-  gap: 6px;
-  min-height: 2.75rem;
-  padding: 8px 16px;
+  gap: var(--iot-space-xs);
+  min-height: var(--iot-target-min);
+  padding: var(--iot-space-sm) var(--iot-space-md);
   /* One accent, not an indigo→violet gradient. The gradient was the single element reviews of both
      themes named first as belonging to another visual family -- "a promotional accent rather than a
      verification-tool action" -- and it competed with the canvas for focus. The assistant is a
      genuine primary action, so it keeps a filled treatment; it just uses the product's accent. */
   background: var(--accent-fill);
   border: none;
-  border-radius: var(--iot-radius-surface);
-  color: #fff;
+  border-radius: var(--iot-radius-action);
+  color: var(--text-on-fill);
   font-weight: 500;
-  font-size: 0.875rem;
+  font-size: var(--iot-font-label);
   cursor: pointer;
-  transition: background-color 0.2s, box-shadow 0.2s;
+  transition: background-color var(--iot-motion-fast) ease, border-color var(--iot-motion-fast) ease;
 }
 
 .board-nav-bar .ai-assistant-btn {
@@ -250,7 +240,7 @@
   border: 2px solid var(--surface-control);
   border-radius: var(--iot-radius-pill);
   background: var(--danger-fill);
-  color: #fff;
+  color: var(--text-on-fill);
   font-size: var(--iot-font-min);
   font-weight: 700;
   line-height: 1;
@@ -269,7 +259,7 @@
   }
 
   .board-nav-bar .ai-assistant-status.is-sync-pending {
-    background: var(--warning);
+    background: var(--warning-fill);
   }
 
   .board-nav-bar .ai-assistant-btn.has-active-status .ai-assistant-status.is-sync-pending,
@@ -285,23 +275,19 @@
   background: var(--surface-control);
   border: 1px solid var(--border);
   color: var(--text);
-  border-radius: var(--iot-radius-panel);
-  /* A control lifting off the surface it sits on: the smallest step. */
-  box-shadow: var(--shadow-raised);
+  box-shadow: none;
 }
 
-.board-nav-bar .scene-action-btn:hover {
-  background: color-mix(in srgb, var(--iot-color-accent) 12%, var(--surface-control));
-  border-color: color-mix(in srgb, var(--iot-color-accent) 36%, var(--border));
-  color: var(--iot-color-accent);
-  transform: translateY(-1px);
+.board-nav-bar .scene-action-btn:hover:not(:disabled) {
+  background: var(--surface-control-hover);
+  border-color: var(--border-strong);
 }
 
 .board-nav-bar .scene-clear-btn {
   color: var(--danger);
 }
 
-.board-nav-bar .scene-clear-btn:hover {
+.board-nav-bar .scene-clear-btn:hover:not(:disabled) {
   background: color-mix(in srgb, var(--danger-surface) 72%, var(--surface-control));
   border-color: color-mix(in srgb, var(--danger) 42%, var(--border));
   color: var(--danger);
@@ -309,13 +295,13 @@
 
 .board-nav-bar .scene-action-btn:disabled {
   cursor: wait;
-  opacity: 0.62;
+  color: var(--text-muted);
   transform: none;
 }
 
 .board-nav-bar .ai-assistant-btn:hover {
   background: var(--accent-fill-hover);
-  box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 38%, transparent);
+  box-shadow: none;
 }
 
 .board-nav-bar .scene-action-btn .material-symbols-outlined,
@@ -331,26 +317,28 @@
  * reachability and left the wide viewport at 40px. That is the least defensible place to be under the minimum:
  * undo is what makes deleting a device recoverable, and a user reaching for it has just done something they want
  * to take back. */
-.board-nav-bar .board-edit-history-btn {
+.board-nav-bar .board-edit-history-btn,
+.board-nav-bar .nav-account-btn {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 2.75rem;
-  min-width: 2.75rem;
-  height: 2.75rem;
+  width: var(--iot-target-min);
+  min-width: var(--iot-target-min);
+  height: var(--iot-target-min);
   padding: 0;
   background: var(--surface-control);
   border: 1px solid var(--border);
-  border-radius: 50%;
+  border-radius: var(--iot-radius-action);
   color: var(--text-muted);
   cursor: pointer;
-  transition: all 0.2s;
+  transition: background-color var(--iot-motion-fast) ease, border-color var(--iot-motion-fast) ease, color var(--iot-motion-fast) ease;
 }
 
-.board-nav-bar .board-edit-history-btn:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--iot-color-accent) 14%, var(--surface-control));
-  border-color: color-mix(in srgb, var(--iot-color-accent) 45%, var(--border));
-  color: var(--iot-color-accent);
+.board-nav-bar .board-edit-history-btn:hover:not(:disabled),
+.board-nav-bar .nav-account-btn:hover:not(:disabled) {
+  background: var(--surface-control-hover);
+  border-color: var(--border-strong);
+  color: var(--text);
 }
 
 .board-nav-bar .board-edit-history-btn:disabled {
@@ -371,55 +359,19 @@
   outline-offset: 3px;
 }
 
-.board-nav-bar .board-edit-history-btn .material-symbols-outlined {
-  font-size: 20px;
-}
-
-@media (max-width: 1023.98px), (max-height: 599.98px) {
-  .board-nav-bar .board-edit-history-btn {
-    width: 2.75rem;
-    min-width: 2.75rem;
-    height: 2.75rem;
-  }
-}
-
-/* Logout 按钮样式 — 44px like the rest of the strip.
- *
- * This is also the only route to account deletion, so it is the last control in the nav that should be a
- * smaller target than its neighbours. Its narrow-viewport rule already used `2.75rem`; this makes the desktop
- * case agree instead of being 4px short. */
-.board-nav-bar .nav-logout-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 2.75rem;
-  height: 2.75rem;
-  background: var(--surface-control);
-  border: 1px solid var(--border);
-  border-radius: 50%;
-  color: var(--text-muted);
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.board-nav-bar .nav-logout-btn:hover {
-  background: color-mix(in srgb, var(--danger) 14%, var(--surface-control));
-  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
-  color: var(--danger);
-}
-
-.board-nav-bar .nav-logout-btn .material-symbols-outlined {
+.board-nav-bar .board-edit-history-btn .material-symbols-outlined,
+.board-nav-bar .nav-account-btn .material-symbols-outlined {
   font-size: 20px;
 }
 
 @media (max-width: 1023.98px), (max-height: 599.98px) {
   .board-nav-bar {
-    padding: 0.5rem;
+    padding: var(--iot-space-sm);
   }
 
   .board-nav-bar .nav-content {
     padding: 0;
-    gap: 0.25rem;
+    gap: var(--iot-space-2xs);
   }
 
   .board-nav-bar .logo-left {
@@ -430,7 +382,7 @@
   }
 
   .board-nav-bar .nav-actions {
-    gap: 0.25rem;
+    gap: var(--iot-space-2xs);
     min-width: 0;
   }
 
@@ -447,10 +399,9 @@
   }
 
   .board-nav-bar .ai-assistant-btn {
-    width: 2.75rem;
-    height: 2.75rem;
+    width: var(--iot-target-min);
+    height: var(--iot-target-min);
     justify-content: center;
-    border-radius: var(--iot-radius-pill);
     padding: 0;
   }
 
@@ -458,10 +409,6 @@
     display: none;
   }
 
-  .board-nav-bar .nav-logout-btn {
-    width: 2.75rem;
-    height: 2.75rem;
-  }
 }
 
 /* The nav overflow group lives in the scene menu and is desktop-hidden: on a wide bar every control
@@ -471,13 +418,17 @@
   display: none;
 }
 
+.board-nav-bar .nav-overflow-only .header-preference {
+  width: 100%;
+  justify-content: flex-start;
+}
+
 @media (max-width: 420px) {
   .board-nav-bar {
-    padding-inline: 0.25rem;
+    padding-inline: var(--iot-space-2xs);
   }
 
-  .board-nav-bar .logo-wordmark,
-  .board-nav-bar .logo-sup {
+  .board-nav-bar .logo-wordmark {
     display: none;
   }
 
@@ -491,27 +442,22 @@
 
 }
 
-/* The bar needs 390px intrinsically and `nav-actions > *` is `flex-shrink: 0`, so below that the tail
-   was clipped — `overflow-x: visible` with no document scroll, which makes a control unreachable
-   rather than merely off-screen. Measured with `elementFromPoint`: at 375px Log Out was clipped, and
-   at 320px both the assistant and Log Out were entirely untappable.
-   Rather than shrink controls under the 44px tap minimum, the set-once chrome (theme, language, sign
-   out) moves into the overflow menu while the actions used while working — Undo, Redo, Scene, AI —
-   keep their places. The threshold is the measured intrinsic width, not a device guess: 414px fits
-   the full bar and keeps it, so nothing is hidden from a phone that can show it. */
-@media (max-width: 389.98px) {
+/* Account access adds a full target to the preferences strip.
+   Move preferences and sign-out into the scene menu below that capacity; working actions
+   retain their 44px targets and the final control stays inside the viewport. */
+@media (max-width: 639.98px) {
   .board-nav-bar .nav-overflow-only {
     display: flex;
     flex-direction: column;
-    gap: 0.25rem;
-    margin-top: 0.25rem;
-    padding-top: 0.25rem;
+    gap: var(--iot-space-2xs);
+    margin-top: var(--iot-space-2xs);
+    padding-top: var(--iot-space-2xs);
     border-top: 1px solid var(--border);
   }
 
   .board-nav-bar .nav-actions > .theme-toggle,
   .board-nav-bar .nav-actions > .language-toggle,
-  .board-nav-bar .nav-logout-btn {
+  .board-nav-bar .nav-account-btn {
     display: none;
   }
 }
@@ -523,7 +469,7 @@
 @media (max-width: 1023.98px), (max-height: 599.98px) {
   .canvas-fit-mobile {
     position: fixed;
-    top: calc(var(--board-nav-height) + 1rem);
+    top: calc(var(--board-nav-height) + var(--board-playback-toolbar-height, 0px) + 1rem);
     left: 4rem;
     z-index: 48;
     display: flex;
@@ -532,16 +478,17 @@
     align-items: center;
     justify-content: center;
     border: 1px solid var(--board-border);
-    border-radius: 50%;
-    background: var(--surface-overlay);
+    border-radius: var(--iot-radius-action);
+    background: var(--surface-control);
     color: var(--text);
-    /* A floating action button over the canvas. */
-    box-shadow: var(--shadow-floating);
-    backdrop-filter: blur(10px);
+  }
+
+  .canvas-fit-mobile:hover {
+    background: var(--surface-control-hover);
   }
 
   .canvas-fit-mobile:focus-visible {
-    outline: 3px solid var(--accent-border);
+    outline: 2px solid var(--accent-border);
     outline-offset: 2px;
   }
 }
@@ -568,6 +515,8 @@
     --board-border: var(--border);
     --board-text: var(--text);
     --board-text-muted: var(--text-muted);
+    /* Quiet dock controls need a boundary that is visible in both themes. */
+    --board-tool-border: var(--control-border);
 }
 
 .iot-board {
@@ -585,7 +534,7 @@
        what the floating panels and the dock measured their right inset from. */
     --board-inspector-width: 20rem;
     --board-control-width: 20rem;
-    --board-nav-height: 4.3125rem;
+    --board-nav-height: var(--iot-header-height);
     --board-floating-gap: clamp(0.75rem, 2vw, 1rem);
     /* Pre-hydration default only: the live value is injected per dock mode from `ACTION_DOCK_RAIL_PX`,
        which is the single owner of the rail's width in both rem-flavoured CSS calc and the px fit math.
@@ -613,33 +562,6 @@
        reach of a teleported dialog. Layout metrics stay board-scoped: they describe this board's
        geometry, and nothing outside it has any use for them. */
 
-    /*
-     * Per-category accents for the AI-suggestion dock group. These sit on the icon and the active
-     * state, so the four categories stay tellable apart without four saturated blocks competing with
-     * the run actions beside them.
-     *
-     * They were teal / amber / purple / rose -- four unrelated hues from four corners of the wheel.
-     * Reviews of both themes named the group as the one element in a different visual family:
-     * "their multicolored neon outlines (teal, yellow, purple, pink) introduce a palette absent from
-     * neighboring panels". Category coding is worth keeping, but it does not require unrelated hues.
-     *
-     * Now one analogous family stepping around the product accent (blue -> indigo -> violet -> cyan).
-     * Adjacent enough to read as one system, separated enough to distinguish four items, and each
-     * still measured against the real painted fill for the 3:1 component minimum.
-     */
-    --iot-tool-scenario: #1d4ed8;
-    --iot-tool-rule: #4338ca;
-    --iot-tool-device: #6d28d9;
-    --iot-tool-spec: #0e7490;
-}
-
-/* The same family lightened for a dark card surface, where the darker versions lose contrast.
-   Same ordering (blue -> indigo -> violet -> cyan) so the categories keep their identity. */
-.dark .iot-board {
-    --iot-tool-scenario: #93c5fd;
-    --iot-tool-rule: #a5b4fc;
-    --iot-tool-device: #c4b5fd;
-    --iot-tool-spec: #67e8f9;
 }
 
 @media (min-width: 1024px) and (min-height: 600px) {
@@ -668,6 +590,7 @@
 .iot-board .canvas-container {
     position: absolute;
     inset: 0;
+    bottom: var(--board-playback-height);
     overflow: hidden;
 }
 
@@ -676,7 +599,7 @@
     inset: var(--board-nav-height) 0 0;
     z-index: 46;
     border: 0;
-    background: color-mix(in srgb, #020617 42%, transparent);
+    background: color-mix(in srgb, var(--iot-color-bg-canvas) 42%, transparent);
     cursor: default;
     backdrop-filter: blur(1px);
 }
@@ -685,67 +608,6 @@
     outline: 3px solid color-mix(in srgb, var(--iot-color-accent) 70%, white);
     outline-offset: -3px;
 }
-
-/* Worn by the verification and simulation result dialogs *in addition to* `.iot-dialog`, because their bodies
-   still contain ~150 raw `text-slate-*` / `bg-white` / `border-slate-*` utilities that only resolve in the
-   light theme; these selectors remap them. Dropping the class during the dialog restyle silently un-themed
-   both dialog bodies in dark mode — the shell was correct and the content was not. `--surface-panel` is opaque
-   in both themes, so overriding the shared card's background here does not reintroduce translucency. The real
-   fix is migrating those utilities to role classes, after which this whole block goes. */
-.dark .board-result-dialog-surface {
-    border-color: var(--border) !important;
-    background: var(--surface-panel) !important;
-    color: var(--text);
-}
-
-.dark .board-result-dialog-surface .bg-white,
-.dark .board-result-dialog-surface .bg-slate-50,
-.dark .board-result-dialog-surface .bg-slate-100,
-.dark .board-result-dialog-surface .bg-slate-200 {
-    background-color: var(--surface-elevated) !important;
-}
-
-.dark .board-result-dialog-surface .text-slate-900,
-.dark .board-result-dialog-surface .text-slate-800,
-.dark .board-result-dialog-surface .text-slate-700 {
-    color: var(--text) !important;
-}
-
-.dark .board-result-dialog-surface .text-slate-600,
-.dark .board-result-dialog-surface .text-slate-500,
-.dark .board-result-dialog-surface .text-slate-400 {
-    color: var(--text-muted) !important;
-}
-
-.dark .board-result-dialog-surface .border-slate-100,
-.dark .board-result-dialog-surface .border-slate-200,
-.dark .board-result-dialog-surface .border-slate-300,
-.dark .board-result-dialog-surface .divide-slate-100 {
-    border-color: var(--border) !important;
-}
-
-
-
-
-
-
-
-/* The seven class-keyed text remaps that used to live here are gone.
- *
- * They darkened raw Tailwind text hues by class name with `!important` — 28 class selectors across
- * red/amber/green/emerald/indigo/violet/fuchsia/orange/cyan — so the light theme picked a hue per site
- * and dark theme silently rewrote it. That is the parallel colour system this pass set out to remove:
- * the source never said what a colour *meant*, only what it looked like in one theme.
- *
- * The two dialogs that wear `.board-result-dialog-surface` now use the theme-aware role classes
- * (`board-text-danger` / `-warning` / `-success` / `-info`), which carry the meaning and resolve
- * correctly in both themes without an override. Verified before deleting: none of the 28 remapped
- * classes remains anywhere in `Board.vue`, and those dialogs contain only plain markup — no child
- * component can inherit the scope. */
-
-
-
-
 
 .iot-board .modern-panel,
 .iot-board .glass-panel,
@@ -761,15 +623,68 @@
 .iot-board .modern-panel,
 .iot-board .glass-panel,
 .iot-board .board-side-panel {
-    top: calc(var(--board-nav-height) + 1px) !important;
-    max-height: calc(100dvh - var(--board-nav-height) - 1px);
+    --board-panel-expanded-max: min(32.5rem, 44vw);
+    top: calc(var(--board-nav-height) + var(--board-status-height, 0px) + 1px) !important;
+    max-height: calc(100dvh - var(--board-nav-height) - var(--board-status-height, 0px) - 1px);
     max-width: min(32.5rem, 44vw);
+}
+
+.iot-board .board-side-panel {
+    container-name: board-side-panel;
+    container-type: inline-size;
+    box-shadow: none;
+    transition: width var(--iot-motion-panel) var(--iot-ease-panel);
+}
+
+/* Keep the form at its expanded width while the containing rail closes. */
+.iot-board .board-side-panel > :is(.board-panel-tabs, .board-panel-body, .board-panel-footer) {
+    flex-shrink: 0;
+    width: calc(min(var(--board-panel-expanded-width), var(--board-panel-expanded-max)) - 1px);
+}
+
+.iot-board .glass-panel > :is(.board-panel-tabs, .board-panel-body, .board-panel-footer) {
+    align-self: flex-end;
+}
+
+.board-panel-content-enter-active {
+    transition: opacity var(--iot-motion-fast) ease, transform var(--iot-motion-fast) var(--iot-ease-panel);
+    transition-delay: calc(var(--iot-motion-fast) / 2);
+}
+
+.board-panel-content-leave-active {
+    transition: opacity calc(var(--iot-motion-fast) / 2) ease;
+    pointer-events: none;
+}
+
+.board-panel-content-enter-from,
+.board-panel-content-leave-to {
+    opacity: 0;
+}
+
+.board-panel-content-enter-from {
+    transform: translateX(-0.5rem);
+}
+
+.glass-panel .board-panel-content-enter-from {
+    transform: translateX(0.5rem);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .iot-board .board-side-panel {
+        transition: none;
+    }
+
+    .board-panel-content-enter-active,
+    .board-panel-content-leave-active {
+        transition: none;
+    }
 }
 
 @media (max-width: 1023.98px), (max-height: 599.98px) {
     .iot-board .modern-panel,
     .iot-board .glass-panel,
     .iot-board .board-side-panel {
+        --board-panel-expanded-max: min(calc(100vw - 3rem), 22rem);
         max-width: min(calc(100vw - 3rem), 22rem);
         z-index: 47;
     }
@@ -799,6 +714,22 @@
     z-index: var(--z-board-panel-above-alert);
 }
 
+.iot-board .board-floating-panel.board-recommendation-panel {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.iot-board .board-recommendation-panel > :first-child {
+    flex-shrink: 0;
+}
+
+.iot-board .board-recommendation-panel__body {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
 .iot-board .board-floating-panel.fuzzing-panel {
     overflow: hidden;
 }
@@ -807,10 +738,320 @@
     overflow: hidden;
 }
 
+.iot-board .board-run-panel {
+    width: 22rem;
+}
+
+.iot-board .board-floating-panel.board-run-panel {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.board-run-panel > :first-child,
+.board-run-panel__footer {
+    flex-shrink: 0;
+}
+
+.board-run-panel__body {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+.board-run-panel__footer {
+    padding: var(--iot-space-md);
+    border-top: 1px solid var(--border);
+}
+
+.board-run-panel__footer > p {
+    margin-top: var(--iot-space-sm);
+}
+
+/* History uses one card rhythm; secondary evidence stays behind keyboard-accessible disclosures. */
+.iot-board .history-tabs {
+    flex-shrink: 0;
+    padding: var(--iot-space-md);
+    border-bottom: 1px solid var(--board-border);
+}
+
+.iot-board .history-body {
+    min-height: 0;
+    flex: 1;
+    padding: var(--iot-space-md);
+    font-size: var(--iot-font-caption);
+    line-height: 1.6;
+}
+
+.iot-board .history-toolbar,
+.iot-board .history-card__header,
+.iot-board .history-progress-label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--iot-space-sm);
+    min-width: 0;
+}
+
+.iot-board .history-toolbar {
+    margin-bottom: var(--iot-space-md);
+}
+
+.iot-board .history-filters {
+    display: flex;
+    flex-wrap: wrap;
+    min-width: 0;
+    flex: 1;
+    gap: var(--iot-space-2xs);
+    padding: var(--iot-space-2xs);
+    border-radius: var(--iot-radius-action);
+}
+
+.iot-board .history-filters .history-tab {
+    flex: 1 0 auto;
+    min-width: var(--iot-target-min);
+    padding-inline: var(--iot-space-2xs);
+    white-space: nowrap;
+}
+
+.iot-board .history-filter-select {
+    display: none;
+    min-width: 0;
+    flex: 1;
+}
+
+/* Leave room to identify a result before scrolling on narrow or short screens. */
+@media (max-width: 639.98px), (max-height: 599.98px) {
+    .iot-board .history-filters {
+        display: none;
+    }
+
+    .iot-board .history-filter-select {
+        display: flex;
+    }
+
+    .iot-board .history-tabs .material-symbols-outlined {
+        display: none;
+    }
+}
+
+.iot-board .history-tab,
+.iot-board .history-text-action {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: var(--iot-target-min);
+    gap: var(--iot-space-xs);
+    border-radius: var(--iot-radius-action);
+    padding: var(--iot-space-2xs) var(--iot-space-sm);
+    font-size: var(--iot-font-control);
+    font-weight: 600;
+    transition: background-color var(--iot-motion-fast), color var(--iot-motion-fast);
+}
+
+.iot-board .history-tab {
+    font-size: var(--iot-font-label);
+    flex-wrap: wrap;
+    overflow-wrap: anywhere;
+}
+
+.iot-board .history-delete {
+    margin-left: auto;
+}
+
+.iot-board .history-tab:disabled,
+.iot-board .history-text-action:disabled {
+    cursor: not-allowed;
+    color: var(--text-muted);
+}
+
+.iot-board .history-group {
+    display: grid;
+    gap: var(--iot-space-md);
+    margin-bottom: var(--iot-space-md);
+}
+
+.iot-board .history-group-title {
+    font-weight: 600;
+}
+
+.iot-board .history-card {
+    min-width: 0;
+    padding: var(--iot-space-lg);
+    border: 1px solid var(--board-border);
+    border-radius: var(--iot-radius-card);
+}
+
+.iot-board .history-card__header {
+    flex-wrap: wrap;
+    align-items: baseline;
+    margin-bottom: var(--iot-space-sm);
+}
+
+.iot-board .history-card__title {
+    font-size: var(--iot-font-control);
+    font-weight: 600;
+}
+
+.iot-board .history-card__date {
+    font-size: var(--iot-font-min);
+    font-variant-numeric: tabular-nums;
+}
+
+.iot-board .history-card__badges,
+.iot-board .history-card__actions,
+.iot-board .history-evidence-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--iot-space-sm);
+}
+
+.iot-board .history-badge {
+    max-width: 100%;
+    padding: var(--iot-space-2xs) var(--iot-space-sm);
+    border-radius: var(--iot-radius-control);
+    font-size: var(--iot-font-caption);
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.iot-board .history-model-relation {
+    display: flex;
+    align-items: center;
+    gap: var(--iot-space-xs);
+    margin-top: var(--iot-space-md);
+    font-weight: 600;
+}
+
+.iot-board .history-model-relation > .material-symbols-outlined {
+    flex-shrink: 0;
+}
+
+.iot-board .history-model-relation > span:not(.material-symbols-outlined) {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.iot-board .history-card__scope,
+.iot-board .history-card__copy {
+    margin-top: var(--iot-space-xs);
+    overflow-wrap: anywhere;
+}
+
+.iot-board .history-card__actions {
+    margin-top: var(--iot-space-md);
+}
+
+.board-run-notice,
+.iot-board .history-notice {
+    padding: var(--iot-space-sm) var(--iot-space-md);
+    border-radius: var(--iot-radius-action);
+    font-size: var(--iot-font-control);
+    line-height: 1.6;
+    overflow-wrap: anywhere;
+}
+
+.board-run-notice .material-symbols-outlined,
+.iot-board .history-notice > .material-symbols-outlined {
+    flex-shrink: 0;
+    font-size: 1.125rem;
+}
+
+.iot-board .history-notice {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--iot-space-sm);
+    margin-bottom: var(--iot-space-md);
+}
+
+.board-run-notice summary,
+.iot-board .history-notice summary {
+    min-height: var(--iot-target-min);
+    padding-block: var(--iot-space-sm);
+    border-radius: var(--iot-radius-action);
+}
+
+.board-run-notice summary:focus-visible,
+.iot-board .history-notice summary:focus-visible {
+    outline: 2px solid var(--accent-border);
+    outline-offset: 2px;
+}
+
+.iot-board .history-card .history-notice {
+    margin-top: var(--iot-space-sm);
+    margin-bottom: 0;
+}
+
+.iot-board .history-disclosures {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: var(--iot-space-md);
+    margin-top: var(--iot-space-sm);
+    border-top: 1px solid var(--board-border);
+}
+
+.iot-board .history-disclosure {
+    min-width: 0;
+}
+
+.iot-board .history-disclosure[open],
+.iot-board .history-disclosure:only-child {
+    grid-column: 1 / -1;
+}
+
+.iot-board .history-disclosure > summary {
+    min-height: var(--iot-target-min);
+    padding: var(--iot-space-sm) 0;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.iot-board .history-disclosure__body {
+    display: grid;
+    gap: var(--iot-space-sm);
+    padding-bottom: var(--iot-space-sm);
+    overflow-wrap: anywhere;
+}
+
+.iot-board .history-evidence-row {
+    padding: var(--iot-space-md);
+    border-radius: var(--iot-radius-action);
+    overflow-wrap: anywhere;
+}
+
+.iot-board .history-evidence-actions {
+    margin-top: var(--iot-space-sm);
+}
+
+.iot-board .history-progress-label {
+    margin-top: var(--iot-space-md);
+    font-variant-numeric: tabular-nums;
+}
+
+.iot-board .history-progress {
+    height: var(--iot-space-2xs);
+    margin-top: var(--iot-space-xs);
+    overflow: hidden;
+    border-radius: var(--iot-radius-pill);
+}
+
+.iot-board .history-progress > div {
+    height: 100%;
+}
+
+.iot-board .history-empty {
+    display: grid;
+    justify-items: center;
+    gap: var(--iot-space-sm);
+    padding: var(--iot-space-2xl) var(--iot-space-lg);
+    text-align: center;
+}
+
 .iot-board .board-floating-actions {
     position: fixed;
     right: var(--board-action-dock-right, var(--board-floating-action-right));
-    top: calc(var(--board-nav-height) + 0.75rem);
+    top: calc(var(--board-nav-height) + var(--board-playback-toolbar-height) + 0.75rem);
     z-index: 35;
     width: var(--board-action-dock-width, var(--board-action-rail-width));
     display: flex;
@@ -915,7 +1156,7 @@
  * work out which one names the panel. It cleared `typographyFloor` (11.52px against an 11px floor) which is
  * why nothing flagged it, but a floor is a minimum for body text, not a target for a heading.
  *
- * `0.875rem` is the tier the side panels' own titles use (`text-sm`), so the board now has one heading size.
+ * The title shares the side panels' 16px tier.
  * Dropping `text-transform: uppercase` is part of the same fix: uppercase costs roughly 15% of apparent
  * x-height and removes word shape, which is most of why four characters read as smaller than they measure.
  */
@@ -923,8 +1164,8 @@
     min-width: 0;
     overflow: hidden;
     color: var(--board-text);
-    font-size: 0.875rem;
-    font-weight: 700;
+    font-size: 1rem;
+    font-weight: 600;
     letter-spacing: 0;
     line-height: 1.2;
     text-overflow: ellipsis;
@@ -989,97 +1230,14 @@
 }
 
 /*
- * Secondary dock treatment for the AI-suggestion group.
- *
- * Every dock button used to be an opaque 700-weight fill in its own hue, so eight of them read as
- * eight primary actions and the dock had no focal point -- measured at 14 of 38 visible controls
- * carrying primary weight on an empty Board. Run actions (simulate, verify, explore, history) act on
- * the model; suggestions propose changes to it. That is a real difference in consequence, so it
- * should be a visible difference in weight.
- *
- * These stay fully visible, keyboard reachable, and named: this is a demotion in emphasis, not
- * disclosure. Each button keeps its own hue for the icon and its active state, so the categorical
- * colour coding that helps recognition survives -- it just stops shouting.
+ * Panel and inline actions share typography and geometry; width belongs to the layout.
  */
-/*
- * The border carries the button's shape, so it has to be perceptible on its own. A hairline at the
- * default border token measured 1.23:1 against the fill in the light theme -- below the 3:1 WCAG
- * minimum for identifying a UI component, which made the buttons read as absent rather than
- * secondary. Reviewing the screenshot rather than the CSS is what exposed it: in the light-theme
- * render the whole group nearly vanished while the run actions above it stayed solid.
- *
- * Tinting the border and fill with the category accent solves both problems at once: it lifts the
- * boundary well past 3:1 and makes the four categories distinguishable at a glance, without
- * returning to a saturated fill that would compete with the run actions again.
- */
-.iot-board .board-tool-button--suggestion {
-    /*
-     * The fill stays neutral on purpose. Tinting it with the accent darkened the fill in step with
-     * the border, so strengthening the border did not improve the ratio -- measured, purple actually
-     * fell from 2.99:1 to 2.39:1 when its accent was darkened. Against a neutral fill the same
-     * borders measure 4.81-8.36:1, clearing the 3:1 minimum for identifying a UI component.
-     */
-    background-color: var(--board-card-bg);
-    border: 1px solid var(--board-tool-accent, var(--iot-color-accent));
-    color: var(--board-text);
-    box-shadow: none;
-}
+.board-panel-submit { width: 100%; }
 
-/* Hover tints the fill, which is safe: it only ever raises the contrast against the border. */
-.iot-board .board-tool-button--suggestion:hover:not(:disabled) {
-    background-color: color-mix(in srgb, var(--board-tool-accent, var(--iot-color-accent)) 12%, var(--board-card-bg));
-}
-
-/* The icon carries the category colour, so recognition does not depend on a saturated fill. */
-.iot-board .board-tool-button--suggestion .material-symbols-outlined {
-    color: var(--board-tool-accent, currentColor);
-}
-
-/*
- * Active and running states still need to be unmistakable, and must not rely on colour alone --
- * the left border gives a non-colour cue for the same state.
- */
-.iot-board .board-tool-button--suggestion[aria-pressed='true'] {
-    background-color: color-mix(in srgb, var(--board-tool-accent, var(--iot-color-accent)) 14%, var(--board-card-bg));
-    border-color: color-mix(in srgb, var(--board-tool-accent, var(--iot-color-accent)) 55%, transparent);
-    box-shadow: inset 3px 0 0 0 var(--board-tool-accent, var(--iot-color-accent));
-}
-
-.iot-board .board-tool-button--suggestion:disabled {
-    opacity: 0.55;
-    cursor: not-allowed;
-}
-
-/*
- * Panel submit button.
- *
- * The two setup panels had a green and an indigo submit button, neither matching the panel they sat
- * in. A primary action is the one control a user is looking for, so it should look the same
- * everywhere and match the product accent rather than the panel that happens to host it.
- */
-.board-panel-submit {
-    display: flex;
-    width: 100%;
-    align-items: center;
-    justify-content: center;
-    gap: 0.5rem;
-    /* 44px floor: measured 38px, and this is a panel primary action. */
-    min-height: 2.75rem;
-    padding: 0.625rem 0;
-    border-radius: var(--iot-radius-action);
-    background-color: var(--accent-fill);
-    color: #fff;
-    font-size: 0.75rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    box-shadow: 0 2px 6px color-mix(in srgb, var(--accent) 28%, transparent);
-    transition: background-color 0.18s, box-shadow 0.18s;
-}
-
-.board-panel-submit:hover:not(:disabled) {
-    background-color: var(--accent-fill-hover);
-    box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 34%, transparent);
+/* Run-state utilities may replace the ordinary primary fill without forking its type or geometry. */
+@layer components {
+    .board-panel-submit { background-color: var(--accent-fill); }
+    .board-panel-submit:hover:not(:disabled) { background-color: var(--accent-fill-hover); }
 }
 
 /* Inline action primitives — the same accent/success meanings as `board-panel-submit`, for actions
@@ -1094,18 +1252,20 @@
  * good outcome (verify, confirm). Anything destructive keeps the danger role, which is deliberately
  * not offered here: a destructive action should be written out with its confirmation, not reached for
  * as a colour. */
+.board-panel-submit,
 .board-action-inline,
-.board-action-inline-affirm {
+.board-action-inline-affirm,
+.board-action-inline-danger {
     display: inline-flex;
     align-items: center;
     justify-content: center;
     gap: 0.375rem;
-    min-height: 2.75rem;
-    padding: 0.5rem 1rem;
+    min-height: var(--iot-target-min);
+    padding: var(--iot-space-sm) var(--iot-space-md);
+    border: 1px solid transparent;
     border-radius: var(--iot-radius-action);
-    color: #fff;
-    font-weight: 700;
-    transition: background-color 0.18s, box-shadow 0.18s;
+    color: var(--text-on-fill);
+    transition: background-color var(--iot-motion-fast), border-color var(--iot-motion-fast);
 }
 
 .board-action-inline {
@@ -1130,32 +1290,264 @@
  * the one to reach for least: it belongs only where the call site also gates the action behind
  * `confirmDestructive`, which is what distinguishes "this deletes rules" from "this is emphatic". */
 .board-action-inline-danger {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.375rem;
-    min-height: 2.75rem;
-    padding: 0.5rem 1rem;
-    border-radius: var(--iot-radius-action);
     background-color: var(--danger-fill);
-    color: #fff;
-    font-weight: 700;
-    transition: background-color 0.18s, box-shadow 0.18s;
 }
 
 .board-action-inline-danger:hover:not(:disabled) {
-    background-color: color-mix(in srgb, var(--danger) 84%, #000);
-}
-
-.board-action-inline-danger:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
+    background-color: var(--danger-fill-hover);
 }
 
 .board-action-inline:disabled,
-.board-action-inline-affirm:disabled {
-    opacity: 0.5;
+.board-action-inline-affirm:disabled,
+.board-action-inline-danger:disabled {
+    background: var(--accent-fill-disabled);
+    opacity: 1;
     box-shadow: none;
+    cursor: not-allowed;
+}
+
+/* Repeated result/replay actions share a quiet control; filled copper starts new work. */
+.board-action-secondary {
+    display: inline-flex;
+    min-height: var(--iot-target-min);
+    align-items: center;
+    justify-content: center;
+    gap: var(--iot-space-xs);
+    padding: var(--iot-space-2xs) var(--iot-space-md);
+    border: 1px solid var(--control-border);
+    border-radius: var(--iot-radius-action);
+    background: var(--surface-control);
+    color: var(--text);
+    transition: background-color var(--iot-motion-fast), border-color var(--iot-motion-fast);
+}
+
+.board-action-secondary:hover:not(:disabled) {
+    background: var(--surface-control-hover);
+    border-color: var(--accent-border);
+}
+
+.board-action-secondary.board-icon-danger:hover:not(:disabled) {
+    background: var(--danger-surface);
+    border-color: var(--danger-border);
+    color: var(--danger);
+}
+
+.board-run-mode {
+    position: relative;
+    isolation: isolate;
+    min-height: var(--iot-target-min);
+    min-width: 0;
+    border-radius: var(--iot-radius-action);
+    padding: var(--iot-space-md) var(--iot-space-sm);
+    background: transparent;
+    color: var(--text-muted);
+    font-size: var(--iot-font-label);
+    font-weight: 600;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+    transition: color var(--iot-motion-fast);
+}
+
+/* Leave a gutter around the face, including when a translated choice wraps. */
+.board-run-mode::before {
+    position: absolute;
+    z-index: -1;
+    inset: var(--iot-space-sm) var(--iot-space-2xs);
+    border: 1px solid transparent;
+    border-radius: var(--iot-radius-marker);
+    background: transparent;
+    content: '';
+    pointer-events: none;
+    transition: background-color var(--iot-motion-fast), border-color var(--iot-motion-fast);
+}
+
+.board-run-mode[aria-pressed='true'] {
+    color: var(--accent);
+}
+
+.board-run-mode[aria-pressed='true']::before {
+    background: var(--surface-elevated);
+    border-color: var(--border);
+}
+
+.board-run-mode--adversarial {
+    color: var(--danger);
+}
+
+.board-run-mode--adversarial::before {
+    background: var(--surface-elevated);
+    border-color: var(--danger-border);
+}
+
+.board-run-mode--adversarial[aria-pressed='true'] {
+    color: var(--text-on-fill);
+}
+
+.board-run-mode--adversarial[aria-pressed='true']::before {
+    background: var(--danger-fill);
+    border-color: var(--danger-fill);
+}
+
+.board-run-mode:disabled {
+    color: var(--text-muted);
+    opacity: 1;
+    cursor: not-allowed;
+}
+
+.board-run-mode:focus-visible {
+    outline: 2px solid var(--accent-border);
+    outline-offset: 2px;
+}
+
+.board-run-mode:hover:not(:disabled) {
+    color: var(--text);
+}
+
+.board-run-mode:hover:not(:disabled)::before {
+    background: var(--surface-control-hover);
+}
+
+.board-run-mode[aria-pressed='true']:hover:not(:disabled) {
+    color: var(--accent-strong);
+}
+
+.board-run-mode--adversarial:hover:not(:disabled) {
+    color: var(--danger);
+}
+
+.board-run-mode--adversarial:hover:not(:disabled)::before {
+    background: var(--danger-surface);
+}
+
+.board-run-mode--adversarial[aria-pressed='true']:hover:not(:disabled) {
+    color: var(--text-on-fill);
+}
+
+.board-run-mode--adversarial[aria-pressed='true']:hover:not(:disabled)::before {
+    background: var(--danger-fill-hover);
+}
+
+.board-run-mode:disabled::before {
+    border-color: var(--border);
+    background: var(--surface-muted);
+}
+
+.board-run-mode[aria-pressed='true']:disabled::before {
+    border-color: var(--border-strong);
+}
+
+.board-attack-point {
+    display: flex;
+    min-height: var(--iot-target-min);
+    align-items: center;
+    gap: var(--iot-space-sm);
+    padding: var(--iot-space-sm);
+    border: 1px solid var(--border);
+    border-radius: var(--iot-radius-action);
+    background: var(--surface-elevated);
+    cursor: pointer;
+}
+
+.board-attack-point:has(input:checked) {
+    border-color: var(--danger-border);
+}
+
+.board-attack-point:hover:not(:has(input:disabled)) {
+    background: var(--surface-control-hover);
+}
+
+.board-attack-point:has(input:focus-visible) {
+    outline: 2px solid var(--accent-border);
+    outline-offset: 2px;
+}
+
+.board-attack-point:has(input:disabled) {
+    background: var(--surface-muted);
+    color: var(--text-muted);
+    cursor: not-allowed;
+}
+
+.board-attack-point:has(input:disabled) .material-symbols-outlined {
+    color: var(--text-muted);
+}
+
+.board-run-range {
+    --run-range-color: var(--accent-fill);
+    --run-range-track: var(--control-border);
+    min-width: 0;
+    height: var(--iot-target-min);
+    appearance: none;
+    background: transparent;
+    cursor: pointer;
+}
+
+.board-run-range--adversarial {
+    --run-range-color: var(--danger-fill);
+    --run-range-track: var(--danger-border);
+}
+
+.board-run-range::-webkit-slider-runnable-track {
+    height: var(--iot-space-2xs);
+    border-radius: var(--iot-radius-pill);
+    background: var(--run-range-track);
+}
+
+.board-run-range::-moz-range-track {
+    height: var(--iot-space-2xs);
+    border-radius: var(--iot-radius-pill);
+    background: var(--run-range-track);
+}
+
+.board-run-range::-webkit-slider-thumb {
+    width: var(--iot-space-lg);
+    height: var(--iot-space-lg);
+    margin-top: calc((var(--iot-space-2xs) - var(--iot-space-lg)) / 2);
+    appearance: none;
+    border-radius: var(--iot-radius-pill);
+    background: var(--run-range-color);
+}
+
+.board-run-range::-moz-range-thumb {
+    width: var(--iot-space-lg);
+    height: var(--iot-space-lg);
+    border: 0;
+    border-radius: var(--iot-radius-pill);
+    background: var(--run-range-color);
+}
+
+.board-run-range:focus-visible {
+    outline: 2px solid var(--accent-border);
+    outline-offset: 2px;
+}
+
+.board-run-range:disabled {
+    --run-range-color: var(--text-muted);
+    --run-range-track: var(--border);
+    cursor: not-allowed;
+}
+
+.iot-board .history-tab:focus-visible,
+.iot-board .history-text-action:focus-visible,
+.iot-board .history-disclosure > summary:focus-visible,
+.board-action-secondary:focus-visible {
+    outline: 2px solid var(--accent-border);
+    outline-offset: 2px;
+}
+
+.board-panel-submit:focus-visible,
+.board-action-inline:focus-visible,
+.board-action-inline-affirm:focus-visible,
+.board-action-inline-danger:focus-visible,
+.board-action-inline-subtle:focus-visible {
+    outline: 2px solid var(--accent-border);
+    outline-offset: 2px;
+}
+
+.board-action-secondary:disabled {
+    border-color: var(--border-strong);
+    background-color: var(--surface-muted);
+    color: var(--text-muted);
+    opacity: 1;
     cursor: not-allowed;
 }
 
@@ -1166,14 +1558,13 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 0.375rem;
-    min-height: 2.75rem;
-    padding: 0.5rem 0.75rem;
+    gap: var(--iot-space-xs);
+    min-height: var(--iot-target-min);
+    padding: var(--iot-space-sm) var(--iot-space-md);
     border: 1px solid var(--accent-border);
     border-radius: var(--iot-radius-action);
     background-color: var(--accent-surface);
     color: var(--accent);
-    font-weight: 600;
     transition: background-color 0.18s;
 }
 
@@ -1182,7 +1573,10 @@
 }
 
 .board-action-inline-subtle:disabled {
-    opacity: 0.5;
+    border-color: var(--border-strong);
+    background-color: var(--surface-muted);
+    color: var(--text-muted);
+    opacity: 1;
     cursor: not-allowed;
 }
 
@@ -1192,92 +1586,17 @@
     cursor: not-allowed;
 }
 
-/*
- * A panel's close button: 24px glyph, 44px target.
- *
- * All six board panels declared the identical `w-8 h-8 flex items-center justify-center rounded-lg` string,
- * giving a **32px** target — under SC 2.5.8, and on the control a user reaches for when a non-modal panel is
- * covering the canvas they want back. Enlarging the visible box to 44px would make dismissal the largest
- * thing in the header, so the target grows through transparent padding instead: the same `content-box` +
- * `background-clip: content-box` technique `iot-info-tooltip-trigger` already uses, with a negative margin
- * so the header's flex layout absorbs the growth and the glyph does not move.
- */
-.board-panel-close {
-    display: inline-flex;
-    box-sizing: content-box;
-    width: 1.5rem;
-    height: 1.5rem;
-    padding: 0.625rem;
-    margin: -0.625rem;
-    background-clip: content-box;
-    flex: 0 0 auto;
-    align-items: center;
-    justify-content: center;
-    border-radius: var(--iot-radius-action);
-    transition: color 0.18s, background-color 0.18s;
-}
-
-/*
- * The reusable disabled treatment for a filled primary action.
- *
- * Seven other filled buttons disarmed themselves with `disabled:opacity-50` instead, which fades the ink
- * along with the fill: white text on the accent measured **2.42:1** while disabled, below AA, so the label
- * of an unavailable action was the least readable text on the surface. That is backwards — a disabled
- * control still has to be readable to explain why it is disabled.
- *
- * Desaturating the fill while leaving the ink opaque says "not available" through the same channel
- * (a weaker fill) without spending contrast, which is the treatment `board-panel-submit` already used and
- * `AccountDeleteDialog` adopted for its destructive twin.
- */
+/* Disabled actions drain the fill without fading their labels. */
 .board-action-disarmed:disabled {
     background-color: var(--accent-fill-disabled);
     box-shadow: none;
     cursor: not-allowed;
 }
 
-/*
- * Panel header banner.
- *
- * Each of the six board panels wore its own two-hue gradient -- green→emerald for Verification,
- * teal→cyan, amber→orange, purple→violet, red→rose, indigo→violet. That is what made reviewers
- * describe the panels by colour ("its green header", "its purple Simulation header") as though they
- * were different products: the banner was the largest coloured surface in each panel and it said
- * nothing except "this is a different panel".
- *
- * One accent banner. What identifies a panel is its title and icon, which is what a user reads.
- * A subtle vertical shade keeps the header distinct from the panel body without introducing a hue.
- */
-/*
- * The banner is a fill, so it uses `--accent-fill` and its ink is white in both themes.
- *
- * It used `--accent`, which flips lightness between themes: `#2563eb` light, `#60a5fa` dark. That made the
- * correct ink flip too — black ink measures 4.06 on the light banner but 8.26 on the dark one, white the
- * reverse — and the panels declared `text-black`, which is right in light and wrong in dark. One panel
- * title measured **1.44:1** on the dark banner. A surface whose required ink depends on the theme cannot
- * have a single correct markup, so the fix is to stop the ground from flipping rather than to fork the ink.
- *
- * `--accent-fill` is stable across themes by construction, and carries white at 5.17 (top) to 6.99 (bottom).
- */
+/* Titles identify tools; header surfaces do not encode a separate category palette. */
 .board-panel-banner {
-    background: linear-gradient(
-        160deg,
-        var(--accent-fill) 0%,
-        color-mix(in srgb, var(--accent-fill) 82%, #000) 100%
-    );
+    background: var(--surface-elevated);
 }
-
-/*
- * There is no `.board-dropzone` here, and that is a decision rather than an omission.
- *
- * One existed, styling a drop target with `--accent-surface` / `--accent-border`, carrying a note that the
- * orange "read as a separate warm widget" on a dark board. Nothing ever used it. Both real drop targets —
- * the template-import panel and the canvas `template-drop-overlay` — are dashed `--warning-border`, so the
- * accent version was a proposal the product did not adopt, not a migration left half-done. Two independent
- * implementations agreeing is the convention; a third, unreferenced opinion in a stylesheet is not.
- *
- * If the warm reading is worth revisiting, change both call sites together and delete this note. Do not
- * reintroduce a global class that neither of them reaches.
- */
 
 /* Role text colours, for use on the matching tinted surface. Both themes come from the role token,
    so a warning message stays legible in dark mode instead of keeping a light-theme amber. */
@@ -1301,9 +1620,11 @@
  * Heading versus body is a hierarchy distinction, not a colour-identity one, so it uses the shared
  * text tokens and inherits the theme.
  */
-.board-text-strong { color: var(--text); }
-.board-text-muted { color: var(--text-muted); }
-.board-border-subtle { border-color: var(--border); }
+@layer components {
+    .board-text-strong { color: var(--text); }
+    .board-text-muted { color: var(--text-muted); }
+    .board-border-subtle { border-color: var(--border); }
+}
 
 /* Determinate progress fill. Shares the in-progress accent so a running bar and a running spinner
    agree, instead of each panel tinting its own bar. */
@@ -1313,35 +1634,9 @@
 .board-text-danger { color: var(--danger); }
 .board-text-success { color: var(--success); }
 .board-text-info { color: var(--info); }
-/*
- * The accent member of the family was missing while two `ControlCenter` elements already applied
- * `board-text-accent` — a class Tailwind cannot generate either, so both were silent no-ops.
- *
- * It needs the `.iot-board` prefix, unlike its five siblings, and that is not cosmetic. Its one call site is an
- * icon inside a `<summary class="text-slate-600">`, and the board's neutral-text normaliser
- * (`.iot-board .board-side-panel .text-slate-600`, specificity 0-3-0) recolours that summary to
- * `--board-text-muted`, which the icon then *inherits*. A bare `.board-text-accent` is 0-1-0 and loses: measured
- * in dark theme it painted `rgb(148,163,184)` where `--accent` is `rgb(96,165,250)`. The first version of this
- * fix had exactly that defect and looked correct in the source.
- *
- * The siblings share the weakness and simply never sit under a `text-slate-*` ancestor today, so they are left
- * as they are rather than changed speculatively.
- */
-.iot-board .board-text-accent { color: var(--accent); }
+.board-text-accent { color: var(--accent); }
 
-/*
- * Section-header icon tile.
- *
- * The Control Center had six of these in one panel, in six hues -- orange×3, blue×2, purple, red --
- * one per section. The hue distinguished nothing a reader needs: the icon glyph and the heading beside
- * it already name the section. What it did do was give the panel its own signature palette, which is
- * why reviewing the Board repeatedly named the left panel as belonging to a different visual family:
- * "the large orange blocks are much more visually forceful than neighbouring cool-blue controls,
- * competing with the canvas as a focal point".
- *
- * One tinted accent tile, so the glyph carries the meaning and the panel stops competing with the
- * canvas. Tinted rather than filled because a section header is a label, not an action.
- */
+/* Section identity stays neutral so outcomes and actions retain their emphasis. */
 .board-section-icon {
     display: flex;
     width: 2.25rem;
@@ -1350,9 +1645,9 @@
     align-items: center;
     justify-content: center;
     border-radius: var(--iot-radius-well);
-    background-color: var(--accent-surface);
-    border: 1px solid var(--accent-border);
-    color: var(--accent);
+    background-color: var(--surface-muted);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
 }
 
 .board-section-icon--lg {
@@ -1361,39 +1656,285 @@
     border-radius: var(--iot-radius-well);
 }
 
-/* The glyphs inside were `text-white` against a saturated fill; on a tinted tile they take the
-   accent colour instead. Scoped to the tile so no other icon is affected. */
+/* Override inherited category colours only inside section tiles. */
 .board-section-icon .material-symbols-outlined {
-    color: var(--accent);
+    color: var(--text-muted);
 }
 
-/*
- * Neutral card surface — the product's default container.
- *
- * 82 call sites wrote this as `bg-white border border-slate-200` (47 of them adding `shadow-sm`),
- * with no dark counterpart. That is one surface expressed 82 times, and it is why the dark theme
- * needed a blanket repair rule: each site had decided "white" locally, so nothing could restate it
- * per theme.
- *
- * `--surface-elevated` and `--border` are already theme-aware, so a call site that uses this class
- * needs no `dark:` variant at all. The `--raised` modifier carries the shadow those 47 sites wanted.
- *
- * This is the class that lets the `.dark [class~='bg-white']` migration fallback be deleted: every
- * site migrated here stops depending on it.
- */
-.board-card {
-    background-color: var(--surface-elevated);
+/* Panel identity and metadata use neutrals; colour belongs to outcomes and selection. */
+.iot-board .board-tool-header {
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--iot-space-md);
+    padding: var(--iot-space-sm) var(--iot-space-md);
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-elevated);
+}
+
+.board-meta-chip {
+    background: var(--surface-control);
+    color: var(--text-muted);
+    border-color: var(--border);
+}
+
+.board-note {
+    background: var(--surface-muted);
+    color: var(--text-muted);
     border: 1px solid var(--border);
+}
+
+/* Defaults remain below utility state overrides, including validation borders. */
+@layer components {
+    .board-bg-elevated { background-color: var(--surface-elevated); }
+    .board-bg-muted { background-color: var(--surface-muted); }
+    .board-bg-control { background-color: var(--surface-control); }
+
+    .board-field {
+        width: 100%;
+        min-width: 0;
+        min-height: var(--iot-target-min);
+        padding: var(--iot-space-sm) var(--iot-space-md);
+        border: 1px solid;
+        border-color: var(--field-border);
+        border-radius: var(--iot-radius-action);
+        background-color: var(--field-bg);
+        color: var(--text);
+        font-family: var(--iot-font-body);
+        font-size: var(--iot-font-control);
+        font-weight: 400;
+        line-height: 1.5;
+        box-shadow: none;
+        transition: border-color var(--iot-motion-fast), box-shadow var(--iot-motion-fast);
+    }
+
+    .board-field:hover:not(:disabled):not([aria-invalid='true']) {
+        border-color: var(--text-muted);
+    }
+
+    .board-field:focus {
+        border-color: var(--accent-border);
+        outline: 2px solid var(--accent-border);
+        outline-offset: 2px;
+    }
+    .board-field[aria-invalid='true'] { border-color: var(--danger-border); }
+    .board-field[aria-invalid='true']:focus { outline-color: var(--danger-border); }
+    .board-field:disabled {
+        background: var(--surface-muted);
+        color: var(--text-muted);
+        opacity: 1;
+        cursor: not-allowed;
+    }
+    .board-field::placeholder { color: var(--text-muted); opacity: 1; }
+    .board-field--clearable::-webkit-search-cancel-button { appearance: none; }
+
+    select.board-field { cursor: pointer; }
+    select.board-field:disabled { cursor: not-allowed; }
+
+    /* An empty template-default choice is a value, not a disabled placeholder. */
+    select.board-field:not(:disabled):has(option:checked:disabled, option:checked[hidden]) { color: var(--text-muted); }
+
+    select.board-field[multiple] { padding: var(--iot-space-2xs); }
+    select.board-field[multiple] option {
+        padding: var(--iot-space-sm) var(--iot-space-md);
+        border-radius: var(--iot-radius-control);
+    }
+    select.board-field[multiple] option:checked {
+        background: var(--accent-surface);
+        /* Native focused selection paints over background-color and color. */
+        background-image: linear-gradient(var(--accent-surface), var(--accent-surface));
+        color: var(--accent-strong);
+        -webkit-text-fill-color: var(--accent-strong);
+        font-weight: 600;
+    }
+    select.board-field[multiple]:disabled option:checked {
+        background: var(--surface-control);
+        background-image: linear-gradient(var(--surface-control), var(--surface-control));
+        color: var(--text-muted);
+        -webkit-text-fill-color: var(--text-muted);
+    }
+
+    /* Native selection keeps labels, values, type-ahead and focus ownership intact.
+       The picker enters the top layer, so panel scrolling cannot clip its options. */
+    @supports (appearance: base-select) {
+        select.board-field:not([multiple]),
+        select.board-field:not([multiple])::picker(select) { appearance: base-select; }
+
+        select.board-field:not([multiple]) {
+            align-items: center;
+            gap: var(--iot-space-md);
+            white-space: nowrap;
+        }
+        select.board-field:not([multiple]):open:not([aria-invalid='true']) { border-color: var(--accent-border); }
+        select.board-field::picker-icon { color: var(--text-muted); flex-shrink: 0; }
+
+        .board-select__button {
+            display: flex;
+            align-items: center;
+            flex: 1;
+            min-width: 0;
+            padding: 0;
+            border: 0;
+            background: transparent;
+            color: inherit;
+            font: inherit;
+            text-align: inherit;
+            cursor: inherit;
+        }
+        .board-select__value {
+            display: block;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        select.board-field:not([multiple])::picker(select) {
+            inline-size: anchor-size(self-inline);
+            max-inline-size: calc(100dvw - var(--iot-space-lg) * 2);
+            max-block-size: min(20rem, calc(100dvh - var(--iot-space-lg) * 2));
+            margin-block: var(--iot-space-xs);
+            padding: var(--iot-space-2xs);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--iot-radius-well);
+            background: var(--surface-elevated);
+            color: var(--text);
+            box-shadow: var(--shadow-floating);
+            overflow: auto;
+        }
+        select.board-field:not([multiple]) option {
+            display: flex;
+            align-items: center;
+            gap: var(--iot-space-md);
+            min-block-size: var(--iot-target-min);
+            padding: var(--iot-space-sm) var(--iot-space-md);
+            border-radius: var(--iot-radius-action);
+            font-size: var(--iot-font-control);
+            font-weight: 400;
+            line-height: 1.5;
+            white-space: normal;
+            overflow-wrap: anywhere;
+        }
+        select.board-field:not([multiple]) option[hidden] { display: none; }
+        select.board-field:not([multiple]) option:checked {
+            background: var(--accent-surface);
+            color: var(--accent-strong);
+            font-weight: 600;
+        }
+        select.board-field:not([multiple]) option:is(:hover, :focus-visible):not(:disabled) {
+            background: var(--surface-control-hover);
+            color: var(--text);
+        }
+        select.board-field:not([multiple]) option:focus-visible {
+            outline: 2px solid var(--accent-border);
+            outline-offset: -2px;
+        }
+        select.board-field:not([multiple]) option:disabled { color: var(--text-muted); }
+        select.board-field:not([multiple]) option::checkmark {
+            order: 1;
+            margin-inline-start: auto;
+            color: var(--accent);
+        }
+    }
+
+    .board-form-label {
+        color: var(--text-muted);
+        font-size: var(--iot-font-label);
+        font-weight: 600;
+        line-height: 1.5;
+    }
+
+    .board-section-title {
+        color: var(--text);
+        font-size: var(--iot-font-control);
+        font-weight: 600;
+        line-height: 1.5;
+    }
+
+    .board-copy {
+        font-size: var(--iot-font-control);
+        font-weight: 400;
+        line-height: 1.6;
+    }
+
+    .board-caption {
+        font-size: var(--iot-font-caption);
+        font-weight: 400;
+        line-height: 1.5;
+    }
+
+    .board-badge {
+        font-size: var(--iot-font-caption);
+        font-weight: 600;
+        line-height: 1.5;
+    }
+
+    .board-metric {
+        font-size: var(--iot-font-base);
+        font-weight: 600;
+        line-height: 1.4;
+        font-variant-numeric: tabular-nums;
+    }
+
+    .board-section-marker {
+        width: 0.25rem;
+        height: calc(var(--iot-font-control) * 1.5);
+        flex-shrink: 0;
+        border-radius: var(--iot-radius-pill);
+    }
+
+}
+
+/* Clearing a field has the same target as other icon actions, including touch input. */
+.board-field-clear {
+    position: absolute;
+    right: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: var(--iot-target-min);
+    height: var(--iot-target-min);
+    border: 0;
+    border-radius: var(--iot-radius-action);
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+}
+
+.board-field-clear:hover:not(:disabled) {
+    background: var(--surface-control-hover);
     color: var(--text);
 }
 
-.board-card--raised {
-    box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 8%, transparent);
+.board-field-clear:focus-visible {
+    outline: 2px solid var(--accent-border);
+    outline-offset: 2px;
 }
 
-/* Recessed variant for inset regions (empty states, nested wells) that used `bg-slate-50`. */
-.board-card--muted {
-    background-color: var(--surface-muted);
+/* Card defaults yield to explicit ink roles, border styles and hover states. */
+@layer components {
+    :where(.board-card) {
+        background-color: var(--surface-elevated);
+        border: 1px solid var(--border);
+        color: var(--text);
+    }
+
+    .board-card--muted {
+        background-color: var(--surface-muted);
+    }
+
+    :where(.iot-board .board-card-surface) {
+        background: var(--board-card-bg);
+        color: var(--board-text);
+        border-color: var(--board-border);
+    }
+}
+
+.board-card--raised {
+    box-shadow: var(--shadow-raised);
 }
 
 /*
@@ -1488,37 +2029,11 @@
 .hover\:board-chip-accent:hover { background-color: var(--accent-surface); color: var(--accent); }
 .disabled\:board-chip-info:disabled { background-color: var(--info-surface); color: var(--info); }
 
-/*
- * The chip variants sit here; the *ink* variants had to move below the neutral-text normaliser — see the note
- * at that block. Nothing sets a competing `background-color` at rest on the chip call sites, so these win where
- * a same-specificity ink rule did not.
- */
-
 .hover\:board-border-subtle:hover { border-color: var(--border); }
 .hover\:board-card--muted:hover { background-color: var(--board-card-muted-bg); }
 
-/*
- * The neutral control's hover, for the 26 sites that had reached for `hover:bg-slate-100`/`200`.
- *
- * Those utilities cannot win here — Tailwind emits them into `@layer utilities`, and every rule in this
- * file is unlayered, which outranks a layer at any specificity. So the hover either did nothing (where an
- * `!important` remap owned the background) or painted near-white under light ink at 1.13:1. The derivation
- * of the token, both themes, is on `--surface-control-hover` in `base.css`.
- *
- * The ink half is not optional on a muted control: light's hover ground leaves `--text-muted` at 4.23:1,
- * under AA, so a site whose rest ink is muted must pair this with `hover:board-text-strong`. Sites already
- * resting on `--text` need only the ground. `styles/__tests__/neutralHoverFeedback.spec.ts` enforces the pair.
- *
- * `!important` because the panel normalisers this must beat are 0-3-0 and sit *later* in the file
- * (`.iot-board .board-floating-panel .bg-slate-100`, `.board-timeline .bg-slate-100`), so neither a
- * bare 0-2-0 rule nor an `.iot-board`-prefixed tie can win — measured: the history panel's Dismiss
- * button showed an identical ground at rest and on hover (5.71:1 both) until this was added. The
- * `.board-timeline` twin further down carries the same flag for the sibling replay bars.
- */
-.hover\:board-control-hover:hover { background-color: var(--surface-control-hover) !important; }
-
-.dark .dark\:board-text-progress { color: var(--accent); }
-.dark .dark\:board-border-progress { border-color: var(--accent); }
+/* Hover uses the same surface and strong ink inside and outside the workspace shell. */
+.hover\:board-control-hover:hover { background-color: var(--surface-control-hover); }
 
 /*
  * A file-picker trigger: a `<label>` wrapping a hidden `<input type="file">`.
@@ -1529,6 +2044,15 @@
  * as the chip it was reaching for.
  */
 .board-file-trigger {
+    display: inline-flex;
+    min-height: var(--iot-target-min);
+    align-items: center;
+    gap: var(--iot-space-xs);
+    padding: var(--iot-space-sm) var(--iot-space-md);
+    border-radius: var(--iot-radius-action);
+    font-size: var(--iot-font-control);
+    font-weight: 600;
+    line-height: 1.5;
     border: 1px solid var(--accent-border);
     color: var(--accent);
 }
@@ -1536,6 +2060,11 @@
 .board-file-trigger:hover,
 .board-file-trigger:focus-within {
     background-color: var(--accent-surface);
+}
+
+.board-file-trigger:focus-visible {
+    outline: 2px solid var(--accent-border);
+    outline-offset: 2px;
 }
 
 /* A chip that carries no status at all — a count, a unit, an ordinary label.
@@ -1594,20 +2123,21 @@
     background: color-mix(in srgb, var(--board-border) 70%, transparent);
 }
 
-.iot-board .board-tool-pulse {
+.iot-board .board-tool-status {
     position: absolute;
-    inset: 0.15rem;
-    border-radius: var(--iot-radius-well);
-    opacity: 0.55;
-    animation: board-tool-ping 1s cubic-bezier(0, 0, 0.2, 1) infinite;
+    inset: 0;
+    z-index: 2;
+    pointer-events: none;
+    border: 1px solid var(--accent-border);
+    border-radius: var(--iot-radius-action);
 }
 
-@keyframes board-tool-ping {
-    75%,
-    100% {
-        opacity: 0;
-        transform: scale(1.35);
-    }
+.iot-board .board-tool-status--warning {
+    border-color: var(--warning-border);
+}
+
+.iot-board .board-tool-status--danger {
+    border-color: var(--danger-border);
 }
 
 .iot-board .board-tool-button {
@@ -1615,174 +2145,66 @@
     z-index: 1;
     display: inline-flex;
     width: 100%;
-    /* 44px, not 40px. All eight dock buttons measured 124×40 — these are the entry points to simulation,
-       verification, exploration, run history and the four recommendation panels, i.e. every primary workflow on
-       the board. `2.5rem` was 4px short of the platform minimum on the one strip a user visits before every task. */
-    min-height: 2.75rem;
+    min-height: var(--iot-target-min);
     align-items: center;
     justify-content: center;
-    gap: 0.45rem;
-    border-radius: var(--iot-radius-well);
-    padding: 0 0.55rem;
-    overflow: hidden;
-    white-space: nowrap;
-}
-
-/*
- * Primary dock treatment for the run/review actions.
- *
- * These four buttons each had their own saturated hue -- blue Simulation, indigo Explore, green
- * Verification, cyan Run History -- for four actions of equal standing. The hue carried no meaning:
- * the filled-versus-outlined split already distinguishes run actions from AI suggestions, verified
- * in a real browser last round. So the colour was decoration, and reviewing a rendered Board named
- * it as the product's main visual seam: "saturated blue, purple, green, and teal filled buttons ...
- * belong to a more vivid visual family than the restrained panels and canvas ... the rainbow rail is
- * the substantive mismatch".
- *
- * One accent role for all four. What still distinguishes them is what should: the icon and the label.
- */
-/*
- * Three tiers in the dock, because the product has three kinds of action — not because three weights look
- * nicer than one.
- *
- * Measured: `open-verification-panel`, `open-simulation-panel`, `open-fuzzing-panel` and
- * `open-history-panel` rendered **byte-identical** — same `rgb(37, 99, 235)` fill, same 400 weight, same
- * 124x44 box, same 10.4px radius, same shadow. Yet the repo's own semantics say they differ in kind, and
- * `frontend-ui-conventions.md` §4 already requires that emphasis follow consequence:
- *
- *   - **Verification** runs NuSMV and returns a formal proof or a counterexample. It is the only control on
- *     the board whose output is a mathematical conclusion. It stays a filled primary.
- *   - **Simulation** and **Explore** run real work but produce a single trace and bounded *candidate*
- *     evidence — `CLAUDE.md` is explicit that a fuzz finding is replay-only and must never be dressed as a
- *     verdict. Painting them exactly like the verifier is that same overclaim, in the visual layer.
- *   - **Run History** is not an action at all. It opens a view of past results and writes nothing.
- *
- * So: filled for proof, tinted-and-bordered for evidence, quiet for navigation. Colour still marks the
- * family (all three are accent, none is a new hue), and weight now marks the epistemic claim.
- */
-/*
- * Emphasis here is the fill, not a lift.
- *
- * This button carried Tailwind's `shadow-lg` in the markup while all seven siblings declare
- * `box-shadow: none`, so one of eight buttons floated above a strip they all belong to — inside a panel that
- * is itself elevated. It made the tier difference read as a depth difference, and `shadow-lg` is a raw
- * light-theme shadow that never followed the theme. Removed from the markup; the base rule's `none` applies.
- */
-.iot-board .board-tool-button--primary {
-    background-color: var(--accent-fill);
-    color: #fff;
-}
-
-.iot-board .board-tool-button--primary:hover:not(:disabled) {
-    background-color: var(--accent-fill-hover);
-}
-
-/*
- * Tier 2 — real work, candidate evidence. A tinted surface rather than a fill.
- *
- * The tint alone is not enough to see: accent at 14% over a card measures 1.22:1 against that card, so the
- * border carries the boundary and the tint carries the family. The label uses the accent *text* colour on a
- * pale ground (5.51 light / 7.16 dark), which is the ink half of the pair doing its actual job.
- */
-.iot-board .board-tool-button--evidence {
-    background-color: color-mix(in srgb, var(--accent) 14%, var(--board-card-bg));
-    /*
-     * 80%, not 42%: the tint is 1.22:1 against the panel behind the dock, so the border is the only thing
-     * making this a control rather than a coloured patch, and it has to clear the 3:1 boundary minimum on its
-     * own. At 42% it measured 1.87 (light) / 2.27 (dark); 80% gives 3.62 / above. The same measurement caught
-     * the `--view` tier below, where it was 1.48.
-     */
-    border: 1px solid color-mix(in srgb, var(--accent) 80%, transparent);
-    color: var(--accent-strong);
-    box-shadow: none;
-}
-
-.iot-board .board-tool-button--evidence:hover:not(:disabled) {
-    background-color: color-mix(in srgb, var(--accent) 22%, var(--board-card-bg));
-    border-color: var(--accent);
-}
-
-/* Pressed = this panel is open. An inset bar, so the state does not rely on colour alone. */
-.iot-board .board-tool-button--evidence[aria-pressed='true'] {
-    background-color: color-mix(in srgb, var(--accent) 22%, var(--board-card-bg));
-    box-shadow: inset 3px 0 0 0 var(--accent);
-}
-
-.iot-board .board-tool-button--evidence:disabled {
-    background-color: var(--board-control-bg);
-    border-color: var(--board-border);
-    color: var(--board-text-muted);
-}
-
-/*
- * Tier 3 — opens a view, writes nothing. The quietest tier that is still clearly a control.
- *
- * Deliberately not `--suggestion`: that variant means "this proposes a change you may accept", which Run
- * History does not do. Same restraint, different meaning, so it gets its own name rather than borrowing one
- * that would misdescribe it.
- */
-.iot-board .board-tool-button--view {
-    /*
-     * The same quiet ground as the suggestion tier.
-     *
-     * This was `--board-control-bg` (#f1f5f9) against the suggestions' `--board-card-bg` (#ffffff) — two
-     * tiers that both mean "this is not the primary action" sitting on two different neutrals, four rows
-     * apart in one strip. Reviewed on screen that reads as an unexplained grey band among white buttons
-     * ("why is some white and some not"), because a background change in a vertical list implies a
-     * *category* change, and these two are the same category. What distinguishes them is already the
-     * border hue and the label.
-     */
+    gap: var(--iot-space-sm);
+    padding: 0 var(--iot-space-md);
+    border: 1px solid var(--board-tool-border);
+    border-radius: var(--iot-radius-action);
     background-color: var(--board-card-bg);
-    /*
-     * A deliberately quiet tier still needs a *visible* edge.
-     *
-     * Two independent reviews of the retiered dock — one per theme — both said Run History was "too quiet"
-     * and "easy to miss". That reads like taste until you measure it: the tier's surface is 1.10:1 against
-     * its panel in light and 1.22 in dark, so the whole boundary rests on the border, and `--board-border`
-     * was **1.48:1** (light) / 1.72 (dark). WCAG wants 3:1 for a control boundary, so the edge of this
-     * control was effectively invisible — not a matter of emphasis but of whether it reads as a control.
-     *
-     * #64748b clears it in both themes at once (4.76 light / 3.75 dark), so the tier needs no theme fork.
-     * Kept local rather than pushed into `--border-strong`, which is used for field edges on tinted grounds
-     * where a darker value would be heavier than those need.
-     */
-    border: 1px solid #64748b;
     color: var(--board-text);
     box-shadow: none;
+    overflow: hidden;
+    white-space: nowrap;
+    transition: background-color var(--iot-motion-fast) ease, border-color var(--iot-motion-fast) ease,
+        color var(--iot-motion-fast) ease, transform var(--iot-motion-fast) ease;
 }
 
-/* These mix against the tier's own resting ground. They still said `--board-control-bg` after the rest state
-   moved to `--board-card-bg`, which would have made hover *lighter* than rest in light theme — a hover that
-   changes ground rather than deepening it. */
-.iot-board .board-tool-button--view:hover:not(:disabled) {
-    background-color: color-mix(in srgb, var(--accent) 10%, var(--board-card-bg));
-    border-color: color-mix(in srgb, var(--accent) 38%, var(--board-border));
+.iot-board .board-tool-button:hover:not(:disabled) {
+    background-color: var(--surface-control-hover);
+    color: var(--text);
 }
 
-.iot-board .board-tool-button--view[aria-pressed='true'] {
-    background-color: color-mix(in srgb, var(--accent) 14%, var(--board-card-bg));
-    box-shadow: inset 3px 0 0 0 var(--accent);
+.iot-board .board-tool-button:active:not(:disabled) {
+    transform: translateY(1px);
 }
 
-/* The running halo behind a primary tool. "This is running" is one meaning, so it is one colour --
-   it previously inherited each button's own hue, which is the same decoration problem. */
-.iot-board .board-tool-pulse--primary {
-    background-color: var(--accent-fill);
+/* A separate marker keeps the open state clear without beveling the whole button. */
+.iot-board .board-tool-button::before {
+    content: '';
+    position: absolute;
+    left: var(--iot-space-xs);
+    top: 50%;
+    width: 2px;
+    height: var(--iot-space-lg);
+    border-radius: var(--iot-radius-pill);
+    background-color: var(--accent);
+    opacity: 0;
+    transform: translateY(-50%) scaleY(0.6);
+    transition: opacity var(--iot-motion-fast) ease, transform var(--iot-motion-fast) ease;
 }
 
-/* Pressed = this panel is open. A left inset bar so the state does not rely on colour alone. */
-.iot-board .board-tool-button--primary[aria-pressed='true'] {
-    background-color: var(--accent-fill-hover);
-    box-shadow: inset 3px 0 0 0 #fff;
+.iot-board .board-tool-button[aria-pressed='true'] {
+    background-color: var(--accent-surface);
+    border-color: var(--accent-border);
+    color: var(--accent-strong);
 }
 
-.iot-board .board-tool-button--primary:disabled {
-    background-color: color-mix(in srgb, var(--accent) 42%, var(--board-card-bg));
+.iot-board .board-tool-button[aria-pressed='true']::before {
+    opacity: 1;
+    transform: translateY(-50%) scaleY(1);
+}
+
+.iot-board .board-tool-button:disabled {
+    background-color: var(--surface-control);
+    border-color: var(--border);
+    color: var(--text-muted);
     cursor: not-allowed;
 }
 
 .iot-board .board-tool-button:focus-visible {
-    outline: 2px solid color-mix(in srgb, var(--iot-color-accent) 70%, white);
+    outline: 2px solid var(--accent-border);
     outline-offset: 2px;
 }
 
@@ -1876,8 +2298,7 @@
 
 .iot-board .board-surface-panel,
 .iot-board .board-floating-panel,
-.iot-board .board-mini-tasks,
-.iot-board .canvas-map {
+.iot-board .board-mini-tasks {
     background: var(--surface-overlay);
     border-color: var(--board-border);
     color: var(--board-text);
@@ -1891,19 +2312,19 @@
 .iot-board .board-panel-header,
 .iot-board .board-panel-tabs,
 .iot-board .board-panel-body,
-.iot-board .board-card-surface,
+.iot-board .board-panel-footer,
 .iot-board .board-muted-surface {
     color: var(--board-text);
     border-color: var(--board-border);
 }
 
-.iot-board .board-panel-header,
-.iot-board .board-card-surface {
+.iot-board .board-panel-header {
     background: var(--board-card-bg);
 }
 
 .iot-board .board-panel-tabs,
 .iot-board .board-panel-body,
+.iot-board .board-panel-footer,
 .iot-board .board-muted-surface {
     background: var(--board-card-muted-bg);
 }
@@ -1913,203 +2334,677 @@
     border-color: var(--board-border);
 }
 
-/* `.board-text` and `.board-muted` were members of these two groups and no template applied either — the
-   live classes are `.board-text-strong`/`.board-text-muted` in the utility block above, plus
-   `.board-muted-surface`, which is a surface rather than an ink. */
-.iot-board .board-panel-title {
-    color: var(--board-text);
+.iot-board .board-panel-header {
+    flex-shrink: 0;
+    padding: var(--iot-space-md);
 }
 
-.iot-board .board-panel-subtitle,
-.iot-board .board-floating-panel .text-slate-400,
-.iot-board .board-floating-panel .text-slate-500,
-.iot-board .board-floating-panel .text-slate-600,
-.iot-board .board-mini-tasks .text-slate-400,
-.iot-board .board-mini-tasks .text-slate-500,
-.iot-board .board-mini-tasks .text-slate-600,
-.iot-board .canvas-map .text-slate-400,
-.iot-board .canvas-map .text-slate-500,
-.iot-board .canvas-map .text-slate-600,
-.iot-board .modern-panel .text-slate-400,
-.iot-board .modern-panel .text-slate-500,
-.iot-board .modern-panel .text-slate-600,
-.iot-board .glass-panel .text-slate-400,
-.iot-board .glass-panel .text-slate-500,
-.iot-board .glass-panel .text-slate-600,
-.iot-board .board-side-panel .text-slate-400,
-.iot-board .board-side-panel .text-slate-500,
-.iot-board .board-side-panel .text-slate-600 {
+.iot-board .is-collapsed .board-panel-header {
+    padding: var(--iot-space-md) 0;
+}
+
+.iot-board .is-collapsed .board-panel-heading {
+    justify-content: center;
+}
+
+.iot-board .board-panel-heading,
+.iot-board .board-panel-heading__identity {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: var(--iot-space-sm);
+}
+
+.iot-board .board-panel-heading__identity {
+    flex: 1;
+}
+
+.iot-board .board-panel-icon {
+    display: grid;
+    flex: 0 0 auto;
+    width: var(--iot-target-min);
+    height: var(--iot-target-min);
+    place-items: center;
+    border: 1px solid var(--border);
+    border-radius: var(--iot-radius-well);
+    background: var(--surface-muted);
+    color: var(--text-muted);
+}
+
+.iot-board .board-panel-icon .material-symbols-outlined {
+    font-size: 1.25rem;
+}
+
+.iot-board .board-panel-toggle {
+    display: inline-flex;
+    flex: 0 0 auto;
+    width: var(--iot-target-min);
+    height: var(--iot-target-min);
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--iot-radius-action);
+    color: var(--text-muted);
+    transition: background-color var(--iot-motion-fast), color var(--iot-motion-fast);
+}
+
+.iot-board .board-panel-toggle:hover {
+    background: var(--surface-control-hover);
+    color: var(--text);
+}
+
+.iot-board .board-panel-tabs {
+    flex-shrink: 0;
+    padding: var(--iot-space-sm) var(--iot-space-md);
+}
+
+.iot-board .board-panel-body {
+    min-width: 0;
+    min-height: 0;
+}
+
+.iot-board .board-panel-footer {
+    flex: 0 0 auto;
+    min-height: 0;
+    max-height: 45%;
+    padding: var(--iot-space-2xs) var(--iot-space-md);
+    border-top: 1px solid var(--board-border);
+}
+
+.iot-board .board-panel-body :is(input, select, textarea) {
+    min-width: 0;
+    max-width: 100%;
+}
+
+.iot-board .board-field-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 7rem), 1fr));
+    gap: var(--iot-space-sm);
+}
+
+/* Relation labels need their own readable column; values take the remaining space. */
+.board-condition-value-grid {
+    display: grid;
+    grid-template-columns: minmax(min(100%, 9rem), 1fr) minmax(0, 2fr);
+    gap: var(--iot-space-sm);
+}
+
+@media (max-width: 479.98px) {
+    .board-condition-value-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+.iot-board .board-item-heading {
+    flex-wrap: wrap;
+    gap: var(--iot-space-sm);
+}
+
+.iot-board .board-item-heading__identity {
+    flex: 1;
+    min-width: min(100%, 7rem);
+}
+
+/* Both side panels share one density and interaction treatment. The painted icon
+   face stays compact inside a full target, without extending over neighbouring controls. */
+.iot-board .board-panel-section,
+.iot-board .board-inventory-card {
+    min-width: 0;
+    border: 1px solid var(--board-border);
+    border-radius: var(--iot-radius-control);
+    background: var(--surface-elevated);
+    color: var(--text);
+}
+
+.iot-board .board-inventory-card {
+    padding: var(--iot-space-sm);
+    transition: border-color var(--iot-motion-fast), background-color var(--iot-motion-fast), box-shadow var(--iot-motion-fast);
+}
+
+.iot-board .board-inventory-card:hover,
+.iot-board .board-inventory-card:focus-within,
+.iot-board .board-inventory-card.is-focused,
+.iot-board .board-inventory-card.template-card--active {
+    border-color: var(--accent-border);
+    background: var(--surface-muted);
+    box-shadow: var(--shadow-raised);
+}
+
+.iot-board .board-inventory-card:hover .board-inventory-name,
+.iot-board .board-inventory-card.is-focused .board-inventory-name,
+.iot-board .board-inventory-card.template-card--active .board-inventory-name {
+    color: var(--accent);
+}
+
+.iot-board .board-inventory-card.is-focused,
+.iot-board .board-inventory-open:focus-visible,
+.iot-board .board-panel-icon-action:focus-visible,
+.iot-board .board-panel-close:focus-visible,
+.iot-board .board-source-link:focus-visible,
+.iot-board .board-side-panel .board-section-heading:focus-visible,
+.iot-board .board-inventory-disclosure > summary:focus-visible {
+    outline: 2px solid var(--accent-border);
+    outline-offset: 2px;
+}
+
+.iot-board .board-side-panel .board-section-heading {
+    min-height: var(--iot-target-min);
+    padding: var(--iot-space-sm) var(--iot-space-md);
+    gap: var(--iot-space-sm);
+    cursor: pointer;
+    transition: background-color var(--iot-motion-fast), color var(--iot-motion-fast);
+}
+
+.iot-board .board-side-panel .board-section-heading:hover {
+    background: var(--surface-control-hover);
+}
+
+.iot-board .board-side-panel .board-section-heading__identity {
+    gap: var(--iot-space-sm);
+}
+
+.iot-board .board-side-panel .board-section-icon {
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: var(--iot-radius-marker);
+}
+
+.iot-board .board-inventory-toolbar {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: var(--iot-space-sm);
+}
+
+.iot-board .board-inventory-count {
+    margin-left: auto;
+    font-variant-numeric: tabular-nums;
+}
+
+.iot-board .board-inventory-help {
+    display: grid;
+    width: var(--iot-target-min);
+    height: var(--iot-target-min);
+    place-items: center;
+}
+
+.iot-board .board-inventory-search {
+    margin-bottom: var(--iot-space-sm);
+}
+
+.iot-board .board-inventory-list {
+    display: grid;
+    gap: var(--iot-space-sm);
+}
+
+.iot-board .board-panel-icon-action,
+.iot-board .board-panel-close {
+    position: relative;
+    display: inline-flex;
+    flex: 0 0 auto;
+    width: var(--iot-target-min);
+    height: var(--iot-target-min);
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    border-radius: var(--iot-radius-action);
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+}
+
+.iot-board .board-panel-icon-action::before,
+.iot-board .board-panel-close::before {
+    position: absolute;
+    inset: var(--iot-space-sm);
+    border: 1px solid var(--border);
+    border-radius: var(--iot-radius-marker);
+    background: var(--surface-control);
+    content: '';
+    pointer-events: none;
+    transition: background-color var(--iot-motion-fast), border-color var(--iot-motion-fast);
+}
+
+.iot-board .board-panel-icon-action .material-symbols-outlined,
+.iot-board .board-panel-close .material-symbols-outlined {
+    position: relative;
+    font-size: 1rem;
+}
+
+.iot-board .board-panel-icon-action:hover:not(:disabled),
+.iot-board .board-panel-close:hover:not(:disabled) {
+    color: var(--text);
+}
+
+.iot-board .board-panel-icon-action:hover:not(:disabled)::before,
+.iot-board .board-panel-close:hover:not(:disabled)::before {
+    border-color: var(--accent-border);
+    background: var(--surface-control-hover);
+}
+
+.iot-board .board-panel-icon-action--danger:hover:not(:disabled) {
+    color: var(--danger);
+}
+
+.iot-board .board-panel-icon-action--danger:hover:not(:disabled)::before {
+    border-color: var(--danger-border);
+    background: var(--danger-surface);
+}
+
+.iot-board .board-panel-icon-action:disabled,
+.iot-board .board-panel-close:disabled {
+    color: var(--text-muted);
+    cursor: not-allowed;
+    opacity: 1;
+}
+
+.iot-board .board-panel-icon-action:disabled::before,
+.iot-board .board-panel-close:disabled::before {
+    border-color: transparent;
+    background: var(--surface-muted);
+}
+
+.iot-board .board-panel-close::before {
+    border-color: transparent;
+    background: transparent;
+}
+
+.iot-board .board-inventory-open {
+    min-width: 0;
+    min-height: var(--iot-target-min);
+    border-radius: var(--iot-radius-marker);
+    text-align: left;
+}
+
+.iot-board .board-inventory-name,
+.iot-board .board-inventory-card .board-copy {
+    overflow-wrap: anywhere;
+}
+
+.iot-board .board-device-row {
+    display: flex;
+    align-items: center;
+}
+
+.iot-board .board-device-identity {
+    display: grid;
+    flex: 1;
+    grid-template-columns: 1.25rem minmax(0, 1fr);
+    align-items: center;
+    gap: var(--iot-space-sm);
+}
+
+.iot-board .board-inventory-symbol,
+.iot-board .board-inventory-chevron {
+    flex: 0 0 auto;
+    font-size: 1.125rem;
+    color: var(--text-muted);
+}
+
+.iot-board .board-device-meta,
+.iot-board .board-environment-labels {
+    display: flex;
+    min-width: 0;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--iot-space-xs) var(--iot-space-sm);
+}
+
+@layer components {
+    .board-inventory-chip {
+        padding: var(--iot-space-2xs) var(--iot-space-xs);
+        border-radius: var(--iot-radius-marker);
+        background: var(--surface-control);
+        color: var(--text-muted);
+        overflow-wrap: anywhere;
+    }
+}
+
+.iot-board .board-inventory-heading {
+    display: flex;
+    align-items: baseline;
+    gap: var(--iot-space-sm);
+}
+
+.iot-board .board-inventory-order {
+    flex: 0 0 auto;
+    padding: var(--iot-space-2xs) var(--iot-space-xs);
+    border-radius: var(--iot-radius-marker);
+    background: var(--surface-control);
+    font-variant-numeric: tabular-nums;
+}
+
+.iot-board .board-rule-flow {
+    display: grid;
+    gap: var(--iot-space-md);
+    margin-top: var(--iot-space-sm);
+}
+
+.iot-board .board-rule-step,
+.iot-board .board-spec-description {
+    display: grid;
+    min-width: 0;
+    gap: var(--iot-space-xs);
+    padding: var(--iot-space-sm);
+    border: 1px solid var(--border);
+    border-radius: var(--iot-radius-action);
+}
+
+.iot-board .board-rule-flow dd,
+.iot-board .board-spec-description dd {
+    overflow-wrap: anywhere;
+}
+
+.iot-board .board-rule-step--command {
+    background: var(--surface-control);
+}
+
+.iot-board .board-rule-command {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--iot-space-xs) var(--iot-space-sm);
+}
+
+.iot-board .board-rule-command-action {
+    max-width: 100%;
+    padding: var(--iot-space-2xs) var(--iot-space-xs);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--iot-radius-action);
+    font-weight: 600;
+}
+
+.iot-board .board-spec-description {
+    margin-top: var(--iot-space-sm);
+}
+
+.iot-board .board-rule-conditions {
+    display: grid;
+    gap: var(--iot-space-xs);
+    padding-inline-start: 1rem;
+    list-style: disc;
+}
+
+.iot-board .board-rule-conditions li::marker {
+    color: var(--text-muted);
+}
+
+.iot-board .board-rule-target {
+    font-weight: 600;
+}
+
+.iot-board .board-inventory-footer {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--iot-space-xs);
+    margin-top: var(--iot-space-xs);
+    border-top: 1px solid var(--border);
+}
+
+.iot-board .board-inventory-footer .spec-formula-disclosure {
+    flex: 1;
+    min-width: 0;
+}
+
+.iot-board .board-rule-actions {
+    justify-content: space-between;
+}
+
+.iot-board .board-rule-order-actions {
+    display: flex;
+    gap: var(--iot-space-2xs);
+}
+
+.iot-board .board-formula-preview {
+    margin-bottom: var(--iot-space-sm);
+    padding: var(--iot-space-sm);
+    border-radius: var(--iot-radius-marker);
+    background: var(--surface-control);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.iot-board .board-environment-summary {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    gap: var(--iot-space-sm);
+}
+
+.iot-board .board-environment-summary__identity {
+    display: grid;
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.iot-board .board-environment-summary__value {
+    display: grid;
+    min-width: 0;
+    max-width: 40%;
+    justify-items: end;
+    text-align: right;
+    overflow-wrap: anywhere;
+}
+
+.iot-board .board-environment-labels {
+    justify-content: space-between;
+    margin-top: var(--iot-space-xs);
+}
+
+.iot-board .board-environment-details {
+    display: grid;
+    gap: var(--iot-space-sm);
+    margin-top: var(--iot-space-sm);
+    padding-top: var(--iot-space-sm);
+    border-top: 1px solid var(--border);
+}
+
+.iot-board .board-environment-details .board-field[aria-busy='true'] {
+    cursor: wait;
+}
+
+.iot-board .board-environment-sources {
+    display: grid;
+    gap: var(--iot-space-xs);
+}
+
+.iot-board .board-source-links {
+    display: flex;
+    flex-wrap: wrap;
+}
+
+.iot-board .board-source-link {
+    display: inline-flex;
+    min-width: 0;
+    max-width: 100%;
+    min-height: var(--iot-target-min);
+    align-items: center;
+    gap: var(--iot-space-xs);
+    padding-inline: var(--iot-space-xs);
+    border-radius: var(--iot-radius-marker);
+    color: var(--text-muted);
+    font-size: var(--iot-font-label);
+    text-align: left;
+    overflow-wrap: anywhere;
+    transition: background-color var(--iot-motion-fast), color var(--iot-motion-fast);
+}
+
+.iot-board .board-source-link:hover {
+    background: var(--surface-control-hover);
+    color: var(--text);
+}
+
+.iot-board .board-source-link .material-symbols-outlined {
+    flex: 0 0 auto;
+    font-size: 1rem;
+}
+
+.iot-board .board-inventory-disclosure {
+    min-width: 0;
+    border-top: 1px solid var(--border);
+}
+
+.iot-board .board-inventory-disclosure > summary {
+    min-height: var(--iot-target-min);
+    align-content: center;
+    padding-inline: var(--iot-space-xs);
+    cursor: pointer;
+}
+
+.iot-board .board-inventory-disclosure > summary:hover {
+    color: var(--text);
+    background: var(--surface-control-hover);
+}
+
+.iot-board .board-inventory-disclosure__body {
+    display: grid;
+    gap: var(--iot-space-sm);
+    padding-bottom: var(--iot-space-sm);
+    overflow-wrap: anywhere;
+}
+
+.iot-board .board-inventory-empty {
+    display: grid;
+    justify-items: center;
+    gap: var(--iot-space-sm);
+    padding: var(--iot-space-lg) var(--iot-space-sm);
+    color: var(--text-muted);
+    font-size: var(--iot-font-label);
+    text-align: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .iot-board .board-inventory-card,
+    .iot-board .board-panel-icon-action::before,
+    .iot-board .board-side-panel .board-section-heading,
+    .iot-board .board-source-link {
+        transition: none;
+    }
+}
+
+.iot-board .board-section-heading,
+.iot-board .board-section-heading__identity {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: var(--iot-space-md);
+}
+
+.iot-board .board-section-heading__identity {
+    flex: 1;
+}
+
+.iot-board .board-section-heading__copy {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.iot-board .board-section-heading :is(.board-section-icon, .board-section-heading__chevron) {
+    flex-shrink: 0;
+}
+
+.iot-board .board-section-tabs {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(var(--iot-target-min), auto));
+    gap: var(--iot-space-2xs);
+    padding: var(--iot-space-2xs);
+    border: 1px solid var(--board-border);
+    border-radius: var(--iot-radius-well);
+}
+
+.iot-board .board-section-tab {
+    display: flex;
+    min-width: 0;
+    min-height: var(--iot-target-min);
+    align-items: center;
+    justify-content: center;
+    gap: var(--iot-space-2xs);
+    padding: var(--iot-space-sm) var(--iot-space-2xs);
+    border-radius: var(--iot-radius-action);
+    color: var(--text-muted);
+    font-size: var(--iot-font-label);
+    font-weight: 600;
+    line-height: 1.25;
+    transition: background-color var(--iot-motion-fast), color var(--iot-motion-fast), box-shadow var(--iot-motion-fast);
+}
+
+.iot-board .board-section-tab:hover {
+    background: var(--surface-control-hover);
+    color: var(--text);
+}
+
+.iot-board .board-section-tab[aria-selected='true'] {
+    background: var(--surface-elevated);
+    color: var(--accent);
+    box-shadow: var(--shadow-raised);
+}
+
+.iot-board .board-section-tab--stacked {
+    min-height: 3.25rem;
+    flex-direction: column;
+}
+
+.iot-board .board-section-tab__label {
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    white-space: normal;
+}
+
+.iot-board .board-section-tab__count {
+    flex-shrink: 0;
+    padding: var(--iot-space-2xs);
+    border-radius: var(--iot-radius-marker);
+    background: var(--surface-control);
+    color: var(--text-muted);
+    font-size: var(--iot-font-min);
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+}
+
+.iot-board .board-section-tab[aria-selected='true'] .board-section-tab__count {
+    background: var(--accent-surface);
+    color: var(--accent);
+}
+
+@container board-side-panel (max-width: 17rem) {
+    .iot-board .board-panel-tabs {
+        padding-inline: var(--iot-space-2xs);
+    }
+
+    .iot-board .board-section-tabs {
+        gap: 0;
+        padding-inline: 0;
+    }
+}
+
+@container board-side-panel (max-width: 13rem) {
+    .iot-board .board-panel-icon {
+        display: none;
+    }
+}
+
+.iot-board .board-panel-title {
+    color: var(--board-text);
+    overflow-wrap: anywhere;
+}
+
+.iot-board .board-panel-subtitle {
+    margin-top: var(--iot-space-2xs);
+    font-size: var(--iot-font-caption);
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+}
+
+.iot-board .board-panel-subtitle {
     color: var(--board-text-muted);
 }
 
-/*
- * ===== Role ink on hover/focus, placed *after* the normaliser above =====
- *
- * These have to come last, and the reason is worth recording because I got it wrong twice.
- *
- * Almost every call site pairs a hover ink with a resting neutral — `text-slate-500` on the device delete button,
- * `board-text-muted` on the task-cancel actions — and the block directly above re-colours those neutrals for the
- * theme at specificity 0-3-0. A bare `.hover\:board-text-danger:hover` (0-2-0) lost to it, and so did a doubled
- * `.x.x:hover`; adding `.iot-board` tied at 0-3-0 and *still* lost, because the normaliser sits later in the
- * file. Measured each time with CDP forced-hover, which lists the matched rules in cascade order — the symptom
- * was a danger-tinted background under a grey glyph, which is worse than no hover at all.
- *
- * Order is the mechanism here, not specificity. Anything added to the normaliser above must stay above this.
- */
-.iot-board .hover\:board-text-danger:hover { color: var(--danger); }
-.iot-board .hover\:board-text-warning:hover { color: var(--warning); }
-.iot-board .hover\:board-text-info:hover { color: var(--info); }
-.iot-board .hover\:board-text-strong:hover { color: var(--text); }
-
-/*
- * The hover ground and the strong hover ink again, unprefixed, for the two replay bars.
- *
- * `.board-timeline-host` is a **sibling** of `.iot-board`, not a descendant — the same structure that made
- * `--board-floating-gap` unreadable inside it and needed `boardShellStyle` injected. So every rule above is
- * unreachable there, and the timeline's own neutral normaliser (`.board-timeline .text-slate-*`, 0-2-0, with
- * `!important`) is what these must outrank instead. `!important` is required to beat it, not decoration:
- * source order cannot help, since that block sits later in the file.
- */
-.board-timeline .hover\:board-text-strong:hover { color: var(--text) !important; }
-.board-timeline .hover\:board-control-hover:hover { background-color: var(--surface-control-hover) !important; }
+.hover\:board-text-danger:hover { color: var(--danger); }
+.hover\:board-text-warning:hover { color: var(--warning); }
+.hover\:board-text-info:hover { color: var(--info); }
+.hover\:board-text-strong:hover { color: var(--text); }
 
 .iot-board .group:hover .group-hover\:board-text-info { color: var(--info); }
 .iot-board .group:focus-within .group-focus-within\:board-text-info { color: var(--info); }
-
-.iot-board .board-floating-panel .bg-white,
-.iot-board .board-floating-panel .bg-slate-50,
-.iot-board .board-floating-panel .bg-slate-50\/50,
-.iot-board .board-floating-panel .bg-white\/50,
-.iot-board .board-mini-tasks .bg-white,
-.iot-board .board-mini-tasks .bg-slate-50,
-.iot-board .canvas-map .bg-white,
-.iot-board .canvas-map .bg-slate-50,
-.iot-board .modern-panel .bg-white,
-.iot-board .modern-panel .bg-slate-50,
-.iot-board .modern-panel .bg-slate-50\/50,
-.iot-board .glass-panel .bg-white,
-.iot-board .glass-panel .bg-slate-50,
-.iot-board .glass-panel .bg-slate-50\/50,
-.iot-board .board-side-panel .bg-white,
-.iot-board .board-side-panel .bg-slate-50,
-.iot-board .board-side-panel .bg-slate-50\/50,
-.iot-board .board-side-panel .bg-white\/50 {
-    background-color: var(--board-card-bg);
-}
-
-/*
- * The panel-scoped semantic-hue remaps that used to live here are gone with their callers.
- *
- * They rewrote raw palette utilities (bg-red-50, bg-blue-50, ...) to token-derived colours by class
- * name, which is what kept the dark theme readable while components still shipped light-theme hues.
- * Every component has since migrated to the board-* role classes, so all 42 selectors matched nothing:
- * measured 0 consumers across every .vue file, and no dynamic class construction anywhere in src.
- * Structural neutrals (slate) below are a different case and remain in use.
- */
-.iot-board .board-floating-panel .bg-slate-100,
-.iot-board .board-mini-tasks .bg-slate-100,
-.iot-board .canvas-map .bg-slate-100,
-.iot-board .canvas-map .bg-slate-200,
-.iot-board .modern-panel .bg-slate-100,
-.iot-board .glass-panel .bg-slate-100,
-.iot-board .board-side-panel .bg-slate-100,
-.iot-board .board-side-panel .bg-slate-200 {
-    background-color: var(--board-control-bg);
-}
-
-.iot-board .board-floating-panel .border-slate-100,
-.iot-board .board-floating-panel .border-slate-200,
-.iot-board .board-floating-panel .border-slate-200\/60,
-.iot-board .board-mini-tasks .border-slate-100,
-.iot-board .board-mini-tasks .border-slate-200,
-.iot-board .canvas-map .border-slate-100,
-.iot-board .canvas-map .border-slate-200,
-.iot-board .modern-panel .border-slate-100,
-.iot-board .modern-panel .border-slate-200,
-.iot-board .modern-panel .border-slate-200\/60,
-.iot-board .modern-panel .border-white\/20,
-.iot-board .glass-panel .border-slate-100,
-.iot-board .glass-panel .border-slate-200,
-.iot-board .glass-panel .border-slate-200\/60,
-.iot-board .glass-panel .border-white\/20,
-.iot-board .board-side-panel .border-slate-100,
-.iot-board .board-side-panel .border-slate-200,
-.iot-board .board-side-panel .border-slate-200\/60,
-.iot-board .board-side-panel .border-white\/20 {
-    border-color: var(--board-border);
-}
-
-.iot-board .board-floating-panel .text-slate-700,
-.iot-board .board-floating-panel .text-slate-800,
-.iot-board .board-floating-panel .text-black,
-.iot-board .board-mini-tasks .text-slate-700,
-.iot-board .board-mini-tasks .text-slate-800,
-.iot-board .canvas-map .text-slate-700,
-.iot-board .canvas-map .text-slate-800,
-.iot-board .modern-panel .text-slate-700,
-.iot-board .modern-panel .text-slate-800,
-.iot-board .modern-panel .text-black,
-.iot-board .glass-panel .text-slate-700,
-.iot-board .glass-panel .text-slate-800,
-.iot-board .glass-panel .text-black,
-.iot-board .board-side-panel .text-slate-700,
-.iot-board .board-side-panel .text-slate-800,
-.iot-board .board-side-panel .text-black {
-    color: var(--board-text);
-}
-
-/*
- * Text fields, selects and textareas - not range sliders.
- *
- * `input` matched `input[type="range"]` too, and at 0-3-0 it beat the track colour the markup asked for. Both
- * sliders therefore painted `--field-bg`, which is the panel colour: measured 1.0:1 for the simulation-steps
- * track on a white panel, 1.01:1 in dark. The groove was not faint - it was the same colour as the surface behind
- * it, so "the line does not show" was exact. A control boundary needs 3:1 (this repo raised two dock borders for
- * that reason), and a field background is the wrong paint for a track in any case.
- */
-.iot-board .board-floating-panel input:not([type='range']),
-.iot-board .board-floating-panel select,
-.iot-board .board-floating-panel textarea,
-.iot-board .modern-panel input:not([type='range']),
-.iot-board .modern-panel select,
-.iot-board .modern-panel textarea,
-.iot-board .glass-panel input:not([type='range']),
-.iot-board .glass-panel select,
-.iot-board .glass-panel textarea,
-.iot-board .board-side-panel input:not([type='range']),
-.iot-board .board-side-panel select,
-.iot-board .board-side-panel textarea {
-    background-color: var(--field-bg);
-    border-color: var(--field-border);
-    color: var(--board-text);
-}
-
-.iot-board .board-floating-panel input::placeholder,
-.iot-board .board-floating-panel textarea::placeholder,
-.iot-board .modern-panel input::placeholder,
-.iot-board .modern-panel textarea::placeholder,
-.iot-board .glass-panel input::placeholder,
-.iot-board .glass-panel textarea::placeholder,
-.iot-board .board-side-panel input::placeholder,
-.iot-board .board-side-panel textarea::placeholder {
-    color: var(--board-text-muted);
-    opacity: 0.9;
-}
-
-.iot-board .board-floating-panel > .relative:first-child h3,
-.iot-board .board-floating-panel > .relative:first-child p,
-.iot-board .board-floating-panel > .relative:first-child span:not(.material-symbols-outlined) {
-    color: #ffffff;
-}
-
-.iot-board .board-floating-panel > .relative:first-child button {
-    color: rgba(255, 255, 255, 0.82);
-}
-
-.iot-board .board-floating-panel > .relative:first-child button:hover {
-    color: #ffffff;
-    background-color: rgba(255, 255, 255, 0.16);
-}
 
 @media (max-width: 1023.98px), (max-height: 599.98px) {
     .iot-board .board-floating-panel {
@@ -2125,11 +3020,6 @@
         z-index: 49;
     }
 
-    .iot-board .board-floating-panel [data-testid^="close-"] {
-        min-width: 2.75rem;
-        min-height: 2.75rem;
-    }
-
     .iot-board .board-run-panel {
         --board-floating-panel-max-width: 21rem;
     }
@@ -2141,13 +3031,7 @@
 
 @media (max-width: 639.98px), (max-height: 599.98px) {
     .iot-board {
-        --board-nav-height: 3.8125rem;
-    }
-
-    .iot-board .modern-panel,
-    .iot-board .glass-panel,
-    .iot-board .board-side-panel {
-        top: calc(var(--board-nav-height) + 1px) !important;
+        --board-nav-height: calc(var(--iot-target-min) + var(--iot-space-sm) * 2 + 1px);
     }
 
     .iot-board .board-floating-actions {
@@ -2172,11 +3056,6 @@
         max-height: calc(100dvh - var(--board-nav-height) - 1.5rem);
     }
 
-    .iot-board .board-playback-change-popover {
-        left: var(--board-floating-gap);
-        right: var(--board-floating-gap);
-        width: auto;
-    }
 }
 
 /* Short landscape viewports cannot fit the vertical tool rail. Keep every
@@ -2217,47 +3096,165 @@
     }
 }
 
-/*
- * No second `.canvas-map` rule.
- *
- * This block held the last of the overlay-era styling. `top`/`left`/`bottom`/`max-width` and
- * `transition: left, top` went when the map's `position` did — they were inert. The translucency and blur
- * looked live but were not doing anything either: measured, the card painted as 77%-opaque white with a 12px
- * backdrop blur *on the inspector's opaque #f8fafc panel body*, so the blur had nothing behind it to blur and
- * the alpha only washed the card against its own parent. It also silently overrode the `background` from the
- * shared board-surface rule above — one property, two owners, the later one winning by position.
- */
+.iot-board .canvas-map {
+    --canvas-map-tools-width: calc(var(--iot-target-min) * 3 + 3.5rem);
+    position: relative;
+    container-name: canvas-map;
+    container-type: inline-size;
+    width: 100%;
+    color: var(--text);
+}
+
+.iot-board .canvas-map__header {
+    position: relative;
+    display: flex;
+    min-height: var(--iot-target-min);
+    align-items: center;
+    padding-inline: var(--iot-space-xs);
+    border-radius: var(--iot-radius-action);
+    cursor: pointer;
+    list-style: none;
+}
+
+.iot-board .canvas-map__header::-webkit-details-marker {
+    display: none;
+}
+
+.iot-board .canvas-map__header::before {
+    position: absolute;
+    inset: var(--iot-space-sm) 0;
+    border-radius: var(--iot-radius-marker);
+    content: '';
+    pointer-events: none;
+}
+
+.iot-board .canvas-map__header > * {
+    position: relative;
+    flex-shrink: 0;
+}
+
+.iot-board .canvas-map__header:hover::before {
+    background: var(--surface-control-hover);
+}
+
+.iot-board .canvas-map__header:focus-visible {
+    outline: 2px solid var(--accent-border);
+    outline-offset: 2px;
+}
+
+.iot-board .canvas-map[open] .canvas-map__header {
+    width: calc(100% - var(--canvas-map-tools-width) - var(--iot-space-2xs));
+    margin-bottom: var(--iot-space-2xs);
+}
+
+.iot-board .canvas-map__chevron {
+    color: var(--text-muted);
+    font-size: 1rem;
+    transform: rotate(-90deg);
+}
+
+.iot-board .canvas-map[open] .canvas-map__chevron {
+    transform: none;
+}
+
+.iot-board .canvas-map__title {
+    font-size: var(--iot-font-caption);
+    font-weight: 600;
+}
 
 .iot-board .canvas-map__viewport {
+    width: 100%;
+    height: clamp(7rem, 18dvh, 10rem);
+    border: 1px solid var(--board-border);
+    border-radius: var(--iot-radius-action);
     background-color: var(--surface-muted);
-    border-color: var(--board-border);
     touch-action: none;
 }
 
 .iot-board .canvas-map__zoom-controls {
-    min-width: 8.5rem;
-    justify-content: flex-end;
+    position: absolute;
+    top: 0;
+    right: 0;
+    display: grid;
+    width: var(--canvas-map-tools-width);
+    grid-template-columns: var(--iot-target-min) minmax(0, 1fr) repeat(2, var(--iot-target-min));
 }
 
-/* The 44px floor for these lives with the rest of `.canvas-map__tool` below, in one block. It was declared
-   here as well, 66 lines from the block that sets the same element's `width`/`height` — two owners for one
-   control, which is only invisible while `min-*` happens to win over `width`. */
+/* Only exceptionally narrow panel widths need a second row; ordinary phones retain one. */
+@container canvas-map (max-width: 14.75rem) {
+    .iot-board .canvas-map[open] .canvas-map__header {
+        width: 100%;
+        margin-bottom: 0;
+    }
+
+    .iot-board .canvas-map__zoom-controls {
+        position: static;
+        width: 100%;
+        margin-bottom: var(--iot-space-2xs);
+    }
+
+    .iot-board .canvas-map__viewport {
+        height: clamp(6rem, 14dvh, 10rem);
+    }
+}
+
+@container canvas-map (max-width: 13.25rem) {
+    .iot-board .canvas-map__zoom-controls {
+        grid-template-columns: var(--iot-target-min) minmax(3.75rem, 1fr) var(--iot-target-min);
+    }
+
+    .iot-board .canvas-map__tool:last-child {
+        grid-column: 1 / -1;
+    }
+}
+
+@container canvas-map (max-width: 11rem) {
+    .iot-board .canvas-map__zoom-controls {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .iot-board .canvas-map__tool:last-child {
+        grid-column: auto;
+    }
+}
+
+@container canvas-map (max-width: 8rem) {
+    .iot-board .canvas-map__zoom-controls {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
 
 .iot-board .canvas-map__zoom-input-wrap {
+    position: relative;
     display: inline-flex;
-    /* 44px: this measured 17px tall in a 32px wrapper, and it is a field a user types a zoom level into. */
-    min-height: 2.75rem;
-    height: 2.75rem;
-    width: 3.6rem;
+    min-height: var(--iot-target-min);
+    min-width: 0;
     align-items: center;
     justify-content: center;
-    gap: 0.1rem;
-    border: 1px solid var(--board-border);
+    gap: var(--iot-space-2xs);
     border-radius: var(--iot-radius-action);
-    background: var(--surface-control);
     color: var(--text);
-    font-size: var(--iot-font-min);
-    font-weight: 800;
+    font-size: var(--iot-font-caption);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+.iot-board .canvas-map__zoom-input-wrap::before {
+    position: absolute;
+    inset: var(--iot-space-sm) 0;
+    border: 1px solid var(--border);
+    border-radius: var(--iot-radius-marker);
+    background: var(--surface-elevated);
+    content: '';
+}
+
+.iot-board .canvas-map__zoom-input-wrap > * {
+    position: relative;
+}
+
+.iot-board .canvas-map__zoom-input-wrap:focus-within {
+    outline: 2px solid var(--accent-border);
+    outline-offset: 1px;
 }
 
 .iot-board .canvas-map__zoom-input {
@@ -2276,25 +3273,6 @@
     appearance: none;
 }
 
-@media (max-width: 380px), (max-height: 599.98px) and (max-width: 480px) {
-    .iot-board .canvas-map__header {
-        align-items: flex-start;
-        flex-wrap: wrap;
-        row-gap: 0.35rem;
-    }
-
-    .iot-board .canvas-map__title {
-        flex: 1 1 100%;
-    }
-
-    .iot-board .canvas-map__zoom-controls {
-        width: 100%;
-        min-width: 0;
-        justify-content: flex-start;
-        flex-wrap: wrap;
-    }
-}
-
 .iot-board .canvas-map__viewport-rect {
     fill: color-mix(in srgb, var(--iot-color-accent) 18%, transparent);
     stroke: var(--iot-color-accent);
@@ -2304,35 +3282,79 @@
     pointer-events: none;
 }
 
-/* 44px targets. These measured 32x32 — zoom in, zoom out and fit-to-screen, among the most repeatedly pressed
-   controls on the board, and the ones a user reaches for while already struggling to see something. The
-   `1.375rem` width/height is the icon box; the floor is what actually sizes them, so it is stated here rather
-   than in a second block that only won by cascade accident. */
-.iot-board .canvas-map__tool {
-    display: inline-flex;
-    width: 1.375rem;
-    height: 1.375rem;
-    min-width: 2.75rem;
-    min-height: 2.75rem;
-    align-items: center;
-    justify-content: center;
-    border-radius: var(--iot-radius-control);
+.iot-board .canvas-map__zoom-input-wrap:has(input:disabled) {
     color: var(--text-muted);
-    transition: background-color 0.15s ease, color 0.15s ease;
+    cursor: not-allowed;
 }
 
-.iot-board .canvas-map__tool:hover {
-    background-color: var(--surface-muted);
+.iot-board .canvas-map__zoom-input-wrap:has(input:disabled)::before {
+    border-color: transparent;
+    background: var(--surface-muted);
+}
+
+.iot-board .canvas-map__empty {
+    padding: var(--iot-space-sm);
+    color: var(--text-muted);
+    font-size: var(--iot-font-caption);
+    text-align: center;
+}
+
+.iot-board .canvas-empty-state__card {
+    max-width: 32rem;
+    padding: var(--iot-space-xl);
+    border: 1px solid var(--border);
+    border-radius: var(--iot-radius-surface);
+    background: var(--surface-elevated);
+    box-shadow: var(--shadow-floating);
+    text-align: center;
+}
+
+.iot-board .canvas-empty-state {
+    top: var(--board-nav-height);
+    padding-block: var(--iot-space-lg);
+    align-items: safe center;
+}
+
+.iot-board .canvas-empty-state__icon {
+    display: grid;
+    width: 3.5rem;
+    height: 3.5rem;
+    margin-inline: auto;
+    place-items: center;
+    border: 1px solid var(--accent-border);
+    border-radius: var(--iot-radius-card);
+    background: var(--accent-surface);
+    color: var(--accent);
+}
+
+.iot-board .canvas-empty-state__icon .material-symbols-outlined {
+    font-size: 1.75rem;
+}
+
+.iot-board .canvas-empty-state__title {
+    margin-top: var(--iot-space-lg);
     color: var(--text);
+    font-family: var(--iot-font-display);
+    font-size: 1.25rem;
+    font-weight: 600;
+    line-height: 1.4;
 }
 
-@media (pointer: coarse), (max-width: 1023.98px), (max-height: 599.98px) {
-    /* `.canvas-map__tool` needs nothing here: the 44px floor is unconditional in its base rule, so repeating
-       it behind a coarse-pointer query implied it was conditional. */
-    .iot-board .canvas-map__zoom-input-wrap {
-        min-height: 2.75rem;
-        height: 2.75rem;
-    }
+.iot-board .canvas-drop-overlay {
+    border: 2px dashed var(--accent-border);
+    border-radius: var(--iot-radius-surface);
+    background: color-mix(in srgb, var(--accent-surface) 80%, transparent);
+    color: var(--accent);
+}
+
+.iot-board .canvas-drop-overlay__label {
+    padding: var(--iot-space-md) var(--iot-space-lg);
+    border: 1px solid var(--accent-border);
+    border-radius: var(--iot-radius-pill);
+    background: var(--surface-elevated);
+    box-shadow: var(--shadow-floating);
+    font-size: var(--iot-font-control);
+    font-weight: 600;
 }
 
 .iot-board .board-mini-tasks {
@@ -2378,11 +3400,6 @@
     color: var(--danger);
 }
 
-:root[data-theme='dark'] .iot-board .board-context-menu__item--danger,
-:root:not([data-theme]) .iot-board .board-context-menu__item--danger {
-    color: var(--danger);
-}
-
 .iot-board .board-context-menu__item--danger:hover,
 .iot-board .board-context-menu__item--danger:focus-visible {
     background: color-mix(in srgb, var(--danger) 14%, var(--surface-muted));
@@ -2392,314 +3409,933 @@
     border-color: var(--border);
 }
 
-.iot-board .board-playback-change-popover {
-    position: fixed;
-    top: calc(var(--board-nav-height) + var(--board-floating-gap));
-    right: calc(var(--board-inspector-width) + var(--board-action-rail-width) + (var(--board-floating-gap) * 2));
-    z-index: 49;
-    width: min(22rem, calc(100vw - var(--board-control-width) - var(--board-inspector-width) - var(--board-action-rail-width) - (var(--board-floating-gap) * 3)));
-    /* Capped so the two playback overlays cannot claim the viewport between them.
-     *
-     * This was `46dvh` against the timeline's `66dvh` — 112dvh combined, i.e. more than the whole screen
-     * before either hit its rem ceiling. Measured, this popover renders at 209px (23% of a 900px viewport),
-     * so the cap is not what sizes it today; it is the ceiling for a step that changes many devices, and
-     * that ceiling should not be able to co-occupy the screen with the timeline's.
-     *
-     * 34dvh + the timeline's 44dvh = 78dvh, leaving the canvas a visible corridor in the worst case rather
-     * than relying on both overlays happening to be short. */
-    max-height: min(34dvh, 20rem);
-    overflow: hidden;
-    color: var(--board-text);
-    background: color-mix(in srgb, var(--surface-overlay) 94%, transparent);
-    border: 1px solid color-mix(in srgb, var(--iot-color-accent) 28%, var(--board-border));
-    border-radius: var(--iot-radius-action);
-    box-shadow: var(--shadow-elevated);
-    backdrop-filter: blur(14px);
-}
-
-.iot-board .playback-change-popover__header {
-    border-color: color-mix(in srgb, var(--iot-color-accent) 18%, var(--board-border));
-    cursor: grab;
-    touch-action: none;
-    user-select: none;
-}
-
-.iot-board .playback-change-popover__header:active {
-    cursor: grabbing;
-}
-
-.iot-board .playback-change-popover__device {
-    border-color: color-mix(in srgb, var(--iot-color-accent) 18%, var(--board-border));
-    background: color-mix(in srgb, var(--iot-color-accent) 7%, var(--surface-muted));
-}
-
-.iot-board .playback-change-popover__environment {
-    border-color: color-mix(in srgb, var(--warning) 28%, var(--board-border));
-    background: color-mix(in srgb, var(--warning) 8%, var(--surface-muted));
-}
-
-.iot-board .playback-change-popover__automation {
-    border-color: color-mix(in srgb, var(--success) 24%, var(--board-border));
-    background: color-mix(in srgb, var(--success) 7%, var(--surface-muted));
-}
-
-.iot-board .playback-change-popover__body {
-    min-height: 4.75rem;
-}
-
-.playback-change-step-enter-active,
-.playback-change-step-leave-active {
-    transition: opacity 0.16s ease, transform 0.22s cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.playback-change-step-enter-from {
-    opacity: 0;
-    transform: translateY(4px);
-}
-
-.playback-change-step-leave-to {
-    opacity: 0;
-    transform: translateY(-3px);
-}
-
-@media (prefers-reduced-motion: reduce) {
-    .playback-change-step-enter-active,
-    .playback-change-step-leave-active {
-        transition: none;
-    }
-}
-
-.iot-board .board-playback-change-popover .text-slate-500,
-.iot-board .board-playback-change-popover .text-slate-600 {
-    color: var(--board-text-muted) !important;
-}
-
-.iot-board .board-playback-change-popover .text-slate-800 {
-    color: var(--board-text) !important;
-}
-
-.iot-board .board-playback-change-popover [data-testid="playback-change-dismiss"] {
-    min-width: 2.75rem;
-    min-height: 2.75rem;
-}
-
-
-
-
-
-
-
-.dark .iot-board .board-playback-change-popover :is(
-    .bg-white, .bg-slate-50
-) {
-    background-color: var(--surface-elevated) !important;
-}
-
-
-
-
-.dark .iot-board .board-playback-change-popover :is(
-    .border-slate-200
-) {
-    border-color: var(--board-border) !important;
-}
-
-
-
-
 .board-timeline-host {
     position: fixed;
-    left: calc(var(--board-control-width) + var(--board-floating-gap));
-    right: calc(var(--board-inspector-width) + var(--board-floating-gap));
-    bottom: clamp(1rem, 3dvh, 2rem);
+    left: var(--board-control-width);
+    right: var(--board-inspector-width);
+    bottom: 0;
     z-index: 40;
-    display: flex;
-    justify-content: center;
     pointer-events: none;
 }
 
-.board-timeline-host > * {
-    pointer-events: auto;
-}
-
-/* The playback overlay is apparatus; the animated canvas is the subject.
- *
- * This was `max-height: min(66dvh, 24rem)` — 384px at 900px tall, which measured as **43% of the viewport
- * for this overlay alone and 66% together with the change popover**. Two independent reviews at two
- * viewports reached the same verdict in the same words: "the canvas is functioning more as a backdrop than
- * as the subject of this screen".
- *
- * Both terms had to move. Lowering only the viewport fraction to 44dvh changed nothing at 1440×900,
- * because `24rem` (384px) then became the binding constraint — measured: still exactly 384px. The rem
- * ceiling is what caps a *tall* screen, and at 20rem/44dvh the overlay lands at ~1/3 of a 900px viewport,
- * which is the ratio that lets the canvas read as the subject rather than the backdrop.
- *
- * The overlay's contents were reduced first, not squeezed into a smaller box: a duplicate "Violated
- * Specification" card (102px, restating the header), a redundant step-number input (one of three controls
- * answering "which step"), and its card wrapper are gone — 663px of content down to 523px. The cap does the
- * rest, and `iot-scroll-region` keeps the remainder reachable with a scrollbar that matches the product.
- *
- * `getVisibleCanvasFrame` now measures this element rather than guessing a fraction of the window, so the
- * canvas fit follows whatever height it actually takes. */
+/* A single dock owns layout space and scrolls evidence beneath stable controls. */
 .board-timeline {
-    /*
-     * Width follows the corridor the host already reserves; the 39rem cap was making the height problem.
-     *
-     * The height above was lowered on the finding that the overlay read as the subject rather than the canvas.
-     * That was right, but only one term moved: at `min(39rem, 100%)` the panel used **624px of 1416px of host
-     * width — 44%** — and then paid for it vertically. Measured with a real counterexample open: content 529px
-     * against a 318px viewport, so **211px sat hidden behind a scrollbar** while 792px of horizontal room went
-     * unused. The four device chips total ~1268px and were folded into 598px of content width, taking three rows
-     * (89.5px); the header badge row folded into three rows too (87px). Squeezing a wide row into a narrow column
-     * does not remove the content, it turns width into height.
-     *
-     * So the width now spans the corridor between the two side panels, which is what `--board-control-width` and
-     * `--board-inspector-width` already describe, with 72rem as a readability ceiling so a 2556px screen does not
-     * stretch one line of chips across 1400px. The height cap stays exactly as the earlier pass set it: with the
-     * rows unfolded it is no longer the binding constraint.
-     */
-    width: min(72rem, 100%);
-    /*
-     * The cap is a ceiling for a runaway trace, not the working height.
-     *
-     * It was `min(44dvh, 20rem)`, and the `20rem` term binds on every screen taller than ~727px — so in practice
-     * the overlay was pinned at exactly 320px whatever the viewport offered. With the duplicated device and
-     * environment blocks gone the content measured 317px, which *fit*, but with **1px to spare**: the next label
-     * or badge would have re-armed the clipping and quietly undone the whole reduction.
-     *
-     * 26rem is the ceiling that leaves headroom while still holding the overlay to roughly a third of a 900px
-     * viewport, which is the ratio the earlier pass established so the canvas reads as the subject. The `dvh`
-     * term stays and now does the job it is for: on a short viewport it clamps below the rem ceiling rather
-     * than being shadowed by it.
-     *
-     * Content has since shrunk further, to a measured **236px** at both 1280x871 and 1440x900 (E2E, real
-     * counterexample): the redundant "jump to state" range slider and the disclosure wrapper around the
-     * step's cause are gone, and `scrollHeight` now equals `clientHeight` — the overlay no longer scrolls at
-     * all. `playbackOverlayCaps.spec.ts` still pins its floor against the older 317px figure on purpose: that
-     * constant guards the *ceiling* from dropping below content, so a conservative floor stays correct, and
-     * lowering it would weaken the guard rather than tighten it.
-     */
-    max-height: min(44dvh, 26rem);
-    background: color-mix(in srgb, var(--surface-overlay) 86%, transparent);
+    width: 100%;
+    height: var(--board-playback-height);
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    pointer-events: auto;
     color: var(--text);
+    background: var(--surface-elevated);
+    border-top: 1px solid var(--border);
+    border-radius: 0;
+    box-shadow: none;
+    font-size: var(--iot-font-control);
+    container-name: playback-terminal;
+    container-type: inline-size;
+}
+
+.playback-terminal__header {
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+    gap: var(--iot-space-2xs);
+    padding-inline: var(--iot-space-sm);
+    border-bottom: 1px solid var(--border);
+    height: var(--iot-target-min);
+    justify-content: space-between;
+    background: var(--surface-panel);
+}
+
+.playback-terminal__tabs,
+.playback-terminal__header-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--iot-space-2xs);
+    flex-shrink: 0;
+}
+
+.playback-terminal__header-actions {
+    gap: 0;
+}
+
+.playback-terminal__run-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--iot-space-md);
+    border-top: 1px solid var(--border);
+    padding-top: var(--iot-space-xs);
+}
+
+.playback-terminal__tabs {
+    min-width: 0;
+    flex-shrink: 1;
+    overflow-x: auto;
+    padding-inline-end: var(--iot-space-2xs);
+    scroll-padding-inline: var(--iot-space-2xs);
+    /* Selection and resize reveal the active tab without adding a second header row. */
+    scrollbar-width: none;
+}
+
+.playback-terminal__tabs::-webkit-scrollbar {
+    display: none;
+}
+
+/* Isolate inset paint behind both icons and native button text while retaining the full target. */
+.board-timeline button:where(:not(.playback-terminal__marker):not(.iot-info-tooltip-trigger)),
+.board-playback-bar button:where(:not(.playback-terminal__marker):not(.iot-info-tooltip-trigger)) {
+    position: relative;
+    isolation: isolate;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    gap: var(--iot-space-xs);
+    min-width: var(--iot-target-min);
+    min-height: var(--iot-target-min);
+    padding-inline: var(--iot-space-sm);
+    color: var(--text-muted);
+    background: transparent;
+    border: 0;
+    border-radius: var(--iot-radius-action);
+    font-size: var(--iot-font-control);
+    font-weight: 500;
+}
+
+.board-timeline button:where(:not(.playback-terminal__marker):not(.iot-info-tooltip-trigger))::before,
+.board-playback-bar button:where(:not(.playback-terminal__marker):not(.iot-info-tooltip-trigger))::before {
+    content: '';
+    position: absolute;
+    inset: var(--iot-space-sm) 0;
+    z-index: -1;
+    pointer-events: none;
+    border-radius: var(--iot-radius-marker);
+}
+
+.board-timeline button:where(:not(.playback-terminal__marker):not(.iot-info-tooltip-trigger)):hover:not(:disabled),
+.board-playback-bar button:where(:not(.playback-terminal__marker):not(.iot-info-tooltip-trigger)):hover:not(:disabled) {
+    color: var(--text);
+}
+
+.board-timeline button:where(:not(.playback-terminal__marker):not(.iot-info-tooltip-trigger)):hover:not(:disabled)::before,
+.board-playback-bar button:where(:not(.playback-terminal__marker):not(.iot-info-tooltip-trigger)):hover:not(:disabled)::before {
+    background: var(--surface-control-hover);
+}
+
+.board-timeline button:disabled,
+.board-playback-bar button:disabled {
+    cursor: not-allowed;
+    color: var(--text-muted);
+}
+
+.board-timeline button:focus-visible,
+.board-playback-bar button:focus-visible,
+.playback-terminal__position:focus-within {
+    outline: 2px solid var(--accent-border);
+    outline-offset: -2px;
+}
+
+.board-timeline .material-symbols-outlined,
+.board-playback-bar .material-symbols-outlined {
+    font-size: var(--iot-font-base);
+}
+
+.board-playback-bar .playback-terminal__icon,
+.board-playback-bar .board-playback-bar__toggle,
+.board-timeline .playback-terminal__icon {
+    width: var(--iot-target-min);
+    padding: 0;
+}
+
+.board-playback-bar .playback-terminal__icon::before,
+.board-playback-bar .board-playback-bar__toggle::before,
+.board-timeline .playback-terminal__icon::before {
+    inset: var(--iot-space-sm);
+}
+
+.board-timeline .playback-terminal__icon.board-text-danger {
+    color: var(--danger);
+}
+
+.board-timeline .playback-terminal__icon.board-text-warning {
+    color: var(--warning);
+}
+
+.board-timeline .playback-terminal__icon.board-text-success {
+    color: var(--success);
+}
+
+.playback-terminal__tabs button {
+    position: relative;
+    flex-shrink: 0;
+    height: var(--iot-target-min);
+    white-space: nowrap;
+}
+
+.board-timeline .playback-terminal__tabs button {
+    font-size: var(--iot-font-label);
+}
+
+.board-timeline .playback-terminal__tabs button[aria-selected='true'] {
+    color: var(--text);
+    background: transparent;
+    font-weight: 600;
+}
+
+.playback-terminal__tabs button[aria-selected='true']::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: var(--iot-space-sm);
+    right: var(--iot-space-sm);
+    height: 2px;
+    background: var(--accent);
+}
+
+.playback-terminal__transport {
+    display: flex;
+    align-items: center;
+    gap: var(--iot-space-2xs);
+}
+
+.playback-terminal__transport > * {
+    flex-shrink: 0;
+}
+
+.board-playback-bar .playback-terminal__play,
+.board-timeline .playback-run__download {
+    color: var(--text-on-fill);
+}
+
+.board-playback-bar .playback-terminal__play::before,
+.board-timeline .playback-run__download::before {
+    background: var(--accent-fill);
+}
+
+.board-playback-bar .playback-terminal__play:hover:not(:disabled),
+.board-timeline .playback-run__download:hover:not(:disabled) {
+    color: var(--text-on-fill);
+}
+
+.board-playback-bar .playback-terminal__play:hover:not(:disabled)::before,
+.board-timeline .playback-run__download:hover:not(:disabled)::before {
+    background: var(--accent-fill-hover);
+}
+
+.board-playback-bar .playback-terminal__play:disabled,
+.board-timeline .playback-run__download:disabled {
+    color: var(--text-muted);
+}
+
+.board-playback-bar .playback-terminal__play:disabled::before,
+.board-timeline .playback-run__download:disabled::before {
+    background: var(--surface-muted);
+}
+
+.playback-terminal__position {
+    position: relative;
+    isolation: isolate;
+    display: flex;
+    align-items: center;
+    gap: var(--iot-space-2xs);
+    min-height: var(--iot-target-min);
+    padding-inline: var(--iot-space-sm);
+    border: 0;
+    border-radius: var(--iot-radius-action);
+    color: var(--text-muted);
+    font-size: var(--iot-font-caption);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.playback-terminal__position::before {
+    content: '';
+    position: absolute;
+    inset: var(--iot-space-sm) 0;
+    z-index: -1;
+    pointer-events: none;
     border: 1px solid var(--border);
-    border-radius: var(--iot-radius-well);
-    padding: 0.75rem;
-    box-shadow: var(--shadow-elevated);
-    backdrop-filter: blur(14px);
+    border-radius: var(--iot-radius-marker);
+    background: var(--surface-elevated);
 }
 
-.board-timeline__sticky-header {
-    position: sticky;
-    top: -0.75rem;
-    z-index: 25;
-    margin-inline: -0.75rem;
-    padding: 0.75rem 0.75rem 0.5rem;
-    background: color-mix(in srgb, var(--surface-overlay) 94%, transparent);
-    backdrop-filter: blur(14px);
+.playback-terminal__position input {
+    border: 0;
+    outline: none;
+    background: transparent;
+    color: var(--text);
+    text-align: center;
+    font-weight: 600;
+    appearance: textfield;
+    -moz-appearance: textfield;
 }
 
-/*
- * The rail is the one scrub control, so its track has to look grabbable.
- *
- * It replaced a range slider, and a slider's thumb telegraphs "drag me" for free. The rail's step markers are
- * an obvious affordance on their own, but the *track between them* is equally interactive — press or drag
- * anywhere and it seeks to the nearest state — and nothing said so. A cursor is the cheapest way to say it:
- * it costs no height, which is the constraint this whole overlay is under.
- *
- * The `:active` pair matters as much as the rest state: during a scrub the pointer is captured, so the cursor
- * is the only continuous confirmation that the gesture is still live once it leaves the track's box.
- *
- * Scoped by testid because the rail is Tailwind-classed inline in two different SFCs and has no shared class
- * of its own; the testid is the one selector both already carry. Touch devices have no hover or cursor, which
- * is why `touch-none` on the element is the mechanism there — it stops the browser reading a scrub as a
- * scroll — and this rule is a pointer-only enhancement layered over that.
- */
-.board-timeline [data-testid='trace-timeline-track'],
-.board-timeline [data-testid='simulation-timeline-track'] {
+.playback-terminal__position input::-webkit-inner-spin-button,
+.playback-terminal__position input::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+.playback-terminal__body {
+    flex: 1;
+    min-height: 0;
+    padding: 0 var(--iot-space-md) var(--iot-space-sm);
+}
+
+.playback-terminal__sequence-track {
+    display: flex;
+    align-items: flex-start;
+    min-width: 0;
+    gap: var(--iot-space-2xs);
+    height: var(--iot-target-min);
+}
+
+.playback-terminal__sequence {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 1rem var(--iot-target-min);
+    row-gap: var(--iot-space-2xs);
+    width: 100%;
+    min-width: 0;
+}
+
+.playback-terminal__sequence-heading {
+    display: flex;
+    align-items: center;
+    gap: var(--iot-space-xs);
+    min-width: 0;
+    padding-inline: var(--iot-space-2xs);
+    font-size: var(--iot-font-caption);
+    line-height: 1rem;
+    white-space: nowrap;
+}
+
+.playback-terminal__sequence.has-windows .playback-terminal__sequence-heading {
+    padding-left: calc(var(--iot-target-min) + var(--iot-space-2xs));
+}
+
+.playback-terminal__window-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--text-muted);
+}
+
+.playback-terminal__scene-label {
+    min-width: 0;
+    max-width: 45%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--text-muted);
+}
+
+.playback-terminal__initial-label {
+    color: var(--text);
+    font-weight: 600;
+}
+
+.playback-terminal__violation-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--danger);
+    font-weight: 700;
+}
+
+.playback-terminal__sequence-track > .iot-scroll-region-x {
+    flex: 1;
+    min-width: 0;
+    scrollbar-width: none;
+}
+
+.playback-terminal__sequence-track > .iot-scroll-region-x::-webkit-scrollbar {
+    display: none;
+}
+
+.playback-terminal__help {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: var(--iot-target-min);
+    height: var(--iot-target-min);
+    flex-shrink: 0;
+}
+
+.playback-terminal__context-bar {
+    flex-shrink: 0;
+    max-height: 4.5rem;
+    overflow-y: auto;
+    padding-inline: var(--iot-space-md);
+}
+
+.playback-run {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+    gap: var(--iot-space-lg);
+    padding-block: var(--iot-space-sm);
+    font-size: var(--iot-font-label);
+    line-height: 1.6;
+}
+
+.playback-run__section {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.playback-run__section:only-child {
+    grid-column: 1 / -1;
+}
+
+.playback-run h3 {
+    margin: 0 0 var(--iot-space-sm);
+    color: var(--text);
+    font-size: var(--iot-font-label);
+    font-weight: 600;
+}
+
+.playback-run p {
+    margin: 0 0 var(--iot-space-xs);
+}
+
+.playback-run__requirement {
+    color: var(--text);
+}
+
+.playback-run__facts {
+    margin: 0;
+}
+
+.playback-run__facts > div {
+    display: grid;
+    grid-template-columns: minmax(5rem, 30%) 1fr;
+    gap: var(--iot-space-sm);
+    padding-block: var(--iot-space-xs);
+    border-bottom: 1px solid var(--border);
+}
+
+.playback-run dt {
+    color: var(--text-muted);
+}
+
+.playback-run dd {
+    margin: 0;
+    color: var(--text);
+}
+
+.playback-run__issues {
+    padding-left: var(--iot-space-md);
+}
+
+.playback-run__issues li {
+    margin-block: var(--iot-space-xs);
+}
+
+.playback-run__issues strong,
+.playback-run__issues span {
+    display: block;
+}
+
+.playback-run__diagnostics {
+    grid-column: 1 / -1;
+}
+
+.playback-run details {
+    border-top: 1px solid var(--border);
+    margin-top: var(--iot-space-sm);
+}
+
+.playback-run summary {
+    cursor: pointer;
+    padding-block: var(--iot-space-sm);
+    color: var(--text);
+    font-weight: 500;
+}
+
+.playback-run summary:focus-visible {
+    outline: 2px solid var(--accent-border);
+    outline-offset: -2px;
+}
+
+.playback-run pre {
+    padding: var(--iot-space-sm);
+    margin: 0;
+    color: var(--text);
+    background: var(--surface-muted);
+    border-radius: var(--iot-radius-action);
+    font-size: var(--iot-font-caption);
+    line-height: 1.6;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.playback-terminal__window-label {
+    font-size: var(--iot-font-caption);
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.board-playback-rail {
+    position: relative;
+    max-width: 100%;
+    min-width: var(--iot-target-min);
+    height: calc(var(--iot-target-min) + var(--iot-space-sm));
+    padding-inline: calc(var(--iot-target-min) / 2);
+    touch-action: none;
     cursor: grab;
 }
 
-.board-timeline [data-testid='trace-timeline-track']:active,
-.board-timeline [data-testid='simulation-timeline-track']:active {
+.board-playback-rail:active {
     cursor: grabbing;
 }
 
-.board-timeline .text-slate-400,
-.board-timeline .text-slate-500,
-.board-timeline .text-slate-600 {
-    color: var(--text-muted) !important;
+.board-playback-rail__line {
+    position: absolute;
+    top: calc(var(--iot-target-min) / 2);
+    left: calc(var(--iot-target-min) / 2);
+    right: calc(var(--iot-target-min) / 2);
+    height: 0.25rem;
+    transform: translateY(-50%);
+    border-radius: var(--iot-radius-pill);
+    background: var(--surface-control);
 }
 
-.board-timeline .text-slate-700,
-.board-timeline .text-slate-800,
-.board-timeline .text-black {
-    color: var(--text) !important;
+.board-playback-rail__progress {
+    right: auto;
+    background: var(--accent);
 }
 
-.board-timeline .bg-white,
-.board-timeline .bg-white\/70,
-.board-timeline .bg-slate-50,
-.board-timeline .bg-slate-100,
-.board-timeline .bg-slate-200 {
-    background-color: var(--surface-muted) !important;
+.board-playback-rail__steps {
+    position: absolute;
+    top: calc(var(--iot-target-min) / 2);
+    left: calc((var(--iot-target-min) - 1.5rem) / 2);
+    right: calc((var(--iot-target-min) - 1.5rem) / 2);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    transform: translateY(-50%);
 }
 
-.board-timeline .border-slate-100,
-.board-timeline .border-slate-200,
-.board-timeline .border-slate-300 {
-    border-color: var(--border) !important;
+.board-playback-rail.is-single .board-playback-rail__steps {
+    justify-content: center;
+}
+
+.playback-terminal__marker {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.5rem;
+    height: 1.5rem;
+    flex-shrink: 0;
+    border: 2px solid var(--border-strong);
+    border-radius: 50%;
+    background: var(--surface-elevated);
+}
+
+/* The painted marker is small; its pointer target remains the shared 44px size. */
+.playback-terminal__marker::before {
+    content: '';
+    position: absolute;
+    width: var(--iot-target-min);
+    height: var(--iot-target-min);
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+}
+
+.playback-terminal__marker[aria-current='step'] {
+    background: var(--accent-fill);
+    border-color: var(--accent-border);
+}
+
+.playback-terminal__marker[data-violation='true'] {
+    background: var(--danger-fill);
+    border-color: var(--danger-border);
+}
+
+.playback-terminal__marker[data-initial='true'] {
+    border-radius: var(--iot-radius-action);
+}
+
+.playback-terminal__marker[data-violation='true'][aria-current='step'] {
+    box-shadow: 0 0 0 2px var(--surface-elevated), 0 0 0 4px var(--danger);
+}
+
+.playback-terminal__marker-dot {
+    width: 0.25rem;
+    height: 0.25rem;
+    border-radius: 50%;
+    background: var(--text-on-fill);
+}
+
+.playback-terminal__marker-number {
+    position: absolute;
+    top: calc(100% + var(--iot-space-2xs));
+    font-size: var(--iot-font-min);
+    line-height: 1rem;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.playback-terminal__marker[aria-current='step'] .playback-terminal__marker-number {
+    color: var(--text);
+    font-weight: 700;
+}
+
+.playback-terminal__marker-alert {
+    font-size: var(--iot-font-min);
+    font-weight: 700;
+    color: var(--text-on-fill);
+}
+
+.playback-terminal__context,
+.playback-changes__summary {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--iot-space-xs);
+    padding-block: var(--iot-space-2xs);
+}
+
+.playback-terminal__context p,
+.playback-changes__summary p {
+    margin: 0;
+}
+
+.playback-terminal__subject {
+    flex: 1;
+    min-width: 0;
+    font-size: var(--iot-font-caption);
+    line-height: 1.5;
+    color: var(--text-muted);
+    overflow-wrap: anywhere;
+}
+
+.playback-terminal__badge {
+    padding: 0 var(--iot-space-xs);
+    border-radius: var(--iot-radius-action);
+    font-size: var(--iot-font-caption);
+    font-weight: 600;
+    line-height: 1.75;
+}
+
+.playback-terminal__notice {
+    padding: var(--iot-space-xs) var(--iot-space-sm);
+    margin-block: var(--iot-space-2xs);
+    border-radius: var(--iot-radius-action);
+    font-size: var(--iot-font-caption);
+    line-height: 1.5;
+}
+
+.playback-terminal__state-details {
+    padding-block: var(--iot-space-sm);
+    font-size: var(--iot-font-label);
+}
+
+.playback-terminal__readings {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+    gap: var(--iot-space-sm);
+}
+
+.playback-terminal__readings p {
+    margin: 0;
+}
+
+.playback-evidence-group {
+    padding-block: var(--iot-space-sm);
+}
+
+.playback-evidence-group + .playback-evidence-group {
+    border-top: 1px solid var(--border);
+}
+
+.playback-evidence-group__heading,
+.playback-evidence__name {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--iot-space-xs);
+    margin: 0 0 var(--iot-space-xs);
+    font-size: var(--iot-font-label);
+    font-weight: 600;
+    line-height: 1.5;
+    color: var(--text);
+    overflow-wrap: anywhere;
+}
+
+.playback-evidence-group__heading > span:last-child:not(.material-symbols-outlined) {
+    color: var(--text-muted);
+    font-size: var(--iot-font-caption);
+    font-weight: 400;
+}
+
+.playback-evidence__values {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
+    column-gap: var(--iot-space-sm);
+    row-gap: var(--iot-space-2xs);
+    margin: 0;
+    font-size: var(--iot-font-caption);
+}
+
+.playback-evidence__scope {
+    display: block;
+    margin: 0 0 var(--iot-space-xs);
+    color: var(--text-muted);
+    font-size: var(--iot-font-caption);
+    font-weight: 400;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+}
+
+.playback-evidence__values dt,
+.playback-evidence__environment dt {
+    color: var(--text-muted);
+    overflow-wrap: anywhere;
+}
+
+.playback-evidence__values dd,
+.playback-evidence__environment dd {
+    min-width: 0;
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+.playback-evidence__environment {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+    gap: var(--iot-space-xs) var(--iot-space-md);
+    margin: 0;
+    font-size: var(--iot-font-caption);
+}
+
+.playback-evidence__environment > div {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: var(--iot-space-xs);
+    padding: var(--iot-space-xs) var(--iot-space-sm);
+    border-radius: var(--iot-radius-action);
+    background: var(--surface-muted);
+}
+
+.playback-evidence__list {
+    display: grid;
+    gap: var(--iot-space-xs);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    overflow-wrap: anywhere;
+}
+
+.playback-changes__summary {
+    color: var(--text-muted);
+    font-size: var(--iot-font-caption);
+    line-height: 1.5;
+    padding-block: var(--iot-space-sm);
+}
+
+.playback-changes__grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr));
+    align-items: start;
+    gap: var(--iot-space-sm);
+}
+
+.playback-changes__card {
+    min-width: 0;
+    padding: var(--iot-space-sm);
+    border: 1px solid var(--border);
+    border-radius: var(--iot-radius-action);
+    background: var(--surface-muted);
+    font-size: var(--iot-font-label);
+    line-height: 1.5;
+}
+
+.playback-changes__row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+    align-items: baseline;
+    gap: var(--iot-space-sm);
+    overflow-wrap: anywhere;
+}
+
+.playback-changes__row[data-change-kind='security'],
+.playback-changes__row[data-change-kind='compromised'] {
+    padding-top: var(--iot-space-2xs);
+    border-top: 1px dashed var(--border);
+}
+
+@container playback-controls (max-width: 64rem) {
+    .playback-terminal__locate-label { display: none; }
+
+    .board-playback-bar .playback-terminal__locate::before {
+        inset: var(--iot-space-sm);
+    }
+}
+
+.playback-changes__inputs,
+.playback-changes__group-label {
+    margin-bottom: var(--iot-space-sm);
+}
+
+.playback-changes__inputs ul {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+    gap: var(--iot-space-sm);
+}
+
+.playback-changes__group-label {
+    color: var(--text-muted);
+    font-size: var(--iot-font-caption);
+    font-weight: 600;
+}
+
+.playback-changes__empty {
+    grid-column: 1 / -1;
+    padding-block: var(--iot-space-sm);
+    color: var(--text-muted);
+    font-size: var(--iot-font-caption);
+    line-height: 1.5;
+}
+
+.playback-changes__event {
+    padding-block: var(--iot-space-2xs);
+    border-bottom: 1px solid var(--border);
+    overflow-wrap: anywhere;
+}
+
+.iot-board .board-playback-bar {
+    position: absolute;
+    top: var(--board-nav-height);
+    left: var(--board-control-width);
+    right: var(--board-inspector-width);
+    z-index: var(--z-board-nav);
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-rows: 1rem var(--iot-target-min);
+    align-content: center;
+    align-items: center;
+    column-gap: var(--iot-space-sm);
+    row-gap: var(--iot-space-2xs);
+    height: var(--board-playback-toolbar-height);
+    padding-inline: var(--iot-space-sm);
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-panel);
+    container-name: playback-controls;
+    container-type: inline-size;
+}
+
+.board-playback-bar__title {
+    grid-column: 1;
+    grid-row: 1;
+    padding-left: var(--iot-space-2xs);
+    color: var(--text-muted);
+    font-size: var(--iot-font-caption);
+    line-height: 1rem;
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.board-playback-bar__transport {
+    grid-column: 1;
+    grid-row: 2;
+    min-width: 0;
+}
+
+.board-playback-bar__timeline {
+    grid-column: 2;
+    grid-row: 1 / 3;
+    min-width: 0;
+}
+
+.board-playback-bar__actions {
+    grid-column: 3;
+    grid-row: 2;
+    display: flex;
+    align-items: center;
+    gap: var(--iot-space-2xs);
+}
+
+.board-playback-bar__locate:empty {
+    display: none;
+}
+
+.board-playback-bar.is-stacked {
+    grid-template-columns: minmax(0, 1fr) var(--iot-target-min) var(--iot-target-min);
+    grid-template-rows: var(--iot-target-min) 4rem;
+    row-gap: var(--iot-space-2xs);
+}
+
+.board-playback-bar.is-stacked .board-playback-bar__title {
+    display: none;
+}
+
+.board-playback-bar.is-stacked .board-playback-bar__transport {
+    grid-column: 1 / 3;
+    grid-row: 1;
+}
+
+.board-playback-bar.is-stacked .board-playback-bar__actions {
+    display: contents;
+}
+
+.board-playback-bar.is-stacked .board-playback-bar__exit {
+    grid-column: 3;
+    grid-row: 1;
+}
+
+.board-playback-bar.is-stacked .board-playback-bar__toggle {
+    grid-column: 3;
+    grid-row: 2;
+    align-self: end;
+}
+
+.board-playback-bar.is-stacked .board-playback-bar__locate {
+    grid-column: 3;
+    grid-row: 2;
+    align-self: end;
+}
+
+.board-playback-bar.is-stacked .board-playback-bar__timeline {
+    grid-column: 1 / -1;
+    grid-row: 2;
+}
+
+.board-playback-bar.is-stacked.has-hidden-panel .board-playback-bar__timeline,
+.board-playback-bar.is-stacked:has(.playback-terminal__locate) .board-playback-bar__timeline {
+    grid-column: 1 / 3;
+}
+
+.board-playback-bar.is-stacked.has-hidden-panel:has(.playback-terminal__locate) .board-playback-bar__timeline {
+    grid-column: 1;
+}
+
+.board-playback-bar.is-stacked.has-hidden-panel .board-playback-bar__locate {
+    grid-column: 2;
 }
 
 @media (max-width: 1023.98px), (max-height: 599.98px) {
-    .iot-board .board-playback-change-popover {
-        top: calc(var(--board-nav-height) + var(--board-floating-gap));
-        left: auto;
-        right: var(--board-floating-gap);
-        width: min(22rem, calc(100vw - (var(--board-floating-gap) * 2)));
-        max-height: min(36dvh, 17rem);
-    }
-
     .board-timeline-host {
-        left: var(--board-floating-gap);
-        right: var(--board-floating-gap);
+        left: 0;
+        right: 0;
         z-index: 49;
     }
 
-    /* Unprefixed, because the two replay bars are **siblings** of `.iot-board`, not descendants — the same
-     * structure that made `.iot-board button` miss 10 of 12 replay controls (see the cursor rule at the top
-     * of this file) and made `--board-floating-gap` unreadable inside them. With the prefix this rule matched
-     * nothing, so on the viewport where a 44px target matters most both close buttons stayed at the ~32px
-     * their padding produced. */
-    .board-timeline [data-testid$="-timeline-close"] {
-        min-width: 2.75rem;
-        min-height: 2.75rem;
+    .iot-board .board-playback-bar {
+        left: var(--board-floating-gap);
+        right: var(--board-floating-gap);
     }
 
-    /* Narrow viewports get *less* of the screen, not more.
-     *
-     * This was `58dvh`, which on a 667px-tall phone is ~387px — most of the screen for the apparatus, on
-     * the device where the canvas has least room to begin with. The wide cap is now 44dvh, so a narrow one
-     * that is larger inverts the priority: the smaller the screen, the more the subject needs of it.
-     *
-     * Both terms matter, and I got this wrong the first time: lowering only the viewport fraction to 40dvh
-     * left the ceiling at `22rem`, which was *larger* than the wide rule's `20rem` then. At 834×1112 that
-     * ceiling bound, so the tablet rendered a 352px overlay against the desktop's 320px — the smaller screen
-     * still getting the taller apparatus. The ceiling has to come down with the fraction.
-     *
-     * The ceiling then went to `18rem` (288px) on a premise that has since **inverted**: "the overlay is
-     * full-width here, so it holds more per row than at 39rem and needs less height". That was true against a
-     * 624px wide panel. The wide cap is now 72rem, so at 1024px+ the panel is **1152px** while the narrow
-     * full-width one is 991px — the narrow case is the *narrower* of the two and needs more height, not less.
-     *
-     * Measured consequence: content is **317px** at every width from 900 to 1600 (it does not re-fold), so the
-     * 288px ceiling clipped 31px and the overlay scrolled at exactly `< 1024px` — a discontinuous step, since
-     * `scrollHeight` is identical either side of it. 22rem (352px) clears the content with 35px of headroom
-     * while `40dvh` still binds on anything under ~880px tall, so a 667px phone gets 267px and the priority
-     * the rest of this comment describes is preserved. */
-    .board-timeline {
-        width: 100%;
-        max-height: min(40dvh, 22rem);
+    /* Compact playback spans the window; side-panel toggles start below it. */
+    .iot-board .board-side-panel {
+        top: calc(var(--board-nav-height) + var(--board-status-height, 0px) + var(--board-playback-toolbar-height) + 1px) !important;
+        max-height: calc(100dvh - var(--board-nav-height) - var(--board-status-height, 0px) - var(--board-playback-toolbar-height) - 1px);
     }
 
     .iot-board .board-mini-tasks {
@@ -2709,28 +4345,44 @@
     }
 }
 
-/* A short landscape viewport cannot stack the change inspector above the
- * timeline without covering one of them. While both are visible, reserve a
- * right-hand column for the inspector and keep the timeline in the remaining
- * width. Dismissing the inspector restores the timeline's full width. */
-@media (min-width: 640px) and (max-height: 599.98px) {
-    .iot-board.has-playback-change-popover .board-playback-change-popover {
-        width: min(22rem, 42vw);
+/* The canvas corridor can be narrow even in a wide window with both sidebars open. */
+@container playback-controls (max-width: 40rem) {
+    .board-playback-bar__exit > span:last-child,
+    .playback-terminal__position > span:first-child {
+        display: none;
     }
 
-    /* Keyed off the host's own `data-playback-change-popover`, not off `.iot-board.has-…`: the hosts are
-     * *siblings* of the board root, so a descendant selector rooted there reserved nothing and the two
-     * overlays kept the full width they each asked for — which on a short landscape viewport is exactly the
-     * overlap this block exists to prevent. The popover half of the pair matched (it *is* inside the board),
-     * so the inspector narrowed to 42vw while the timeline stayed put: half a layout rule, and the half
-     * that shows is the one that gives away space. `boardShellStyle` already mirrors board state onto these
-     * hosts for `--board-floating-gap`; this attribute is the same channel. */
-    .board-timeline-host[data-playback-change-popover='true'] {
-        right: calc(min(22rem, 42vw) + (var(--board-floating-gap) * 2));
+    .board-playback-bar__exit {
+        padding: 0;
+        width: var(--iot-target-min);
+    }
+
+    .board-playback-bar .board-playback-bar__exit::before {
+        inset: var(--iot-space-sm);
     }
 }
 
-/* 背景画布：负责撑满和裁剪，不再承担网格绘制 */
+@container playback-terminal (max-width: 32rem) {
+    .playback-terminal__header {
+        padding-inline: var(--iot-space-xs);
+    }
+
+    .playback-terminal__tabs button {
+        padding-inline: var(--iot-space-2xs);
+    }
+
+    .playback-terminal__tabs .material-symbols-outlined {
+        display: none;
+    }
+}
+
+@container playback-terminal (max-width: 40rem) {
+    .playback-run {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+/* The canvas owns the grid and clips both world layers. */
 .iot-board .canvas {
     position: absolute;
     inset: 0;
@@ -2740,20 +4392,23 @@
     background-image:
             linear-gradient(90deg, var(--iot-color-grid) 1px, transparent 1px),
             linear-gradient(180deg, var(--iot-color-grid) 1px, transparent 1px);
-    background-size: var(--canvas-grid-size, var(--iot-grid-size)) var(--canvas-grid-size, var(--iot-grid-size));
-    background-position: var(--canvas-grid-offset-x, 0) var(--canvas-grid-offset-y, 0);
-    /* 为固定导航栏留出空间 */
-    padding-top: var(--board-nav-height);
+    background-size: var(--iot-grid-size) var(--iot-grid-size);
+    background-position: 0 0;
+    /* Fit-to-view reserves this inset; it must not move either world layer. */
+    padding-top: calc(var(--board-nav-height) + var(--board-playback-toolbar-height));
 }
 
-/* 画布内部：真正被平移 / 缩放的层，负责网格 + 节点 */
+/* HTML nodes and the sibling SVG share the canvas origin. */
 .iot-board .canvas-inner {
-    position: relative;
-    width: calc(100vw * 4); /* 扩大到4倍屏幕宽度，确保完全覆盖 */
-    height: calc(100vh * 4); /* 扩大到4倍屏幕高度，确保完全覆盖 */
-    min-width: 400vw;
-    min-height: 400vh;
+    position: absolute;
+    top: 0;
+    left: 0;
+    /* Empty HTML space must not cover the sibling SVG edge hit regions. */
+    pointer-events: none;
+    width: 100%;
+    height: 100%;
     background: transparent;
+    will-change: transform;
 }
 
 /* 连线层（SVG） */
@@ -2764,21 +4419,25 @@
     height: 100%;
     pointer-events: none;
     overflow: visible;
+    transform-origin: 0 0;
+    will-change: transform;
 }
 
 /* 连线（包含自环 path 和普通 line） */
 .iot-board .edge-layer .edge-base-line {
     fill: none;
-    stroke-width: 3.2;
+    vector-effect: non-scaling-stroke;
+    stroke-width: 2.2;
     stroke-linecap: round;
-    opacity: 0.62;
-    filter: drop-shadow(0 3px 6px rgba(15, 23, 42, 0.16));
+    opacity: 0.82;
+    filter: drop-shadow(var(--shadow-raised));
     transition: opacity 0.22s ease, stroke-width 0.22s ease, filter 0.22s ease;
 }
 
 .iot-board .edge-layer .edge-line {
-    fill: none; /* 自环 path 不要填充，否则会出现"黑洞" */
-    stroke-width: 2.8;
+    fill: none;
+    vector-effect: non-scaling-stroke; /* 自环 path 不要填充，否则会出现"黑洞" */
+    stroke-width: 2.4;
     stroke-linecap: round;
     stroke-dasharray: 4, 8; /* 虚线样式：8px实线，4px空白 */
     transition: opacity 0.22s ease, stroke-width 0.22s ease, filter 0.22s ease;
@@ -2788,8 +4447,8 @@
 .iot-board .edge-layer .edge-base-line.edge-line--active,
 .iot-board .edge-layer .edge-line--active {
     opacity: 1 !important;
-    stroke-width: 4.4;
-    filter: drop-shadow(0 0 10px color-mix(in srgb, var(--accent-fill) 58%, transparent));
+    stroke-width: 3.2;
+    filter: drop-shadow(0 0 6px color-mix(in srgb, var(--accent-fill) 58%, transparent));
     stroke-dasharray: 6, 6;
 }
 
@@ -2797,17 +4456,16 @@
 .iot-board .edge-layer .edge-line--compromised {
     opacity: 1 !important;
     stroke: var(--danger-fill) !important;
-    stroke-width: 4.4;
-    filter: drop-shadow(0 0 9px color-mix(in srgb, var(--danger-fill) 58%, transparent));
+    stroke-width: 3.2;
+    filter: drop-shadow(0 0 5px color-mix(in srgb, var(--danger-fill) 58%, transparent));
     stroke-dasharray: 3, 7;
 }
 
 .iot-board .edge-layer .edge-base-line.edge-line--focused,
 .iot-board .edge-layer .edge-line--focused {
     opacity: 1 !important;
-    stroke-width: 4.8;
-    filter: drop-shadow(0 0 10px color-mix(in srgb, var(--accent-fill) 70%, transparent))
-            drop-shadow(0 0 18px color-mix(in srgb, var(--accent-fill) 50%, transparent));
+    stroke-width: 2.8;
+    filter: drop-shadow(var(--shadow-raised));
     stroke-dasharray: 6, 5;
     /* Two pulses, then still — same reasoning as `.node-focused::after`: this cue expires, so its motion
        must end before the cue does instead of running for as long as the highlight happens to last. */
@@ -2824,6 +4482,7 @@
 
 .iot-board .device-node {
     position: absolute;
+    pointer-events: auto;
     background: transparent;
     border-radius: var(--iot-radius-action);
     display: grid;
@@ -2836,20 +4495,18 @@
     color: var(--iot-color-text);
     user-select: none;
     touch-action: none;
-    padding: clamp(0.22rem, 3.5%, 0.45rem);
+    padding: 0;
     box-sizing: border-box;
     overflow: visible;
     min-width: 5rem;
     min-height: 3.75rem;
     container-name: device-node;
     container-type: size;
-    backdrop-filter: blur(5px);
-    transition: transform 0.16s ease, box-shadow 0.18s ease, border-color 0.18s ease, filter 0.18s ease, opacity 0.18s ease;
+    transition: box-shadow var(--iot-motion-fast), border-color var(--iot-motion-fast), filter var(--iot-motion-fast), opacity var(--iot-motion-fast);
 }
 
 .iot-board .device-node.trace-not-represented {
     opacity: 0.38;
-    filter: grayscale(0.75);
     border-style: dashed;
     box-shadow: 0 0 0 1px color-mix(in srgb, var(--iot-color-text-muted) 24%, transparent);
 }
@@ -2859,17 +4516,8 @@
     box-shadow: 0 0 0 1px color-mix(in srgb, var(--iot-color-text-muted) 24%, transparent);
 }
 
-/*
- * Hover raises the node one step, from floating to elevated. It does not change the node's *hue*.
- *
- * It used to swap the resting hairline — `color-mix(var(--text) 12%)`, a dark line on a light card — for
- * `rgba(255, 255, 255, 0.72)`, a near-opaque white ring. On a light canvas that inverted the edge from dark to
- * white on hover, and in dark theme it drew a bright white outline on a navy node: a colour change dressed as
- * a depth change, which is why hovering a node looked wrong rather than lifted. The hairline now stays put and
- * only the elevation moves, which is what "hover" should mean.
- */
+/* Hover changes elevation without moving the node away from its connection anchors. */
 .iot-board .device-node:hover {
-    transform: translateY(-1px);
     box-shadow: var(--shadow-elevated), 0 0 0 1px color-mix(in srgb, var(--text) 12%, transparent) inset;
 }
 
@@ -2930,7 +4578,7 @@
     z-index: 18;
     border-width: 2px;
     box-shadow:
-        var(--shadow-elevated),
+        var(--shadow-floating),
         0 0 0 3px color-mix(in srgb, var(--iot-color-accent) 22%, transparent);
 }
 
@@ -2967,8 +4615,8 @@
     border-width: 2px;
     box-shadow:
         var(--shadow-floating),
-        0 0 0 4px color-mix(in srgb, var(--iot-color-accent) 30%, transparent),
-        0 0 28px color-mix(in srgb, var(--iot-color-accent) 28%, transparent);
+        0 0 0 3px color-mix(in srgb, var(--iot-color-accent) 22%, transparent),
+        0 0 16px color-mix(in srgb, var(--iot-color-accent) 18%, transparent);
 }
 
 .iot-board .device-node.trace-change-pulse::after {
@@ -2985,57 +4633,6 @@
     animation: traceContentSettle 0.72s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-/*
- * Also intentionally unrendered, and kept for the same reason as `__previous` above: `CanvasBoard.spec.ts`
- * asserts `[data-testid="trace-change-badge"]` must **not** exist, recording the same measurement — a node
- * has no room for a `previous → current` badge, so the transition belongs in the popover.
- */
-.iot-board .trace-change-badge {
-    position: absolute;
-    top: -0.8rem;
-    right: -0.55rem;
-    z-index: 22;
-    display: inline-flex;
-    max-width: min(12rem, calc(100% + 2rem));
-    align-items: center;
-    gap: 0.25rem;
-    border: 1px solid color-mix(in srgb, var(--iot-color-accent) 55%, white);
-    border-radius: var(--iot-radius-pill);
-    background: color-mix(in srgb, var(--surface-overlay) 92%, var(--iot-color-accent) 8%);
-    color: color-mix(in srgb, var(--iot-color-accent) 82%, var(--text));
-    padding: 0.2rem 0.45rem;
-    /* A transient badge above a node. */
-    box-shadow: var(--shadow-floating);
-    font-size: var(--iot-font-min);
-    font-weight: 800;
-    line-height: 1;
-    pointer-events: none;
-}
-
-.iot-board .trace-change-badge .material-symbols-outlined {
-    flex: 0 0 auto;
-    font-size: 0.9rem;
-}
-
-.iot-board .trace-change-badge__text {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.iot-board .device-node--compact .trace-change-badge {
-    width: 1.35rem;
-    height: 1.35rem;
-    justify-content: center;
-    padding: 0;
-}
-
-.iot-board .device-node--compact .trace-change-badge__text {
-    display: none;
-}
-
-/* 被攻击的设备节点 - 红色圆圈标记 */
 .iot-board .device-node.device-attacked {
     animation: none;
     border-width: 0 !important;
@@ -3135,6 +4732,18 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+    .board-action-secondary,
+    .board-action-inline-subtle,
+    .board-run-mode,
+    .iot-board .board-tool-button,
+    .iot-board .board-tool-button::before {
+        transition: none;
+    }
+
+    .iot-board .board-tool-button:active:not(:disabled) {
+        transform: none;
+    }
+
     .iot-board :is(
         .board-side-panel,
         .board-floating-panel,
@@ -3147,14 +4756,13 @@
         .board-mini-tasks,
         .board-timeline
     ) *,
-    .board-result-dialog-surface,
-    .board-result-dialog-surface * {
+    .iot-dialog,
+    .iot-dialog * {
         scroll-behavior: auto !important;
         transition-delay: 0ms !important;
         transition-duration: 0.01ms !important;
     }
 
-    .iot-board .board-tool-pulse,
     .iot-board .edge-layer .edge-line--focused,
     .iot-board .device-node.node-focused::after,
     .iot-board .device-node.trace-change-pulse::after,
@@ -3204,19 +4812,51 @@
     }
 }
 
+.spec-formula-disclosure summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--iot-space-xs);
+  min-height: var(--iot-target-min);
+  list-style: none;
+  cursor: pointer;
+  border-radius: var(--iot-radius-control);
+}
+.spec-formula-disclosure summary::-webkit-details-marker { display: none; }
+.spec-formula-disclosure summary:hover { color: var(--text); }
+.spec-formula-disclosure summary:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
+}
+.spec-formula-disclosure__chevron {
+  font-size: 1rem;
+  transition: transform var(--iot-motion-fast) ease;
+}
+.spec-formula-disclosure[open] .spec-formula-disclosure__chevron { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) {
+  .spec-formula-disclosure__chevron { transition: none; }
+}
+
 /* 设备节点主体容器：包含上部分和状态 */
 .iot-board .device-node-content {
+    --node-ui-scale: 1;
+    position: relative;
     display: grid;
-    grid-template-rows: minmax(0, 1fr) auto auto;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, calc(2rem / var(--node-ui-scale))) auto auto;
+    align-content: safe center;
     align-items: center;
-    justify-items: center;
+    justify-items: stretch;
     width: 100%;
     height: 100%;
-    gap: clamp(0.15rem, 3%, 0.35rem);
-    padding: clamp(0.3rem, 4%, 0.65rem);
+    gap: min(calc(var(--iot-space-2xs) / var(--node-ui-scale)), 2cqmin);
+    padding: min(calc(var(--iot-space-sm) / var(--node-ui-scale)), 4cqmin);
     box-sizing: border-box;
     min-width: 0;
     min-height: 0;
+    overflow: hidden;
+    border-radius: inherit;
+    transition: transform var(--iot-motion-panel) var(--iot-ease-panel);
 }
 
 @keyframes focusedNodePulse {
@@ -3239,155 +4879,123 @@
     }
 }
 
-.iot-board .device-node--compact {
-    border-radius: var(--iot-radius-pill);
-    padding: clamp(0.18rem, 5%, 0.45rem);
-}
-
 .iot-board .device-node--compact .device-node-content {
-    position: relative;
-    display: block;
-    padding: clamp(0.1rem, 6%, 0.35rem);
-    gap: 0;
-}
-
-.iot-board .device-node--compact .device-top-row {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    width: 100%;
-    height: 100%;
-    align-items: center;
-    justify-content: center;
-}
-
-.iot-board .device-node--compact .device-img {
-    width: min(76%, clamp(2rem, 58cqmin, 6rem));
-    max-width: 76%;
-    max-height: 42%;
-}
-
-.iot-board .device-node--compact .device-label-wrapper {
-    position: absolute;
-    left: 3%;
-    right: 3%;
-    bottom: 2%;
-    z-index: 7;
-    display: flex;
-    min-width: 0;
-    justify-content: center;
-    pointer-events: none;
+    grid-template-rows: minmax(0, calc(1.25rem / var(--node-ui-scale))) auto;
 }
 
 .iot-board .device-node--compact .device-label {
-    max-width: 100%;
-    overflow: hidden;
-    padding: 0.08rem 0.24rem;
-    border: 1px solid color-mix(in srgb, var(--board-border) 70%, transparent);
-    border-radius: var(--iot-radius-marker);
-    background: color-mix(in srgb, var(--surface-overlay) 88%, var(--node-accent-color, #64748b));
-    color: var(--board-text);
-    max-height: 1.2em;
-    display: block;
-    font-size: clamp(0.4rem, calc(0.5rem / max(var(--canvas-zoom, 1), 0.4)), 0.9rem);
-    font-weight: 800;
-    line-height: 1.1;
-    overflow-wrap: anywhere;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    text-align: center;
+    font-size: calc(var(--iot-font-min) / var(--node-ui-scale));
+    -webkit-line-clamp: var(--node-name-lines);
 }
 
 .iot-board .device-node--compact .device-state,
 .iot-board .device-node--compact .device-runtime-strip,
-.iot-board .device-node--compact .device-node-actions {
-    display: none;
-}
-
-.iot-board .device-node--condensed .device-node-content {
-    grid-template-rows: minmax(0, 1fr) auto;
-    gap: clamp(0.1rem, 3cqmin, 0.3rem);
-    padding: clamp(0.2rem, 5cqmin, 0.55rem);
-}
-
-.iot-board .device-node--condensed .device-top-row {
-    width: 100%;
-    height: 100%;
-}
-
-.iot-board .device-node--condensed .device-img {
-    width: min(72%, clamp(2.25rem, 44cqmin, 5.5rem));
-    max-height: 78%;
-}
-
-.iot-board .device-node--condensed .device-label-wrapper {
-    width: 92%;
-}
-
-.iot-board .device-node--condensed .device-label {
-    font-size: clamp(var(--iot-font-min), 8cqmin, 0.8rem);
-}
-
-.iot-board .device-node--condensed .device-state,
+.iot-board .device-node--compact .device-node-actions,
 .iot-board .device-node--condensed .device-runtime-strip,
 .iot-board .device-node--condensed .device-node-actions {
     display: none;
 }
 
 .iot-board .device-node--expanded .device-node-content {
-    width: 92%;
-    height: 92%;
-    place-self: center;
-    /* The icon column may not outgrow the text it labels.
-     *
-     * This was `minmax(clamp(3rem, 34cqmin, 42rem), clamp(4.5rem, 42cqmin, 52rem))`, whose upper bound has a
-     * **72px floor** (`4.5rem`) that wins over its own `42cqmin` term on any node up to ~171px. Measured on a
-     * default 184×135 node the icon therefore claimed **72px of a 132px content row** and the column holding
-     * the label, the state and the runtime chips resolved to **26px** — which is why the state value
-     * "No state machine" rendered in 2px, 98% lost, and every review of the replay surface concluded the
-     * canvas cannot explain itself.
-     *
-     * The floor was inverted: a `clamp()` lower bound on a *maximum* guarantees the decoration its size while
-     * the content absorbs every shortfall. Now the icon scales with the node (`34cqmin`, so it still grows on
-     * a large one) and is capped so it can never take more than about a third of the row. */
-    grid-template-columns: minmax(clamp(1.75rem, 22cqmin, 3rem), clamp(2rem, 34cqmin, 4.5rem)) minmax(0, 1fr);
+    max-width: calc(30rem / var(--node-ui-scale));
+    margin-inline: auto;
+    grid-template-columns: minmax(0, calc(2rem / var(--node-ui-scale))) minmax(0, 1fr);
     grid-template-rows: auto auto auto auto;
     grid-template-areas:
         "icon label"
         "icon state"
         "runtime runtime"
         "actions actions";
-    align-content: center;
-    justify-content: center;
-    justify-items: stretch;
-    column-gap: clamp(0.45rem, 6cqmin, 1.4rem);
-    row-gap: clamp(0.22rem, 4cqmin, 0.9rem);
-    padding: clamp(0.5rem, 5cqmin, 1.5rem);
 }
 
-/* Runtime chips wrap, and use the node's spare vertical space rather than fighting over one row.
- *
- * This was a single non-wrapping row at `width: min(90%, 11rem)` with `overflow: hidden`. Measured during
- * a counterexample replay on a 184×135 node, the result was severe: the changed value **`26` rendered in
- * 6px of the 15px it needs (60% lost)**, the neighbouring node's `0` in 2px of 16px (88%), and the state
- * value "No state machine" in **2px of 85px (98%)**. Meanwhile the node had **29–32px of unused vertical
- * space**.
- *
- * That is the mechanism behind the complaint this whole batch is about. Five independent vision reviews of
- * the replay surface each said the canvas cannot explain itself and the panels have to — "labels are
- * truncated, so the causal story lives almost entirely in the panels". A value shown in 6px is not a value
- * shown; the eye had nowhere to go but the overlay.
- *
- * `flex-wrap` spends the spare height instead of compressing the one fact the replay exists to convey. The
- * strip keeps `overflow: hidden` as the last resort for a node genuinely too small for even one chip. */
+.iot-board .device-node--expanded .device-state {
+    grid-area: state;
+    justify-content: flex-start;
+}
+
+.iot-board .device-node--horizontal:not(.device-node--expanded):not(.device-node--short) .device-node-content {
+    grid-template-columns: minmax(0, calc(1.75rem / var(--node-ui-scale))) minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    grid-template-areas: "icon label" "icon state";
+}
+
+.iot-board .device-node--horizontal:not(.device-node--expanded):not(.device-node--short) .device-top-row {
+    grid-area: icon;
+    height: min(100%, calc(2rem / var(--node-ui-scale)));
+}
+
+.iot-board .device-node--horizontal:not(.device-node--expanded):not(.device-node--short) .device-label-wrapper {
+    grid-area: label;
+}
+
+.iot-board .device-node--horizontal:not(.device-node--expanded):not(.device-node--short) .device-label {
+    text-align: left;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    white-space: normal;
+}
+
+.iot-board .device-node--horizontal:not(.device-node--expanded):not(.device-node--short) .device-state {
+    grid-area: state;
+    justify-content: flex-start;
+}
+
+.iot-board .device-node--compact.device-node--horizontal:not(.device-node--short) .device-node-content {
+    grid-template-rows: auto;
+    grid-template-areas: "icon label";
+}
+
+/* A short overview card prioritizes its name over decorative artwork. */
+.iot-board .device-node--short .device-node-content {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto;
+    grid-template-areas: none;
+    padding: min(calc(var(--iot-space-2xs) / var(--node-ui-scale)), 2cqmin);
+}
+
+.iot-board .device-node--short .device-top-row,
+.iot-board .device-node--short .device-state {
+    display: none;
+}
+
+.iot-board .device-node--short .device-label-wrapper {
+    grid-area: auto;
+}
+
+.iot-board .device-node--short .device-label {
+    text-align: center;
+}
+
+.iot-board .device-node--minimal .device-label {
+    display: block;
+    -webkit-line-clamp: unset;
+    white-space: nowrap;
+}
+
+/* Micro overviews use artwork; the full name remains in the node title and ARIA label. */
+.iot-board .device-node--micro .device-node-content {
+    grid-template-rows: minmax(0, 1fr);
+}
+
+.iot-board .device-node--micro .device-label-wrapper {
+    display: none;
+}
+
+.iot-board .device-node--micro .device-top-row {
+    display: flex;
+    grid-area: auto;
+    height: 100%;
+}
+
+/* Wrapping spends spare height before compressing the reading's value. */
 .iot-board .device-runtime-strip {
     display: flex;
     flex-wrap: wrap;
-    width: min(96%, 11rem);
+    width: 100%;
     min-width: 0;
     align-items: center;
     justify-content: center;
-    gap: 0.2rem 0.25rem;
+    gap: calc(0.125rem / var(--node-ui-scale));
     overflow: hidden;
 }
 
@@ -3400,35 +5008,21 @@
 .iot-board .device-runtime-chip {
     display: inline-flex;
     min-width: 0;
-    max-width: 44cqmin;
+    max-width: 100%;
     align-items: center;
-    gap: 0.2rem;
+    gap: calc(0.2rem / var(--node-ui-scale));
     border: 1px solid var(--border);
     border-radius: var(--iot-radius-pill);
     background: color-mix(in srgb, var(--surface-elevated) 84%, transparent);
     color: var(--text-muted);
-    padding: clamp(0.125rem, 1.2cqmin, 0.28rem) clamp(0.35rem, 2.4cqmin, 0.7rem);
-    /*
-     * Static, because the clamp this replaces never once used its middle term. `4.3cqmin` is 4.3% of the
-     * node's smaller side, and these chips only render on an expanded node, whose measured height ranges
-     * 110-137px — so the preferred size evaluated to 4.7-5.9px and the 0.58rem floor won at every viewport
-     * and every node size. It would take roughly 215cqmin to reach the readable minimum. The clamp read as
-     * a responsive size while being a fixed 9.28px, which is how it passed a type-floor check whose
-     * exemption for container-relative sizes assumed the middle term could win.
-     */
-    font-size: var(--iot-font-min);
+    padding: calc(0.0625rem / var(--node-ui-scale)) calc(var(--iot-space-2xs) / var(--node-ui-scale));
+    /* Container scaling must not shrink runtime text below the shared minimum. */
+    font-size: calc(var(--iot-font-min) / var(--node-ui-scale));
     font-weight: 700;
     line-height: 1;
 }
 
-/*
- * The `+N` chip: a count, not a value.
- *
- * Quieter than `--changed` on purpose. `--changed` earns accent colour because it marks what moved in this step;
- * this one only says the node is holding variables back, so it reads as structure rather than as a finding. It
- * needs no `max-width` — "+2" is two characters — and it must not be `flex: 1`, or it would take room from the
- * three badges that carry actual values.
- */
+/* Overflow counts stay neutral and leave room for the visible values. */
 .iot-board .device-runtime-chip--overflow {
     flex: 0 0 auto;
     border-color: var(--border);
@@ -3438,24 +5032,12 @@
 }
 
 .iot-board .device-runtime-chip--changed {
-    max-width: 58cqmin;
     border-color: color-mix(in srgb, var(--iot-color-accent) 56%, var(--border));
     background: color-mix(in srgb, var(--iot-color-accent) 14%, var(--surface-elevated));
     color: color-mix(in srgb, var(--iot-color-accent) 74%, var(--text));
 }
 
-/* When the pair cannot both fit, the label yields and the value survives.
- *
- * Both were equally shrinkable, so a 65px chip holding "Temperature" (58px) plus "26" (15px) split the
- * shortfall between them and printed the value in 6px. The label says which variable; the value is the fact
- * a counterexample is about, and a variable named without its value explains nothing. `flex-shrink` ranks
- * them: the label gives up its width first, down to a floor where its own prefix still identifies it, and
- * the value keeps enough room for the two or three characters these actually hold.
- *
- * One rule per class. My first version added the `flex` ranking in a *second* pair of rules beside the shared
- * truncation block above, so each class had two declarations — the duplicated ownership I removed from
- * `ControlCenter` earlier in this audit, reintroduced by me within the hour. A test slicing on the first
- * occurrence found no `flex` and failed against correct CSS, which is how it surfaced. */
+/* Variable names yield first so current values remain readable. */
 .iot-board .device-runtime-chip__label {
     min-width: 1.5rem;
     flex: 0 1 auto;
@@ -3475,34 +5057,13 @@
     color: var(--text);
 }
 
-/*
- * `__previous` renders nowhere **on purpose**, and it stays for that reason.
- *
- * `.device-runtime-chip--changed` is capped at `58cqmin` — 64px on a standard 150x110 node — so
- * "Temperature 24 → 26" truncates to a fragment there; the node shows the destination value and the
- * `--changed` tint, and the full transition lives in the popover and in `badge.title`. Someone already
- * rendered the pair to test that reasoning and measured it back out again.
- *
- * `CanvasBoard.vue`, `Board.vue` and `CanvasBoard.spec.ts` all cite this selector as the evidence for that
- * decision, one of them saying outright that the style exists here. Deleting it would leave three comments
- * pointing at nothing and invite the next reader to re-litigate the measurement from an absence. Its sibling
- * `__delta` carried no such reference and is gone.
- */
-.iot-board .device-runtime-chip__previous {
-    min-width: 0;
-    overflow: hidden;
-    color: var(--text-muted);
-    text-decoration: line-through;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
 .iot-board .device-node-actions {
     display: flex;
-    width: min(90%, 11rem);
+    width: 100%;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: center;
-    gap: 0.35rem;
+    gap: calc(0.125rem / var(--node-ui-scale));
     min-width: 0;
 }
 
@@ -3514,14 +5075,8 @@
 
 .iot-board .device-node-trust {
     min-width: 0;
-    /*
-     * `46cqmin` was sized to stop a full sentence from swallowing the node. The pill now prints a one-word
-     * category, so the cap only re-truncates it: 46cqmin of a 137px node is 63px, and "Trusted" at 11px bold
-     * with its padding needs about 68px, which measured as 28% of the word cut off. A ceiling generous enough
-     * for the longest short label keeps the original intent — the pill cannot dominate the node — without
-     * clipping the word it exists to show.
-     */
-    max-width: min(100%, 7rem);
+    /* The short category retains screen space while the full explanation stays in title. */
+    max-width: min(100%, calc(7rem / var(--node-ui-scale)));
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -3529,10 +5084,9 @@
     border-radius: var(--iot-radius-pill);
     background: color-mix(in srgb, var(--iot-color-accent) 12%, var(--surface-elevated));
     color: color-mix(in srgb, var(--iot-color-accent) 72%, var(--text));
-    padding: clamp(0.15rem, 1.3cqmin, 0.3rem) clamp(0.45rem, 2.8cqmin, 0.8rem);
-    /* Same unreachable clamp as `.device-runtime-chip`; see the note there. */
-    font-size: var(--iot-font-min);
-    font-weight: 800;
+    padding: calc(0.0625rem / var(--node-ui-scale)) calc(var(--iot-space-2xs) / var(--node-ui-scale));
+    font-size: calc(var(--iot-font-min) / var(--node-ui-scale));
+    font-weight: 600;
     line-height: 1;
 }
 
@@ -3547,7 +5101,7 @@
     color: var(--accent-strong);
 }
 
-/* 上部分：左边图标，右边名字 */
+/* Artwork occupies its own cell so transitions cannot cover the name. */
 .iot-board .device-top-row {
     display: flex;
     flex-direction: column;
@@ -3564,12 +5118,7 @@
     align-self: center;
     justify-self: center;
     width: 100%;
-    aspect-ratio: 1;
-    max-height: 46cqmin;
-    border-radius: var(--iot-radius-action);
-    background: color-mix(in srgb, var(--surface-elevated) 78%, transparent);
-    border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
-    box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 14%, transparent);
+    height: calc(2rem / var(--node-ui-scale));
 }
 
 /* 节点图标图片：不响应鼠标事件，避免拖拽图片 */
@@ -3577,28 +5126,20 @@
     pointer-events: none;
     flex-shrink: 0;
     object-fit: contain;
-    width: clamp(2rem, 42%, 5.75rem);
-    height: auto;
+    width: min(100%, calc(2rem / var(--node-ui-scale)));
+    height: min(100%, calc(2rem / var(--node-ui-scale)));
     aspect-ratio: 1;
-    max-width: calc(100% - 0.5rem);
-    max-height: min(72%, 5.75rem);
-    filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.15));
+    max-width: 100%;
+    max-height: 100%;
+    filter: drop-shadow(var(--shadow-raised));
 }
 
-.iot-board .device-node--expanded .device-img {
-    width: clamp(3.4rem, 32cqmin, 40rem);
-    max-width: 68%;
-    max-height: 68%;
-}
-
-/* 节点名字容器：带背景和圆角 */
+/* Names use their grid cell, without a world-space width cap. */
 .iot-board .device-label-wrapper {
-    width: min(88%, 9rem);
+    width: 100%;
     height: auto;
     min-width: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    display: block;
     overflow: hidden;
 }
 
@@ -3608,24 +5149,18 @@
     justify-content: flex-start;
 }
 
-/* 节点文字：基础排版，具体字号由 JS 控制 */
+/* Counter-scaling preserves readable type while the node decides the available space. */
 .iot-board .device-label {
+    width: 100%;
     font-weight: 600;
     text-align: center;
-    padding: 0.125rem 0.25rem;
+    padding: 0;
     white-space: normal;
     overflow: hidden;
     text-overflow: ellipsis;
     overflow-wrap: anywhere;
     color: var(--text);
-    font-size: var(--iot-font-min);
-    background: color-mix(in srgb, var(--surface-elevated) 88%, transparent);
-    border-radius: var(--iot-radius-control);
-    /* The raised step. The `inset 0 1px 0 rgba(255,255,255,.8)` top highlight went with it: a near-opaque
-       white line reads as a glossy bevel on a light label and as a bright seam on a dark one, and no other
-       surface in the product uses that treatment. */
-    box-shadow: var(--shadow-raised);
-    border: 1px solid var(--border);
+    font-size: calc(var(--iot-font-caption) / var(--node-ui-scale));
     line-height: 1.2;
     max-width: 100%;
     display: -webkit-box;
@@ -3636,12 +5171,8 @@
 .iot-board .device-node--expanded .device-label {
     width: 100%;
     text-align: left;
-    background: transparent;
-    border: 0;
-    box-shadow: none;
-    padding: 0;
-    font-size: clamp(0.72rem, 8cqmin, 8rem);
-    font-weight: 800;
+    font-size: calc(var(--iot-font-label) / var(--node-ui-scale));
+    font-weight: 600;
     -webkit-line-clamp: 2;
 }
 
@@ -3650,12 +5181,8 @@
 
 .iot-board .resize-handle {
     position: absolute;
-    /* Geometry is set per-node via --resize-hit-size and --resize-hit-offset (see getNodeResizeHandleGeometry
-       in CanvasBoard.vue). The fallback values (2.75rem = 44px, -1.375rem = -22px at 16px base font) are
-       correct for zoom 1.0 only and do not adapt to minimum-dimension nodes. They exist to prevent layout
-       collapse if the JS computation fails, not as a design choice. */
-    width: var(--resize-hit-size, 2.75rem);
-    height: var(--resize-hit-size, 2.75rem);
+    /* Direct width, height and margins come from getNodeResizeHandleGeometry in CanvasBoard.vue.
+       Avoid inherited geometry variables: each zoom otherwise restyles the handle's pseudo-element. */
     border: 0;
     background: transparent;
     opacity: 0;
@@ -3670,8 +5197,10 @@
     position: absolute;
     left: 50%;
     top: 50%;
-    width: var(--resize-visual-size, var(--iot-resize-size));
-    height: var(--resize-visual-size, var(--iot-resize-size));
+    /* Preserve 11.2px artwork without inherited geometry variables. The denominator must match
+       POINTER_RESIZE_TARGET_SIZE_PX in CanvasBoard.vue, which owns the screen-space hit size. */
+    width: calc(100% * 11.2 / 44);
+    height: calc(100% * 11.2 / 44);
     transform: translate(-50%, -50%);
     border: 1px solid var(--iot-color-resize-border);
     border-radius: var(--iot-radius-resize);
@@ -3680,33 +5209,34 @@
 }
 
 .iot-board .device-node:hover .resize-handle,
-.iot-board .device-node:focus-visible .resize-handle {
+.iot-board .device-node:focus .resize-handle,
+.iot-board .device-node.node-focused .resize-handle {
     opacity: 1;
     pointer-events: auto;
 }
 
 /* 四个方向的手柄位置 + 光标形状 */
 .iot-board .resize-handle.tl {
-    left: var(--resize-hit-offset, -1.375rem);
-    top: var(--resize-hit-offset, -1.375rem);
+    left: 0;
+    top: 0;
     cursor: nw-resize;
 }
 
 .iot-board .resize-handle.tr {
-    right: var(--resize-hit-offset, -1.375rem);
-    top: var(--resize-hit-offset, -1.375rem);
+    right: 0;
+    top: 0;
     cursor: ne-resize;
 }
 
 .iot-board .resize-handle.bl {
-    left: var(--resize-hit-offset, -1.375rem);
-    bottom: var(--resize-hit-offset, -1.375rem);
+    left: 0;
+    bottom: 0;
     cursor: sw-resize;
 }
 
 .iot-board .resize-handle.br {
-    right: var(--resize-hit-offset, -1.375rem);
-    bottom: var(--resize-hit-offset, -1.375rem);
+    right: 0;
+    bottom: 0;
     cursor: se-resize;
 }
 
@@ -3735,58 +5265,41 @@
     }
 }
 
-/*
- * Nine global redefinitions of Tailwind's own utilities lived here — `.bg-green-200`, `.border-blue-100`,
- * `.border-green-200`, `.border-purple-100`, `.border-purple-200`, then `.text-primary`, `.text-secondary`,
- * `.bg-online` and `.bg-offline` — each pinned to a light-theme hex, unscoped, and so applying anywhere in
- * the app rather than inside `.iot-board`. All nine had 0 consumers, but any future use of those Tailwind
- * classes would silently have got a hardcoded light colour instead of the palette value.
- *
- * `.text-primary` proved that concretely: this file loads *after* Tailwind, so its `#2563EB` won over the
- * generated `color: var(--iot-color-accent)` — both rules were in the bundle, and the theme-aware one lost.
- *
- * The last four survived the first pass because a note here claimed they were "still in use (ControlCenter,
- * SystemInspector)". Those files *redefined* the same class names in their own `scoped` blocks; neither
- * template ever applied one. Three files, 13 declarations, no consumer — and the same concept spelled four
- * different ways (`.bg-online` was `#059669`, `#10B981` and `var(--success)`), which is what a class nobody
- * renders looks like as it rots. Read the templates, not the stylesheets, before calling a class used.
- *
- * A later sweep of all 250 global classes took seven more from right here — `.node-container`, `.glass-node`,
- * `.glow-icon`, `.data-badge`, `.pulse-status` with its `pulse-border` keyframes, and `.animate-spin-slow`.
- * Two were provably broken rather than merely unused: `.animate-spin-slow` animated `spin`, which this file
- * never defines, and `.data-badge` hardcoded `background: white`. That sweep needed three fixes before its
- * output could be trusted — it first counted Element Plus's runtime classes, Vue `<Transition>` names, and
- * template-literal class construction (`board-action-dock--${mode}`) as dead, and it also read a *spec
- * documenting a class as dead* as a consumer of it. 35 reported, 15 real.
- */
-
-.board-panel--interaction-read-only {
-    opacity: 0.78;
-    filter: saturate(0.72);
-    transition: opacity 160ms ease, filter 160ms ease;
-}
-
 .board-panel--interaction-read-only button:disabled {
     cursor: not-allowed;
-    opacity: 0.5;
 }
 
-/* Long destructive-scene confirmations must keep their actions reachable. */
-.scene-replacement-confirm.el-message-box {
+/* Structured destructive confirmations scroll their content while keeping actions reachable. */
+.scene-replacement-confirm.el-message-box,
+.fix-removal-confirm.el-message-box {
     display: flex;
+    min-width: 0;
+    max-width: min(var(--iot-messagebox-max-width), calc(100vw - 32px));
     max-height: calc(100vh - 32px);
     max-height: calc(100dvh - 32px);
     flex-direction: column;
 }
 
-.scene-replacement-confirm .el-message-box__content {
+.scene-replacement-confirm .el-message-box__content,
+.fix-removal-confirm .el-message-box__content {
     min-height: 0;
     flex: 1 1 auto;
     overflow-y: auto;
 }
 
-.scene-replacement-confirm .el-message-box__container {
+.scene-replacement-confirm .el-message-box__container,
+.fix-removal-confirm .el-message-box__container {
     align-items: flex-start;
+}
+
+.scene-replacement-confirm .el-message-box__message,
+.fix-removal-confirm .el-message-box__message {
+    min-width: 0;
+    flex: 1;
+}
+
+.scene-replacement-confirm:has(.scene-import-preview) .el-message-box__status {
+    display: none;
 }
 
 .scene-replacement-confirm .el-message-box__status {
@@ -3801,7 +5314,44 @@
     height: 1em;
 }
 
-.scene-replacement-confirm .el-message-box__btns {
+.scene-replacement-confirm .el-message-box__btns,
+.fix-removal-confirm .el-message-box__btns {
     flex: 0 0 auto;
+}
+
+.scene-import-preview table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+    font-size: var(--iot-font-label);
+}
+
+.scene-import-preview th,
+.scene-import-preview td {
+    padding: 0.5rem;
+    border-bottom: 1px solid var(--border);
+    text-align: right;
+    vertical-align: top;
+}
+
+.scene-import-preview th:first-child {
+    width: 50%;
+    text-align: left;
+}
+
+.scene-import-preview thead th:not(:first-child) {
+    padding-inline: 0.25rem;
+}
+
+.scene-import-preview summary {
+    min-height: var(--iot-target-min);
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.scene-import-preview details p {
+    margin: 0.5rem 0;
 }
 

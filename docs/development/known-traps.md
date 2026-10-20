@@ -96,7 +96,9 @@ not accept the outcome.
 believing it.** If it persists, build in an isolated copy — a backend-only copy is *not* sufficient,
 because several tests read repo-relative paths and need `../docs/`, the root `README.md`,
 `CLAUDE.md`, and `backend/device-template-schema.json`; omitting the schema alone fabricates ~90
-failures.
+failures. Copy `frontend/src/types/scene.ts` at its repo-relative path as well:
+`PortableSceneContractTest` reads the shared scene declaration directly, and omitting it causes two
+file-not-found errors before any contract assertion runs.
 
 ### Deleting or changing an overloaded method needs `mvn clean`
 
@@ -238,7 +240,7 @@ backend, one MySQL and one NuSMV, while `.github/scripts/run-e2e.sh` runs the co
 
 The measured consequence of the unset default: `POST /board/rules/check-duplicate` errored under the
 load, which opens the "Check Duplicate — the overlap pre-check failed" confirmation
-(`RuleBuilderDialog.vue`). No spec clicks "Save Anyway", so the rule-builder dialog stayed visible and
+(`RuleBuilder.vue`, then presented in a dialog). No spec clicked "Save Anyway", so the rule-builder dialog stayed visible and
 a 10s `toBeHidden` expired — a failure that reads exactly like a product regression and cost a full
 investigation to attribute. It passed when serialized.
 
@@ -285,12 +287,18 @@ CI runs with `--fail-on-flaky-tests`, so one retry-passing test still fails the 
   1280×720 viewport — and the forced click on `verification-attack-toggle` was delivered at
   (1004, 218), inside it. The switch stayed `aria-checked="false"`, its `v-if`-gated section never
   rendered, and the run died 180s later on `verification-attack-budget`. Use
-  `clickUnderTooltip` from `e2e/support/tooltips.ts`, which parks the pointer at the origin, waits
-  for the popper to go `aria-hidden`, then clicks with the check intact — and **assert the state the
-  click was supposed to produce**, so a swallowed click fails at the click rather than downstream.
+  `clickUnderTooltip` from `e2e/support/tooltips.ts`, which parks the pointer at the origin, blurs
+  focused tooltip triggers while waiting for poppers to go `aria-hidden`, then clicks with the check intact —
+  and **assert the state the click was supposed to produce**, so a swallowed click fails at the click
+  rather than downstream.
   When attributing this class of failure, **sample more than once per build**: single runs read as a
   clean "fails here, passes at HEAD" regression that ten runs contradict (HEAD failed 1 in 19, an
   unrelated feature branch 2 in 9).
+  Pointer parking alone does not dismiss a focus-triggered hint: Undo can correctly move focus to
+  Redo, leaving its hint open while the pointer is already elsewhere. The helper blurs only a
+  control whose `aria-describedby` names a tooltip popper, preserving unrelated field drafts.
+  It repeats that scoped dismissal within the same bounded wait, because delayed popper mounting
+  or modal focus restoration can leave a new hint open after a single early blur.
 - **A route mock must satisfy the same validators as the real response.** `api/chat.ts` validates
   every field it depends on, so a fixture returning a convenient subset is rejected at the boundary —
   and the failure surfaces far from the cause. A session mock missing `active`/`userId`/`updatedAt`

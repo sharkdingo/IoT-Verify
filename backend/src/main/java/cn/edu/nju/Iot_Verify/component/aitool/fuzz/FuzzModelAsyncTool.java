@@ -51,7 +51,9 @@ public class FuzzModelAsyncTool extends AbstractAiTool {
         props.put("targetSpecIds", Map.of(
                 "type", "array",
                 "items", Map.of("type", "string"),
-                "description", "Optional. Specification IDs (from list_specs) to target. Omit to search every eligible specification. Ineligible specs are reported back, not silently dropped."));
+                "description", "Optional. Exact saved specification id values from board_overview or list_specs, "
+                        + "never templateId or display order. Omit to search every eligible specification. "
+                        + "Ineligible specs are reported back, not silently dropped."));
         props.put("maxIterations", Map.of(
                 "type", "integer",
                 "description", "Search budget in iterations, 1-5000 (default 200). A larger budget can be refused: the admission guard multiplies this by path length, population size, and the Board's model complexity. Budget exhaustion never proves a specification holds."));

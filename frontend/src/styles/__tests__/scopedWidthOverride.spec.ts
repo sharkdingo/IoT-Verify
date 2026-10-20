@@ -106,8 +106,8 @@ describe('scoped size rules do not defeat Tailwind caps', () => {
     const dialog = readFileSync(join(__dirname, '../../components/DeviceDialog.vue'), 'utf8')
 
     const surfaceTag = dialog.slice(
-      dialog.lastIndexOf('<div', dialog.indexOf('device-dialog-surface')),
-      dialog.indexOf('>', dialog.indexOf('device-dialog-surface')))
+      dialog.lastIndexOf('<div', dialog.indexOf('data-testid="device-dialog"')),
+      dialog.indexOf('>', dialog.indexOf('data-testid="device-dialog"')))
     // The cap is now a size on the shared dialog layer (`--md` is 40rem) rather than a per-dialog Tailwind
     // utility. Asserting the size class keeps the original guarantee — a readable column, not the viewport —
     // while leaving the actual value in one place for every dialog.

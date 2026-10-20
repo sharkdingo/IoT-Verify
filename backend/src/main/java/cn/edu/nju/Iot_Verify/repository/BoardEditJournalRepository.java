@@ -1,6 +1,7 @@
 package cn.edu.nju.Iot_Verify.repository;
 
 import cn.edu.nju.Iot_Verify.po.BoardEditJournalPo;
+import cn.edu.nju.Iot_Verify.service.board.BoardUndoAvailability;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
@@ -58,6 +59,12 @@ public interface BoardEditJournalRepository extends JpaRepository<BoardEditJourn
     long countByUserIdAndUndoneFalse(Long userId);
 
     long countByUserIdAndUndoneTrue(Long userId);
+
+    @Query("SELECT new cn.edu.nju.Iot_Verify.service.board.BoardUndoAvailability("
+            + "COUNT(CASE WHEN e.undone = false THEN 1 END) > 0, "
+            + "COUNT(CASE WHEN e.undone = true THEN 1 END) > 0) "
+            + "FROM BoardEditJournalPo e WHERE e.userId = :userId")
+    BoardUndoAvailability findAvailabilityByUserId(@Param("userId") Long userId);
 
     void deleteByUserId(Long userId);
 }

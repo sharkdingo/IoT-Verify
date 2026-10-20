@@ -3,6 +3,7 @@ package cn.edu.nju.Iot_Verify.po;
 import jakarta.persistence.*;
 import lombok.*;
 import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
 
 @Entity
 @Table(name = "rules", indexes = {
@@ -45,7 +46,8 @@ public class RulePo {
             executionOrder = 0;
         }
         if (createdAt == null) {
-            createdAt = LocalDateTime.now();
+            // Match timestamp(6) before this metadata is returned and recorded in the journal.
+            createdAt = LocalDateTime.now().truncatedTo(ChronoUnit.MICROS);
         }
     }
 }

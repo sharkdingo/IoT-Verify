@@ -553,6 +553,8 @@ class FuzzRepositoryTest {
                         21L, FuzzTaskPo.TaskStatus.COMPLETED, PageRequest.of(0, 10));
 
         assertEquals(List.of(task.getId()), tasks.stream().map(FuzzTaskSummaryProjection::getId).toList());
+        assertTrue(tasks.stream().noneMatch(item -> java.lang.reflect.Proxy.isProxyClass(item.getClass())),
+                "history metadata must not rebuild a proxy interceptor chain for every getter");
         assertTrue(Arrays.stream(FuzzTaskSummaryProjection.class.getMethods())
                 .map(Method::getName)
                 .noneMatch(name -> name.equals("getModelInputSnapshotJson")

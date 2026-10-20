@@ -78,9 +78,11 @@ public class DismissFuzzTaskTool extends AbstractAiTool {
             FuzzTaskDto task = fuzzService.getTask(userId, taskId);
             ensureDismissible(task.getStatus());
             Map<String, Object> previewSummary = previewSummary(taskId, task);
+            String displayTarget = "Counterexample-search task: " + task.getStatus() + " · " + task.getCreatedAt();
             if (!confirmed || !UserContextHolder.isDestructiveActionConfirmed()) {
                 String impactToken = destructiveActionGuard.issue(
-                        userId, getName(), Long.toString(taskId), task, null);
+                        userId, getName(), Long.toString(taskId),
+                        displayTarget, task, null);
                 return readOnlySuccessJson(previewResponse(previewSummary, impactToken),
                         "Counterexample-search task dismissal preview prepared; no changes were made.");
             }
@@ -90,7 +92,8 @@ public class DismissFuzzTaskTool extends AbstractAiTool {
                     userId, getName(), Long.toString(taskId), impactToken, task);
             if (!confirmation.approved()) {
                 String freshToken = destructiveActionGuard.issue(
-                        userId, getName(), Long.toString(taskId), task, null);
+                        userId, getName(), Long.toString(taskId),
+                        displayTarget, task, null);
                 return errorJson(confirmation.message(), confirmation.errorCode(), 409, Map.of(
                         "requiresUserConfirmation", true,
                         "currentPreview", previewResponse(previewSummary, freshToken)));

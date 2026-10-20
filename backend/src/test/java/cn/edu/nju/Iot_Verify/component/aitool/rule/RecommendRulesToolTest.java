@@ -1,10 +1,14 @@
 package cn.edu.nju.Iot_Verify.component.aitool.rule;
 
+import cn.edu.nju.Iot_Verify.service.recommendation.DeviceInfoHelper;
+import cn.edu.nju.Iot_Verify.service.recommendation.RuleRecommendationService;
+import cn.edu.nju.Iot_Verify.service.recommendation.RecommendationResultParser;
 import cn.edu.nju.Iot_Verify.component.ai.PromptCompletionService;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
 import cn.edu.nju.Iot_Verify.security.UserContextHolder;
 import cn.edu.nju.Iot_Verify.service.BoardStorageService;
+import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
 import cn.edu.nju.Iot_Verify.testutil.LogCapture;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -20,15 +24,17 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.lenient;
 
 @ExtendWith(MockitoExtension.class)
 class RecommendRulesToolTest {
@@ -42,12 +48,17 @@ class RecommendRulesToolTest {
     @Mock
     private PromptCompletionService promptCompletionService;
 
+    private BoardSemanticSnapshotDto snapshot;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
     private RecommendRulesTool tool;
 
     @BeforeEach
     void setUp() {
-        tool = new RecommendRulesTool(deviceInfoHelper, boardStorageService, promptCompletionService, objectMapper);
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of());
+        lenient().when(boardStorageService.getSemanticSnapshot(1L)).thenAnswer(invocation -> snapshot);
+        tool = new RecommendRulesTool(new RuleRecommendationService(deviceInfoHelper, boardStorageService,
+                promptCompletionService, objectMapper, new RecommendationResultParser(objectMapper)), objectMapper);
         UserContextHolder.setUserId(1L);
     }
 
@@ -57,19 +68,43 @@ class RecommendRulesToolTest {
     }
 
     @Test
+    void promptAndValidationUseOneCapturedSceneEvenIfBoardChangesDuringCompletion() throws Exception {
+        snapshot = new BoardSemanticSnapshotDto(
+                List.of(lightNode()), List.of(), List.of(), List.of(), List.of(lightTemplate()));
+        tool = new RecommendRulesTool(new RuleRecommendationService(new DeviceInfoHelper(), boardStorageService,
+                promptCompletionService, objectMapper, new RecommendationResultParser(objectMapper)), objectMapper);
+        when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
+                .thenAnswer(invocation -> {
+                    assertTrue(invocation.<String>getArgument(1).contains("node-light"));
+                    snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of());
+                    return """
+                            {"recommendations":[{"name":"Turn the light on",
+                              "conditions":[{"deviceId":"node-light","attribute":"state",
+                                "targetType":"state","relation":"=","value":"off"}],
+                              "command":{"deviceId":"node-light","action":"turnOn"}}]}
+                            """;
+                });
+
+        JsonNode result = objectMapper.readTree(tool.execute("{}"));
+
+        assertEquals(1, result.path("validatedCount").asInt(), result.toString());
+        verify(boardStorageService).getSemanticSnapshot(1L);
+        verifyNoMoreInteractions(boardStorageService);
+    }
+
+    @Test
     void execute_rejectsUnknownRequestFieldBeforeReadingBoardOrCallingAi() throws Exception {
         JsonNode json = objectMapper.readTree(tool.execute("{\"maxRecomendations\":3}"));
 
         assertEquals("VALIDATION_ERROR", json.path("errorCode").asText());
         assertEquals("$ contains unsupported field(s): maxRecomendations.", json.path("error").asText());
-        verify(deviceInfoHelper, never()).getDevicesWithTemplateInfo(anyLong());
+        verify(deviceInfoHelper, never()).getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class));
         verify(promptCompletionService, never()).complete(anyString(), anyString(), anyDouble(), anyInt());
     }
 
     @Test
     void execute_withUnparseableAiResponse_returnsUpstreamErrorNotEmptySuccess() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(lightDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(lightDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("not-json");
 
@@ -83,8 +118,7 @@ class RecommendRulesToolTest {
     @Test
     void execute_doesNotLogRejectedModelCandidateContent() throws Exception {
         String sensitive = "private-rule-value-never-log";
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(lightDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(lightDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -99,18 +133,18 @@ class RecommendRulesToolTest {
                         }
                         """);
 
-        try (LogCapture logs = LogCapture.forClass(RecommendRulesTool.class)) {
+        try (LogCapture logs = LogCapture.forClass(RuleRecommendationService.class)) {
             JsonNode json = objectMapper.readTree(tool.execute("{}"));
 
             assertEquals(2, json.path("filteredCount").asInt());
+            assertTrue(logs.messages().stream().anyMatch(message -> message.contains("kept=0, filtered=2")));
             assertFalse(logs.messages().stream().anyMatch(message -> message.contains(sensitive)));
         }
     }
 
     @Test
     void execute_whenAiReturnsNoCandidates_distinguishesThatFromBackendFiltering() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(lightDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(lightDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("{\"recommendations\":[]}");
 
@@ -123,8 +157,7 @@ class RecommendRulesToolTest {
 
     @Test
     void execute_withChineseLanguage_returnsLocalizedBackendMessage() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(lightDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(lightDevice()));
         when(promptCompletionService.completeRecommendation(
                 anyString(),
                 contains("输出语言: 简体中文"),
@@ -165,8 +198,7 @@ class RecommendRulesToolTest {
 
     @Test
     void execute_stripsVolunteeredCategoryInsteadOfDiscardingTheCandidate() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(lightDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(lightDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -196,8 +228,7 @@ class RecommendRulesToolTest {
 
     @Test
     void execute_acceptsModeAttributeRecommendation() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(homeModeDevice(), lightDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(homeModeDevice(), lightDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -225,8 +256,7 @@ class RecommendRulesToolTest {
 
     @Test
     void execute_normalizesSetRelationRecommendation() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(homeModeDevice(), lightDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(homeModeDevice(), lightDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -255,8 +285,7 @@ class RecommendRulesToolTest {
 
     @Test
     void execute_acceptsFullStateTupleSetRecommendation() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(homeModeDevice(), lightDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(homeModeDevice(), lightDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -287,8 +316,7 @@ class RecommendRulesToolTest {
 
     @Test
     void execute_acceptsApiSignalRecommendationWithoutRelationOrValue() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(motionSensorDevice(), lightDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(motionSensorDevice(), lightDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -320,8 +348,7 @@ class RecommendRulesToolTest {
 
     @Test
     void execute_reportsEquivalentApiEventSyntaxNormalization() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(motionSensorDevice(), lightDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(motionSensorDevice(), lightDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -355,8 +382,7 @@ class RecommendRulesToolTest {
 
     @Test
     void execute_filtersApiEventComparisonsThatChangeOrLeaveSemanticsAmbiguous() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(motionSensorDevice(), lightDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(motionSensorDevice(), lightDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {"recommendations":[
@@ -384,8 +410,7 @@ class RecommendRulesToolTest {
 
     @Test
     void execute_canonicalizesAiFieldCaseBeforeReturningRecommendation() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(lightDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(lightDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -416,8 +441,7 @@ class RecommendRulesToolTest {
 
     @Test
     void execute_reportsTruncatedRawCandidatesAfterRequestedLimit() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(lightDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(lightDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -453,8 +477,7 @@ class RecommendRulesToolTest {
 
     @Test
     void execute_returnsFilteredItemsWithReasonsForInvalidCandidates() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(lightDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(lightDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -498,7 +521,7 @@ class RecommendRulesToolTest {
         assertEquals("VALIDATION_ERROR", json.path("errorCode").asText());
         assertEquals(400, json.path("status").asInt());
         assertEquals("maxRecommendations must be between 1 and 10.", json.path("error").asText());
-        verify(deviceInfoHelper, never()).getDevicesWithTemplateInfo(anyLong());
+        verify(deviceInfoHelper, never()).getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class));
         verify(promptCompletionService, never()).complete(anyString(), anyString(), anyDouble(), anyInt());
     }
 
@@ -508,15 +531,14 @@ class RecommendRulesToolTest {
 
         assertEquals("VALIDATION_ERROR", json.path("errorCode").asText());
         assertEquals(400, json.path("status").asInt());
-        verify(deviceInfoHelper, never()).getDevicesWithTemplateInfo(anyLong());
+        verify(deviceInfoHelper, never()).getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class));
         verify(promptCompletionService, never()).complete(anyString(), anyString(), anyDouble(), anyInt());
     }
 
     @Test
     void execute_validatesContentLabelFlowAndExplainsIncompleteCandidate() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L))
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class)))
                 .thenReturn(List.of(lightDevice(), phoneDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -552,9 +574,8 @@ class RecommendRulesToolTest {
 
     @Test
     void execute_filtersContentFlowWhenTheTargetActionDoesNotAcceptContent() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L))
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class)))
                 .thenReturn(List.of(lightDevice(), motionSensorDevice(), phoneDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {"recommendations":[{
@@ -576,8 +597,7 @@ class RecommendRulesToolTest {
 
     @Test
     void execute_filtersCandidateWithUnknownSemanticField() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(lightDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(lightDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {"recommendations":[{
@@ -599,8 +619,7 @@ class RecommendRulesToolTest {
 
     @Test
     void execute_filtersCandidateWithoutPersistedRuleName() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(lightDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(lightDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {"recommendations":[{
@@ -619,10 +638,9 @@ class RecommendRulesToolTest {
 
     @Test
     void execute_filtersConditionsThatAreIndividuallyLegalButMutuallyContradictory() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(lightDevice()));
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(lightTemplate()));
-        when(boardStorageService.getNodes(1L)).thenReturn(List.of(lightNode()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(lightDevice()));
+        snapshot = new BoardSemanticSnapshotDto(snapshot.nodes(), snapshot.environmentVariables(), snapshot.rules(), snapshot.specifications(), List.of(lightTemplate()));
+        snapshot = new BoardSemanticSnapshotDto(List.of(lightNode()), snapshot.environmentVariables(), snapshot.rules(), snapshot.specifications(), snapshot.deviceTemplates());
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {"recommendations":[{

@@ -15,6 +15,7 @@ import org.springframework.data.redis.core.script.RedisScript;
 import java.time.Duration;
 import java.lang.reflect.Field;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
 
@@ -236,5 +237,37 @@ class UserOperationGuardTest {
         guard.renewActiveLeases();
 
         verify(redisTemplate, times(2)).execute(any(RedisScript.class), anyList(), any());
+    }
+
+    @Test
+    void interruptedWorkerReleasesItsSlotWithoutWaitingForMaintenanceAndKeepsItsInterrupt() {
+        AtomicBoolean occupied = new AtomicBoolean();
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+        when(valueOperations.setIfAbsent(anyString(), anyString(), any(Duration.class)))
+                .thenAnswer(invocation -> occupied.compareAndSet(false, true));
+        when(redisTemplate.execute(any(RedisScript.class), anyList(), any()))
+                .thenAnswer(invocation -> {
+                    if (Thread.currentThread().isInterrupted()) {
+                        throw new RedisConnectionFailureException("Redis command interrupted");
+                    }
+                    occupied.set(false);
+                    return 1L;
+                });
+        UserOperationGuard guard = new UserOperationGuard(redisTemplate);
+        UserOperationGuard.Lease lease = guard.acquire(
+                7L, UserOperationGuard.Kind.FORMAL, 1, Duration.ofMinutes(1));
+
+        Thread.currentThread().interrupt();
+        try {
+            lease.close();
+            assertTrue(Thread.currentThread().isInterrupted(), "Cleanup must preserve the cancellation signal");
+            assertFalse(occupied.get(), "An interrupted worker must not leave a Redis slot until the next heartbeat");
+        } finally {
+            Thread.interrupted();
+        }
+
+        UserOperationGuard.Lease next = assertDoesNotThrow(() -> guard.acquire(
+                7L, UserOperationGuard.Kind.FORMAL, 1, Duration.ofMinutes(1)));
+        next.close();
     }
 }

@@ -2,9 +2,12 @@ package cn.edu.nju.Iot_Verify.controller;
 
 import cn.edu.nju.Iot_Verify.dto.Result;
 import cn.edu.nju.Iot_Verify.dto.auth.AuthResponseDto;
+import cn.edu.nju.Iot_Verify.dto.auth.AccountProfileDto;
+import cn.edu.nju.Iot_Verify.dto.auth.ChangePasswordRequestDto;
 import cn.edu.nju.Iot_Verify.dto.auth.DeleteAccountRequestDto;
 import cn.edu.nju.Iot_Verify.dto.auth.LoginRequestDto;
 import cn.edu.nju.Iot_Verify.dto.auth.RegisterRequestDto;
+import cn.edu.nju.Iot_Verify.dto.auth.UpdateUsernameRequestDto;
 import cn.edu.nju.Iot_Verify.security.CurrentUser;
 import cn.edu.nju.Iot_Verify.security.AuthRateLimitGuard;
 import cn.edu.nju.Iot_Verify.service.AuthService;
@@ -42,6 +45,30 @@ public class AuthController {
     @PostMapping("/logout")
     public Result<Void> logout(@CurrentUser Long userId, @RequestHeader("Authorization") String authHeader) {
         authService.logout(userId, authHeader);
+        return Result.success();
+    }
+
+    @GetMapping("/account")
+    public Result<AccountProfileDto> getAccount(@CurrentUser Long userId) {
+        return Result.success(authService.getAccount(userId));
+    }
+
+    @PatchMapping("/account/username")
+    public Result<AccountProfileDto> updateUsername(
+            @CurrentUser Long userId,
+            @Valid @RequestBody UpdateUsernameRequestDto request,
+            HttpServletRequest httpRequest) {
+        authRateLimitGuard.checkAccountChange(userId, httpRequest);
+        return Result.success(authService.updateUsername(userId, request));
+    }
+
+    @PostMapping("/account/password")
+    public Result<Void> changePassword(
+            @CurrentUser Long userId,
+            @Valid @RequestBody ChangePasswordRequestDto request,
+            HttpServletRequest httpRequest) {
+        authRateLimitGuard.checkAccountChange(userId, httpRequest);
+        authService.changePassword(userId, request);
         return Result.success();
     }
 

@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { readThemeTokens } from './themeTokens'
 
 /**
  * Depth comes from the elevation scale, never from a literal offset/blur/alpha.
@@ -32,17 +33,7 @@ import { describe, expect, it } from 'vitest'
 const SRC = join(__dirname, '../..')
 const STEPS = ['--shadow-raised', '--shadow-floating', '--shadow-elevated']
 
-/**
- * The board's own stylesheets, which is where this migration happened.
- *
- * Twenty more hand-written neutral elevations remain in nine components outside the board — `ChatView`,
- * `Landing`, `PublicHeader`, `ThemeToggle`, `LanguageToggle`, `ToggleSwitch`, `AccountDeleteDialog`,
- * `ControlCenter`'s scoped block, and `CanvasBoard`'s. They are the same defect and should move onto the
- * scale, but each needs its depth *chosen* and then measured on the surface it sits on, and several of them
- * (chat, landing, the auth dialog) are outside the review this change came from. Scoping the file list is
- * deliberate: a `.skip` or a hardcoded allow-list of twenty paths would go stale silently, whereas this
- * states plainly what is covered and leaves the rest visibly unconverted.
- */
+// This guard covers shared board stylesheets; component-scoped elevations need separate review.
 const FILES = ['styles/base.css', 'styles/board.css']
 
 const sources = () => FILES.map(name => ({ name, text: readFileSync(join(SRC, name), 'utf8') }))
@@ -52,30 +43,16 @@ const withoutComments = (text: string) =>
   text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/<!--[\s\S]*?-->/g, '')
 
 describe('elevation scale', () => {
-  it('declares each step once per theme, and deepens them for the dark ground', () => {
-    const base = readFileSync(join(SRC, 'styles/base.css'), 'utf8')
-    for (const step of STEPS) {
-      // `:root` (light values), the dark block, and the explicit light block — the dark block is the default
-      // theme, so an explicit light theme must reset every step rather than inherit.
-      const declared = base.match(new RegExp(`${step}:`, 'g')) ?? []
-      expect(declared, `${step} should be declared for both themes`).toHaveLength(3)
+  it('keeps every palette depth defined and deepens shadows for dark grounds', () => {
+    for (const palette of ['copper', 'monochrome'] as const) {
+      const light = readThemeTokens('light', palette)
+      const dark = readThemeTokens('dark', palette)
+      const alpha = (value: string) => Number(/rgba\([^)]*?,\s*([\d.]+)\)/.exec(value)?.[1])
+      for (const step of STEPS) {
+        expect(alpha(light[step]), palette + ' light ' + step).toBeGreaterThan(0)
+        expect(alpha(dark[step]), palette + ' dark ' + step).toBeGreaterThan(alpha(light[step]))
+      }
     }
-
-    // A shadow darkens its ground, and a near-black ground has little headroom left, so the light theme's
-    // alphas disappear on it. Each dark step must be at least as opaque as its light counterpart.
-    const alphas = (block: string) => STEPS.map(step => {
-      const value = new RegExp(`${step}:\\s*[^;]*rgba\\([^)]*?([\\d.]+)\\)`).exec(block)
-      return Number(value?.[1])
-    })
-    const darkAt = base.indexOf(":root[data-theme='dark'],")
-    const lightAt = base.indexOf(":root[data-theme='light'] {")
-    const dark = alphas(base.slice(darkAt, lightAt))
-    const light = alphas(base.slice(lightAt))
-    dark.forEach((a, index) => {
-      expect(a, `dark step ${STEPS[index]} should parse`).toBeGreaterThan(0)
-      expect(a, `${STEPS[index]} should be at least as opaque in dark theme`)
-        .toBeGreaterThanOrEqual(light[index])
-    })
   })
 
   it('has no elevation token outside the scale', () => {
@@ -124,12 +101,37 @@ describe('elevation scale', () => {
     // drop a panel-sized shadow across the canvas. The dock's hint is now the shared `HintTooltip`
     // popper rather than a hand-rolled span, so the depth constraint has to hold where that popper is
     // styled. Asserting it here keeps the rule that outlived the element it was written for.
-    const popperCss = readFileSync(join(SRC, 'components/common/InfoTooltip.vue'), 'utf8')
-    const at = popperCss.indexOf('.iot-info-tooltip-popper)')
+    const popperCss = readFileSync(join(SRC, 'styles/base.css'), 'utf8')
+    const at = popperCss.indexOf('.el-popper.iot-info-tooltip-popper:is(')
     expect(at, 'the shared tooltip popper rule should exist').toBeGreaterThan(-1)
     const body = popperCss.slice(at, at + popperCss.slice(at).indexOf('}'))
     expect(body).toMatch(/box-shadow:\s*var\(--shadow-floating\)/)
     expect(body).not.toMatch(/box-shadow:\s*var\(--shadow-elevated\)/)
+  })
+
+  it('keeps help above its owning panel and nested modal but below confirmations', () => {
+    const tokens = readThemeTokens('light')
+    for (const owner of ['--z-board-panel-above-alert', '--z-modal-nested', '--z-session-modal']) {
+      expect(Number(tokens['--z-tooltip'])).toBeGreaterThan(Number(tokens[owner]))
+    }
+    expect(Number(tokens['--z-tooltip'])).toBeLessThan(Number(tokens['--z-message-box']))
+    const css = withoutComments(readFileSync(join(SRC, 'styles/base.css'), 'utf8'))
+    const at = css.indexOf('.el-popper.iot-info-tooltip-popper:is(')
+    expect(at).toBeGreaterThan(-1)
+    const body = css.slice(at, css.indexOf('}', at))
+    // Element Plus assigns an inline z-index; normal stylesheet specificity cannot override it.
+    expect(body).toMatch(/z-index:\s*var\(--z-tooltip\)\s*!important/)
+  })
+
+  it('keeps portaled template details above navigation and sidebars but below modals', () => {
+    const tokens = readThemeTokens('light')
+    const component = readFileSync(join(SRC, 'components/ControlCenter.vue'), 'utf8')
+    const preview = /\.template-preview\s*\{([^}]+)\}/.exec(withoutComments(component))?.[1] ?? ''
+    const layer = /z-index:\s*([^;]+)/.exec(preview)?.[1]?.trim() ?? ''
+    const token = /^var\((--[a-z-]+)\)$/.exec(layer)?.[1]
+    const elevation = Number(token ? tokens[token] : layer)
+    expect(elevation).toBeGreaterThan(Number(tokens['--z-board-nav']))
+    expect(elevation).toBeLessThan(Number(tokens['--z-modal']))
   })
 
   it('routes every dock button hint through the shared popper, not a clipped span', () => {
@@ -146,13 +148,12 @@ describe('elevation scale', () => {
 
     const buttons = dock.match(/class="board-tool-button[^"]*"/g) ?? []
     expect(buttons.length, 'the dock buttons should be found').toBeGreaterThanOrEqual(8)
-    // Every dock button must sit inside a HintTooltip: count openers against buttons plus the two
-    // chrome controls (packed-mode launcher and the mode toggle) that were already wrapped.
+    // Functional tools keep hints; layout switches retain only their accessible names.
     const wrappers = dock.match(/<HintTooltip/g) ?? []
     expect(wrappers.length).toBeGreaterThanOrEqual(buttons.length)
   })
 
-  it('keeps every dock button flat, so the tiers differ by fill rather than by depth', () => {
+  it('keeps every dock button inside the toolbar elevation', () => {
     // `open-verification-panel` carried Tailwind's `shadow-lg` while its seven siblings declared
     // `box-shadow: none` — one of eight floating above a strip they all belong to, inside a panel that is
     // itself elevated. It read as a depth difference where the product means an emphasis difference.
@@ -164,35 +165,4 @@ describe('elevation scale', () => {
     }
   })
 
-  it('keeps the two quiet dock tiers on one ground', () => {
-    // Run History sat on `--board-control-bg` (#f1f5f9) while the four suggestions sat on `--board-card-bg`
-    // (#ffffff) — two tiers that both mean "not the primary action", on two different neutrals, four rows
-    // apart in one strip. A background change down a vertical list implies a *category* change, so it read as
-    // an unexplained grey band among white buttons. What separates them is the border hue and the label.
-    //
-    // Border contrast was re-measured in a browser after the move, because changing the ground changes what
-    // the border is measured against: 4.76 (vs fill) / 3.02 (vs panel) light, 3.73 / 3.90 dark — the 3:1
-    // component minimum still holds on the new ground.
-    const css = readFileSync(join(SRC, 'styles/board.css'), 'utf8')
-    const groundOf = (selector: string) => {
-      const at = css.indexOf(`${selector} {`)
-      expect(at, `${selector} should exist`).toBeGreaterThan(-1)
-      const body = css.slice(at, at + css.slice(at).indexOf('}'))
-      return /background-color:\s*([^;]+)/.exec(body)?.[1].trim()
-    }
-    const quiet = groundOf('.iot-board .board-tool-button--view')
-    expect(quiet).toBeTruthy()
-    expect(quiet).toBe(groundOf('.iot-board .board-tool-button--suggestion'))
-
-    // Hover and pressed must mix against that same ground, or hover changes ground rather than deepening it.
-    // They still named `--board-control-bg` after the rest state moved, which would have made hover *lighter*
-    // than rest in light theme.
-    for (const state of [':hover:not(:disabled)', "[aria-pressed='true']"]) {
-      const at = css.indexOf(`.iot-board .board-tool-button--view${state} {`)
-      expect(at, `the --view${state} rule should exist`).toBeGreaterThan(-1)
-      const body = css.slice(at, at + css.slice(at).indexOf('}'))
-      expect(body, `--view${state} should mix against the tier's resting ground`)
-        .not.toContain('--board-control-bg')
-    }
-  })
 })

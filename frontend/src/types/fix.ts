@@ -12,22 +12,7 @@ export type { ModelTokenSource } from './modelToken'
 
 // 故障规则定位结果
 export interface FaultRule {
-  /**
-   * The rule's own preview text, or null when it has none.
-   *
-   * `RuleDto.ruleString` has no `@NotBlank` and a nullable TEXT column, so a rule legitimately persists without
-   * one — verified against the running API, which accepts a rule with the field omitted and echoes
-   * `"ruleString": null`. This was declared `string`, and `validateFaultRule` enforced that with
-   * `text(row, 'ruleString')`, which throws on null and rejected the **entire** fault-localization response: one
-   * such rule turned a fix request into "malformed result" instead of a fix.
-   *
-   * The fallback belongs on this side, not on the server. `verify.ts` already types the sibling field as
-   * `ruleLabel?: string | null`, and `PlaybackChangePopover`, `SimulationTimeline` and `Board.vue` all render
-   * `rule.ruleLabel?.trim() || t('app.ruleNumber', …)` — localised. `FixResultDialog` uses
-   * `t('app.noDescription')` instead of a rule number, because that row already renders a numbered badge beside
-   * the label; repeating the number there would read as a rendering glitch. A server-side English
-   * label would have shown a zh-CN user English text, which the bilingual rule in `CLAUDE.md` forbids.
-   */
+  /** Optional persisted preview; the UI supplies a localised fallback when absent. */
   ruleString?: string | null
   transitionNumber: number
   targetDeviceLabel: string
@@ -59,6 +44,9 @@ export type FixStrategyName = 'parameter' | 'condition' | 'remove'
 // Numeric condition available for trace-scoped preferred-range selection.
 export interface ParameterTarget {
   targetId: string
+  /** One-based rule order in the run's frozen snapshot; never an apply selector. */
+  rulePosition: number
+  deviceLabel: string
   attribute: string
   relation: string
   originalValue: string
@@ -117,6 +105,7 @@ export type FixStrategyAttemptStatus =
   | 'SKIPPED_NO_SPEC'
   | 'SKIPPED_NO_PARAMETERIZABLE_VALUES'
   | 'SKIPPED_NO_FAULT_RULES'
+  | 'SKIPPED_INITIAL_STATE_VIOLATION'
   | 'SKIPPED_INCOMPLETE_SOURCE_MODEL'
   | 'SKIPPED_UNSUPPORTED'
 
@@ -125,8 +114,8 @@ export interface FixStrategyAttempt {
   status: FixStrategyAttemptStatus
   reason: string
   /**
-   * Only on VERIFIED: true when the strategy checked every candidate, so its listed suggestions are every
-   * minimal repair of that kind; false when the listing limit, the budget or the time share stopped it first.
+   * Only on VERIFIED: true when search is exhausted and every inconclusive change set is covered by a
+   * listed repair. Supersets of listed repairs are pruned without checking every candidate.
    */
   alternativesComplete?: boolean | null
 }

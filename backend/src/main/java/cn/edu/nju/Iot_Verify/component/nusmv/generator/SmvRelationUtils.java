@@ -80,6 +80,12 @@ public final class SmvRelationUtils {
                 || "not in".equals(relation);
     }
 
+    /** Enumeration conditions have no ordering; callers supply a normalized relation. */
+    public static boolean isEnumRelation(String relation) {
+        return "=".equals(relation) || "!=".equals(relation)
+                || "in".equals(relation) || "not in".equals(relation);
+    }
+
     /**
      * A rule condition's relation as an SMV expression: IN/NOT_IN expand to {@code (x=a | x=b)} and
      * {@code (x!=a & x!=b)}, a single-element list without parentheses; any other relation is

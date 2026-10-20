@@ -8,7 +8,9 @@ import {
   test,
   type AuthUser
 } from './support/auth'
-import { clickUnderTooltip } from './support/tooltips'
+import { clickUnderTooltip, dismissHintTooltips } from './support/tooltips'
+import { selectHistoryResultType } from './support/historyFilter'
+import { expectFooterUsable } from './support/footerLayout'
 
 const authHeaders = (auth: AuthUser) => ({
   Authorization: `Bearer ${auth.token}`
@@ -33,14 +35,16 @@ const unwrap = async <T>(response: Awaited<ReturnType<APIRequestContext['get']>>
   return body.data as T
 }
 
-const openWorkspace = async (page: Page, auth: AuthUser) => {
-  await page.addInitScript(({ token, user }) => {
+const openWorkspace = async (page: Page, auth: AuthUser, locale = 'en', theme = 'light') => {
+  await page.addInitScript(({ token, user, locale, theme }) => {
     window.localStorage.setItem('iot_verify_token', token)
     window.localStorage.setItem('iot_verify_user', JSON.stringify(user))
-    window.localStorage.setItem('iot_verify_theme', 'light')
-    window.localStorage.setItem('locale', 'en')
+    window.localStorage.setItem('iot_verify_theme', theme)
+    window.localStorage.setItem('locale', locale)
   }, {
     token: auth.token,
+    locale,
+    theme,
     user: {
       userId: auth.userId,
       phone: auth.phone,
@@ -239,7 +243,7 @@ const addDeviceViaLeftPanel = async (
   return node
 }
 
-const addMotionRuleViaDialog = async (
+const addMotionRuleViaControlCenter = async (
   page: Page,
   request: APIRequestContext,
   auth: AuthUser,
@@ -250,8 +254,7 @@ const addMotionRuleViaDialog = async (
   expectedRuleCount: number
 ) => {
   await openControlSection(page, 'rules')
-  await page.getByTestId('open-rule-builder').click()
-  await expect(page.getByTestId('rule-builder-dialog')).toBeVisible()
+  await expect(page.getByTestId('rule-builder')).toBeVisible()
 
   await page.locator('#rule-builder-name').fill(name)
   await page.locator('#rule-source-device').selectOption(motionId)
@@ -267,7 +270,8 @@ const addMotionRuleViaDialog = async (
   await page.locator('#rule-target-device').selectOption(targetId)
   await page.locator('#rule-target-action').selectOption(action)
   await page.getByTestId('rule-save').click()
-  await expect(page.getByTestId('rule-builder-dialog')).toBeHidden({ timeout: 10_000 })
+  await expect(page.locator('#rule-builder-name')).toHaveValue('', { timeout: 10_000 })
+  await expect(page.getByTestId('rule-builder')).toBeVisible()
 
   return waitForApi<any[]>(request, auth, '/api/board/rules', rules => rules.length === expectedRuleCount)
 }
@@ -286,13 +290,13 @@ const assertVariableSourceGate = async (page: Page) => {
   // And whether THIS reading can actually diverge. `motion` on a Motion Detector is declared
   // `FalsifiableWhenCompromised: true`, so the affirmative branch must be the one shown — asserting mere
   // visibility would pass on the opposite text, which tells the user the choice is inert here.
-  await expect(page.getByTestId('spec-condition-variable-source-falsifiable'))
-    .toHaveText(/declares falsifiable when compromised/i)
+  await expect(page.getByTestId('spec-condition-variable-source-help'))
+    .toHaveText(/allows the reading to be falsified after compromise/i)
   await expect(page.getByTestId('spec-condition-save')).toBeDisabled()
   // The reason names the reading. A bare visibility check would pass for the wrong reason, because the
   // value is also still empty at this point.
   await expect(page.getByTestId('spec-condition-blocked-reason'))
-    .toHaveText(/actual value in the home|device reports/i)
+    .toHaveText(/environment value|device-reported value/i)
 }
 
 const fillSpecCondition = async (
@@ -508,8 +512,8 @@ test.describe('board full-stack NuSMV user flow', () => {
 
       const scenePath = path.resolve(process.cwd(), '..', 'docs', 'examples', scenario.file)
       await page.getByTestId('scene-import-file').setInputFiles(scenePath)
-      await page.getByRole('dialog', { name: 'Confirm Full Scene Replacement' })
-        .getByRole('button', { name: 'Replace in full' })
+      await page.getByRole('dialog', { name: 'Replace the current scene?' })
+        .getByRole('button', { name: 'Replace scene' })
         .click()
 
       await waitForApi<any[]>(request, auth, '/api/board/nodes',
@@ -623,11 +627,15 @@ test.describe('board full-stack NuSMV user flow', () => {
     })
   }
 
-  for (const scenario of targetedRepairScenarios) {
-    test(`finds and applies a ${scenario.strategy} repair for ${scenario.name}`, async ({ page, request }) => {
+  for (const { scenario, locale, width } of targetedRepairScenarios.flatMap(scenario =>
+    ['zh-CN', 'en'].flatMap(locale => [320, 1920].map(width => ({ scenario, locale, width })))
+  )) {
+    test(`finds and applies a ${scenario.strategy} repair for ${scenario.name} in ${locale} at ${width}px`, async ({ page, request }, testInfo) => {
       const auth = await createAuthenticatedUser(request)
+      const chinese = locale === 'zh-CN'
+      await page.setViewportSize({ width, height: width === 320 ? 500 : 1080 })
       await saveEmptyBoard(request, auth)
-      await openWorkspace(page, auth)
+      await openWorkspace(page, auth, locale, width === 320 ? 'dark' : 'light')
 
       const basePath = path.resolve(process.cwd(), '..', 'docs', 'examples', scenario.baseFile)
       const scene = JSON.parse(fs.readFileSync(basePath, 'utf8'))
@@ -637,8 +645,8 @@ test.describe('board full-stack NuSMV user flow', () => {
         mimeType: 'application/json',
         buffer: Buffer.from(JSON.stringify(scene))
       })
-      await page.getByRole('dialog', { name: 'Confirm Full Scene Replacement' })
-        .getByRole('button', { name: 'Replace in full' })
+      await page.getByRole('dialog', { name: chinese ? '替换当前场景？' : 'Replace the current scene?' })
+        .getByRole('button', { name: chinese ? '替换场景' : 'Replace scene', exact: true })
         .click()
 
       await waitForApi<any[]>(request, auth, '/api/board/nodes',
@@ -650,7 +658,16 @@ test.describe('board full-stack NuSMV user flow', () => {
       await waitForApi<any[]>(request, auth, '/api/board/specs',
         value => value.length === scenario.counts.specs)
 
-      await page.getByTestId('open-verification-panel').click()
+      const snapshot = async () => {
+        const { nodes, environmentVariables, rules, specifications } = await unwrap<any>(
+          await request.get(`${apiBaseURL}/api/board/snapshot`, { headers: authHeaders(auth) })
+        )
+        return { nodes, environmentVariables, rules, specifications }
+      }
+      const before = await snapshot()
+      const restoreDock = page.getByTestId('restore-action-dock')
+      if (await restoreDock.isVisible()) await restoreDock.click()
+      await clickUnderTooltip(page, page.getByTestId('open-verification-panel'))
       await page.getByTestId('verification-mode-sync').click()
       const baselineResponsePromise = page.waitForResponse(response =>
         response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/verify')
@@ -664,18 +681,30 @@ test.describe('board full-stack NuSMV user flow', () => {
         modelSnapshot: { specificationCount: scenario.counts.specs }
       })
       expect(baseline.specResults.filter((result: any) => result.outcome === 'VIOLATED')).toHaveLength(1)
-      await page.getByTestId('close-verification-result').click()
 
       const traces = await waitForApi<any[]>(request, auth, '/api/verify/traces', rows =>
         rows.some(trace => trace.isAttack === false && trace.states?.length >= 2))
       const trace = traces.find(row => row.isAttack === false && row.states?.length >= 2)
       expect(trace).toBeTruthy()
 
-      const fixResponse = await request.post(fixRequestUrl(trace.id), {
-        headers: authHeaders(auth),
-        data: { strategies: [scenario.strategy] }
+      await page.getByTestId('verification-trace-fix').click()
+      const dialog = page.getByTestId('fix-result-dialog')
+      await expect(dialog).toBeVisible()
+      await dialog.getByTestId('fix-scope-help').focus()
+      const help = page.locator('.iot-info-tooltip-popper:not([aria-hidden="true"])').filter({
+        hasText: chinese ? '搜索不会修改场景。' : 'Searching does not change the scene.'
       })
-      const fix = await unwrap<any>(fixResponse)
+      await expect(help).toBeVisible()
+      await expect.poll(() => help.evaluate(element => {
+        const rect = element.getBoundingClientRect()
+        return element.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2))
+      })).toBe(true)
+      await dialog.getByTestId('fix-scope-help').press('Tab')
+      await dialog.getByTestId(`fix-strategy-${scenario.strategy}`).click()
+      const fixResponse = page.waitForResponse(response => response.request().method() === 'POST'
+        && new URL(response.url()).pathname === `/api/verify/traces/${trace.id}/fix`, { timeout: 180_000 })
+      await dialog.getByTestId('fix-try-current').click()
+      const fix = await unwrap<any>(await fixResponse as any)
       expect(fix).toMatchObject({
         traceId: trace.id,
         violatedSpecId: expect.not.stringMatching(/^UNKNOWN_SPEC$/),
@@ -686,20 +715,74 @@ test.describe('board full-stack NuSMV user flow', () => {
         strategyAttempts: [{ strategy: scenario.strategy, status: 'VERIFIED' }]
       })
       scenario.assertFix(fix)
+      if (scenario.strategy === 'parameter') {
+        for (const target of fix.parameterTargets) {
+          expect(Number.isInteger(target.rulePosition)).toBe(true)
+          expect(target.rulePosition).toBeGreaterThan(0)
+          const condition = scene.rules[target.rulePosition - 1].sources.find((source: any) => source.fromApi === target.attribute)
+          const device = scene.devices.find((node: any) => node.id === condition.fromId)
+          expect(target.deviceLabel).toBe(device.label)
+        }
+        for (const adjustment of fix.suggestions.flatMap((item: any) => item.parameterAdjustments)) {
+          const target = fix.parameterTargets.find((item: any) => item.targetId === adjustment.targetId)
+          expect(adjustment).toMatchObject({ rulePosition: target.rulePosition, deviceLabel: target.deviceLabel })
+        }
+      }
       const suggestion = listedRepair(fix, scenario.strategy, scenario.isExpectedRepair)
 
-      const applyResponse = await request.post(
-        `${apiBaseURL}/api/verify/traces/${trace.id}/fix/apply`,
-        {
-          headers: authHeaders(auth),
-          data: {
-            strategy: suggestion.strategy,
-            suggestion,
-            suggestionToken: suggestion.suggestionToken
-          }
+      await expect(dialog.getByTestId('fix-apply-current')).toBeEnabled()
+      if (!chinese) await expect(dialog.getByTestId('fix-fault-summary')).toHaveText(/^Related rules executed: \d+$/)
+      await expectFooterUsable(dialog.locator('.iot-dialog__footer'))
+      if (scenario.strategy === 'parameter') {
+        for (const target of fix.parameterTargets) {
+          await expect(dialog.getByTestId('fix-parameter-range-row').filter({
+            hasText: `${chinese ? '规则' : 'Rule'} ${target.rulePosition} · ${target.deviceLabel}`
+          })).toHaveCount(1)
         }
-      )
-      const applied = await unwrap<any>(applyResponse)
+      }
+      const options = fix.suggestions.filter((item: any) => item.strategy === scenario.strategy)
+      if (options.length > 1) {
+        await dialog.getByTestId('fix-alternative').nth(options.indexOf(suggestion)).getByRole('radio').check()
+      }
+      const proposal = options.length > 1
+        ? dialog.getByTestId('fix-alternative').nth(options.indexOf(suggestion))
+        : dialog.getByTestId('fix-verified-proposals')
+      if (scenario.strategy === 'parameter') {
+        const adjustment = suggestion.parameterAdjustments[0]
+        await expect(proposal.getByText(adjustment.originalValue, { exact: true })).toBeVisible()
+        const value = proposal.getByText(adjustment.newValue, { exact: true }).first()
+        await value.scrollIntoViewIfNeeded()
+        await expect(value).toBeInViewport()
+      } else {
+        const condition = proposal.getByText(chinese ? /添加条件：/ : /Add condition to/).first()
+        await expect(condition).toContainText('occupied')
+        await expect(condition).toContainText('present')
+        await condition.scrollIntoViewIfNeeded()
+        await expect(condition).toBeInViewport()
+        const wordLines = await condition.evaluate(element => {
+          const text = element.firstChild!
+          const start = text.textContent!.indexOf('Occupancy')
+          const range = document.createRange()
+          range.setStart(text, start)
+          range.setEnd(text, start + 'Occupancy'.length)
+          return range.getClientRects().length
+        })
+        expect.soft(wordLines, 'ordinary device-name words must not be squeezed into fragments').toBe(1)
+      }
+      await dismissHintTooltips(page)
+      await expectFooterUsable(dialog.locator('.iot-dialog__footer'))
+      expect.soft(await proposal.evaluate(element => element.scrollWidth <= element.clientWidth + 1),
+        'proposal details must fit without horizontal scrolling').toBe(true)
+      const screenshot = testInfo.outputPath(`${scenario.strategy}-repair-preview.png`)
+      await page.screenshot({ path: screenshot, fullPage: true })
+      await testInfo.attach(`${scenario.strategy}-repair-preview`, { path: screenshot, contentType: 'image/png' })
+      const applyResponse = page.waitForResponse(response => response.request().method() === 'POST'
+        && new URL(response.url()).pathname === `/api/verify/traces/${trace.id}/fix/apply`)
+      await dialog.getByTestId('fix-apply-current').click()
+      const write = await applyResponse
+      expect(write.request().postDataJSON().suggestion).toEqual(suggestion)
+      const applied = await unwrap<any>(write as any)
+      await expect(dialog).toBeHidden()
       expect(applied).toMatchObject({
         applied: true,
         strategy: scenario.strategy,
@@ -707,10 +790,24 @@ test.describe('board full-stack NuSMV user flow', () => {
         currentRuleCount: scenario.counts.rules
       })
       expect(applied.verificationEvidenceReused).toBe(true)
+      const after = await snapshot()
+      expect(after.nodes).toEqual(before.nodes)
+      expect(after.environmentVariables).toEqual(before.environmentVariables)
+      expect(after.specifications).toEqual(before.specifications)
+      expect(after.rules).not.toEqual(before.rules)
 
       await page.reload()
-      await expect(page.getByTestId('board-root')).toBeVisible({ timeout: 30_000 })
-      await page.getByTestId('open-verification-panel').click()
+      // Reload restores the saved run; its old verdict must stay stale until the current Board is checked.
+      await expect(page.getByTestId('verification-result-dialog')).toBeVisible({ timeout: 30_000 })
+      await expect(page.getByTestId('verification-result-stale-banner')).toBeVisible()
+      await page.getByTestId('verification-result-reverify').click()
+      await expect(page.getByTestId('board-undo')).toBeEnabled()
+      await clickUnderTooltip(page, page.getByTestId('board-undo'))
+      await expect.poll(snapshot).toEqual(before)
+      await expect(page.getByTestId('board-redo')).toBeEnabled()
+      await clickUnderTooltip(page, page.getByTestId('board-redo'))
+      await expect.poll(snapshot).toEqual(after)
+      await expect(page.getByTestId('board-redo')).toBeDisabled()
       await page.getByTestId('verification-mode-sync').click()
       const repairedResponsePromise = page.waitForResponse(response =>
         response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/verify')
@@ -725,6 +822,10 @@ test.describe('board full-stack NuSMV user flow', () => {
       })
       expect(repaired.specResults).toHaveLength(scenario.counts.specs)
       expect(repaired.specResults.every((result: any) => result.outcome === 'SATISFIED')).toBe(true)
+      await expect(page.getByTestId('verification-result-dialog')).toBeVisible()
+      expect.soft(await page.locator(':is(.el-message--success, .el-message--info):not(.el-message-fade-leave-active)').count(),
+        'earlier undo/redo receipts must not cover the new verification result').toBe(0)
+      await page.screenshot({ path: testInfo.outputPath(`${scenario.strategy}-after-redo.png`) })
     })
   }
 
@@ -743,8 +844,8 @@ test.describe('board full-stack NuSMV user flow', () => {
         mimeType: 'application/json',
         buffer: Buffer.from(JSON.stringify(scene))
       })
-      await page.getByRole('dialog', { name: 'Confirm Full Scene Replacement' })
-        .getByRole('button', { name: 'Replace in full' })
+      await page.getByRole('dialog', { name: 'Replace the current scene?' })
+        .getByRole('button', { name: 'Replace scene' })
         .click()
 
       await waitForApi<any[]>(request, auth, '/api/board/nodes', rows => rows.length === 3)
@@ -902,8 +1003,8 @@ test.describe('board full-stack NuSMV user flow', () => {
       mimeType: 'application/json',
       buffer: Buffer.from(JSON.stringify(scene))
     })
-    await page.getByRole('dialog', { name: 'Confirm Full Scene Replacement' })
-      .getByRole('button', { name: 'Replace in full' })
+    await page.getByRole('dialog', { name: 'Replace the current scene?' })
+      .getByRole('button', { name: 'Replace scene' })
       .click()
     await waitForApi<any[]>(request, auth, '/api/board/nodes', rows => rows.length === 3)
     await waitForApi<any[]>(request, auth, '/api/board/rules', rows => rows.length === 3)
@@ -1012,6 +1113,25 @@ test.describe('board full-stack NuSMV user flow', () => {
 
     await page.getByTestId('device-create-mode-import').click()
 
+    for (const format of ['json', 'csv']) {
+      await page.getByTestId(`device-import-format-${format}`).click()
+      const downloadPromise = page.waitForEvent('download')
+      await page.getByTestId(`device-import-${format}-template`).click()
+      const download = await downloadPromise
+      expect(download.suggestedFilename()).toBe(`devices.${format}`)
+      const downloadedFile = await download.path()
+      expect(downloadedFile).toBeTruthy()
+      await page.getByTestId('device-import-source-file').check()
+      await page.getByTestId('device-import-file').setInputFiles(downloadedFile!)
+      const preview = page.getByTestId('device-import-preview')
+      await expect(preview).toContainText('entry_motion')
+      await expect(preview).toContainText('entry_light')
+      await expect(preview.locator('strong')).toHaveText('2/2')
+      await expect(page.getByTestId('device-import-create')).toBeEnabled()
+    }
+
+    await page.getByTestId('device-import-format-json').click()
+    await page.getByTestId('device-import-source-paste').check()
     await page.getByTestId('device-import-text').fill(JSON.stringify([
       {
         template: 'Mobile Phone',
@@ -1059,6 +1179,8 @@ test.describe('board full-stack NuSMV user flow', () => {
     expect(importedAlarm.state).toBe('both')
     expect(importedAlarm.currentStateTrust).toBe('trusted')
 
+    await page.getByTestId('device-import-format-csv').click()
+    await page.getByTestId('device-import-source-file').check()
     await page.getByTestId('device-import-file').setInputFiles({
       name: 'devices.csv',
       mimeType: 'text/csv',
@@ -1085,6 +1207,8 @@ test.describe('board full-stack NuSMV user flow', () => {
     expect(nodes.find(node => node.label === 'front_csv').templateName).toBe('Door')
     expect(nodes.find(node => node.label === 'hall_light_csv').templateName).toBe('Light')
 
+    await page.getByTestId('device-import-format-json').click()
+    await page.getByTestId('device-import-source-paste').check()
     await page.getByTestId('device-import-text').fill(JSON.stringify({
       template: 'Door',
       name: 'front_csv'
@@ -1157,7 +1281,7 @@ test.describe('board full-stack NuSMV user flow', () => {
       name: 'ambiguous_type'
     }))
     await expect(page.getByTestId('device-import-create')).toBeDisabled()
-    await expect(page.locator('.device-preview-box')).toContainText(/multiple aliases|多个字段/i)
+    await expect(page.locator('.device-preview-box')).toContainText(/refer to the same field|含义相同/i)
 
     const lateInvalidRow = Array.from({ length: 10 }, (_, index) => ({
       template: 'Door',
@@ -1205,7 +1329,8 @@ test.describe('board full-stack NuSMV user flow', () => {
     await expect(page.getByTestId('trace-history-panel')).toBeHidden({ timeout: 5_000 })
     const rulePanel = page.getByTestId('rule-recommendation-panel')
     await expect(rulePanel).toBeVisible()
-    await expect(rulePanel).toContainText(/Configure recommendation parameters|先配置推荐参数/i)
+    await expect(rulePanel.getByTestId('generate-rule-recommendations')).toBeVisible()
+    await expect(rulePanel).not.toContainText(/Configure recommendation parameters|先配置推荐参数/i)
     await expect(rulePanel.locator('textarea')).toHaveAttribute('maxlength', '2000')
     await page.waitForTimeout(500)
     expect(recommendationRequests).toEqual([])
@@ -1237,7 +1362,8 @@ test.describe('board full-stack NuSMV user flow', () => {
     await expect(page.getByTestId('rule-recommendation-panel')).toBeHidden({ timeout: 5_000 })
     const specPanel = page.getByTestId('spec-recommendation-panel')
     await expect(specPanel).toBeVisible()
-    await expect(specPanel).toContainText(/Configure recommendation parameters|先配置推荐参数/i)
+    await expect(specPanel.getByTestId('generate-spec-recommendations')).toBeVisible()
+    await expect(specPanel).not.toContainText(/Configure recommendation parameters|先配置推荐参数/i)
     await expect(specPanel.locator('textarea')).toHaveAttribute('maxlength', '2000')
     await page.waitForTimeout(500)
     expect(recommendationRequests.filter(url => new URL(url).pathname === '/api/board/specs/recommend')).toHaveLength(0)
@@ -1320,6 +1446,11 @@ test.describe('board full-stack NuSMV user flow', () => {
     await page.route('**/api/board/rules/recommend**', normalizedRuleRoute)
     await page.getByTestId('generate-rule-recommendations').click()
     await expect(page.getByTestId('rule-adjusted-items')).toContainText(/normalized|规范化/i)
+    await expect(rulePanel.getByTestId('rule-recommendation-description')).toBeVisible()
+    await expect(rulePanel.getByTestId('rule-recommendation-description')).toContainText(camera.label)
+    await expect(rulePanel.getByTestId('rule-recommendation-description')).toContainText(alarm.label)
+    await expect(rulePanel.getByTestId('rule-recommendations-unverified')).toBeVisible()
+    await expect(rulePanel.getByTestId('rule-candidate-accounting')).not.toHaveAttribute('open')
     await rulePanel.getByRole('button', { name: /Add This Rule/i }).click()
     const savedRules = await waitForApi<any[]>(request, auth, '/api/board/rules', rules =>
       rules.some(rule => rule.ruleString === 'Camera activity starts the alarm'))
@@ -1337,7 +1468,7 @@ test.describe('board full-stack NuSMV user flow', () => {
       }
     })
     await expect(rulePanel.getByRole('button', { name: /Added to board/i })).toBeDisabled()
-    await expect(rulePanel).toContainText(/Only the applied recommendation is kept/i)
+    await expect(rulePanel).not.toContainText(/Other candidates were closed/i)
     await expect(page.getByTestId('rule-candidate-accounting')).toHaveCount(0)
     await page.unroute('**/api/board/rules/recommend**', normalizedRuleRoute)
 
@@ -1440,7 +1571,7 @@ test.describe('board full-stack NuSMV user flow', () => {
     await page.unroute('**/api/board/rules/recommend**', reconciledRuleRoute)
   })
 
-  test('applies a reviewed scenario recommendation through atomic board replacement', async ({ page, request }) => {
+  test('applies a reviewed scenario recommendation through atomic board replacement', async ({ page, request }, testInfo) => {
     const auth = await createAuthenticatedUser(request)
     await saveEmptyBoard(request, auth)
     await openWorkspace(page, auth)
@@ -1489,13 +1620,29 @@ test.describe('board full-stack NuSMV user flow', () => {
     await page.route('**/api/board/scenario/recommend**', scenarioRoute)
 
     await page.getByTestId('open-scenario-recommendations').click()
+    const persistedEndpoints = ['/api/board/snapshot', '/api/board/edits/clear-preview', '/api/verify/runs']
+    const beforeInvalidCriteria = await Promise.all(persistedEndpoints.map(endpoint =>
+      request.get(`${apiBaseURL}${endpoint}`, { headers: authHeaders(auth) }).then(unwrap)))
     await page.getByTestId('scenario-min-devices').fill('7')
-    await page.getByTestId('generate-scenario-recommendation').click()
-    await expect(page.locator('.el-message').filter({
-      hasText: /minimum.*must not exceed.*maximum/i
-    })).toBeVisible()
+    const failure = page.getByTestId('scenario-count-error')
+    await expect(failure).toBeVisible()
+    await expect(failure).toContainText(/minimum.*must not exceed.*maximum/i)
+    await expect(page.getByTestId('generate-scenario-recommendation')).toBeDisabled()
+    await expect(page.getByTestId('scenario-min-devices')).toHaveAttribute('aria-invalid', 'true')
+    await expect(page.getByTestId('scenario-max-devices')).toHaveAttribute('aria-describedby', 'scenario-count-error')
+    await expect(page.getByTestId('scenario-min-rules')).not.toHaveAttribute('aria-invalid', 'true')
+    await expect(page.getByTestId('scenario-recommendation-error')).toHaveCount(0)
     await page.waitForTimeout(200)
     expect(scenarioPostCount).toBe(0)
+    const afterInvalidCriteria = await Promise.all(persistedEndpoints.map(endpoint =>
+      request.get(`${apiBaseURL}${endpoint}`, { headers: authHeaders(auth) }).then(unwrap)))
+    expect(afterInvalidCriteria).toEqual(beforeInvalidCriteria)
+    await testInfo.attach('scenario-invalid-criteria-persistent-diagnostic', {
+      contentType: 'application/json', body: Buffer.from(JSON.stringify({
+        cause: await failure.textContent(), scenarioPostCount,
+        snapshotAndHistoryAndRunsUnchanged: true
+      }))
+    })
 
     await page.getByTestId('scenario-min-devices').fill('3')
     await page.getByTestId('scenario-min-rules').fill('2')
@@ -1503,6 +1650,8 @@ test.describe('board full-stack NuSMV user flow', () => {
     await page.getByTestId('scenario-max-devices').fill('4')
     await page.getByTestId('scenario-max-rules').fill('3')
     await page.getByTestId('scenario-max-specs').fill('6')
+    await expect(failure).not.toBeVisible()
+    await expect(page.getByTestId('generate-scenario-recommendation')).toBeEnabled()
     const recommendationRequest = page.waitForRequest(req => {
       if (req.method() !== 'POST'
         || new URL(req.url()).pathname !== '/api/board/scenario/recommend') return false
@@ -1516,8 +1665,9 @@ test.describe('board full-stack NuSMV user flow', () => {
     })
     await page.getByTestId('generate-scenario-recommendation').click()
     await recommendationRequest
-    expect(scenarioPostCount).toBe(1)
+    await expect(failure).not.toBeVisible()
     await expect(page.getByTestId('apply-recommended-scenario')).toBeVisible()
+    expect(scenarioPostCount).toBe(1)
 
     await page.getByTestId('scenario-min-devices').fill('2')
     await expect(page.getByTestId('apply-recommended-scenario')).toHaveCount(0)
@@ -1535,17 +1685,20 @@ test.describe('board full-stack NuSMV user flow', () => {
     })
     await page.getByTestId('generate-scenario-recommendation').click()
     await refreshedRecommendationRequest
-    expect(scenarioPostCount).toBe(2)
     await expect(page.getByTestId('apply-recommended-scenario')).toBeVisible()
+    expect(scenarioPostCount).toBe(2)
+    await expect(page.getByTestId('scenario-recommendations-unverified')).toBeVisible()
+    await expect(page.getByTestId('scenario-recommendation-panel')
+      .getByText('Not formally verified. Run verification after applying.', { exact: true })).toHaveCount(1)
     await page.unroute('**/api/board/scenario/recommend**', scenarioRoute)
 
     await page.getByTestId('apply-recommended-scenario').click()
-    const confirmation = page.getByRole('dialog', { name: 'Confirm Full Scene Replacement' })
+    const confirmation = page.getByRole('dialog', { name: 'Replace the current scene?' })
     await expect(confirmation).toBeVisible()
     const batchResponsePromise = page.waitForResponse(response =>
       response.request().method() === 'POST'
         && new URL(response.url()).pathname === '/api/board/scene')
-    await confirmation.getByRole('button', { name: 'Replace in full' }).click()
+    await confirmation.getByRole('button', { name: 'Replace scene' }).click()
     const batchResponse = await batchResponsePromise
     expect(batchResponse.ok(), await batchResponse.text()).toBeTruthy()
 
@@ -1571,10 +1724,10 @@ test.describe('board full-stack NuSMV user flow', () => {
     expect(alarm.currentStateTrust ?? null).toBeNull()
     expect(alarm.currentStatePrivacy ?? null).toBeNull()
 
-    await addMotionRuleViaDialog(
+    await addMotionRuleViaControlCenter(
       page, request, auth, motion.id, alarm.id, 'siren',
       'roundtrip motion triggers alarm', 1)
-    const rulesBeforeReorder = await addMotionRuleViaDialog(
+    const rulesBeforeReorder = await addMotionRuleViaControlCenter(
       page, request, auth, motion.id, alarm.id, 'strobe',
       'roundtrip motion triggers strobe', 2)
 
@@ -1668,13 +1821,24 @@ test.describe('board full-stack NuSMV user flow', () => {
     const emptyImportResponsePromise = page.waitForResponse(response =>
       response.request().method() === 'POST'
         && new URL(response.url()).pathname === '/api/board/scene')
-    await page.getByRole('dialog', { name: 'Confirm Full Scene Replacement' })
-      .getByRole('button', { name: 'Replace in full' })
+    await page.getByRole('dialog', { name: 'Replace the current scene?' })
+      .getByRole('button', { name: 'Replace scene' })
       .click()
     const emptyImportResponse = await emptyImportResponsePromise
     expect(emptyImportResponse.ok(), await emptyImportResponse.text()).toBeTruthy()
     await expect(page.getByTestId('scene-import')).toBeEnabled()
     await waitForApi<any[]>(request, auth, '/api/board/nodes', value => value.length === 0)
+
+    const acknowledgeImportFailure = async (reason: string | RegExp) => {
+      const dialog = page.getByRole('dialog')
+      await expect(dialog).toBeVisible()
+      const diagnostic = dialog.locator('[data-testid="failure-summary"], [data-testid="failure-cause"], [data-testid="failure-fields"]')
+        .filter({ hasText: reason }).first()
+      await expect(diagnostic).toBeVisible()
+      await expect(dialog.getByTestId('failure-next-step')).toBeVisible()
+      await dialog.getByRole('button', { name: /Confirm|确定/i }).click()
+      await expect(dialog).not.toBeVisible()
+    }
 
     // 6, one past the current format: at 5 this file is VALID and would import successfully, inverting
     // the rejection this block asserts.
@@ -1682,7 +1846,7 @@ test.describe('board full-stack NuSMV user flow', () => {
     const futurePath = testInfo.outputPath('scene-future-version.json')
     fs.writeFileSync(futurePath, JSON.stringify(futureScene, null, 2), 'utf8')
     await page.getByTestId('scene-import-file').setInputFiles(futurePath)
-    await expect(page.locator('.el-message').filter({ hasText: /version 6|版本 6/i })).toBeVisible()
+    await acknowledgeImportFailure(/version 6|版本 6/i)
     await waitForApi<any[]>(request, auth, '/api/board/nodes', value => value.length === 0)
 
     const internalFieldScene = JSON.parse(firstJson)
@@ -1690,7 +1854,7 @@ test.describe('board full-stack NuSMV user flow', () => {
     const internalFieldPath = testInfo.outputPath('scene-internal-field.json')
     fs.writeFileSync(internalFieldPath, JSON.stringify(internalFieldScene, null, 2), 'utf8')
     await page.getByTestId('scene-import-file').setInputFiles(internalFieldPath)
-    await expect(page.locator('.el-message').filter({ hasText: /internal or derived|内部或派生/i })).toBeVisible()
+    await acknowledgeImportFailure(/internally computed field|内部计算字段/i)
     await waitForApi<any[]>(request, auth, '/api/board/nodes', value => value.length === 0)
 
     const unknownFieldScene = JSON.parse(firstJson)
@@ -1698,13 +1862,13 @@ test.describe('board full-stack NuSMV user flow', () => {
     const unknownFieldPath = testInfo.outputPath('scene-unknown-field.json')
     fs.writeFileSync(unknownFieldPath, JSON.stringify(unknownFieldScene, null, 2), 'utf8')
     await page.getByTestId('scene-import-file').setInputFiles(unknownFieldPath)
-    await expect(page.locator('.el-message').filter({ hasText: /futureConflictPolicy|不认识的字段/i })).toBeVisible()
+    await acknowledgeImportFailure(/futureConflictPolicy|不认识的字段/i)
     await waitForApi<any[]>(request, auth, '/api/board/nodes', value => value.length === 0)
 
     const malformedJsonPath = testInfo.outputPath('scene-malformed.json')
     fs.writeFileSync(malformedJsonPath, '{not-json', 'utf8')
     await page.getByTestId('scene-import-file').setInputFiles(malformedJsonPath)
-    await expect(page.locator('.el-message').filter({ hasText: /Invalid JSON file|JSON 文件无效/i })).toBeVisible()
+    await acknowledgeImportFailure(/property name|Unexpected token/i)
     await waitForApi<any[]>(request, auth, '/api/board/nodes', value => value.length === 0)
 
     const wrongScalarTypeScene = JSON.parse(firstJson)
@@ -1712,9 +1876,7 @@ test.describe('board full-stack NuSMV user flow', () => {
     const wrongScalarTypePath = testInfo.outputPath('scene-wrong-scalar-type.json')
     fs.writeFileSync(wrongScalarTypePath, JSON.stringify(wrongScalarTypeScene, null, 2), 'utf8')
     await page.getByTestId('scene-import-file').setInputFiles(wrongScalarTypePath)
-    await expect(page.locator('.el-message').filter({
-      hasText: /devices\[0\]\.label.*JSON string|devices\[0\]\.label.*JSON 字符串/i
-    })).toBeVisible()
+    await acknowledgeImportFailure(/devices\[0\]\.label.*JSON string|devices\[0\]\.label.*JSON 字符串/i)
     await waitForApi<any[]>(request, auth, '/api/board/nodes', value => value.length === 0)
 
     const missingEnvironmentScene = JSON.parse(firstJson)
@@ -1722,7 +1884,7 @@ test.describe('board full-stack NuSMV user flow', () => {
     const missingEnvironmentPath = testInfo.outputPath('scene-missing-environment.json')
     fs.writeFileSync(missingEnvironmentPath, JSON.stringify(missingEnvironmentScene, null, 2), 'utf8')
     await page.getByTestId('scene-import-file').setInputFiles(missingEnvironmentPath)
-    await expect(page.locator('.el-message').filter({ hasText: /missing environment variables|缺少.*环境变量/i })).toBeVisible()
+    await acknowledgeImportFailure(/missing environment variables|缺少.*环境变量/i)
     await waitForApi<any[]>(request, auth, '/api/board/nodes', value => value.length === 0)
 
     const emptyEnvironmentValueScene = JSON.parse(firstJson)
@@ -1730,7 +1892,7 @@ test.describe('board full-stack NuSMV user flow', () => {
     const emptyEnvironmentValuePath = testInfo.outputPath('scene-empty-environment-value.json')
     fs.writeFileSync(emptyEnvironmentValuePath, JSON.stringify(emptyEnvironmentValueScene, null, 2), 'utf8')
     await page.getByTestId('scene-import-file').setInputFiles(emptyEnvironmentValuePath)
-    await expect(page.locator('.el-message').filter({ hasText: /explicit non-blank value|显式填写非空 value/i })).toBeVisible()
+    await acknowledgeImportFailure(/explicit non-blank value|显式填写非空 value/i)
     await waitForApi<any[]>(request, auth, '/api/board/nodes', value => value.length === 0)
 
     const duplicateVariableScene = JSON.parse(firstJson)
@@ -1741,9 +1903,7 @@ test.describe('board full-stack NuSMV user flow', () => {
     const duplicateVariablePath = testInfo.outputPath('scene-duplicate-device-variable.json')
     fs.writeFileSync(duplicateVariablePath, JSON.stringify(duplicateVariableScene, null, 2), 'utf8')
     await page.getByTestId('scene-import-file').setInputFiles(duplicateVariablePath)
-    await expect(page.locator('.el-message').filter({
-      hasText: /duplicate_input.*devices\[0\]\.variables|devices\[0\]\.variables.*duplicate_input/i
-    })).toBeVisible()
+    await acknowledgeImportFailure(/duplicate_input.*devices\[0\]\.variables|devices\[0\]\.variables.*duplicate_input/i)
     await waitForApi<any[]>(request, auth, '/api/board/nodes', value => value.length === 0)
 
     const duplicatePrivacyScene = JSON.parse(firstJson)
@@ -1754,9 +1914,7 @@ test.describe('board full-stack NuSMV user flow', () => {
     const duplicatePrivacyPath = testInfo.outputPath('scene-duplicate-device-privacy.json')
     fs.writeFileSync(duplicatePrivacyPath, JSON.stringify(duplicatePrivacyScene, null, 2), 'utf8')
     await page.getByTestId('scene-import-file').setInputFiles(duplicatePrivacyPath)
-    await expect(page.locator('.el-message').filter({
-      hasText: /duplicate_privacy.*devices\[0\]\.privacies|devices\[0\]\.privacies.*duplicate_privacy/i
-    })).toBeVisible()
+    await acknowledgeImportFailure(/duplicate_privacy.*devices\[0\]\.privacies|devices\[0\]\.privacies.*duplicate_privacy/i)
     await waitForApi<any[]>(request, auth, '/api/board/nodes', value => value.length === 0)
 
     const duplicateEnvironmentScene = JSON.parse(firstJson)
@@ -1771,9 +1929,7 @@ test.describe('board full-stack NuSMV user flow', () => {
     const duplicateEnvironmentPath = testInfo.outputPath('scene-duplicate-environment.json')
     fs.writeFileSync(duplicateEnvironmentPath, JSON.stringify(duplicateEnvironmentScene, null, 2), 'utf8')
     await page.getByTestId('scene-import-file').setInputFiles(duplicateEnvironmentPath)
-    await expect(page.locator('.el-message').filter({
-      hasText: /duplicate environment variable: duplicate_environment|重复的环境变量.*duplicate_environment/i
-    })).toBeVisible()
+    await acknowledgeImportFailure(/duplicate environment variable: duplicate_environment|重复的环境变量.*duplicate_environment/i)
     await waitForApi<any[]>(request, auth, '/api/board/nodes', value => value.length === 0)
 
     const invalidScene = JSON.parse(firstJson)
@@ -1781,15 +1937,15 @@ test.describe('board full-stack NuSMV user flow', () => {
     const invalidPath = testInfo.outputPath('scene-missing-rule-target.json')
     fs.writeFileSync(invalidPath, JSON.stringify(invalidScene, null, 2), 'utf8')
     await page.getByTestId('scene-import-file').setInputFiles(invalidPath)
-    await expect(page.locator('.el-message').filter({ hasText: 'rules[0].toApi' })).toBeVisible()
+    await acknowledgeImportFailure('rules[0].toApi')
     await waitForApi<any[]>(request, auth, '/api/board/nodes', value => value.length === 0)
     await waitForApi<any[]>(request, auth, '/api/board/rules', value => value.length === 0)
 
     const importPath = testInfo.outputPath('scene-roundtrip.json')
     fs.writeFileSync(importPath, firstJson, 'utf8')
     await page.getByTestId('scene-import-file').setInputFiles(importPath)
-    await page.getByRole('dialog', { name: 'Confirm Full Scene Replacement' })
-      .getByRole('button', { name: 'Replace in full' })
+    await page.getByRole('dialog', { name: 'Replace the current scene?' })
+      .getByRole('button', { name: 'Replace scene' })
       .click()
     await waitForApi<any[]>(request, auth, '/api/board/nodes', value => value.length === 2)
     const importedRules = await waitForApi<any[]>(request, auth, '/api/board/rules', value => value.length === 2)
@@ -1822,8 +1978,8 @@ test.describe('board full-stack NuSMV user flow', () => {
 
     const scenePath = path.resolve(process.cwd(), '..', 'docs', 'examples', 'acceptance-demo-scene.json')
     await page.getByTestId('scene-import-file').setInputFiles(scenePath)
-    await page.getByRole('dialog', { name: 'Confirm Full Scene Replacement' })
-      .getByRole('button', { name: 'Replace in full' })
+    await page.getByRole('dialog', { name: 'Replace the current scene?' })
+      .getByRole('button', { name: 'Replace scene' })
       .click()
 
     const importedNodes = await waitForApi<any[]>(request, auth, '/api/board/nodes', nodes => nodes.length === 4)
@@ -1850,14 +2006,16 @@ test.describe('board full-stack NuSMV user flow', () => {
     expect(JSON.stringify(simulationResult.states)).toContain('siren')
     expect(JSON.stringify(simulationResult.states)).toContain('"on"')
     await expect(page.getByTestId('simulation-timeline')).toBeVisible({ timeout: 45_000 })
-    await expect(page.getByTestId('playback-change-popover')).toBeVisible()
+    await page.getByTestId('simulation-timeline-changes-tab').click()
+    await expect(page.getByTestId('playback-changes-panel')).toBeVisible()
     await expect(page.getByTestId('playback-change-initial-state')).toBeVisible()
 
     const firstTriggeredStateIndex = simulationResult.states.findIndex((state: any, index: number) =>
       index > 0 && Array.isArray(state.triggeredRules) && state.triggeredRules.length > 0)
     expect(firstTriggeredStateIndex).toBeGreaterThan(0)
     await page.getByTestId('simulation-timeline-step-input').fill(String(firstTriggeredStateIndex + 1))
-    await expect(page.getByTestId('playback-change-popover')).toBeVisible()
+    await page.getByTestId('simulation-timeline-step-input').press('Enter')
+    await expect(page.getByTestId('playback-changes-panel')).toBeVisible()
     await expect(page.getByTestId('playback-change-automation')).toContainText(
       simulationResult.states[firstTriggeredStateIndex].triggeredRules[0].ruleLabel)
     await expect(page.locator(`.particle-line[data-playback-state="${firstTriggeredStateIndex}"]`).first()).toBeVisible()
@@ -1964,8 +2122,8 @@ test.describe('board full-stack NuSMV user flow', () => {
 
     const scenePath = path.resolve(process.cwd(), '..', 'docs', 'examples', 'acceptance-demo-scene.json')
     await page.getByTestId('scene-import-file').setInputFiles(scenePath)
-    await page.getByRole('dialog', { name: 'Confirm Full Scene Replacement' })
-      .getByRole('button', { name: 'Replace in full' })
+    await page.getByRole('dialog', { name: 'Replace the current scene?' })
+      .getByRole('button', { name: 'Replace scene' })
       .click()
     await waitForApi<any[]>(request, auth, '/api/board/rules', rules => rules.length === 3)
     await waitForApi<any[]>(request, auth, '/api/board/specs', specs => specs.length === 5)
@@ -1977,6 +2135,7 @@ test.describe('board full-stack NuSMV user flow', () => {
 
     // The verdict describes the model that was just verified, so it starts fresh and offers Fix.
     await expect(page.getByTestId('verification-result-stale-banner')).toHaveCount(0)
+    await expect(page.getByTestId('verification-result-reverify')).toHaveCount(0)
     const traceFix = page.getByTestId('verification-trace-fix').first()
     await expect(traceFix).toBeVisible({ timeout: 30_000 })
     await traceFix.click()
@@ -1999,16 +2158,27 @@ test.describe('board full-stack NuSMV user flow', () => {
     await expect(page.getByTestId('verification-result-dialog')).toBeVisible()
     await expect(page.getByTestId('verification-result-stale-banner')).toBeVisible({ timeout: 30_000 })
     await expect(page.getByTestId('verification-trace-fix')).toHaveCount(0)
-    await expect(page.getByTestId('verification-trace-fix-unavailable').first())
-      .toContainText(/changed after this verification/i)
+    await expect(page.getByTestId('verification-result-stale-banner')).toHaveCount(1)
+    await expect(page.getByTestId('verification-result-stale-banner')).toContainText(/changed after submission/i)
+    await expect(page.getByTestId('verification-trace-fix-unavailable')).toHaveCount(0)
 
-    // A fresh run must not inherit the stale warning.
-    await page.getByTestId('close-verification-result').click()
-    await page.getByTestId('open-verification-panel').click()
-    await page.getByTestId('verification-mode-sync').click()
+    // The stale result leads back to current-board settings, without resubmitting or reopening its URL.
+    let rerunRequests = 0
+    page.on('request', request => {
+      if (request.method() === 'POST' && /^\/api\/verify(?:\/async)?$/.test(new URL(request.url()).pathname)) {
+        rerunRequests += 1
+      }
+    })
+    await page.getByTestId('verification-result-reverify').click()
+    await expect(page.getByTestId('verification-result-dialog')).toBeHidden()
+    await expect(page.getByTestId('verification-mode-sync')).toHaveAttribute('aria-pressed', 'true')
+    await expect(page).not.toHaveURL(/(?:run|trace)=/)
+    expect(rerunRequests).toBe(0)
     await page.getByTestId('run-verification').click()
     await expect(page.getByTestId('verification-result-dialog')).toBeVisible({ timeout: 60_000 })
     await expect(page.getByTestId('verification-result-stale-banner')).toHaveCount(0)
+    await expect(page.getByTestId('verification-result-reverify')).toHaveCount(0)
+    expect(rerunRequests).toBe(1)
   })
 
   test('imports the multi-violation JSON and repairs both baseline violations through one root removal', async ({ page, request }) => {
@@ -2027,12 +2197,12 @@ test.describe('board full-stack NuSMV user flow', () => {
 
     const scenePath = path.resolve(process.cwd(), '..', 'docs', 'examples', 'multi-violation-repair-scene.json')
     await page.getByTestId('scene-import-file').setInputFiles(scenePath)
-    await page.getByRole('dialog', { name: 'Confirm Full Scene Replacement' })
-      .getByRole('button', { name: 'Replace in full' })
+    await page.getByRole('dialog', { name: 'Replace the current scene?' })
+      .getByRole('button', { name: 'Replace scene' })
       .click()
 
     await expect(page.locator('.el-message').filter({
-      hasText: 'Scene atomically replaced in full'
+      hasText: 'Scene replaced:'
     })).toBeVisible({ timeout: 30_000 })
     await expect(page.locator('.el-message').filter({
       hasText: 'The import response was not confirmed'
@@ -2117,7 +2287,7 @@ test.describe('board full-stack NuSMV user flow', () => {
     expect(repaired.specResults.every((result: any) => result.outcome === 'SATISFIED')).toBe(true)
   })
 
-  test('builds a board through left-panel dialogs, then simulates, verifies, replays history, and tracks async tasks', async ({ page, request }) => {
+  test('builds a board through left-panel dialogs, then simulates, verifies, replays history, and tracks async tasks', async ({ page, request }, testInfo) => {
     const browserErrors: string[] = []
     page.on('pageerror', error => browserErrors.push(error.message))
     page.on('console', message => {
@@ -2135,14 +2305,14 @@ test.describe('board full-stack NuSMV user flow', () => {
     await expect(page.locator('.device-label').filter({ hasText: 'privacy_camera' }).first()).toBeVisible()
     await expect(page.locator('.device-label').filter({ hasText: 'night_alarm' }).first()).toBeVisible()
 
-    const cameraRules = await addMotionRuleViaDialog(
+    const cameraRules = await addMotionRuleViaControlCenter(
       page, request, auth, motion.id, camera.id, 'take photo',
       'motion captures camera evidence', 1)
     expect(cameraRules[0].conditions[0].targetType).toBe('variable')
     expect(cameraRules[0].conditions[0].deviceName).toBe(motion.id)
     expect(cameraRules[0].command.action).toBe('take photo')
 
-    const alarmRules = await addMotionRuleViaDialog(
+    const alarmRules = await addMotionRuleViaControlCenter(
       page, request, auth, motion.id, alarm.id, 'siren',
       'motion triggers audible alarm', 2)
     expect(alarmRules[1].command.deviceName).toBe(alarm.id)
@@ -2151,6 +2321,14 @@ test.describe('board full-stack NuSMV user flow', () => {
     await page.getByTestId('spec-template-select').selectOption('3')
     await page.getByTestId('spec-add-condition-a').click()
     await fillSpecCondition(page, camera.id, 'state', null, '=', 'taking photo')
+    const formulaDetails = page.getByTestId('spec-formula-details')
+    await expect(page.getByTestId('spec-description')).toBeVisible()
+    await expect(formulaDetails).toHaveJSProperty('open', false)
+    await expect(page.getByTestId('spec-formula-expression')).toBeHidden()
+    await formulaDetails.locator('summary').press('Enter')
+    await expect(page.getByTestId('spec-formula-expression')).toBeVisible()
+    await formulaDetails.locator('summary').press('Enter')
+    await page.screenshot({ path: testInfo.outputPath('specification-draft.png') })
     await page.getByTestId('spec-create').click()
     await waitForApi<any[]>(request, auth, '/api/board/specs', specs => specs.length === 1)
 
@@ -2179,8 +2357,9 @@ test.describe('board full-stack NuSMV user flow', () => {
     expect(specs.map(spec => spec.templateId)).toEqual(['3', '5'])
     const focusedSpec = page.locator(`[data-spec-id="${specs[1].id}"]`)
     await expect(focusedSpec).toBeVisible()
-    await expect(focusedSpec).toHaveClass(/ring-2/)
     await expect(focusedSpec).toBeFocused()
+    await expect(focusedSpec).toHaveCSS('outline-style', 'solid')
+    await expect(focusedSpec).toHaveCSS('outline-width', '2px')
 
     await page.getByTestId('open-simulation-panel').click()
     await page.getByTestId('simulation-mode-sync').click()
@@ -2259,13 +2438,23 @@ test.describe('board full-stack NuSMV user flow', () => {
     await page.getByTestId('open-history-panel').click()
     await expect(page.getByTestId('trace-history-panel')).toBeVisible({ timeout: 15_000 })
     await page.getByTestId('history-layer-results').click()
-    await page.getByTestId('history-result-filter-verification').click()
+    await selectHistoryResultType(page, 'verification')
+    await page.locator('[data-testid^="run-evidence-verification-"]').first().locator('summary').click()
     const viewTrace = page.locator('[data-testid^="view-verification-trace-"]').first()
     await expect(viewTrace).toBeVisible({ timeout: 30_000 })
     await viewTrace.click()
     await expect(page.getByTestId('trace-timeline')).toBeVisible({ timeout: 20_000 })
     await expect(page.getByTestId('trace-timeline-state-0')).toBeVisible()
     await page.getByTestId('trace-timeline-state-0').click()
+
+    const historyStep = page.getByTestId('trace-timeline-step-input')
+    const historyStateCount = Number(await historyStep.getAttribute('max'))
+    expect(historyStateCount).toBeGreaterThan(1)
+    await page.getByTestId('trace-timeline-play').click()
+    await expect(historyStep).toHaveValue(String(historyStateCount), { timeout: 30_000 })
+    await expect(page.getByTestId('trace-timeline-play')).toHaveAttribute('aria-pressed', 'false')
+    await page.getByTestId('trace-timeline-close').click()
+    await expect(page.getByTestId('trace-timeline')).toBeHidden()
 
     expect(browserErrors).toEqual([])
   })

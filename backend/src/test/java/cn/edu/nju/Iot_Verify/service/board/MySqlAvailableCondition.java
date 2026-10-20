@@ -6,6 +6,7 @@ import org.junit.jupiter.api.extension.ExtensionContext;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.SQLException;
 
 /**
  * Enables a test class only when a MySQL server is actually reachable.
@@ -13,8 +14,9 @@ import java.sql.DriverManager;
  * <p>Some undo behaviour depends on MySQL parsing a string bound to a {@code JSON} column, which H2
  * cannot emulate. Rather than assert it against a database that answers differently — or leave the
  * cases permanently {@code @Disabled} — the class runs where MySQL exists and reports as skipped
- * where it does not, so the H2-only CI job stays green while a developer (and the full-stack E2E job)
- * still gets the coverage.
+ * where it does not. CI provisions a dedicated test database and requires these tests with
+ * {@code -Diot.verify.mysql.required=true}; an unavailable database then fails the run instead of
+ * silently removing persistence and concurrency coverage.
  *
  * <p>The connection details come from the same environment variables the application uses, so a
  * developer who can run the app can run these tests. It also *sets* the datasource properties, so the
@@ -37,10 +39,16 @@ public class MySqlAvailableCondition implements ExecutionCondition {
         try (Connection connection = DriverManager.getConnection(URL, USERNAME, PASSWORD)) {
             return connection.isValid(3)
                     ? ConditionEvaluationResult.enabled("MySQL is reachable")
-                    : ConditionEvaluationResult.disabled("MySQL connection is not valid");
-        } catch (Exception e) {
-            return ConditionEvaluationResult.disabled(
-                    "MySQL is not reachable (" + e.getClass().getSimpleName() + "); skipping MySQL-only undo tests");
+                    : unavailable("MySQL connection is not valid");
+        } catch (SQLException e) {
+            return unavailable("MySQL is not reachable (" + e.getClass().getSimpleName() + ")");
         }
+    }
+
+    private ConditionEvaluationResult unavailable(String reason) {
+        if (Boolean.getBoolean("iot.verify.mysql.required")) {
+            throw new IllegalStateException(reason + "; MySQL integration tests are required");
+        }
+        return ConditionEvaluationResult.disabled(reason + "; skipping MySQL integration tests");
     }
 }

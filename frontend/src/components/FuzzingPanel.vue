@@ -26,6 +26,9 @@ import { fuzzingLimitationKey } from '@/utils/fuzzingPresentation'
 import { formatBuiltInModelToken } from '@/utils/modelTokenDisplay'
 import { normalizeNuSmvDeviceName } from '@/utils/modelRequest'
 import HintTooltip from '@/components/common/HintTooltip.vue'
+import InfoTooltip from '@/components/common/InfoTooltip.vue'
+import FailureDetails from '@/components/FailureDetails.vue'
+import type { ApiErrorDetails } from '@/utils/userMessage'
 
 export type FuzzingPanelForm = {
   explorationMode: FuzzingExplorationMode
@@ -46,6 +49,7 @@ const props = withDefaults(defineProps<{
   taskId: number | null
   cancelling: boolean
   error?: string | null
+  failureDetails?: (ApiErrorDetails & { suggestion?: string }) | null
   configurationError?: string
   workload?: number
   workloadLimit?: number
@@ -106,7 +110,7 @@ const formatNumber = (value: number) => value.toLocaleString(
   locale.value.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en-US'
 )
 
-const closeButtonRef = ref<HTMLButtonElement | null>(null)
+const panelRef = ref<HTMLElement | null>(null)
 const previouslyFocused = typeof document !== 'undefined' && document.activeElement instanceof HTMLElement
   ? document.activeElement
   : null
@@ -119,7 +123,7 @@ const updateSeed = (event: Event) => {
 }
 
 onMounted(() => {
-  void nextTick(() => closeButtonRef.value?.focus())
+  void nextTick(() => panelRef.value?.focus({ preventScroll: true }))
 })
 
 onBeforeUnmount(() => {
@@ -223,6 +227,13 @@ const isOnlySelectedSpec = (id: string) =>
 
 const isSpecEligible = (spec: Specification) => eligibleIds.value.has(spec.id)
 
+const configurationErrorMessage = computed(() => {
+  const targetError = invalidSelectedIds.value.length > 0
+    ? t('app.fuzzTargetSelectionChanged', { count: invalidSelectedIds.value.length })
+    : ''
+  return props.configurationError === targetError ? '' : props.configurationError
+})
+
 // A lookup, not a ternary: a two-way branch silently reported every issue that was not trust/privacy as an
 // unsupported TEMPLATE, so a third reason would have been mislabelled rather than left unhandled.
 const SPEC_INELIGIBILITY_MESSAGE_KEYS: Record<KnownFuzzingSpecificationIssue, string> = {
@@ -241,7 +252,8 @@ const onSpecChange = (id: string, event: Event) => {
 }
 
 const specTitle = (spec: Specification) =>
-  formatTraceSpec(spec, t) || spec.templateLabel || spec.formula || t('app.unknownSpecification')
+  formatTraceSpec(spec, t, Object.fromEntries(props.bundledDeviceIds.map(id => [id, 'BUNDLED'])))
+    || spec.templateLabel || spec.formula || t('app.unknownSpecification')
 
 const formatDomainValues = (
   values: string[],
@@ -281,6 +293,7 @@ const frozenTargetScope = computed(() => {
 
 <template>
   <section
+    ref="panelRef"
     data-testid="fuzzing-panel"
     class="board-floating-panel fuzzing-panel board-surface-panel fixed top-20 z-30 flex w-[30rem] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-lg border shadow-2xl"
     role="region"
@@ -288,19 +301,19 @@ const frozenTargetScope = computed(() => {
     tabindex="-1"
     @keydown.esc.stop.prevent="closePanel"
   >
-    <header class="flex items-start justify-between gap-3 border-b board-border-subtle board-card--muted px-4 py-3">
-      <div class="flex min-w-0 items-start gap-3">
+    <header class="board-tool-header">
+      <div class="flex min-w-0 items-center gap-3">
         <div class="board-section-icon board-section-icon--lg">
           <span class="material-symbols-outlined" aria-hidden="true">radar</span>
         </div>
-        <div class="min-w-0">
-          <h3 id="fuzzing-panel-title" class="text-base font-bold board-text-strong">{{ t('app.fuzzSearch') }}</h3>
-          <p class="mt-0.5 text-xs leading-5 board-text-muted">{{ t('app.fuzzSearchSubtitle') }}</p>
+        <div class="flex min-w-0 items-center gap-3">
+          <h3 id="fuzzing-panel-title" class="board-panel-title">{{ t('app.fuzzSearch') }}</h3>
+          <InfoTooltip :text="t('app.fuzzSearchSubtitle')"
+            :label="t('app.showHelpFor', { topic: t('app.fuzzSearch') })" test-id="fuzz-intro-help" />
         </div>
       </div>
       <HintTooltip :content="t('app.close')">
         <button
-          ref="closeButtonRef"
           type="button"
           data-testid="close-fuzzing-panel"
           class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md board-text-muted hover:board-card--muted"
@@ -316,42 +329,42 @@ const frozenTargetScope = computed(() => {
       <section
         v-if="frozenTask"
         data-testid="fuzz-frozen-task-summary"
-        class="rounded-lg border board-border-subtle board-card--muted px-3 py-3 text-[11px] leading-4 board-text-strong"
+        class="rounded-lg border board-border-subtle board-card--muted px-3 py-3 text-xs leading-4 board-text-strong"
         aria-labelledby="fuzz-frozen-task-title"
       >
-        <h4 id="fuzz-frozen-task-title" class="text-xs font-bold">
+        <h4 id="fuzz-frozen-task-title" class="board-section-title">
           {{ t('app.fuzzWatchingFrozenTask', { id: frozenTask.id }) }}
         </h4>
         <p class="mt-1 board-text-strong">{{ t('app.fuzzWatchingFrozenTaskDetail') }}</p>
         <dl class="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3">
           <div>
             <dt class="board-text-muted">{{ t('app.fuzzExplorationMode') }}</dt>
-            <dd class="mt-0.5 font-bold board-text-strong">{{ frozenModeLabel }}</dd>
+            <dd class="mt-0.5 font-semibold board-text-strong">{{ frozenModeLabel }}</dd>
           </div>
           <div>
             <dt class="board-text-muted">{{ t('app.fuzzMaxIterations') }}</dt>
-            <dd class="mt-0.5 font-bold board-text-strong">{{ frozenTask.maxIterations }}</dd>
+            <dd class="mt-0.5 font-semibold board-text-strong">{{ frozenTask.maxIterations }}</dd>
           </div>
           <div>
             <dt class="board-text-muted">{{ t('app.fuzzPathLength') }}</dt>
-            <dd class="mt-0.5 font-bold board-text-strong">{{ frozenTask.pathLength }}</dd>
+            <dd class="mt-0.5 font-semibold board-text-strong">{{ frozenTask.pathLength }}</dd>
           </div>
           <div>
             <dt class="board-text-muted">{{ t('app.fuzzPopulationSize') }}</dt>
-            <dd class="mt-0.5 font-bold board-text-strong">{{ frozenTask.populationSize }}</dd>
+            <dd class="mt-0.5 font-semibold board-text-strong">{{ frozenTask.populationSize }}</dd>
           </div>
           <div>
             <dt class="board-text-muted">{{ t('app.fuzzSeed') }}</dt>
-            <dd class="mt-0.5 break-all font-mono font-bold board-text-strong">
+            <dd class="mt-0.5 break-all font-mono font-semibold board-text-strong">
               {{ frozenTask.seed ?? t('app.fuzzSeedAuto') }}
             </dd>
           </div>
           <div>
             <dt class="board-text-muted">{{ t('app.fuzzTargetSpecifications') }}</dt>
-            <dd class="mt-0.5 font-bold board-text-strong">{{ frozenTargetScope }}</dd>
+            <dd class="mt-0.5 font-semibold board-text-strong">{{ frozenTargetScope }}</dd>
           </div>
         </dl>
-        <p class="mt-2 text-[length:var(--iot-font-min)] leading-4 board-text-muted">
+        <p class="mt-2 text-xs leading-4 board-text-muted">
           {{ t('app.fuzzFrozenTaskSnapshotSummary', {
             devices: frozenTask.modelSnapshot.deviceCount,
             rules: frozenTask.modelSnapshot.ruleCount,
@@ -363,20 +376,20 @@ const frozenTargetScope = computed(() => {
       </section>
 
       <fieldset v-if="!frozenTask" class="min-w-0" :disabled="running">
-        <legend class="text-xs font-bold uppercase tracking-wide text-slate-600">
+        <legend class="board-form-label">
           {{ t('app.fuzzExplorationMode') }}
         </legend>
         <div
-          class="mt-1 grid grid-cols-2 gap-1 rounded-lg bg-slate-100 p-1"
+          class="mt-1 grid grid-cols-2 gap-1 rounded-lg board-bg-control p-1"
           role="radiogroup"
           :aria-label="t('app.fuzzExplorationMode')"
           aria-describedby="fuzz-exploration-mode-help"
         >
           <label
-            class="flex min-h-11 min-w-0 cursor-pointer items-center justify-center rounded-md px-2 py-1.5 text-center text-[11px] font-bold leading-4 transition-colors focus-within:ring-2 focus-within:ring-[color:var(--accent)] focus-within:ring-offset-1"
+            class="flex min-h-11 min-w-0 cursor-pointer items-center justify-center rounded-md px-2 py-1.5 text-center text-sm font-semibold leading-5 transition-colors focus-within:ring-2 focus-within:ring-[color:var(--accent)] focus-within:ring-offset-1"
             :class="form.explorationMode === 'BOARD_SNAPSHOT'
-              ? 'bg-white board-text-muted shadow-sm'
-              : 'text-slate-600 hover:text-slate-800'"
+              ? 'board-bg-elevated board-text-muted shadow-sm'
+              : 'board-text-muted hover:board-text-strong'"
           >
             <input
               v-model="form.explorationMode"
@@ -393,10 +406,10 @@ const frozenTargetScope = computed(() => {
             <span class="min-w-0 whitespace-normal break-words">{{ t('app.fuzzModeBoard') }}</span>
           </label>
           <label
-            class="flex min-h-11 min-w-0 cursor-pointer items-center justify-center rounded-md px-2 py-1.5 text-center text-[11px] font-bold leading-4 transition-colors focus-within:ring-2 focus-within:ring-[color:var(--accent)] focus-within:ring-offset-1"
+            class="flex min-h-11 min-w-0 cursor-pointer items-center justify-center rounded-md px-2 py-1.5 text-center text-sm font-semibold leading-5 transition-colors focus-within:ring-2 focus-within:ring-[color:var(--accent)] focus-within:ring-offset-1"
             :class="form.explorationMode === 'PAPER_COMPATIBLE'
-              ? 'bg-white board-text-muted shadow-sm'
-              : 'text-slate-600 hover:text-slate-800'"
+              ? 'board-bg-elevated board-text-muted shadow-sm'
+              : 'board-text-muted hover:board-text-strong'"
           >
             <input
               v-model="form.explorationMode"
@@ -413,26 +426,156 @@ const frozenTargetScope = computed(() => {
             <span class="min-w-0 whitespace-normal break-words">{{ t('app.fuzzModePaper') }}</span>
           </label>
         </div>
-        <p id="fuzz-exploration-mode-help" class="mt-1.5 break-words text-[length:var(--iot-font-min)] leading-4 text-slate-500">
+        <p id="fuzz-exploration-mode-help" class="mt-1.5 break-words text-xs leading-4 board-text-muted">
           {{ explorationModeDescription }}
         </p>
       </fieldset>
 
+
+      <div v-if="!frozenTask" class="rounded-lg border board-border-subtle board-bg-elevated p-3">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div class="flex min-w-0 items-center gap-3">
+            <span class="board-form-label">{{ t('app.fuzzTargetSpecifications') }}</span>
+            <InfoTooltip
+              :text="t('app.fuzzTargetSpecificationsHint')"
+              :label="t('app.showHelpFor', { topic: t('app.fuzzTargetSpecifications') })"
+              test-id="fuzz-targets-help"
+            />
+          </div>
+          <!--
+            No `disabled:opacity-50` here. On already-muted text it lands at 2:1 (light) / 2.68:1 (dark):
+            muted is the de-emphasised role and sits deliberately close to the contrast floor, so halving it
+            goes under — and the disabled state is where the label most needs to be readable, since it is what
+            explains why the action is unavailable. The cursor and the `disabled` attribute already carry
+            "not available" without spending contrast to say it twice.
+          -->
+          <button
+            v-if="eligibleSpecifications.length <= FUZZ_TARGET_SPEC_MAX"
+            type="button"
+            class="board-action-secondary"
+            :disabled="running || eligibleSpecifications.length === 0 || implicitAll"
+            @click="toggleAll"
+          >
+            {{ selectedAll ? t('app.allSpecificationsSelected') : t('app.selectAll') }}
+          </button>
+        </div>
+        <p
+          v-if="preflightBlocked"
+          data-testid="fuzz-eligibility-blocked"
+          class="mt-1 rounded-md board-surface-warning px-2 py-1.5 text-xs font-semibold leading-4 board-text-warning"
+          role="alert"
+        >
+          {{ preflightMessage || t('app.fuzzEligibilityPreflightBlocked') }}
+        </p>
+        <p v-else class="mt-1 text-xs font-semibold board-text-muted" data-testid="fuzz-eligibility-summary">
+          {{ t('app.fuzzEligibilitySummary', {
+            eligible: eligibleSpecifications.length,
+            total: specifications.length,
+            selected: selectedEligibleCount
+          }) }}
+        </p>
+        <div
+          v-if="invalidSelectedIds.length > 0"
+          data-testid="fuzz-invalid-target-selection"
+          class="mt-2 rounded-md board-surface-warning px-2.5 py-2 text-xs leading-4 board-text-warning"
+          role="alert"
+        >
+          <p>{{ t('app.fuzzTargetSelectionChanged', { count: invalidSelectedIds.length }) }}</p>
+          <button
+            type="button"
+            class="board-action-secondary mt-1.5"
+            :disabled="running"
+            @click="resolveInvalidTargets"
+          >
+            {{ normalizedSelectedIds.length > 0
+              ? t('app.fuzzRemoveUnavailableTargets')
+              : t('app.fuzzSelectCurrentTargets') }}
+          </button>
+        </div>
+        <div v-if="specifications.length === 0" class="mt-3 rounded-md board-surface-warning px-2.5 py-2 text-xs board-text-warning">
+          {{ t('app.noSpecsToFuzz') }}
+        </div>
+        <div v-else-if="eligibleSpecifications.length === 0" class="mt-3 rounded-md board-surface-warning px-2.5 py-2 text-xs board-text-warning" role="alert">
+          {{ t('app.noEligibleSpecsToFuzz') }}
+        </div>
+        <div v-if="specifications.length > 0" class="mt-3 space-y-1.5">
+          <label
+            v-for="spec in specifications"
+            :key="spec.id"
+            class="board-form-label flex min-h-11 items-start gap-2 rounded-md border px-2 py-1.5"
+            :class="isSpecEligible(spec)
+              ? 'cursor-pointer board-border-subtle hover:board-border-subtle hover:board-card--muted'
+              : 'cursor-not-allowed board-border-subtle board-bg-muted board-text-muted'"
+          >
+            <input
+              type="checkbox"
+              class="mt-0.5 accent-[color:var(--accent)]"
+              :checked="isSpecChecked(spec.id)"
+              :disabled="running || preflightBlocked || !isSpecEligible(spec) || isOnlySelectedSpec(spec.id)"
+              :title="isOnlySelectedSpec(spec.id) ? t('app.fuzzAtLeastOneTarget') : undefined"
+              @change="onSpecChange(spec.id, $event)"
+            />
+            <span class="min-w-0 flex-1 leading-4" :class="isSpecEligible(spec) ? 'board-text-strong' : 'board-text-muted'">
+              <span class="block">{{ specTitle(spec) }}</span>
+              <span v-if="!isSpecEligible(spec)" class="mt-0.5 block text-xs leading-4 board-text-muted">
+                {{ t(specIneligibilityMessageKey(spec)) }}
+              </span>
+            </span>
+            <span
+              v-if="!isSpecEligible(spec)"
+              class="shrink-0 rounded board-bg-control px-1.5 py-0.5 text-xs font-semibold board-text-muted"
+            >
+              {{ t('app.fuzzFormalOnly') }}
+            </span>
+          </label>
+        </div>
+      </div>
+
+      <div v-if="!frozenTask" class="grid grid-cols-1 gap-2 min-[480px]:grid-cols-2">
+        <label class="board-form-label board-card rounded-lg border board-border-subtle p-2">
+          {{ t('app.fuzzMaxIterations') }}
+          <input
+            v-model.number="form.maxIterations"
+            data-testid="fuzz-max-iterations"
+            type="number"
+            min="1"
+            :max="FUZZ_ITERATIONS_MAX"
+            step="1"
+            :disabled="running"
+            class="board-field mt-1"
+          />
+          <span class="mt-1 block text-xs font-normal board-text-muted">{{ FUZZ_ITERATIONS_MIN }}-{{ FUZZ_ITERATIONS_MAX }}</span>
+        </label>
+        <label class="board-form-label board-card rounded-lg border board-border-subtle p-2">
+          {{ t('app.fuzzPathLength') }}
+          <input
+            v-model.number="form.pathLength"
+            data-testid="fuzz-path-length"
+            type="number"
+            min="1"
+            :max="FUZZ_PATH_LENGTH_MAX"
+            step="1"
+            :disabled="running"
+            class="board-field mt-1"
+          />
+          <span class="mt-1 block text-xs font-normal board-text-muted">{{ FUZZ_PATH_LENGTH_MIN }}-{{ FUZZ_PATH_LENGTH_MAX }}</span>
+        </label>
+      </div>
+
       <section
         v-if="!frozenTask && form.explorationMode === 'PAPER_COMPATIBLE' && eligibleSpecifications.length > 0"
         data-testid="paper-domain-preview"
-        class="rounded-lg board-surface-warning px-3 py-2.5"
+        class="rounded-lg board-note px-3 py-2.5"
         aria-labelledby="paper-domain-preview-title"
       >
         <div class="flex items-start justify-between gap-3">
           <div class="min-w-0">
-            <h4 id="paper-domain-preview-title" class="text-xs font-bold board-text-warning">{{ t('app.fuzzPaperDomainTitle') }}</h4>
-            <p class="mt-1 text-[length:var(--iot-font-min)] leading-4 board-text-warning">{{ t('app.fuzzPaperDomainDescription') }}</p>
+            <h4 id="paper-domain-preview-title" class="board-section-title">{{ t('app.fuzzPaperDomainTitle') }}</h4>
           </div>
           <HintTooltip :content="t('app.refresh')">
             <button
               type="button"
-              class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md board-text-warning hover:board-chip-warning disabled:opacity-50"
+              class="board-action-secondary h-11 w-11 shrink-0 px-0"
               :disabled="running || paperDomainLoading"
               :aria-label="t('app.refresh')"
               @click="emit('refreshPaperDomain')"
@@ -442,15 +585,15 @@ const frozenTargetScope = computed(() => {
           </HintTooltip>
         </div>
 
-        <div v-if="paperDomainLoading" class="mt-2 flex items-center gap-2 text-[11px] board-text-warning" role="status">
+        <div v-if="paperDomainLoading" class="mt-2 flex items-center gap-2 text-xs board-text-muted" role="status">
           <span class="material-symbols-outlined animate-spin text-sm" aria-hidden="true">sync</span>{{ t('app.fuzzPaperDomainLoading') }}
         </div>
-        <div v-else-if="paperDomainError" class="board-surface-danger mt-2 flex items-start justify-between gap-2 rounded-md px-2.5 py-2 text-[11px] leading-4 board-text-danger" role="alert">
+        <div v-else-if="paperDomainError" class="board-surface-danger mt-2 flex items-start justify-between gap-2 rounded-md px-2.5 py-2 text-xs leading-4 board-text-danger" role="alert">
           <span>{{ paperDomainError }}</span>
           <button
             type="button"
             data-testid="refresh-paper-domain"
-            class="min-h-11 shrink-0 px-2 font-bold board-text-danger underline underline-offset-2 disabled:opacity-50"
+            class="board-action-secondary shrink-0"
             :disabled="running || paperDomainLoading"
             @click="emit('refreshPaperDomain')"
           >
@@ -458,19 +601,19 @@ const frozenTargetScope = computed(() => {
           </button>
         </div>
         <template v-else-if="paperDomainPreview">
-          <p class="mt-2 text-[length:var(--iot-font-min)] font-semibold leading-4 board-text-warning">
-            {{ t('app.fuzzPaperDomainSummary', {
-              devices: paperDomainPreview.deviceDomains.length,
-              locals: paperDomainPreview.localVariableDomains.length,
-              environments: paperDomainPreview.environmentDomains.length,
-              length: paperDomainPreview.pathLength
-            }) }}
-          </p>
-          <details class="mt-2 border-t board-border-subtle pt-2">
-            <summary class="flex min-h-11 cursor-pointer items-center text-[11px] font-bold board-text-warning">{{ t('app.fuzzPaperInspectDomains') }}</summary>
-            <div class="mt-2 space-y-2 text-[length:var(--iot-font-min)] leading-4 board-text-warning">
+          <details data-testid="paper-domain-choices" class="mt-2 border-t board-border-subtle pt-2">
+            <summary class="flex min-h-11 cursor-pointer items-center text-xs font-semibold board-text-muted">{{ t('app.fuzzPaperInspectDomains') }}</summary>
+            <p class="mt-2 text-xs font-semibold leading-4 board-text-muted">
+              {{ t('app.fuzzPaperDomainSummary', {
+                devices: paperDomainPreview.deviceDomains.length,
+                locals: paperDomainPreview.localVariableDomains.length,
+                environments: paperDomainPreview.environmentDomains.length,
+                length: paperDomainPreview.pathLength
+              }) }}
+            </p>
+            <div class="mt-2 space-y-2 text-xs leading-4 board-text-muted">
               <div v-if="paperDomainPreview.deviceDomains.length">
-                <p class="font-bold">{{ t('app.fuzzPaperDeviceStateDomains') }}</p>
+                <p class="font-semibold">{{ t('app.fuzzPaperDeviceStateDomains') }}</p>
                 <ul class="mt-1 space-y-1">
                   <li v-for="domain in paperDomainPreview.deviceDomains" :key="`${domain.targetId}-${domain.property}`" class="break-words">
                     <span class="font-semibold">{{ domain.label }}.{{ formatDeviceStateProperty(domain.targetId, domain.property) }}</span>:
@@ -485,7 +628,7 @@ const frozenTargetScope = computed(() => {
                 v-if="paperDomainPreview.localVariableDomains.length"
                 data-testid="paper-local-variable-domains"
               >
-                <p class="font-bold">{{ t('app.fuzzPaperLocalVariableDomains') }}</p>
+                <p class="font-semibold">{{ t('app.fuzzPaperLocalVariableDomains') }}</p>
                 <ul class="mt-1 space-y-1">
                   <li v-for="domain in paperDomainPreview.localVariableDomains" :key="`${domain.targetId}-${domain.property}`" class="break-words">
                     <span class="font-semibold">{{ domain.label }}.{{ formatDeviceVariableProperty(domain.targetId, domain.property) }}</span>:
@@ -497,7 +640,7 @@ const frozenTargetScope = computed(() => {
                 </ul>
               </div>
               <div v-if="paperDomainPreview.environmentDomains.length">
-                <p class="font-bold">{{ t('app.fuzzPaperEnvironmentDomains') }}</p>
+                <p class="font-semibold">{{ t('app.fuzzPaperEnvironmentDomains') }}</p>
                 <ul class="mt-1 space-y-1.5">
                   <li v-for="domain in paperDomainPreview.environmentDomains" :key="domain.name" class="break-words">
                     <span class="font-semibold">{{ formatEnvironmentToken(domain.name, domain.name) }}</span>:
@@ -518,166 +661,32 @@ const frozenTargetScope = computed(() => {
               </div>
             </div>
           </details>
-          <details class="mt-2 border-t board-border-subtle pt-2">
-            <summary class="flex min-h-11 cursor-pointer items-center text-[11px] font-bold board-text-warning">{{ t('app.fuzzPaperCoverageAndBoundaries') }}</summary>
-            <ul class="mt-1 list-disc space-y-1 pl-4 text-[length:var(--iot-font-min)] leading-4 board-text-warning">
+          <details data-testid="paper-domain-boundaries" class="mt-2 border-t board-border-subtle pt-2">
+            <summary class="flex min-h-11 cursor-pointer items-center text-xs font-semibold board-text-muted">{{ t('app.fuzzPaperCoverageAndBoundaries') }}</summary>
+            <p class="mt-1 text-xs leading-4 board-text-muted">{{ t('app.fuzzPaperUnimplementedScope') }}</p>
+            <ul class="mt-1 list-disc space-y-1 pl-4 text-xs leading-4 board-text-muted">
               <li v-for="code in paperDomainPreview.paperSemanticsCodes" :key="code">{{ t(fuzzingLimitationKey(code)) }}</li>
             </ul>
           </details>
-          <p class="mt-2 border-t board-border-subtle pt-2 text-[length:var(--iot-font-min)] font-semibold leading-4 board-text-warning">
-            {{ t('app.fuzzPaperUnimplementedScope') }}
-          </p>
+
         </template>
       </section>
 
-      <div v-if="!frozenTask" class="rounded-lg border board-border-subtle bg-white p-3">
-        <div class="flex items-center justify-between gap-2">
-          <label class="text-xs font-bold uppercase tracking-wide text-slate-600">{{ t('app.fuzzTargetSpecifications') }}</label>
-          <!--
-            No `disabled:opacity-50` here. On already-muted text it lands at 2:1 (light) / 2.68:1 (dark):
-            muted is the de-emphasised role and sits deliberately close to the contrast floor, so halving it
-            goes under — and the disabled state is where the label most needs to be readable, since it is what
-            explains why the action is unavailable. The cursor and the `disabled` attribute already carry
-            "not available" without spending contrast to say it twice.
-          -->
-          <button
-            v-if="eligibleSpecifications.length <= FUZZ_TARGET_SPEC_MAX"
-            type="button"
-            class="min-h-11 px-2 text-[11px] font-semibold board-text-muted hover:board-text-strong disabled:cursor-not-allowed"
-            :disabled="running || eligibleSpecifications.length === 0 || implicitAll"
-            @click="toggleAll"
-          >
-            {{ selectedAll ? t('app.allSpecificationsSelected') : t('app.selectAll') }}
-          </button>
-        </div>
-        <p class="mt-1 text-[11px] leading-4 text-slate-500">{{ t('app.fuzzTargetSpecificationsHint') }}</p>
-        <p
-          v-if="preflightBlocked"
-          data-testid="fuzz-eligibility-blocked"
-          class="mt-1 rounded-md board-surface-warning px-2 py-1.5 text-[11px] font-semibold leading-4 board-text-warning"
-          role="alert"
-        >
-          {{ preflightMessage || t('app.fuzzEligibilityPreflightBlocked') }}
-        </p>
-        <p v-else class="mt-1 text-[11px] font-semibold board-text-muted" data-testid="fuzz-eligibility-summary">
-          {{ t('app.fuzzEligibilitySummary', {
-            eligible: eligibleSpecifications.length,
-            total: specifications.length,
-            selected: selectedEligibleCount
-          }) }}
-        </p>
-        <div
-          v-if="invalidSelectedIds.length > 0"
-          data-testid="fuzz-invalid-target-selection"
-          class="mt-2 rounded-md board-surface-warning px-2.5 py-2 text-[11px] leading-4 board-text-warning"
-          role="alert"
-        >
-          <p>{{ t('app.fuzzTargetSelectionChanged', { count: invalidSelectedIds.length }) }}</p>
-          <button
-            type="button"
-            class="mt-1.5 min-h-11 px-2 font-bold board-text-warning underline decoration-[color:var(--warning)] underline-offset-2 hover:disabled:opacity-50"
-            :disabled="running"
-            @click="resolveInvalidTargets"
-          >
-            {{ normalizedSelectedIds.length > 0
-              ? t('app.fuzzRemoveUnavailableTargets')
-              : t('app.fuzzSelectCurrentTargets') }}
-          </button>
-        </div>
-        <div v-if="specifications.length === 0" class="mt-3 rounded-md board-surface-warning px-2.5 py-2 text-xs board-text-warning">
-          {{ t('app.noSpecsToFuzz') }}
-        </div>
-        <div v-else-if="eligibleSpecifications.length === 0" class="mt-3 rounded-md board-surface-warning px-2.5 py-2 text-xs board-text-warning" role="alert">
-          {{ t('app.noEligibleSpecsToFuzz') }}
-        </div>
-        <div v-else class="mt-3 space-y-1.5">
-          <label
-            v-for="spec in specifications"
-            :key="spec.id"
-            class="flex min-h-11 items-start gap-2 rounded-md border px-2 py-1.5 text-xs"
-            :class="isSpecEligible(spec)
-              ? 'cursor-pointer border-slate-100 hover:board-border-subtle hover:board-card--muted'
-              : 'cursor-not-allowed border-slate-200 bg-slate-50 text-slate-500'"
-          >
-            <input
-              type="checkbox"
-              class="mt-0.5 accent-[color:var(--accent)]"
-              :checked="isSpecChecked(spec.id)"
-              :disabled="running || preflightBlocked || !isSpecEligible(spec) || isOnlySelectedSpec(spec.id)"
-              :title="isOnlySelectedSpec(spec.id) ? t('app.fuzzAtLeastOneTarget') : undefined"
-              @change="onSpecChange(spec.id, $event)"
-            />
-            <span class="min-w-0 flex-1 leading-4" :class="isSpecEligible(spec) ? 'text-slate-700' : 'text-slate-500'">
-              <span class="block">{{ specTitle(spec) }}</span>
-              <span v-if="!isSpecEligible(spec)" class="mt-0.5 block text-[length:var(--iot-font-min)] leading-4 text-slate-500">
-                {{ t(specIneligibilityMessageKey(spec)) }}
-              </span>
-            </span>
-            <span
-              v-if="!isSpecEligible(spec)"
-              class="shrink-0 rounded bg-slate-200 px-1.5 py-0.5 text-[length:var(--iot-font-min)] font-bold text-slate-600"
-            >
-              {{ t('app.fuzzFormalOnly') }}
-            </span>
-          </label>
-        </div>
-      </div>
-
-      <div v-if="!frozenTask" class="grid grid-cols-2 gap-2">
-        <label class="board-card rounded-lg border border-slate-200 p-2 text-xs font-semibold text-slate-600">
-          {{ t('app.fuzzMaxIterations') }}
-          <input
-            v-model.number="form.maxIterations"
-            data-testid="fuzz-max-iterations"
-            type="number"
-            min="1"
-            :max="FUZZ_ITERATIONS_MAX"
-            step="1"
-            :disabled="running"
-            class="mt-1 w-full rounded-md border border-slate-200 px-2 py-1.5 text-sm font-semibold text-slate-800 outline-none focus:border-[color:var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-border)] disabled:bg-slate-100"
-          />
-          <span class="mt-1 block text-[length:var(--iot-font-min)] font-normal text-slate-500">{{ FUZZ_ITERATIONS_MIN }}-{{ FUZZ_ITERATIONS_MAX }}</span>
-        </label>
-        <label class="board-card rounded-lg border border-slate-200 p-2 text-xs font-semibold text-slate-600">
-          {{ t('app.fuzzPathLength') }}
-          <input
-            v-model.number="form.pathLength"
-            data-testid="fuzz-path-length"
-            type="number"
-            min="1"
-            :max="FUZZ_PATH_LENGTH_MAX"
-            step="1"
-            :disabled="running"
-            class="mt-1 w-full rounded-md border border-slate-200 px-2 py-1.5 text-sm font-semibold text-slate-800 outline-none focus:border-[color:var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-border)] disabled:bg-slate-100"
-          />
-          <span class="mt-1 block text-[length:var(--iot-font-min)] font-normal text-slate-500">{{ FUZZ_PATH_LENGTH_MIN }}-{{ FUZZ_PATH_LENGTH_MAX }} {{ t('app.fuzzStatesPerPath') }}</span>
-        </label>
-      </div>
-
-      <!-- The one thing the field labels cannot convey: these budgets multiply, and a larger board shrinks
-           all of them. Without it the ranges read as independent and a rejection looks arbitrary. -->
-      <p
-        v-if="!frozenTask"
-        id="fuzz-budget-help"
-        class="text-[length:var(--iot-font-min)] leading-4 text-slate-500"
-      >
-        {{ t('app.fuzzBudgetProductHint') }}
-      </p>
 
       <!-- Forced open on a configuration error as well as while running: the workload rejection names
            "candidate paths per iteration" as a remedy, and that field lives in here. Telling a blocked user
            to lower a control they cannot see is a dead end. -->
       <details
         v-if="!frozenTask"
-        class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2"
-        :open="running || configurationError ? true : undefined"
+        class="rounded-lg border board-border-subtle board-bg-muted px-3 py-2"
+        :open="running || configurationErrorMessage ? true : undefined"
       >
-        <summary class="flex min-h-11 cursor-pointer items-center justify-between text-xs font-bold text-slate-700">
+        <summary class="flex min-h-11 cursor-pointer items-center justify-between text-xs font-semibold board-text-strong">
           <span class="inline-flex items-center gap-1.5"><span class="material-symbols-outlined text-sm board-text-progress" aria-hidden="true">tune</span>{{ t('app.fuzzAdvancedSettings') }}</span>
-          <span class="material-symbols-outlined text-sm text-slate-400" aria-hidden="true">expand_more</span>
+          <span class="material-symbols-outlined text-sm board-text-muted" aria-hidden="true">expand_more</span>
         </summary>
-        <div class="mt-2 grid grid-cols-2 gap-2">
-          <label class="text-[11px] font-semibold text-slate-600">
+        <div class="mt-2 grid grid-cols-1 gap-3 min-[480px]:grid-cols-2">
+          <label class="board-form-label">
             {{ t('app.fuzzPopulationSize') }}
               <input
               v-model.number="form.populationSize"
@@ -687,13 +696,18 @@ const frozenTargetScope = computed(() => {
               :max="FUZZ_POPULATION_MAX"
               step="1"
               :disabled="running"
-              class="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-sm font-semibold text-slate-800 outline-none focus:border-[color:var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-border)] disabled:bg-slate-100"
+              class="board-field mt-1"
               />
-              <span class="mt-1 block text-[length:var(--iot-font-min)] font-normal text-slate-500">{{ FUZZ_POPULATION_MIN }}-{{ FUZZ_POPULATION_MAX }} {{ t('app.fuzzPathsPerIteration') }}</span>
+              <span class="mt-1 block text-xs font-normal board-text-muted">{{ FUZZ_POPULATION_MIN }}-{{ FUZZ_POPULATION_MAX }} {{ t('app.fuzzPathsPerIteration') }}</span>
           </label>
-          <label class="text-[11px] font-semibold text-slate-600">
-            {{ t('app.fuzzSeed') }}
+          <div class="min-w-0">
+            <div class="flex items-center gap-3">
+              <label for="fuzz-seed" class="board-form-label">{{ t('app.fuzzSeed') }}</label>
+              <InfoTooltip :text="t('app.fuzzSeedHint')"
+                :label="t('app.showHelpFor', { topic: t('app.fuzzSeed') })" test-id="fuzz-seed-help" />
+            </div>
             <input
+              id="fuzz-seed"
               :value="form.seed ?? ''"
               @input="updateSeed"
               data-testid="fuzz-seed"
@@ -703,71 +717,42 @@ const frozenTargetScope = computed(() => {
               step="1"
               :placeholder="t('app.fuzzSeedAuto')"
               :disabled="running"
-              class="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-sm font-semibold text-slate-800 outline-none focus:border-[color:var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-border)] disabled:bg-slate-100"
+              class="board-field mt-1"
             />
-          </label>
+          </div>
         </div>
-        <p class="mt-2 text-[length:var(--iot-font-min)] leading-4 text-slate-500">{{ t('app.fuzzAdvancedSettingsHint') }}</p>
+        <p id="fuzz-budget-help" class="mt-2 text-xs leading-4 board-text-muted">{{ t('app.fuzzBudgetProductHint') }}</p>
+        <p v-if="workloadPreview && !workloadLoading && !workloadError" data-testid="fuzz-model-complexity" class="mt-1 text-xs leading-4 board-text-muted">
+          {{ t('app.fuzzModelComplexity', { complexity: formatNumber(Math.max(1, workloadPreview.modelComplexityUnits)) }) }}
+        </p>
       </details>
+
+      <div
+        v-if="!frozenTask && configurationErrorMessage"
+        id="fuzz-configuration-error"
+        class="rounded-lg board-surface-warning px-3 py-2 text-xs leading-5 board-text-warning"
+        role="alert"
+      >
+        {{ configurationErrorMessage }}
+      </div>
 
       <div v-if="error" class="board-surface-danger rounded-lg px-3 py-2 text-xs leading-5 board-text-danger" role="alert">
         {{ error }}
+        <FailureDetails v-if="failureDetails" v-bind="failureDetails" :message="error" :suggestion="failureDetails.suggestion || t('app.runFailureNextStep')" />
       </div>
 
       <div v-if="notice" class="rounded-lg board-surface-info px-3 py-2 text-xs leading-5 board-text-info" role="status">
         {{ notice }}
       </div>
 
-      <div v-if="!frozenTask && configurationError" class="rounded-lg board-surface-warning px-3 py-2 text-xs leading-5 board-text-warning" role="alert">
-        {{ configurationError }}
-      </div>
-
-      <div
-        v-if="!frozenTask && workloadLoading"
-        class="flex items-center gap-2 text-[length:var(--iot-font-min)] leading-4 text-slate-500"
-        role="status"
-      >
-        <span class="material-symbols-outlined animate-spin text-sm" aria-hidden="true">progress_activity</span>
-        <span>{{ t('app.fuzzWorkloadLoading') }}</span>
-      </div>
-
-      <div
-        v-else-if="!frozenTask && workloadError"
-        class="flex items-start justify-between gap-2 rounded-lg board-surface-warning px-3 py-2 text-xs leading-5 board-text-warning"
-        role="alert"
-      >
-        <span>{{ workloadError }}</span>
-        <button
-          type="button"
-          class="min-h-11 shrink-0 px-2 font-bold board-text-warning underline underline-offset-2"
-          data-testid="refresh-fuzzing-workload"
-          @click="emit('refreshWorkload')"
-        >
-          {{ t('app.retry') }}
-        </button>
-      </div>
-
-      <!-- Suppressed while a configuration error is showing: this line says the workload was "confirmed
-           against the current Board", which read as approval directly under a rejection of the same
-           number. The warning block above owns the rejected case and states every factor itself. -->
-      <p
-        v-else-if="!frozenTask && !configurationError && workloadPreview && Number.isFinite(workload)"
-        class="text-[length:var(--iot-font-min)] leading-4 text-slate-500"
-      >
-        {{ t('app.fuzzWorkloadPreview', {
-          workload: formatNumber(Number(workload)),
-          limit: formatNumber(Number(workloadLimit || 0)),
-          iterations: formatNumber(workloadPreview.maxIterations),
-          path: formatNumber(workloadPreview.pathLength),
-          population: formatNumber(workloadPreview.populationSize),
-          complexity: formatNumber(Math.max(1, workloadPreview.modelComplexityUnits))
-        }) }}
-      </p>
-
       <div v-if="running" class="rounded-lg border board-border-subtle board-card--muted px-3 py-2" aria-live="polite" aria-atomic="true">
-        <div class="flex items-center justify-between gap-2 text-xs font-semibold board-text-strong">
-          <span>{{ status }}</span>
-          <span>{{ progress }}%</span>
+        <div class="flex items-start justify-between gap-2 text-xs font-semibold board-text-strong">
+          <span class="min-w-0 break-words">{{ status }}</span>
+          <span class="inline-flex shrink-0 items-center gap-1.5">
+            {{ progress }}%
+            <InfoTooltip :text="t('app.fuzzProgressNotCoverage')"
+              :label="t('app.showHelpFor', { topic: t('app.fuzzBudgetProgress') })" test-id="fuzz-progress-help" />
+          </span>
         </div>
         <div
           class="mt-1.5 h-2 overflow-hidden rounded-full board-card--muted"
@@ -779,13 +764,12 @@ const frozenTargetScope = computed(() => {
         >
           <div class="board-progress-fill h-full rounded-full transition-all" :style="{ width: `${progress}%` }"></div>
         </div>
-        <p class="mt-1 text-[length:var(--iot-font-min)] leading-4 board-text-muted">{{ t('app.fuzzProgressNotCoverage') }}</p>
-        <div class="mt-1 flex items-center justify-between text-[length:var(--iot-font-min)] board-text-muted">
+        <div class="mt-1 flex flex-wrap items-center justify-between gap-2 text-xs board-text-muted">
           <span>{{ taskId ? t('app.fuzzTaskId', { id: taskId }) : t('app.taskInitializing') }}</span>
           <button
             v-if="taskId"
             type="button"
-            class="inline-flex min-h-11 items-center gap-1 px-2 font-semibold hover:board-text-strong disabled:opacity-50"
+            class="board-action-secondary"
             :disabled="cancelling"
             @click="emit('cancel')"
           >
@@ -793,18 +777,62 @@ const frozenTargetScope = computed(() => {
           </button>
         </div>
       </div>
-
-      <button
-        v-if="!frozenTask"
-        type="button"
-        data-testid="run-fuzzing"
-        class="board-panel-submit min-h-11 px-3 text-sm"
-        :disabled="running || preflightBlocked || eligibleSpecifications.length === 0 || invalidSelectedIds.length > 0 || Boolean(configurationError) || workloadReady === false || !paperDomainReady"
-        @click="emit('submit')"
-      >
-        <span class="material-symbols-outlined text-base" :class="running ? 'animate-spin' : ''" aria-hidden="true">{{ running ? 'sync' : 'radar' }}</span>
-        {{ running ? t('app.fuzzRunning') : t('app.startFuzzSearch') }}
-      </button>
     </div>
+
+    <footer v-if="!frozenTask" class="board-run-panel__footer">
+      <div class="space-y-2">
+        <p v-if="configurationErrorMessage" class="text-xs leading-4 board-text-warning">
+          {{ t('app.fuzzConfigurationBlocked') }}
+        </p>
+
+        <div
+          v-if="workloadLoading"
+          class="flex items-center gap-2 text-xs leading-4 board-text-muted"
+          role="status"
+        >
+          <span class="material-symbols-outlined animate-spin text-sm" aria-hidden="true">progress_activity</span>
+          <span>{{ t('app.fuzzWorkloadLoading') }}</span>
+        </div>
+
+        <div
+          v-else-if="workloadError"
+          class="flex items-start justify-between gap-2 rounded-lg board-surface-warning px-3 py-2 text-xs leading-5 board-text-warning"
+          role="alert"
+        >
+          <span>{{ workloadError }}</span>
+          <button
+            type="button"
+            class="min-h-11 shrink-0 px-2 font-semibold board-text-warning underline underline-offset-2"
+            data-testid="refresh-fuzzing-workload"
+            @click="emit('refreshWorkload')"
+          >
+            {{ t('app.retry') }}
+          </button>
+        </div>
+
+        <!-- A rejected estimate belongs to the configuration warning, not the normal workload summary. -->
+        <p
+          v-else-if="!configurationError && workloadPreview && Number.isFinite(workload)"
+          class="text-xs leading-4 board-text-muted"
+        >
+          {{ t('app.fuzzWorkloadPreview', {
+            workload: formatNumber(Number(workload)),
+            limit: formatNumber(Number(workloadLimit || 0))
+          }) }}
+        </p>
+
+        <button
+          type="button"
+          data-testid="run-fuzzing"
+          class="board-panel-submit min-h-11 px-3"
+          :aria-describedby="configurationErrorMessage ? 'fuzz-configuration-error' : undefined"
+          :disabled="running || preflightBlocked || eligibleSpecifications.length === 0 || invalidSelectedIds.length > 0 || Boolean(configurationError) || workloadReady === false || !paperDomainReady"
+          @click="emit('submit')"
+        >
+          <span class="material-symbols-outlined text-base" :class="running ? 'animate-spin' : ''" aria-hidden="true">{{ running ? 'sync' : 'radar' }}</span>
+          {{ running ? t('app.fuzzRunning') : t('app.startFuzzSearch') }}
+        </button>
+      </div>
+    </footer>
   </section>
 </template>

@@ -1,25 +1,36 @@
 package cn.edu.nju.Iot_Verify.component.aitool.rule;
 
+import cn.edu.nju.Iot_Verify.component.ai.PromptCompletionService;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
+import cn.edu.nju.Iot_Verify.exception.BadRequestException;
 import cn.edu.nju.Iot_Verify.security.UserContextHolder;
 import cn.edu.nju.Iot_Verify.service.BoardStorageService;
+import cn.edu.nju.Iot_Verify.service.recommendation.RecommendationResultParser;
+import cn.edu.nju.Iot_Verify.service.recommendation.RuleCheckService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -28,17 +39,126 @@ class CheckDuplicateRuleToolTest {
     @Mock
     private BoardStorageService boardStorageService;
 
+    @Mock
+    private PromptCompletionService promptCompletionService;
+
     private CheckDuplicateRuleTool tool;
+    private RuleCheckService service;
 
     @BeforeEach
     void setUp() {
-        tool = new CheckDuplicateRuleTool(boardStorageService, new ObjectMapper());
+        ObjectMapper objectMapper = new ObjectMapper();
+        service = new RuleCheckService(boardStorageService, promptCompletionService,
+                objectMapper, new RecommendationResultParser(objectMapper));
+        tool = new CheckDuplicateRuleTool(service, objectMapper);
         UserContextHolder.setUserId(1L);
     }
 
     @AfterEach
     void tearDown() {
         UserContextHolder.clear();
+    }
+
+    @Test
+    void typedDuplicateCheckUsesExplicitOwnerAndNeverCallsTheProvider() {
+        when(boardStorageService.getRules(7L)).thenReturn(List.of());
+
+        var result = service.checkDuplicate(7L, validCandidate());
+
+        assertFalse(result.isDuplicate());
+        assertFalse(result.isRequiresReview());
+        assertEquals("NO_EXISTING_RULES", result.getReasonCode());
+        verify(boardStorageService).getRules(7L);
+        verifyNoInteractions(promptCompletionService);
+    }
+
+    @Test
+    void typedDuplicateCheckPreservesSelfIdAndSkipsTheRuleBeingEdited() {
+        RuleDto candidate = validCandidate();
+        candidate.setId(9L);
+        when(boardStorageService.getRules(7L)).thenReturn(List.of(candidate));
+
+        var result = service.checkDuplicate(7L, candidate);
+
+        assertFalse(result.isDuplicate());
+        assertEquals("NO_MATCHING_SIGNATURE", result.getReasonCode());
+        assertEquals(9L, candidate.getId());
+        verifyNoInteractions(promptCompletionService);
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("invalidTypedCandidates")
+    void typedChecksRejectMalformedCandidatesBeforeReadingBoard(String kind, RuleDto candidate) throws Exception {
+        BadRequestException duplicateFailure = assertThrows(BadRequestException.class,
+                () -> service.checkDuplicate(7L, candidate));
+        BadRequestException similarityFailure = assertThrows(BadRequestException.class,
+                () -> service.checkSimilarity(7L, candidate));
+        assertEquals(400, duplicateFailure.getCode());
+        assertEquals(duplicateFailure.getMessage(), similarityFailure.getMessage());
+
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode payload = mapper.valueToTree(candidate);
+        payload.remove("createdAt");
+        String arguments = mapper.writeValueAsString(java.util.Map.of("newRule", payload));
+        CheckRuleSimilarityTool similarityTool = new CheckRuleSimilarityTool(service, mapper);
+        for (String result : List.of(tool.execute(arguments), similarityTool.execute(arguments))) {
+            JsonNode error = mapper.readTree(result);
+            assertEquals(400, error.path("status").intValue());
+            assertEquals("VALIDATION_ERROR", error.path("errorCode").textValue());
+            assertEquals(duplicateFailure.getMessage(), error.path("error").textValue());
+        }
+        verifyNoInteractions(boardStorageService, promptCompletionService);
+    }
+
+    @Test
+    void typedAndJsonCandidatesShareCanonicalDuplicateDecisionWithoutChangingCaller() throws Exception {
+        RuleDto candidate = validCandidate();
+        candidate.getConditions().get(0).setTargetType(" STATE ");
+        candidate.getConditions().get(0).setRelation(" EQ ");
+        candidate.getConditions().get(0).setDeviceName(" Light_1 ");
+        candidate.getCommand().setAction(" turnOn ");
+        when(boardStorageService.getRules(7L)).thenReturn(List.of(validCandidate()));
+
+        ObjectMapper mapper = new ObjectMapper();
+        var typedResult = service.checkDuplicate(7L, candidate);
+        ObjectNode payload = mapper.valueToTree(candidate);
+        payload.remove("createdAt");
+        UserContextHolder.setUserId(7L);
+        JsonNode toolResult = mapper.readTree(tool.execute(
+                mapper.writeValueAsString(java.util.Map.of("newRule", payload))));
+
+        assertTrue(typedResult.isDuplicate());
+        assertEquals(mapper.valueToTree(typedResult), toolResult);
+        assertEquals(" STATE ", candidate.getConditions().get(0).getTargetType());
+        assertEquals(" EQ ", candidate.getConditions().get(0).getRelation());
+        assertEquals(" turnOn ", candidate.getCommand().getAction());
+        verify(boardStorageService, org.mockito.Mockito.times(2)).getRules(7L);
+        verifyNoInteractions(promptCompletionService);
+    }
+
+    private static Stream<Arguments> invalidTypedCandidates() {
+        RuleDto negativeId = validCandidate();
+        negativeId.setId(-1L);
+        RuleDto zeroId = validCandidate();
+        zeroId.setId(0L);
+        RuleDto stateOrdering = validCandidate();
+        stateOrdering.getConditions().get(0).setRelation(">");
+        RuleDto emptySet = validCandidate();
+        emptySet.getConditions().get(0).setRelation("in");
+        emptySet.getConditions().get(0).setValue(", ; |");
+        RuleDto partialContent = validCandidate();
+        partialContent.getCommand().setContent("photo");
+        RuleDto eventComparison = validCandidate();
+        eventComparison.getConditions().get(0).setTargetType("api");
+        return Stream.of(Arguments.of("negative id", negativeId), Arguments.of("zero id", zeroId),
+                Arguments.of("state ordering", stateOrdering), Arguments.of("empty set", emptySet),
+                Arguments.of("partial content", partialContent), Arguments.of("API comparison", eventComparison));
+    }
+
+    private static RuleDto validCandidate() {
+        return RuleDto.builder().conditions(List.of(RuleDto.Condition.builder()
+                        .deviceName("Light_1").attribute("state").targetType("state").relation("=").value("On").build()))
+                .command(RuleDto.Command.builder().deviceName("Light_1").action("turnOn").build()).build();
     }
 
     @Test

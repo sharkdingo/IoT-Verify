@@ -1,7 +1,7 @@
 package cn.edu.nju.Iot_Verify.util.mapper;
 
 import cn.edu.nju.Iot_Verify.component.fuzz.FuzzLimitationContract;
-import cn.edu.nju.Iot_Verify.component.fuzz.FuzzModelFingerprint;
+import cn.edu.nju.Iot_Verify.util.ModelFingerprint;
 import cn.edu.nju.Iot_Verify.component.fuzz.FuzzModelInputSnapshotCodec;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
@@ -32,6 +32,10 @@ import cn.edu.nju.Iot_Verify.po.FuzzFindingPo;
 import cn.edu.nju.Iot_Verify.po.FuzzTaskPo;
 import cn.edu.nju.Iot_Verify.repository.projection.FuzzFindingSummaryProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.FuzzTaskSummaryProjection;
+import cn.edu.nju.Iot_Verify.repository.projection.FuzzSpecificationPresentationProjection;
+import jakarta.validation.Validation;
+import jakarta.validation.ValidatorFactory;
+import org.junit.jupiter.api.AfterAll;
 import cn.edu.nju.Iot_Verify.util.JsonUtils;
 import cn.edu.nju.Iot_Verify.util.mapper.BoardDataConverter.ModelInputSnapshot;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -51,9 +55,13 @@ import static org.mockito.Mockito.when;
 
 class FuzzMapperTest {
 
-    private final FuzzModelFingerprint modelFingerprint =
-            new FuzzModelFingerprint(new ObjectMapper().findAndRegisterModules());
-    private final FuzzMapper mapper = new FuzzMapper(modelFingerprint);
+    private static final ValidatorFactory VALIDATORS = Validation.buildDefaultValidatorFactory();
+    @AfterAll
+    static void closeValidators() { VALIDATORS.close(); }
+
+    private final ModelFingerprint modelFingerprint =
+            new ModelFingerprint(new ObjectMapper().findAndRegisterModules());
+    private final FuzzMapper mapper = new FuzzMapper(modelFingerprint, VALIDATORS.getValidator());
 
     @Test
     void mapsCompletedRunWrittenWithVersionedSnapshotEnvelope() {
@@ -546,23 +554,23 @@ class FuzzMapperTest {
 
     @Test
     void projectedRunRejectsInconsistentExecutionStatistics() {
-        assertThrows(PersistedDataIntegrityException.class,
+        assertEquals("statistics", assertThrows(PersistedDataIntegrityException.class,
                 () -> mapper.toRunSummaryDtoFromTaskProjection(
-                        projectedRun(0, 1L, 1, 10), List.of()));
-        assertThrows(PersistedDataIntegrityException.class,
+                        projectedRun(0, 1L, 1, 10), List.of(), null)).getField());
+        assertEquals("statistics", assertThrows(PersistedDataIntegrityException.class,
                 () -> mapper.toRunSummaryDtoFromTaskProjection(
-                        projectedRun(1, 0L, 1, 10), List.of()));
-        assertThrows(PersistedDataIntegrityException.class,
+                        projectedRun(1, 0L, 1, 10), List.of(), null)).getField());
+        assertEquals("statistics", assertThrows(PersistedDataIntegrityException.class,
                 () -> mapper.toRunSummaryDtoFromTaskProjection(
-                        projectedRun(2, 1L, 1, 10), List.of()));
-        assertThrows(PersistedDataIntegrityException.class,
+                        projectedRun(2, 1L, 1, 10), List.of(), null)).getField());
+        assertEquals("statistics", assertThrows(PersistedDataIntegrityException.class,
                 () -> mapper.toRunSummaryDtoFromTaskProjection(
-                        projectedRun(2, 3L, 1, 10), List.of()));
-        assertThrows(PersistedDataIntegrityException.class,
+                        projectedRun(2, 3L, 1, 10), List.of(), null)).getField());
+        assertEquals("statistics", assertThrows(PersistedDataIntegrityException.class,
                 () -> mapper.toRunSummaryDtoFromTaskProjection(
-                        projectedRun(2, 2L, 2, 1), List.of()));
+                        projectedRun(2, 2L, 2, 1), List.of(), null)).getField());
         assertDoesNotThrow(() -> mapper.toRunSummaryDtoFromTaskProjection(
-                projectedRun(2, 4L, 2, 10), List.of()));
+                projectedRun(2, 4L, 2, 10), List.of(), projectedPresentation()));
     }
 
     @Test
@@ -1032,8 +1040,8 @@ class FuzzMapperTest {
         when(run.getLimitationsJson()).thenReturn(
                 JsonUtils.toJson(FuzzLimitationContract.baseCodes()));
 
-        assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toRunSummaryDtoFromTaskProjection(run, List.of()));
+        assertEquals("targetSpecIdsJson", assertThrows(PersistedDataIntegrityException.class,
+                () -> mapper.toRunSummaryDtoFromTaskProjection(run, List.of(), null)).getField());
 
         when(run.getModelSnapshotJson()).thenReturn(JsonUtils.toJson(
                 fuzzSnapshot(createdAt, 0, 0, 1, 0, 0)));
@@ -1044,8 +1052,8 @@ class FuzzMapperTest {
                 .requestedSpecCount(1)
                 .eligibleSpecCount(1)
                 .build()));
-        assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toRunSummaryDtoFromTaskProjection(run, List.of()));
+        assertEquals("eligibilityJson", assertThrows(PersistedDataIntegrityException.class,
+                () -> mapper.toRunSummaryDtoFromTaskProjection(run, List.of(), null)).getField());
     }
 
     @Test
@@ -1094,8 +1102,8 @@ class FuzzMapperTest {
         when(finding.getStateCount()).thenReturn(2);
         when(finding.getCreatedAt()).thenReturn(createdAt.plusNanos(1));
 
-        assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toRunSummaryDtoFromTaskProjection(run, List.of(finding)));
+        assertEquals("findings", assertThrows(PersistedDataIntegrityException.class,
+                () -> mapper.toRunSummaryDtoFromTaskProjection(run, List.of(finding), null)).getField());
     }
 
     @Test
@@ -1123,6 +1131,61 @@ class FuzzMapperTest {
                 () -> mapper.toRunSummaryDto(legacyRun, List.of()));
     }
 
+    private FuzzSpecificationPresentationProjection projectedPresentation() {
+        FuzzSpecificationPresentationProjection presentation = mock(FuzzSpecificationPresentationProjection.class);
+        when(presentation.getId()).thenReturn(90L);
+        when(presentation.getSpecificationsJson()).thenReturn(JsonUtils.toJson(List.of(supportedSpecification("spec-1"))));
+        when(presentation.getModelTokenSourcesJson()).thenReturn("{\"device-1\":\"UNKNOWN\"}");
+        return presentation;
+    }
+
+    @Test
+    void projectedSummaryCarriesFrozenConditionsAndTokenSourcesWithoutLoadingEvidence() {
+        FuzzTaskSummaryProjection run = projectedRun(1, 1L, 1, 10);
+        FuzzSpecificationPresentationProjection presentation = projectedPresentation();
+        SpecificationDto specification = supportedSpecification("spec-1");
+        specification.setTemplateId("3");
+        specification.setTemplateLabel("Never");
+        specification.getAConditions().get(0).setValue("heat");
+        when(presentation.getSpecificationsJson()).thenReturn(JsonUtils.toJson(List.of(specification)));
+        when(presentation.getModelTokenSourcesJson()).thenReturn("{\"device-1\":\"BUNDLED\"}");
+        LocalDateTime capturedAt = run.getCreatedAt();
+        when(run.getModelSnapshotJson()).thenReturn(JsonUtils.toJson(
+                fuzzSnapshot(capturedAt, 1, 0, 1, 0, 1)));
+        when(run.getOutcome()).thenReturn(FuzzOutcome.FOUND_VIOLATION);
+        when(run.getFindingCount()).thenReturn(1);
+        FuzzFindingSummaryProjection finding = mock(FuzzFindingSummaryProjection.class);
+        when(finding.getId()).thenReturn(31L);
+        when(finding.getUserId()).thenReturn(3L);
+        when(finding.getFuzzTaskId()).thenReturn(90L);
+        when(finding.getViolatedSpecId()).thenReturn("spec-1");
+        when(finding.getFirstViolationStep()).thenReturn(1);
+        when(finding.getSeed()).thenReturn(42L);
+        when(finding.getStateCount()).thenReturn(2);
+        LocalDateTime completedAt = run.getCompletedAt();
+        when(finding.getCreatedAt()).thenReturn(completedAt);
+        FuzzRunSummaryDto summary = mapper.toRunSummaryDtoFromTaskProjection(run, List.of(finding), presentation);
+        assertEquals(specification, summary.getFindings().get(0).getViolatedSpec());
+        assertEquals(specification, summary.getEligibleSpecifications().get("spec-1"));
+        assertEquals(Map.of("device-1", ModelTokenSource.BUNDLED), summary.getModelTokenSourcesByDeviceId());
+
+        when(presentation.getModelTokenSourcesJson()).thenReturn("{\"missing-device\":\"BUNDLED\"}");
+        assertThrows(PersistedDataIntegrityException.class,
+                () -> mapper.toRunSummaryDtoFromTaskProjection(run, List.of(finding), presentation));
+        when(presentation.getModelTokenSourcesJson()).thenReturn("{\"device-1\":\"INVENTED\"}");
+        assertThrows(PersistedDataIntegrityException.class,
+                () -> mapper.toRunSummaryDtoFromTaskProjection(run, List.of(finding), presentation));
+        when(presentation.getModelTokenSourcesJson()).thenReturn("{\"device-1\":\"BUNDLED\"}");
+
+        when(presentation.getId()).thenReturn(91L);
+        assertThrows(PersistedDataIntegrityException.class,
+                () -> mapper.toRunSummaryDtoFromTaskProjection(run, List.of(finding), presentation));
+        when(presentation.getId()).thenReturn(90L);
+        when(presentation.getSpecificationsJson()).thenReturn("[]");
+        assertThrows(PersistedDataIntegrityException.class,
+                () -> mapper.toRunSummaryDtoFromTaskProjection(run, List.of(finding), presentation));
+    }
+
     private FuzzTaskSummaryProjection projectedRun(
             int iterations, long generatedPaths, int populationSize, int maxIterations) {
         LocalDateTime createdAt = LocalDateTime.of(2026, 7, 15, 12, 0);
@@ -1148,7 +1211,7 @@ class FuzzMapperTest {
         when(run.getFindingCount()).thenReturn(0);
         when(run.getTargetSpecIdsJson()).thenReturn("[]");
         when(run.getModelSnapshotJson()).thenReturn(JsonUtils.toJson(
-                fuzzSnapshot(createdAt, 0, 0, 1, 0, 0)));
+                fuzzSnapshot(createdAt, 1, 0, 1, 0, 1)));
         when(run.getEligibilityJson()).thenReturn(JsonUtils.toJson(FuzzEligibilityDto.builder()
                 .eligibleSpecIds(List.of("spec-1"))
                 .eligibleSpecLabels(Map.of("spec-1", "Safety property"))

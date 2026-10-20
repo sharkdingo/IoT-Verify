@@ -68,6 +68,12 @@
 			<artifactId>openai-java</artifactId>
 			<version>${openai.version}</version>
 		</dependency>
+		<!-- The SDK already ships this transport at runtime; expose it to configure TLS setup cancellation. -->
+		<dependency>
+			<groupId>com.squareup.okhttp3</groupId>
+			<artifactId>okhttp</artifactId>
+			<version>4.12.0</version>
+		</dependency>
 
 		<dependency>
 			<groupId>com.fasterxml.jackson.core</groupId>
@@ -158,6 +164,8 @@
 				<groupId>org.springframework.boot</groupId>
 				<artifactId>spring-boot-maven-plugin</artifactId>
 				<configuration>
+					<!-- Keep normal tiered compilation and code-cache capacity for long-lived dev runs. -->
+					<optimizedLaunch>false</optimizedLaunch>
 					<excludes>
 						<exclude>
 							<groupId>org.projectlombok</groupId>

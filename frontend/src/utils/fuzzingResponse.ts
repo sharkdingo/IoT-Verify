@@ -20,6 +20,8 @@ import {
 import type { AsyncTaskStatus, TaskProgressStage } from '@/types/task'
 import { validateTraceStatePayload } from './traceStateResponse'
 import { isRunInitiator, type ModelPlaybackScene } from '@/types/model'
+import { MODEL_TOKEN_SOURCE_SET } from '@/types/modelToken'
+import { normalizeNuSmvDeviceName } from './modelRequest'
 import { validateModelPlaybackScene } from './playbackSceneResponse'
 
 export const FUZZ_RESPONSE_INCOMPLETE_CODE = 'FUZZ_RESPONSE_INCOMPLETE'
@@ -437,6 +439,43 @@ const validateRun = (
     )
   }
   const eligibility = validateEligibility(run.eligibility, context)
+  const specifications = record(run.eligibleSpecifications, `${context} eligibleSpecifications`)
+  const sources = record(run.modelTokenSourcesByDeviceId, `${context} modelTokenSourcesByDeviceId`)
+  if (Object.keys(specifications).length !== eligibility.eligibleSpecIds.length
+    || Object.keys(specifications).some(id => !eligibility.eligibleSpecIds.includes(id))) {
+    throw new FuzzResponseContractError(context, 'frozen specifications must match eligible IDs')
+  }
+  if (Object.keys(sources).length > 100 || Object.keys(sources).length !== run.modelSnapshot.deviceCount
+    || Object.entries(sources).some(([id, source]) => !id.trim() || id.length > 100 || !MODEL_TOKEN_SOURCE_SET.has(String(source)))) {
+    throw new FuzzResponseContractError(context, 'frozen model token sources must match the device count')
+  }
+  const deviceIds = new Set(Object.keys(sources).map(normalizeNuSmvDeviceName))
+  if (deviceIds.size !== Object.keys(sources).length) {
+    throw new FuzzResponseContractError(context, 'frozen model token source identities must be unique')
+  }
+  for (const [id, value] of Object.entries(specifications)) {
+    const spec = record(value, `${context} frozen specification`)
+    if (spec.id !== id || !['1', '3', '4'].includes(spec.templateId)) {
+      throw new FuzzResponseContractError(context, 'frozen specification identity or template is invalid')
+    }
+    for (const side of ['a', 'if', 'then']) {
+      const conditions = spec[`${side}Conditions`]
+      if (!Array.isArray(conditions) || conditions.length > 50
+        || (conditions.length > 0) !== (spec.templateId === '4' ? side !== 'a' : side === 'a')) {
+        throw new FuzzResponseContractError(context, 'frozen specification condition groups are invalid')
+      }
+      for (const item of conditions) {
+        const condition = record(item, `${context} frozen condition`)
+        if (!deviceIds.has(normalizeNuSmvDeviceName(text(condition.deviceId, 'deviceId', context)))) {
+          throw new FuzzResponseContractError(context, 'frozen condition must reference a captured device')
+        }
+        text(condition.targetType, 'targetType', context)
+        text(condition.key, 'key', context)
+        text(condition.relation, 'relation', context)
+        text(condition.value, 'value', context)
+      }
+    }
+  }
   const eligibleSpecIds = new Set(eligibility.eligibleSpecIds)
   if ((run.outcome === 'INCONCLUSIVE') !== (eligibleSpecIds.size === 0)) {
     throw new FuzzResponseContractError(

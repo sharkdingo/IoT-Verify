@@ -6,6 +6,7 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import lombok.Data;
 
@@ -14,8 +15,12 @@ import java.util.List;
 @Data
 public class DeviceNodeDto {
 
+    // Include the BOM that ECMAScript treats as whitespace when checking a portable identity.
+    public static final String ID_PATTERN = "(?U)[^\\s\\uFEFF](?:[\\s\\S]*[^\\s\\uFEFF])?";
+
     @NotBlank(message = "Node ID is required")
     @Size(max = 100, message = "Node ID must be at most 100 characters")
+    @Pattern(regexp = ID_PATTERN, message = "Node ID must not have leading or trailing whitespace")
     private String id;
 
     @NotBlank(message = "Template name is required")

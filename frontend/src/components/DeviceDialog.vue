@@ -1,12 +1,15 @@
 <script setup lang="ts">
-import {ref, watch, computed, nextTick} from 'vue'
+import FieldSelect from '@/components/common/FieldSelect.vue'
+import InfoTooltip from '@/components/common/InfoTooltip.vue'
+import {ref, watch, computed, nextTick, onUnmounted} from 'vue'
 import {useI18n} from 'vue-i18n'
 import { useModalAccessibility } from '@/composables/useModalAccessibility'
 
-import type {DeviceManifest, DeviceTemplate, InternalVariable} from '../types/device'
+import type {DeviceManifest, DeviceTemplate, DeviceTrigger, InternalVariable} from '../types/device'
 import type {DeviceNode} from '../types/node'
 import type {Specification} from '../types/spec'
-import { buildSpecFormula, specFormulaKindFromTemplate } from '@/utils/spec'
+import { buildSpecFormulaPreview } from '@/utils/spec'
+import { describeSpecification } from '@/utils/modelPresentation'
 import { verdictVariableSourceKeys } from '@/views/board/verdictVariableSource'
 import { resolveImpactEnvironmentDefinition } from '@/utils/device'
 import { specTemplateDetails } from '@/assets/config/specTemplates'
@@ -15,6 +18,9 @@ import { resolveEffectiveNodeState } from '@/utils/canvas/nodeState'
 import { confirmDestructive } from '@/utils/feedback'
 import { deviceIconFor } from '@/utils/deviceIcon'
 import { normalizeModelRelation } from '@/utils/modelRequest'
+import FailureDetails from '@/components/FailureDetails.vue'
+import type { ApiErrorDetails } from '@/utils/userMessage'
+import { useAuth } from '@/stores/auth'
 import {
   PRIVACY_OPTIONS,
   TRUST_OPTIONS,
@@ -36,7 +42,6 @@ import {
 const props = defineProps<{
   visible: boolean
   deviceName: string
-  description: string
   label: string
   nodeId?: string
   manifest?: DeviceManifest | null
@@ -52,10 +57,11 @@ const emit = defineEmits<{
   (e: 'update:visible', value: boolean): void
   (e: 'rename'): void
   (e: 'delete'): void
-  (e: 'save-runtime', nodeId: string, runtime: DeviceRuntimeConfig): void
+  (e: 'save-runtime', nodeId: string, runtime: DeviceRuntimeConfig, complete?: (saved: boolean, failure?: ApiErrorDetails) => void): void
 }>()
 
 const {t} = useI18n()
+const { getToken, isCurrentSessionToken } = useAuth()
 
 const innerVisible = ref(props.visible)
 
@@ -169,6 +175,15 @@ const runtimeSchemaIdentity = computed(() => {
 })
 
 const runtimeDraft = ref(createDeviceRuntimeDraft())
+const runtimeSaveFailure = ref<ApiErrorDetails | null>(null)
+let runtimeSaveEpoch = 0
+let runtimeEditorActive = true
+onUnmounted(() => { runtimeEditorActive = false })
+watch(() => [props.visible, props.nodeId, runtimeSchemaIdentity.value, getToken()], () => {
+  runtimeSaveEpoch += 1
+  runtimeSaveFailure.value = null
+})
+watch(runtimeDraft, () => { runtimeSaveFailure.value = null }, { deep: true })
 const runtimeDraftBaseline = ref(createDeviceRuntimeDraft())
 const runtimeDraftConflictFields = ref<string[]>([])
 const runtimeSchemaConflict = ref(false)
@@ -678,6 +693,10 @@ const saveRuntime = () => {
   if (!template || !node || !props.nodeId) return
   // Reported inline by `runtimeSaveBlockedReason`, which also disables the save button.
   if (runtimeSaveBlockedReason.value) return
+  runtimeSaveFailure.value = null
+  const epoch = ++runtimeSaveEpoch
+  const requestToken = getToken()
+  const submittedDraft = JSON.stringify(runtimeDraft.value)
 
   const runtime = buildDeviceRuntimeConfig(template, runtimeDraft.value, {
     includeEmptyCollections: true,
@@ -688,7 +707,11 @@ const saveRuntime = () => {
     submitted: canonicalizeRuntimeDraft(runtimeDraft.value),
     acknowledged: materializeSubmittedRuntimeDraft(template, runtime)
   }
-  emit('save-runtime', props.nodeId, runtime)
+  emit('save-runtime', props.nodeId, runtime, (saved, failure) => {
+    if (!runtimeEditorActive || !isDialogOpen.value || runtimeSaveEpoch !== epoch
+      || !isCurrentSessionToken(requestToken) || JSON.stringify(runtimeDraft.value) !== submittedDraft) return
+    if (!saved && failure) runtimeSaveFailure.value = failure
+  })
   void nextTick(() => {
     // The parent can reject the request before entering its saving state (for example when
     // playback locks mutations). Do not leave that non-request fencing later refreshes.
@@ -705,7 +728,7 @@ const basicInfo = computed(() => {
   return {
     name: m.Name,
     instanceName: props.label,
-    description: m.Description || props.description || t('app.null'),
+    description: m.Description?.trim() || '',
     initState: m.InitState,
     initStateLabel: modes.length > 0
       ? formatStateForDisplay(m.InitState, t('app.notSpecified'))
@@ -789,16 +812,11 @@ const states = computed(() => {
   return m.WorkingStates.map(s => ({
     name: s.Name,
     displayName: formatStateForDisplay(s.Name, t('app.null')),
-    description: s.Description,
+    description: s.Description?.trim() || '',
     trust: s.Trust,
     privacy: s.Privacy,
-    // A standing constraint, not an action: the generator emits a Dynamics `Value` as a branch of
-    // `next(<device>.<var>)` guarded by *being in this state* (`car_1.CarLocation=garage: garage;`), so it
-    // means "while this state holds, the variable holds that value". "Set to" read as a moment's action —
-    // what an API does — and made Car's `garage → set to garage` look like a redundant instruction rather
-    // than the reported-reading mirror it is. Own keys, not the pool's `environmentValueEffect`: there a
-    // device writes a scene-shared quantity, which is closer to an action.
-    //
+    // Dynamics uses the current state to choose the next variable value; it is not an invariant
+    // equating the variable with a state entered by a command in that same transition.
     // Blank, not `!== undefined`: the backend's XOR treats a blank `ChangeRate` as absent
     // (`DeviceTemplateDto.Dynamic.isValidDynamic`), so `""` must fall through to `Value`.
     effects: (s.Dynamics || []).map(dynamic => ({
@@ -809,6 +827,7 @@ const states = computed(() => {
     }))
   }))
 })
+const hasStateDescriptions = computed(() => states.value.some(state => state.description))
 
 // 4. API列表
 const apis = computed(() => {
@@ -817,12 +836,11 @@ const apis = computed(() => {
   return m.APIs.map(api => ({
     name: api.Name,
     displayName: formatDeviceModelToken(api.Name),
-    description: api.Description || '',
+    description: api.Description?.trim() || '',
     startState: api.StartState,
     endState: api.EndState,
     startStateLabel: formatStateForDisplay(api.StartState, t('app.anyState')),
     endStateLabel: formatStateForDisplay(api.EndState, t('app.noStateChange')),
-    trigger: formatTrigger(api.Trigger),
     signal: api.Signal || false,
     acceptsContent: api.AcceptsContent === true
   }))
@@ -831,7 +849,7 @@ const apis = computed(() => {
 /**
  * Declared contents, the data a rule can carry from this device.
  *
- * `RuleBuilderDialog` offers these as a rule's `contentDevice`/`content`, and the model gives each one a
+ * `RuleBuilder` offers these as a rule's `contentDevice`/`content`, and the model gives each one a
  * `privacy_<name>` label that propagates to the command target — but no surface in the product showed
  * which contents a device declares or how they are classified, so the sensitivity a rule inherits was
  * unreadable before running a verification. Only two bundled templates declare any (Mobile Phone's
@@ -843,10 +861,11 @@ const contents = computed(() => {
   return m.Contents.map(content => ({
     name: content.Name,
     displayName: formatDeviceModelToken(content.Name),
-    description: content.Description || '',
+    description: content.Description?.trim() || '',
     privacy: content.Privacy
   }))
 })
+const hasContentDescriptions = computed(() => contents.value.some(content => content.description))
 
 /**
  * Device-declared transitions, the one part of the state machine no rule drives.
@@ -880,9 +899,8 @@ const transitions = computed(() => {
 })
 
 // Trigger is an object { Attribute, Relation, Value }; render it as readable text.
-const formatTrigger = (trigger: any): string => {
-  if (!trigger) return t('app.userRole')
-  if (typeof trigger !== 'object') return t('app.userRole')
+const formatTrigger = (trigger?: DeviceTrigger | null): string => {
+  if (!trigger) return t('app.notAvailable')
   // Normalize first: the schema also admits `EQ`/`NEQ`/`GT`/`GTE`/`LT`/`LTE`/`==`, which
   // `SmvRelationUtils` folds to symbols server-side. Without this the map missed them and a template
   // written with `GTE` printed the raw token instead of "at least" — the same three-renderings-of-one-
@@ -905,28 +923,13 @@ const formatTrigger = (trigger: any): string => {
     : ''
   return trigger.Attribute
     ? `${formatDeviceModelToken(trigger.Attribute)}${value}`
-    : t('app.userRole')
+    : t('app.notAvailable')
 }
 
 // 获取设备图标
-/* `getDeviceIcon` moved to `utils/deviceIcon.ts`: RuleBuilderDialog had a near-identical copy that had
+/* `getDeviceIcon` moved to `utils/deviceIcon.ts`: RuleBuilder had a near-identical copy that had
    drifted in both directions. */
 const getDeviceIcon = (deviceName: string) => deviceIconFor(deviceName)
-
-/*
- * The template decides the logic; the NuSMV keyword prefix is only a fallback for a spec carrying no
- * template. This used to hardcode `templateId === '6'` locally, which was correct but was the second of
- * three copies of that rule — the third, in `ControlCenter`, had drifted into reading a prefix that the
- * formula builder never writes. `specFormulaKindFromTemplate` now owns it for both.
- */
-const getSpecFormulaKind = (spec: Specification, formula: string) => {
-  const fromTemplate = specFormulaKindFromTemplate(spec.templateId)
-  if (fromTemplate) return fromTemplate
-  const normalized = String(formula || '').trim().toUpperCase()
-  if (normalized.startsWith('LTLSPEC')) return 'LTL'
-  if (normalized.startsWith('CTLSPEC')) return 'CTL'
-  return t('app.modelFormulaKind')
-}
 
 // 获取设备相关的规约
 const deviceSpecs = computed(() => {
@@ -935,6 +938,16 @@ const deviceSpecs = computed(() => {
   }
 
   const currentDeviceId = props.nodeId // 使用正确的设备ID
+  const nodeContexts = new Map((props.nodes || []).map(node => [node.id, {
+    node, template: props.deviceTemplates?.find(template => template.name === node.templateName)
+  }]))
+  const presentationContext = {
+    t,
+    resolveDevice: (id: string) => nodeContexts.get(id)?.node,
+    formatToken: (id: string, value: unknown) => nodeContexts.get(id)?.template?.defaultTemplate === true
+      ? formatBuiltInModelToken(value, t) : String(value ?? ''),
+    modeCount: (id: string) => nodeContexts.get(id)?.template?.manifest.Modes?.length || 0
+  }
   
   // 检查条件中是否包含该设备
   const checkConditionsForDevice = (spec: Specification) => {
@@ -960,28 +973,7 @@ const deviceSpecs = computed(() => {
         ? t(template.labelKey)
         : spec.templateLabel || template?.label || t('app.unknown')
 
-      // 处理设备信息显示
-      let deviceInfo = ''
-      if (spec.devices && spec.devices.length > 0) {
-        const deviceLabels = spec.devices.map(d => d.deviceLabel || d.deviceId).join(', ')
-        deviceInfo = deviceLabels
-      } else {
-        const allConditions = [
-          ...(spec.aConditions || []),
-          ...(spec.ifConditions || []),
-          ...(spec.thenConditions || [])
-        ]
-        const deviceLabels = Array.from(new Set(
-          allConditions
-            .map(c => c.deviceLabel || c.deviceId)
-            .filter(Boolean)
-        ))
-        deviceInfo = deviceLabels.length > 0 ? deviceLabels.join(', ') : t('app.global')
-      }
-
-      const formula = buildSpecFormula(spec, {
-        nodes: props.nodes || []
-      })
+      const preview = buildSpecFormulaPreview(spec, { nodes: props.nodes || [] })
 
       return {
         id: spec.id,
@@ -990,9 +982,9 @@ const deviceSpecs = computed(() => {
         variableSourceLabels: verdictVariableSourceKeys(spec)
           .map(key => ({ key, label: t(key), unresolved: key === 'app.specVariableSourceUnresolvedShort' })),
         type: specType,
-        formula,
-        formulaKind: getSpecFormulaKind(spec, formula),
-        devices: deviceInfo
+        description: describeSpecification(spec, presentationContext),
+        formula: preview.expression,
+        formulaKind: preview.kind || t('app.modelFormulaKind')
       }
     })
 })
@@ -1011,7 +1003,7 @@ const deviceSpecs = computed(() => {
           <div
             :ref="setDialogRef"
             data-testid="device-dialog"
-            class="iot-dialog iot-dialog--md device-dialog-surface"
+            class="iot-dialog iot-dialog--md"
             role="dialog"
             aria-modal="true"
             aria-labelledby="device-dialog-title"
@@ -1045,79 +1037,70 @@ const deviceSpecs = computed(() => {
               <!-- Basic Info -->
               <section data-testid="device-dialog-basic">
                 <div class="flex items-start gap-2 mb-4">
-                  <div class="w-1 h-7 shrink-0 bg-primary rounded-full"></div>
+                  <div class="board-section-marker bg-primary"></div>
                   <div class="min-w-0">
-                    <h2 class="text-lg font-semibold text-slate-800">{{ t('app.deviceBasic') }}</h2>
-                    <p class="text-xs text-slate-500 mt-0.5">{{ t('app.deviceBasicHint') }}</p>
+                    <h2 class="board-section-title">{{ t('app.deviceBasic') }}</h2>
                   </div>
                 </div>
                 
                 <!-- 基本信息表格 -->
-                <div class="board-card board-card--raised overflow-hidden border border-slate-200 rounded-xl">
+                <div class="board-card board-card--raised overflow-hidden border board-border-subtle rounded-xl">
                   <table class="device-basic-table w-full table-fixed text-left border-collapse">
                     <thead>
-                      <tr class="bg-slate-50 border-b border-slate-200">
-                        <th class="px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider w-1/3">{{ t('app.property') }}</th>
-                        <th class="px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">{{ t('app.value') }}</th>
+                      <tr class="board-bg-muted border-b board-border-subtle">
+                        <th class="board-form-label px-4 py-3 w-1/3">{{ t('app.property') }}</th>
+                        <th class="board-form-label px-4 py-3">{{ t('app.value') }}</th>
                       </tr>
                     </thead>
-                    <tbody class="divide-y divide-slate-100">
+                    <tbody class="divide-y divide-[color:var(--border)]">
                       <!-- Template Name -->
                       <tr class="board-card--muted hover:transition-colors">
-                        <td class="px-4 py-3 text-xs font-medium text-slate-500 uppercase tracking-wider">{{ t('app.name') }}</td>
-                        <td class="device-basic-value break-words px-4 py-3 text-sm font-bold text-slate-800">{{ basicInfo.name || deviceName }}</td>
+                        <td class="board-form-label px-4 py-3">{{ t('app.deviceTemplateLabel') }}</td>
+                        <td class="device-basic-value break-words px-4 py-3 text-sm font-semibold board-text-strong">{{ basicInfo.name || deviceName }}</td>
                       </tr>
                       
                       <!-- Instance Name -->
                       <tr class="board-card--muted hover:transition-colors">
-                        <td class="px-4 py-3 text-xs font-medium text-slate-500 uppercase tracking-wider">{{ t('app.instanceName') }}</td>
-                        <td class="device-basic-value break-words px-4 py-3 text-sm font-medium text-slate-700">{{ basicInfo.instanceName || label }}</td>
+                        <td class="board-form-label px-4 py-3">{{ t('app.deviceName') }}</td>
+                        <td class="device-basic-value break-words px-4 py-3 text-sm font-medium board-text-strong">{{ basicInfo.instanceName || label }}</td>
                       </tr>
 
                       <!-- Modes -->
-                      <tr v-if="manifest" class="board-card--muted hover:transition-colors">
-                        <td class="px-4 py-3 text-xs font-medium text-slate-500 uppercase tracking-wider align-top">{{ t('app.modes') }}</td>
+                      <tr v-if="basicInfo.modes?.length" class="board-card--muted hover:transition-colors">
+                        <td class="board-form-label px-4 py-3 align-top">{{ t('app.modes') }}</td>
                         <td class="px-4 py-3">
                           <div class="flex flex-wrap gap-1.5">
-                            <template v-if="basicInfo.modes && basicInfo.modes.length">
-                              <span
-                                v-for="mode in basicInfo.modes"
-                                :key="mode"
-                                class="max-w-full break-all whitespace-normal px-2 py-0.5 bg-slate-100 text-slate-600 text-xs rounded-md font-medium border border-slate-200"
-                              >
-                                {{ formatDeviceModelToken(mode) }}
-                              </span>
-                            </template>
                             <span
-                              v-else
-                              class="px-2 py-0.5 bg-slate-100 text-slate-500 text-xs rounded-md font-medium border border-slate-200"
+                              v-for="mode in basicInfo.modes"
+                              :key="mode"
+                              class="max-w-full break-all whitespace-normal px-2 py-0.5 board-bg-control board-text-muted text-xs rounded-md font-medium border board-border-subtle"
                             >
-                              {{ t('app.noStateMachine') }}
+                              {{ formatDeviceModelToken(mode) }}
                             </span>
-                  </div>
+                          </div>
                         </td>
                       </tr>
 
                       <!-- Initial State -->
-                      <tr v-if="manifest" class="board-card--muted hover:transition-colors">
-                        <td class="px-4 py-3 text-xs font-medium text-slate-500 uppercase tracking-wider">{{ t('app.initState') }}</td>
+                      <tr v-if="states.length" class="board-card--muted hover:transition-colors">
+                        <td class="board-form-label px-4 py-3">{{ t('app.templateInitialState') }}</td>
                         <td class="px-4 py-3">
                           <div class="flex min-w-0 items-center gap-2">
                             <span class="h-2 w-2 shrink-0 rounded-full bg-[color:var(--success)] animate-pulse"></span>
-                    <span class="device-basic-value min-w-0 break-words text-sm font-medium text-slate-700" :title="basicInfo.initStateLabel">{{ basicInfo.initStateLabel }}</span>
+                    <span class="device-basic-value min-w-0 break-words text-sm font-medium board-text-strong" :title="basicInfo.initStateLabel">{{ basicInfo.initStateLabel }}</span>
                   </div>
                         </td>
                       </tr>
 
                       <!-- Description -->
-                      <tr v-if="manifest" class="board-card--muted hover:transition-colors">
-                        <td class="px-4 py-3 text-xs font-medium text-slate-500 uppercase tracking-wider align-top">{{ t('app.description') }}</td>
-                        <td class="device-basic-value break-words px-4 py-3 text-sm text-slate-600 leading-relaxed">{{ basicInfo.description || '-' }}</td>
+                      <tr v-if="basicInfo.description" class="board-card--muted hover:transition-colors">
+                        <td class="board-form-label px-4 py-3 align-top">{{ t('app.description') }}</td>
+                        <td class="device-basic-value break-words px-4 py-3 text-sm board-text-muted leading-relaxed">{{ basicInfo.description }}</td>
                       </tr>
 
                       <!-- Impacted Variables -->
                       <tr v-if="basicInfo.impactedVariables && basicInfo.impactedVariables.length" class="board-card--muted hover:transition-colors">
-                        <td class="px-4 py-3 text-xs font-medium text-slate-500 uppercase tracking-wider align-top">{{ t('app.impactedVariables') }}</td>
+                        <td class="board-form-label px-4 py-3 align-top">{{ t('app.impactedVariables') }}</td>
                         <td class="px-4 py-3">
                           <div class="flex flex-wrap gap-2">
                       <span v-for="variable in basicInfo.impactedVariables" :key="variable"
@@ -1130,52 +1113,61 @@ const deviceSpecs = computed(() => {
                     </tbody>
                   </table>
                 </div>
-                <details v-if="nodeId" class="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
-                  <summary class="cursor-pointer font-semibold text-slate-700">{{ t('app.technicalDetails') }}</summary>
+                <p v-if="manifest && states.length === 0" class="board-caption mt-3 board-text-muted" data-testid="device-dialog-stateless">
+                  {{ t('app.noStateMachineDetail') }}
+                </p>
+                <details v-if="nodeId" class="mt-3 rounded-lg border board-border-subtle board-bg-muted px-3 py-2 text-xs board-text-muted">
+                  <summary class="cursor-pointer font-semibold board-text-strong">{{ t('app.technicalDetails') }}</summary>
                   <div class="mt-2 grid gap-1 sm:grid-cols-[9rem_minmax(0,1fr)]">
-                    <span class="font-medium text-slate-500">{{ t('app.deviceTechnicalId') }}</span>
-                    <code class="board-card break-all rounded px-2 py-1 text-[11px] text-slate-700">{{ nodeId }}</code>
+                    <span class="font-medium board-text-muted">{{ t('app.deviceTechnicalId') }}</span>
+                    <code class="board-card break-all rounded px-2 py-1 text-xs board-text-strong">{{ nodeId }}</code>
                   </div>
                 </details>
               </section>
 
               <!-- Instance runtime overrides -->
               <section v-if="hasRuntimeFields" data-testid="device-instance-runtime">
-                <div class="flex items-center justify-between gap-3 mb-4">
-                  <div class="flex items-start gap-2 min-w-0">
-                    <div class="w-1 h-7 shrink-0 bg-[color:var(--accent)] rounded-full"></div>
-                    <div class="min-w-0">
-                      <h2 class="text-lg font-semibold text-slate-800">{{ t('app.instanceRuntime') }}</h2>
-                      <p class="text-xs text-slate-500 mt-0.5">{{ t('app.instanceRuntimeHint') }}</p>
+                <div class="device-runtime-header mb-4">
+                  <div class="flex flex-wrap items-center justify-between gap-3">
+                    <div class="flex items-start gap-2 min-w-0">
+                      <div class="board-section-marker bg-[color:var(--accent)]"></div>
+                      <div class="flex min-w-0 items-center gap-3">
+                        <h2 class="board-section-title">{{ t('app.instanceRuntime') }}</h2>
+                        <InfoTooltip :text="t('app.instanceRuntimeHint')" :label="t('app.showHelpFor', { topic: t('app.instanceRuntime') })" test-id="device-runtime-help" />
+                      </div>
                     </div>
+                    <button
+                      type="button"
+                      data-testid="device-runtime-save"
+                      @click="saveRuntime"
+                      :disabled="runtimeSaving || Boolean(runtimeSaveBlockedReason)"
+                      :aria-describedby="runtimeSaveBlockedReason && !hasRuntimeDraftConflict
+                        ? 'device-runtime-save-blocked-reason'
+                        : undefined"
+                      class="board-action-inline board-action-disarmed shrink-0"
+                    >
+                      <span v-if="runtimeSaving" class="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" aria-hidden="true"></span>
+                      <span v-else class="material-symbols-outlined text-sm" aria-hidden="true">save</span>
+                      {{ t('app.saveInstanceConfig') }}
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    data-testid="device-runtime-save"
-                    @click="saveRuntime"
-                    :disabled="runtimeSaving || Boolean(runtimeSaveBlockedReason)"
-                    :aria-describedby="runtimeSaveBlockedReason && !hasRuntimeDraftConflict
-                      ? 'device-runtime-save-blocked-reason'
-                      : undefined"
-                    class="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-lg bg-[color:var(--accent-fill)] px-4 py-2 text-xs font-bold text-white shadow-sm transition-all hover:bg-[color:var(--accent-fill-hover)] disabled:cursor-not-allowed disabled:board-chip-info"
+                  <!-- Validation reason. The schema/field conflict has its own richer panel
+                       below, so this only covers the remaining runtime validation failures. -->
+                  <p
+                    v-if="runtimeSaveBlockedReason && !hasRuntimeDraftConflict"
+                    id="device-runtime-save-blocked-reason"
+                    role="status"
+                    data-testid="device-runtime-blocked-reason"
+                    class="mt-1 board-caption board-text-danger"
                   >
-                    <span v-if="runtimeSaving" class="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" aria-hidden="true"></span>
-                    <span v-else class="material-symbols-outlined text-sm" aria-hidden="true">save</span>
-                    {{ t('app.saveInstanceConfig') }}
-                  </button>
+                    {{ runtimeSaveBlockedReason }}
+                  </p>
                 </div>
 
-                <!-- Validation reason. The schema/field conflict has its own richer panel
-                     below, so this only covers the remaining runtime validation failures. -->
-                <p
-                  v-if="runtimeSaveBlockedReason && !hasRuntimeDraftConflict"
-                  id="device-runtime-save-blocked-reason"
-                  role="status"
-                  data-testid="device-runtime-blocked-reason"
-                  class="mb-3 text-xs font-semibold leading-5 board-text-danger"
-                >
-                  {{ runtimeSaveBlockedReason }}
-                </p>
+                <div v-if="runtimeSaveFailure" data-testid="device-runtime-save-failure" role="alert" class="mb-3 text-sm">
+                  <p class="font-semibold board-text-danger">{{ t('app.instanceConfigSaveRejected') }}</p>
+                  <FailureDetails v-bind="runtimeSaveFailure" suggestion="" />
+                </div>
 
                 <div
                   v-if="hasRuntimeDraftConflict"
@@ -1196,7 +1188,7 @@ const deviceSpecs = computed(() => {
                     <button
                       type="button"
                       data-testid="device-runtime-adopt-latest"
-                      class="device-runtime-adopt-latest min-h-11 rounded-md bg-white px-3 py-1.5 text-xs font-semibold board-text-warning hover:board-chip-warning"
+                      class="device-runtime-adopt-latest min-h-11 rounded-md px-3 py-1.5 text-xs font-semibold"
                       @click="adoptLatestRuntimeDraft"
                     >
                       {{ t('app.deviceRuntimeUseLatest') }}
@@ -1204,7 +1196,7 @@ const deviceSpecs = computed(() => {
                     <button
                       type="button"
                       data-testid="device-runtime-keep-local"
-                      class="min-h-11 rounded-md bg-[color:var(--warning-fill)] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[color-mix(in_srgb,var(--warning)_84%,#000)]"
+                      class="min-h-11 rounded-md bg-[color:var(--warning-fill)] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[color:var(--warning-fill-hover)]"
                       @click="keepLocalRuntimeDraft"
                     >
                       {{ runtimeSchemaConflict
@@ -1217,16 +1209,15 @@ const deviceSpecs = computed(() => {
                 <div class="device-runtime-panel space-y-3 rounded-xl board-surface-info p-4">
                   <div v-if="runtimeHasModes" class="grid grid-cols-1 gap-3">
                     <label class="min-w-0">
-                      <span class="mb-1 block text-[length:var(--iot-font-min)] font-bold uppercase tracking-wide text-slate-500">{{ t('app.initialState') }}</span>
-                      <select
+                      <span class="board-form-label mb-1 block">{{ t('app.initialState') }}</span>
+                      <FieldSelect
                         v-model="runtimeDraft.state"
                         data-testid="device-runtime-state"
-                        class="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm focus:border-[color:var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-border)]"
                       >
                         <option v-for="state in runtimeWorkingStates" :key="state.Name" :value="state.Name">
                           {{ formatStateForDisplay(state.Name, state.Name) }}
                         </option>
-                      </select>
+                      </FieldSelect>
                     </label>
 
                   </div>
@@ -1235,23 +1226,23 @@ const deviceSpecs = computed(() => {
                     <div
                       v-for="variable in runtimeInternalVariables"
                       :key="variable.Name"
-                      class="board-card board-card--raised rounded-lg border border-slate-200 p-3"
+                      class="board-card board-card--raised rounded-lg border board-border-subtle p-3"
                     >
-                      <div class="mb-2 flex min-w-0 items-center justify-between gap-2">
-                        <div class="min-w-0">
-                          <span class="block truncate text-xs font-bold text-slate-700" :title="formatDeviceModelToken(variable.Name)">{{ formatDeviceModelToken(variable.Name) }}</span>
-                          <span class="text-[length:var(--iot-font-min)] font-semibold text-slate-500">
+                      <div class="mb-2 flex min-w-0 flex-wrap items-start justify-between gap-x-3 gap-y-1">
+                        <div class="min-w-0 max-w-full">
+                          <span class="block truncate text-xs font-semibold board-text-strong" :title="formatDeviceModelToken(variable.Name)">{{ formatDeviceModelToken(variable.Name) }}</span>
+                          <span class="text-xs font-semibold board-text-muted">
                             {{ variable.IsInside !== true ? t('app.environmentVariable') : t('app.internalVariable') }}
                           </span>
                         </div>
-                        <span v-if="templateVariableUsesNumericBounds(variable)" class="shrink-0 text-[length:var(--iot-font-min)] font-semibold text-slate-500">
+                        <span v-if="templateVariableUsesNumericBounds(variable)" class="max-w-full break-words text-xs font-semibold board-text-muted">
                           {{ variableInputPlaceholder(variable) }}
                         </span>
                       </div>
 
                       <div class="grid grid-cols-1 gap-2">
                         <label class="min-w-0">
-                          <span class="mb-1 block text-[length:var(--iot-font-min)] font-bold uppercase text-slate-500">{{ t('app.variableValue') }}</span>
+                          <span class="board-form-label mb-1 block">{{ t('app.variableValue') }}</span>
                           <!--
                             A variable every working state constrains is not an instance choice: the model
                             gives `next()` a branch per state and its hold-current fallback is unreachable,
@@ -1263,29 +1254,28 @@ const deviceSpecs = computed(() => {
                           <div
                             v-if="templateVariableIsStateDerived(currentTemplate, variable.Name)"
                             :data-testid="`device-runtime-variable-derived-${variable.Name}`"
-                            class="flex min-w-0 items-center gap-2 rounded-lg border border-dashed border-slate-200 bg-slate-50 px-3 py-2"
+                            class="flex min-w-0 items-center gap-2 rounded-lg border border-dashed board-border-subtle board-bg-muted px-3 py-2"
                           >
-                            <span class="min-w-0 break-words text-sm font-medium text-slate-700">
+                            <span class="min-w-0 break-words text-sm font-medium board-text-strong">
                               {{ formatDeviceModelToken(runtimeDraft.variables[variable.Name]) }}
                             </span>
-                            <span class="shrink-0 text-[length:var(--iot-font-min)] text-slate-500">
+                            <span class="shrink-0 text-xs board-text-muted">
                               {{ t('app.variableFollowsState') }}
                             </span>
                           </div>
-                          <select
+                          <FieldSelect
                             v-else-if="templateVariableHasEnumValues(variable)"
                             v-model="runtimeDraft.variables[variable.Name]"
                             :data-testid="`device-runtime-variable-${variable.Name}`"
-                            class="board-card w-full min-w-0 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700"
                           >
                             <option value="">{{ t('app.useTemplateDefaultWithValue', { value: formatDeviceModelToken(getTemplateVariableDefaultValue(variable, currentTemplate, runtimeDraft.state)) }) }}</option>
                             <option v-for="value in variable.Values" :key="value" :value="String(value)">{{ formatDeviceModelToken(value) }}</option>
-                          </select>
+                          </FieldSelect>
                           <input
                             v-else
                             v-model="runtimeDraft.variables[variable.Name]"
                             :data-testid="`device-runtime-variable-${variable.Name}`"
-                            class="board-card w-full min-w-0 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 placeholder:text-slate-400"
+                            class="board-field"
                             :placeholder="variableInputPlaceholder(variable)"
                             type="text"
                           />
@@ -1296,38 +1286,36 @@ const deviceSpecs = computed(() => {
                   </div>
 
                   <details class="device-runtime-security border-t board-border-subtle pt-3" data-testid="device-runtime-advanced-security">
-                    <summary class="flex cursor-pointer list-none items-center justify-between gap-3 text-xs font-bold board-text-info">
+                    <summary class="flex cursor-pointer list-none items-center justify-between gap-3 text-xs font-semibold board-text-info">
                       <span class="inline-flex items-center gap-2">
                         <span class="material-symbols-outlined text-base" aria-hidden="true">tune</span>
                         {{ t('app.advancedTrustPrivacyOverrides') }}
                       </span>
                       <span class="material-symbols-outlined text-base" aria-hidden="true">expand_more</span>
                     </summary>
-                    <p class="mt-2 text-[11px] leading-4 text-slate-500">{{ t('app.advancedTrustPrivacyOverridesHint') }}</p>
+                    <p class="board-caption mt-2 leading-4 board-text-muted">{{ t('app.advancedTrustPrivacyOverridesHint') }}</p>
 
                     <div v-if="runtimeHasModes" class="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
                       <label class="min-w-0">
-                        <span class="mb-1 block text-[length:var(--iot-font-min)] font-bold uppercase tracking-wide text-slate-500">{{ t('app.stateTrust') }}</span>
-                        <select
+                        <span class="board-form-label mb-1 block">{{ t('app.stateTrust') }}</span>
+                        <FieldSelect
                           v-model="runtimeDraft.currentStateTrust"
                           data-testid="device-runtime-state-trust"
-                          class="board-card w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700"
                         >
                           <option value="">{{ t('app.useTemplateDefaultWithValue', { value: t(`app.${runtimeStateTemplateDefaults.trust}`) }) }}</option>
                           <option v-for="trust in TRUST_OPTIONS" :key="trust" :value="trust">{{ t(`app.${trust}`) }}</option>
-                        </select>
+                        </FieldSelect>
                       </label>
 
                       <label class="min-w-0">
-                        <span class="mb-1 block text-[length:var(--iot-font-min)] font-bold uppercase tracking-wide text-slate-500">{{ t('app.statePrivacy') }}</span>
-                        <select
+                        <span class="board-form-label mb-1 block">{{ t('app.statePrivacy') }}</span>
+                        <FieldSelect
                           v-model="runtimeDraft.currentStatePrivacy"
                           data-testid="device-runtime-state-privacy"
-                          class="board-card w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700"
                         >
                           <option value="">{{ t('app.useTemplateDefaultWithValue', { value: t(`app.${runtimeStateTemplateDefaults.privacy}`) }) }}</option>
                           <option v-for="privacy in PRIVACY_OPTIONS" :key="privacy" :value="privacy">{{ t(`app.${privacy}`) }}</option>
-                        </select>
+                        </FieldSelect>
                       </label>
                     </div>
 
@@ -1335,30 +1323,28 @@ const deviceSpecs = computed(() => {
                       <div
                         v-for="variable in runtimeInternalVariables"
                         :key="`security-${variable.Name}`"
-                        class="grid grid-cols-1 gap-2 border-t border-slate-200 pt-2 sm:grid-cols-[minmax(0,1fr)_8rem_8rem]"
+                        class="grid grid-cols-1 gap-2 border-t board-border-subtle pt-2 sm:grid-cols-[minmax(0,1fr)_8rem_8rem]"
                       >
-                        <span class="self-center break-words text-xs font-semibold text-slate-600">{{ formatDeviceModelToken(variable.Name) }}</span>
+                        <span class="self-center break-words text-xs font-semibold board-text-muted">{{ formatDeviceModelToken(variable.Name) }}</span>
                         <label class="min-w-0">
-                          <span class="mb-1 block text-[length:var(--iot-font-min)] font-bold uppercase text-slate-500">{{ t('app.variableTrust') }}</span>
-                          <select
+                          <span class="board-form-label mb-1 block">{{ t('app.variableTrust') }}</span>
+                          <FieldSelect
                             v-model="runtimeDraft.variableTrusts[variable.Name]"
                             :data-testid="`device-runtime-variable-trust-${variable.Name}`"
-                            class="board-card w-full min-w-0 rounded-lg border border-slate-200 px-2 py-2 text-xs text-slate-700"
                           >
                             <option value="">{{ t('app.useTemplateDefaultWithValue', { value: t(`app.${variable.Trust}`) }) }}</option>
                             <option v-for="trust in TRUST_OPTIONS" :key="trust" :value="trust">{{ t(`app.${trust}`) }}</option>
-                          </select>
+                          </FieldSelect>
                         </label>
                         <label class="min-w-0">
-                          <span class="mb-1 block text-[length:var(--iot-font-min)] font-bold uppercase text-slate-500">{{ t('app.privacy') }}</span>
-                          <select
+                          <span class="board-form-label mb-1 block">{{ t('app.privacy') }}</span>
+                          <FieldSelect
                             v-model="runtimeDraft.privacies[variable.Name]"
                             :data-testid="`device-runtime-privacy-${variable.Name}`"
-                            class="board-card w-full min-w-0 rounded-lg border border-slate-200 px-2 py-2 text-xs text-slate-700"
                           >
                             <option value="">{{ t('app.useTemplateDefaultWithValue', { value: t(`app.${variable.Privacy}`) }) }}</option>
                             <option v-for="privacy in PRIVACY_OPTIONS" :key="privacy" :value="privacy">{{ t(`app.${privacy}`) }}</option>
-                          </select>
+                          </FieldSelect>
                         </label>
                       </div>
                     </div>
@@ -1369,37 +1355,37 @@ const deviceSpecs = computed(() => {
               <!-- Variables -->
               <section v-if="variables.length" data-testid="device-dialog-variables">
                 <div class="flex items-start gap-2 mb-4">
-                  <div class="w-1 h-7 shrink-0 bg-primary rounded-full"></div>
-                  <div class="min-w-0">
-                    <h2 class="text-lg font-semibold text-slate-800">{{ t('app.deviceVariables') }}</h2>
-                    <p class="text-xs text-slate-500 mt-0.5">{{ t('app.deviceVariablesHint') }}</p>
+                  <div class="board-section-marker bg-primary"></div>
+                  <div class="flex min-w-0 items-center gap-3">
+                    <h2 class="board-section-title">{{ t('app.deviceVariables') }}</h2>
+                    <InfoTooltip :text="t('app.deviceVariablesHint')" :label="t('app.showHelpFor', { topic: t('app.deviceVariables') })" test-id="device-variables-help" />
                   </div>
                 </div>
-                <div class="iot-scroll-region-x border border-slate-200 rounded-xl shadow-sm">
-                  <table class="w-full text-left border-collapse">
+                <div class="iot-scroll-region-x border board-border-subtle rounded-xl shadow-sm">
+                  <table class="w-full min-w-[40rem] text-left border-collapse">
                     <thead>
-                      <tr class="bg-gradient-to-r from-slate-50 to-slate-100 border-b border-slate-200">
-                        <th class="px-4 py-3 text-xs font-bold text-slate-600 uppercase tracking-wider">{{ t('app.name') }}</th>
-                        <th class="px-4 py-3 text-xs font-bold text-slate-600 uppercase tracking-wider">{{ t('app.range') }}</th>
-                        <th class="px-4 py-3 text-xs font-bold text-slate-600 uppercase tracking-wider">{{ t('app.trust') }}</th>
-                        <th class="px-4 py-3 text-xs font-bold text-slate-600 uppercase tracking-wider">{{ t('app.privacy') }}</th>
-                        <th class="px-4 py-3 text-xs font-bold text-slate-600 uppercase tracking-wider">{{ t('app.compromiseBehavior') }}</th>
-                        <th class="px-4 py-3 text-xs font-bold text-slate-600 uppercase tracking-wider">{{ t('app.type') }}</th>
+                      <tr class="board-bg-muted border-b board-border-subtle">
+                        <th class="board-form-label min-w-24 px-4 py-3">{{ t('app.name') }}</th>
+                        <th class="board-form-label px-4 py-3">{{ t('app.range') }}</th>
+                        <th class="board-form-label px-4 py-3">{{ t('app.trust') }}</th>
+                        <th class="board-form-label px-4 py-3">{{ t('app.privacy') }}</th>
+                        <th class="board-form-label px-4 py-3">{{ t('app.compromiseBehavior') }}</th>
+                        <th class="board-form-label px-4 py-3">{{ t('app.type') }}</th>
                       </tr>
                     </thead>
-                    <tbody class="board-card divide-y divide-slate-100">
+                    <tbody class="board-card divide-y divide-[color:var(--border)]">
                       <tr v-for="(v, idx) in variables" :key="idx" class="hover:board-chip-info transition-colors">
-                        <td class="px-4 py-3 text-sm font-medium text-slate-700" :title="v.displayName">{{ v.displayName }}</td>
-                        <td class="px-4 py-3 text-sm text-slate-600 font-mono" :title="v.range || '-'">{{ v.range || '-' }}</td>
-                        <td class="px-4 py-3 text-sm text-slate-600">
+                        <td class="px-4 py-3 text-sm font-medium board-text-strong" :title="v.displayName">{{ v.displayName }}</td>
+                        <td class="px-4 py-3 text-sm board-text-muted font-mono" :title="v.range || '-'">{{ v.range || '-' }}</td>
+                        <td class="px-4 py-3 text-sm board-text-muted">
                           <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
                             :class="v.trust === 'trusted' ? 'board-chip-success board-text-success' :
                                     v.trust === 'untrusted' ? 'board-chip-danger board-text-danger' :
-                                    'bg-slate-100 text-slate-600'">
+                                    'board-bg-control board-text-muted'">
                             {{ v.trust ? t(`app.${v.trust}`) : '-' }}
                           </span>
                         </td>
-                        <td class="px-4 py-3 text-sm text-slate-600">
+                        <td class="px-4 py-3 text-sm board-text-muted">
                           <!-- One privacy vocabulary for the whole dialog, and `info` rather than
                                `warning`: a privacy label is a classification, not a hazard. The amber was
                                tried and rejected in `SimulationTimeline` ("Provenance, not a hazard"), where
@@ -1412,7 +1398,7 @@ const deviceSpecs = computed(() => {
                             {{ v.privacy ? t(`app.${v.privacy}`) : '-' }}
                           </span>
                         </td>
-                        <td class="px-4 py-3 text-sm text-slate-600" :data-testid="`device-dialog-variable-falsifiable-${v.name}`">
+                        <td class="px-4 py-3 text-sm board-text-muted" :data-testid="`device-dialog-variable-falsifiable-${v.name}`">
                           <!-- Both branches speak about a *reading*, so neither is honest for an affect-only
                                declaration: the value-falsification branch in `SmvMainModuleBuilder` requires
                                `Reads !== false`, so the flag cannot move a value this device never reports.
@@ -1471,48 +1457,43 @@ const deviceSpecs = computed(() => {
               </section>
 
               <!-- States -->
-              <section v-if="manifest" data-testid="device-dialog-states">
+              <section v-if="states.length" data-testid="device-dialog-states">
                 <div class="flex items-start gap-2 mb-4">
-                  <div class="w-1 h-7 shrink-0 bg-primary rounded-full"></div>
-                  <div class="min-w-0">
-                    <h2 class="text-lg font-semibold text-slate-800">{{ t('app.deviceStates') }}</h2>
-                    <p class="text-xs text-slate-500 mt-0.5">{{ t('app.deviceStatesHint') }}</p>
+                  <div class="board-section-marker bg-primary"></div>
+                  <div class="flex min-w-0 items-center gap-3">
+                    <h2 class="board-section-title">{{ t('app.deviceStates') }}</h2>
+                    <InfoTooltip :text="t('app.deviceStatesHint')" :label="t('app.showHelpFor', { topic: t('app.deviceStates') })" test-id="device-states-help" />
                   </div>
                 </div>
-                <div class="iot-scroll-region-x border border-slate-200 rounded-xl shadow-sm">
+                <div class="iot-scroll-region-x border board-border-subtle rounded-xl shadow-sm">
                   <table class="w-full text-left border-collapse">
                     <thead>
-                      <tr class="bg-gradient-to-r from-slate-50 to-slate-100 border-b border-slate-200">
-                        <th class="px-4 py-3 text-xs font-bold text-slate-600 uppercase tracking-wider">{{ t('app.name') }}</th>
-                        <th class="px-4 py-3 text-xs font-bold text-slate-600 uppercase tracking-wider">{{ t('app.description') }}</th>
-                        <th class="px-4 py-3 text-xs font-bold text-slate-600 uppercase tracking-wider">{{ t('app.trust') }}</th>
-                        <th class="px-4 py-3 text-xs font-bold text-slate-600 uppercase tracking-wider">{{ t('app.privacy') }}</th>
-                        <th class="px-4 py-3 text-xs font-bold text-slate-600 uppercase tracking-wider">{{ t('app.stateVariableHold') }}</th>
+                      <tr class="board-bg-muted border-b board-border-subtle">
+                        <th class="board-form-label px-4 py-3">{{ t('app.name') }}</th>
+                        <th v-if="hasStateDescriptions" class="board-form-label px-4 py-3">{{ t('app.description') }}</th>
+                        <th class="board-form-label px-4 py-3">{{ t('app.trust') }}</th>
+                        <th class="board-form-label px-4 py-3">{{ t('app.privacy') }}</th>
+                        <th class="board-form-label px-4 py-3">{{ t('app.stateVariableHold') }}</th>
                       </tr>
                     </thead>
-                    <tbody class="board-card divide-y divide-slate-100">
-                      <tr v-if="states.length === 0">
-                        <td class="px-4 py-8 text-center text-slate-500 text-sm italic" colspan="5">
-                          {{ t('app.noData') }}
-                        </td>
-                      </tr>
+                    <tbody class="board-card divide-y divide-[color:var(--border)]">
                       <tr v-for="(s, idx) in states" :key="idx" class="hover:board-chip-info transition-colors">
-                        <td class="px-4 py-3 text-sm font-medium text-slate-700" :title="s.displayName">{{ s.displayName }}</td>
-                        <td class="px-4 py-3 text-sm text-slate-600">{{ s.description || '-' }}</td>
-                        <td class="px-4 py-3 text-sm text-slate-600">
+                        <td class="px-4 py-3 text-sm font-medium board-text-strong" :title="s.displayName">{{ s.displayName }}</td>
+                        <td v-if="hasStateDescriptions" class="px-4 py-3 text-sm board-text-muted">{{ s.description || '—' }}</td>
+                        <td class="px-4 py-3 text-sm board-text-muted">
                           <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
                             :class="s.trust === 'trusted' ? 'board-chip-success board-text-success' : 'board-chip-danger board-text-danger'">
                             {{ t(`app.${s.trust}`) }}
                           </span>
                         </td>
-                        <td class="px-4 py-3 text-sm text-slate-600">
+                        <td class="px-4 py-3 text-sm board-text-muted">
                           <!-- Same vocabulary as the variables table above. -->
                           <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
                             :class="s.privacy === 'private' ? 'board-chip-info board-text-info' : 'board-chip-neutral'">
                             {{ t(`app.${s.privacy}`) }}
                           </span>
                         </td>
-                        <td class="px-4 py-3 text-sm text-slate-600" :data-testid="`device-dialog-state-effects-${s.name}`">
+                        <td class="px-4 py-3 text-sm board-text-muted" :data-testid="`device-dialog-state-effects-${s.name}`">
                           <span v-if="s.effects.length === 0">-</span>
                           <span v-else class="flex flex-col gap-0.5">
                             <span v-for="(effect, effectIdx) in s.effects" :key="effectIdx" class="break-words">
@@ -1529,35 +1510,35 @@ const deviceSpecs = computed(() => {
               <!-- Transitions Section: the device-driven half of the state machine -->
               <section v-if="transitions.length > 0" data-testid="device-dialog-transitions" class="min-w-0">
                 <div class="flex items-start gap-2 mb-4">
-                  <div class="w-1 h-7 shrink-0 bg-primary rounded-full"></div>
-                  <div class="min-w-0">
-                    <h2 class="text-lg font-semibold text-slate-800">{{ t('app.deviceTransitions') }}</h2>
-                    <p class="text-xs text-slate-500 mt-0.5">{{ t('app.deviceTransitionsHint') }}</p>
+                  <div class="board-section-marker bg-primary"></div>
+                  <div class="flex min-w-0 items-center gap-3">
+                    <h2 class="board-section-title">{{ t('app.deviceTransitions') }}</h2>
+                    <InfoTooltip :text="t('app.deviceTransitionsHint')" :label="t('app.showHelpFor', { topic: t('app.deviceTransitions') })" test-id="device-transitions-help" />
                   </div>
                 </div>
-                <div class="iot-scroll-region-x border border-slate-200 rounded-xl shadow-sm">
+                <div class="iot-scroll-region-x border board-border-subtle rounded-xl shadow-sm">
                   <table class="w-full text-left border-collapse">
                     <thead>
-                      <tr class="bg-gradient-to-r from-slate-50 to-slate-100 border-b border-slate-200">
-                        <th class="px-4 py-3 text-xs font-bold text-slate-600 uppercase tracking-wider">{{ t('app.name') }}</th>
-                        <th class="px-4 py-3 text-xs font-bold text-slate-600 uppercase tracking-wider">{{ t('app.startState') }}</th>
-                        <th class="px-4 py-3 text-xs font-bold text-slate-600 uppercase tracking-wider">{{ t('app.endState') }}</th>
-                        <th class="px-4 py-3 text-xs font-bold text-slate-600 uppercase tracking-wider">{{ t('app.trigger') }}</th>
-                        <th class="px-4 py-3 text-xs font-bold text-slate-600 uppercase tracking-wider">{{ t('app.transitionEffect') }}</th>
+                      <tr class="board-bg-muted border-b board-border-subtle">
+                        <th class="board-form-label px-4 py-3">{{ t('app.name') }}</th>
+                        <th class="board-form-label px-4 py-3">{{ t('app.startState') }}</th>
+                        <th class="board-form-label px-4 py-3">{{ t('app.endState') }}</th>
+                        <th class="board-form-label px-4 py-3">{{ t('app.trigger') }}</th>
+                        <th class="board-form-label px-4 py-3">{{ t('app.transitionEffect') }}</th>
                       </tr>
                     </thead>
-                    <tbody class="board-card divide-y divide-slate-100">
+                    <tbody class="board-card divide-y divide-[color:var(--border)]">
                       <tr
                         v-for="(tr, idx) in transitions"
                         :key="idx"
                         :data-testid="`device-dialog-transition-${tr.name}`"
                         class="hover:board-chip-info transition-colors"
                       >
-                        <td class="px-4 py-3 text-sm font-medium text-slate-700" :title="tr.displayName">{{ tr.displayName }}</td>
-                        <td class="px-4 py-3 text-sm text-slate-600">{{ tr.startStateLabel }}</td>
-                        <td class="px-4 py-3 text-sm text-slate-600">{{ tr.endStateLabel }}</td>
-                        <td class="px-4 py-3 text-sm text-slate-600">{{ tr.trigger }}</td>
-                        <td class="px-4 py-3 text-sm text-slate-600">{{ tr.effect || '-' }}</td>
+                        <td class="px-4 py-3 text-sm font-medium board-text-strong" :title="tr.displayName">{{ tr.displayName }}</td>
+                        <td class="px-4 py-3 text-sm board-text-muted">{{ tr.startStateLabel }}</td>
+                        <td class="px-4 py-3 text-sm board-text-muted">{{ tr.endStateLabel }}</td>
+                        <td class="px-4 py-3 text-sm board-text-muted">{{ tr.trigger }}</td>
+                        <td class="px-4 py-3 text-sm board-text-muted">{{ tr.effect || '-' }}</td>
                       </tr>
                     </tbody>
                   </table>
@@ -1567,49 +1548,47 @@ const deviceSpecs = computed(() => {
               <!-- APIs Section -->
               <section v-if="apis.length > 0" data-testid="device-dialog-apis" class="min-w-0">
                 <div class="flex items-start gap-2 mb-4">
-                  <div class="w-1 h-7 shrink-0 bg-[color:var(--success)] rounded-full"></div>
-                  <div class="min-w-0">
-                    <h2 class="text-lg font-semibold text-slate-800">{{ t('app.deviceApis') }}</h2>
-                    <p class="text-xs text-slate-500 mt-0.5">{{ t('app.deviceApisHint') }}</p>
+                  <div class="board-section-marker bg-[color:var(--success)]"></div>
+                  <div class="flex min-w-0 items-center gap-3">
+                    <h2 class="board-section-title">{{ t('app.deviceApis') }}</h2>
+                    <InfoTooltip :text="t('app.deviceApisHint')" :label="t('app.showHelpFor', { topic: t('app.deviceApis') })" test-id="device-apis-help" />
                   </div>
                 </div>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div
                     v-for="(api, idx) in apis"
                     :key="idx"
-                    class="device-api-card min-w-0 bg-white border border-slate-200 rounded-xl p-4 hover:shadow-md transition-all hover:board-border-subtle group"
+                    class="device-api-card min-w-0 board-bg-elevated border board-border-subtle rounded-xl p-4 hover:shadow-md transition-all hover:board-border-subtle group"
                   >
                     <div class="flex min-w-0 flex-wrap items-start justify-between gap-2 mb-3">
                       <div class="flex min-w-0 items-center gap-2">
                         <div class="w-8 h-8 board-chip-success rounded-lg flex items-center justify-center group-hover:transition-colors">
                         <span class="material-icons-round board-text-success text-lg">api</span>
                         </div>
-                        <span class="min-w-0 break-words text-sm font-bold text-slate-800" :title="api.displayName">{{ api.displayName }}</span>
+                        <span class="min-w-0 break-words text-sm font-semibold board-text-strong" :title="api.displayName">{{ api.displayName }}</span>
                       </div>
                       <div class="flex flex-wrap justify-end gap-1">
-                        <span v-if="api.signal" class="text-[length:var(--iot-font-min)] px-1.5 py-0.5 board-surface-warning board-text-warning rounded font-medium">
+                        <span v-if="api.signal" class="board-badge px-1.5 py-0.5 board-surface-warning board-text-warning rounded">
                           {{ t('app.signal') }}
                         </span>
-                        <span v-if="api.acceptsContent" class="text-[length:var(--iot-font-min)] px-1.5 py-0.5 board-surface-info board-text-info rounded font-medium">
+                        <span v-if="api.acceptsContent" class="board-badge px-1.5 py-0.5 board-surface-info board-text-info rounded">
                           {{ t('app.acceptsContentSensitivity') }}
                         </span>
                       </div>
                     </div>
-                    <p v-if="api.description" class="text-xs text-slate-600 mb-4 line-clamp-2">
+                    <p v-if="api.description" class="text-xs board-text-muted mb-4 line-clamp-2">
                       {{ api.description }}
                     </p>
-                    <div class="device-api-transition flex min-w-0 flex-wrap items-center gap-2 text-xs bg-slate-50 p-2 rounded-lg border border-slate-100">
-                      <div class="flex items-center gap-1 text-slate-500 min-w-0">
+                    <div class="device-api-transition flex min-w-0 flex-wrap items-center gap-2 text-xs board-bg-muted p-2 rounded-lg border board-border-subtle">
+                      <div class="flex items-center gap-1 board-text-muted min-w-0">
                         <span class="material-icons-round text-sm font-bold">play_arrow</span>
-                        <span class="font-medium text-slate-700 truncate max-w-[10rem]" :title="api.startStateLabel">{{ api.startStateLabel }}</span>
+                        <span class="font-medium board-text-strong truncate max-w-[10rem]" :title="api.startStateLabel">{{ api.startStateLabel }}</span>
                       </div>
-                      <span class="text-slate-500 shrink-0">→</span>
-                      <div class="flex items-center gap-1 text-slate-500 min-w-0">
+                      <span class="board-text-muted shrink-0">→</span>
+                      <div class="flex items-center gap-1 board-text-muted min-w-0">
                         <span class="material-icons-round text-sm font-bold">stop</span>
-                        <span class="font-medium text-slate-700 truncate max-w-[12rem]" :title="api.endStateLabel">{{ api.endStateLabel }}</span>
+                        <span class="font-medium board-text-strong truncate max-w-[12rem]" :title="api.endStateLabel">{{ api.endStateLabel }}</span>
                       </div>
-                      <div class="flex-1"></div>
-                      <span class="min-w-0 break-all text-[length:var(--iot-font-min)] font-semibold uppercase text-slate-500">{{ t('app.trigger') }}: {{ api.trigger }}</span>
                     </div>
                   </div>
                 </div>
@@ -1618,31 +1597,31 @@ const deviceSpecs = computed(() => {
               <!-- Contents Section: the data a rule can carry from this device -->
               <section v-if="contents.length > 0" data-testid="device-dialog-contents" class="min-w-0">
                 <div class="flex items-start gap-2 mb-4">
-                  <div class="w-1 h-7 shrink-0 bg-[color:var(--success)] rounded-full"></div>
-                  <div class="min-w-0">
-                    <h2 class="text-lg font-semibold text-slate-800">{{ t('app.deviceContents') }}</h2>
-                    <p class="text-xs text-slate-500 mt-0.5">{{ t('app.deviceContentsHint') }}</p>
+                  <div class="board-section-marker bg-[color:var(--success)]"></div>
+                  <div class="flex min-w-0 items-center gap-3">
+                    <h2 class="board-section-title">{{ t('app.deviceContents') }}</h2>
+                    <InfoTooltip :text="t('app.deviceContentsHint')" :label="t('app.showHelpFor', { topic: t('app.deviceContents') })" test-id="device-contents-help" />
                   </div>
                 </div>
-                <div class="iot-scroll-region-x border border-slate-200 rounded-xl shadow-sm">
+                <div class="iot-scroll-region-x border board-border-subtle rounded-xl shadow-sm">
                   <table class="w-full text-left border-collapse">
                     <thead>
-                      <tr class="bg-gradient-to-r from-slate-50 to-slate-100 border-b border-slate-200">
-                        <th class="px-4 py-3 text-xs font-bold text-slate-600 uppercase tracking-wider">{{ t('app.name') }}</th>
-                        <th class="px-4 py-3 text-xs font-bold text-slate-600 uppercase tracking-wider">{{ t('app.description') }}</th>
-                        <th class="px-4 py-3 text-xs font-bold text-slate-600 uppercase tracking-wider">{{ t('app.privacy') }}</th>
+                      <tr class="board-bg-muted border-b board-border-subtle">
+                        <th class="board-form-label px-4 py-3">{{ t('app.name') }}</th>
+                        <th v-if="hasContentDescriptions" class="board-form-label px-4 py-3">{{ t('app.description') }}</th>
+                        <th class="board-form-label px-4 py-3">{{ t('app.privacy') }}</th>
                       </tr>
                     </thead>
-                    <tbody class="board-card divide-y divide-slate-100">
+                    <tbody class="board-card divide-y divide-[color:var(--border)]">
                       <tr
                         v-for="(content, idx) in contents"
                         :key="idx"
                         :data-testid="`device-dialog-content-${content.name}`"
                         class="hover:board-chip-info transition-colors"
                       >
-                        <td class="px-4 py-3 text-sm font-medium text-slate-700" :title="content.displayName">{{ content.displayName }}</td>
-                        <td class="px-4 py-3 text-sm text-slate-600">{{ content.description || '-' }}</td>
-                        <td class="px-4 py-3 text-sm text-slate-600">
+                        <td class="px-4 py-3 text-sm font-medium board-text-strong" :title="content.displayName">{{ content.displayName }}</td>
+                        <td v-if="hasContentDescriptions" class="px-4 py-3 text-sm board-text-muted">{{ content.description || '—' }}</td>
+                        <td class="px-4 py-3 text-sm board-text-muted">
                           <!-- Same privacy vocabulary as the variables and states tables. -->
                           <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
                             :class="content.privacy === 'private' ? 'board-chip-info board-text-info' : 'board-chip-neutral'">
@@ -1658,21 +1637,22 @@ const deviceSpecs = computed(() => {
               <!-- Specifications Section -->
               <section v-if="manifest && deviceSpecs.length > 0" data-testid="device-dialog-specs" class="min-w-0">
                 <div class="flex items-start gap-2 mb-4">
-                  <div class="w-1 h-7 shrink-0 bg-[color:var(--danger)] rounded-full"></div>
-                  <div class="min-w-0">
-                    <h2 class="text-lg font-semibold text-slate-800">{{ t('app.specifications') }}</h2>
-                    <p class="text-xs text-slate-500 mt-0.5">{{ t('app.deviceSpecsHint') }}</p>
+                  <div class="board-section-marker bg-[color:var(--danger)]"></div>
+                  <div class="flex min-w-0 items-center gap-3">
+                    <h2 class="board-section-title">{{ t('app.specifications') }}</h2>
+                    <InfoTooltip :text="t('app.deviceSpecsHint')" :label="t('app.showHelpFor', { topic: t('app.specifications') })" test-id="device-specs-help" />
                   </div>
                 </div>
-                  <div v-if="deviceSpecs.length === 0" class="bg-slate-50 border border-slate-200 rounded-xl p-8 text-center">
-                  <span class="material-icons-round text-slate-500 text-4xl mb-2 block">verified</span>
-                    <p class="text-sm text-slate-500">{{ t('app.noSpecs') }}</p>
+                  <div v-if="deviceSpecs.length === 0" class="board-bg-muted border board-border-subtle rounded-xl p-8 text-center">
+                  <span class="material-icons-round board-text-muted text-4xl mb-2 block">verified</span>
+                    <p class="text-sm board-text-muted">{{ t('app.noSpecs') }}</p>
                 </div>
                 <div v-else class="space-y-3">
                   <div
                     v-for="spec in deviceSpecs"
                     :key="spec.id"
-                    class="device-spec-card min-w-0 bg-white border border-slate-200 rounded-xl p-4 transition-all hover:shadow-md hover:border-[color:var(--danger)]"
+                    :data-spec-id="spec.id"
+                    class="device-spec-card min-w-0 board-bg-elevated border board-border-subtle rounded-xl p-4 transition-all hover:shadow-md hover:border-[color:var(--danger)]"
                   >
                     <div class="flex items-start justify-between mb-3">
                       <div class="flex min-w-0 flex-1 items-center gap-2">
@@ -1680,38 +1660,36 @@ const deviceSpecs = computed(() => {
                           <span class="material-icons-round board-text-danger text-lg">verified</span>
                         </div>
                         <div class="flex-1 min-w-0">
-                          <span class="text-sm font-bold block truncate text-slate-800">{{ spec.type }}</span>
-                          <span class="text-xs text-slate-500 mt-0.5 block truncate">
-                            <span class="font-medium text-slate-500">{{ t('app.target') }}:</span> {{ spec.devices }}
-                          </span>
+                          <span class="text-sm font-semibold block break-words board-text-strong">{{ spec.type }}</span>
                         </div>
                       </div>
                     </div>
-                    <div class="bg-slate-50 rounded-lg p-3 border border-slate-100">
-                      <div class="mb-1 flex items-center gap-2">
-                        <p class="text-[11px] text-slate-500 uppercase font-bold tracking-wider">{{ t('app.formulaPreview') }}</p>
-                        <span class="board-card rounded px-1.5 py-0.5 text-[length:var(--iot-font-min)] font-bold text-slate-600">{{ spec.formulaKind }}</span>
-                      </div>
-                      <div class="text-xs text-slate-700 leading-relaxed font-mono break-all">
-                      {{ spec.formula }}
-                      </div>
+                    <div class="board-bg-muted rounded-lg p-3 border board-border-subtle">
+                      <p class="board-copy break-words board-text-strong" data-testid="device-dialog-spec-description">{{ spec.description }}</p>
                       <div v-if="spec.variableSourceLabels.length" class="mt-1 flex flex-wrap gap-1">
                         <!-- An unresolved reading blocks the run; do not render it as a neutral fact. -->
                         <span
                           v-for="entry in spec.variableSourceLabels"
                           :key="entry.key"
-                          class="rounded border px-1.5 py-0.5 text-[length:var(--iot-font-min)] font-semibold"
+                          class="rounded border px-1.5 py-0.5 text-xs font-semibold"
                           :class="entry.unresolved
                             ? 'board-chip-danger board-text-danger border-[color:var(--danger-border)]'
-                            : 'border-slate-200 bg-slate-100 text-slate-600'"
+                            : 'board-border-subtle board-bg-control board-text-muted'"
                           data-testid="device-dialog-spec-variable-source"
                         >{{ entry.label }}</span>
                       </div>
-                      <details class="mt-2 text-[11px] text-slate-500">
+                      <details data-testid="device-dialog-spec-formula-details" class="mt-2 text-xs board-text-muted">
+                        <summary class="cursor-pointer py-3">
+                          <span class="board-form-label">{{ t('app.formulaPreview') }}</span>
+                          <span class="board-card ml-2 rounded px-1.5 py-0.5 text-xs font-semibold board-text-muted">{{ spec.formulaKind }}</span>
+                        </summary>
+                        <p class="break-all font-mono board-text-strong" data-testid="device-dialog-spec-formula">{{ spec.formula }}</p>
+                      </details>
+                      <details class="mt-2 text-xs board-text-muted">
                         <summary class="cursor-pointer font-semibold">{{ t('app.technicalDetails') }}</summary>
                         <div class="mt-1 grid gap-1 sm:grid-cols-[9rem_minmax(0,1fr)]">
                           <span class="font-medium">{{ t('app.specificationTechnicalId') }}</span>
-                          <code class="board-card break-all rounded px-2 py-1 text-[11px] text-slate-700">{{ spec.id }}</code>
+                          <code class="board-card break-all rounded px-2 py-1 text-xs board-text-strong">{{ spec.id }}</code>
                         </div>
                       </details>
                     </div>
@@ -1722,31 +1700,34 @@ const deviceSpecs = computed(() => {
 
             <!-- Footer -->
             <div class="device-dialog-footer iot-dialog__footer flex-wrap">
-              <button
-                v-if="nodeId"
-                type="button"
-                data-testid="device-rename"
-                @click="onRename"
-                :disabled="runtimeSaving"
-                class="iot-dialog-btn iot-dialog-btn--quiet iot-dialog__footer-aside"
-              >
-                <span class="material-icons-round text-lg" aria-hidden="true">edit</span>
-                {{ t('app.rename') }}
-              </button>
-                <button type="button" data-testid="device-dialog-footer-close" @click="requestClose" :disabled="runtimeSaving" class="iot-dialog-btn iot-dialog-btn--ghost">
-                  {{ t('app.close') }}
+              <div class="iot-dialog__footer-aside flex flex-wrap items-center gap-2">
+                <button
+                  v-if="nodeId"
+                  type="button"
+                  data-testid="device-rename"
+                  @click="onRename"
+                  :disabled="runtimeSaving"
+                  class="iot-dialog-btn iot-dialog-btn--quiet"
+                >
+                  <span class="material-icons-round text-lg" aria-hidden="true">edit</span>
+                  {{ t('app.rename') }}
                 </button>
-              <button
-                type="button"
-                data-testid="device-delete"
-                @click="onDelete"
-                :disabled="deleteLoading || runtimeSaving"
-                :aria-busy="deleteLoading"
-                class="iot-dialog-btn iot-dialog-btn--danger"
-              >
-                <span v-if="deleteLoading" class="iot-dialog-btn__spinner" aria-hidden="true"></span>
-                <span v-else class="material-icons-round text-lg" aria-hidden="true">delete_outline</span>
-                {{ deleteLoading ? t('app.loading') : t('app.deleteDevice') }}
+                <button
+                  type="button"
+                  data-testid="device-delete"
+                  @click="onDelete"
+                  :disabled="deleteLoading || runtimeSaving"
+                  :aria-busy="deleteLoading"
+                  :aria-label="deleteLoading ? t('app.loading') : t('app.deleteDevice')"
+                  class="iot-dialog-btn iot-dialog-btn--quiet"
+                >
+                  <span v-if="deleteLoading" class="iot-dialog-btn__spinner" aria-hidden="true"></span>
+                  <span v-else class="material-icons-round text-lg" aria-hidden="true">delete_outline</span>
+                  {{ deleteLoading ? t('app.loading') : t('app.delete') }}
+                </button>
+              </div>
+              <button type="button" data-testid="device-dialog-footer-close" @click="requestClose" :disabled="runtimeSaving" class="iot-dialog-btn iot-dialog-btn--ghost">
+                {{ t('app.close') }}
               </button>
             </div>
           </div>
@@ -1756,15 +1737,12 @@ const deviceSpecs = computed(() => {
 </template>
 
 <style scoped>
-/*
- * Overflow containment for the body and its sections — deliberately NOT the surface.
- *
- * `.device-dialog-surface` used to be in this list, and because a scoped rule carries `[data-v-…]` it
- * outranked the `max-w-4xl` on the same element (0-2-0 against 0-1-0). So the 896px cap never applied and the
- * dialog grew to the viewport: measured 2516×1433 on a 2548×1465 screen, 98.7% × 97.8%, with content that
- * needed nowhere near that width. The surface needs no `max-width: 100%` of its own — it is a flex column
- * already bounded by the Tailwind cap and the overlay's padding.
- */
+/* Keep action labels intact; the footer can wrap whole buttons when space runs out. */
+.device-dialog-footer .iot-dialog-btn {
+  min-width: max-content;
+}
+
+/* Keep content within the body without overriding the shared dialog width. */
 .device-dialog-body,
 .device-dialog-body > section,
 .device-dialog-body > section > * {
@@ -1780,104 +1758,19 @@ const deviceSpecs = computed(() => {
   overflow-wrap: anywhere;
 }
 
-:global(:root[data-theme='dark'] .device-dialog-surface) {
-  background: var(--surface-panel);
-  color: var(--text);
+.device-runtime-adopt-latest {
+  border: 1px solid var(--warning-border);
+  background-color: var(--warning-surface);
+  color: var(--warning);
 }
 
-:global(:root[data-theme='dark'] .device-dialog-surface .bg-white),
-:global(:root[data-theme='dark'] .device-dialog-surface .bg-slate-50),
-:global(:root[data-theme='dark'] .device-dialog-surface .bg-slate-50\/50),
-:global(:root[data-theme='dark'] .device-dialog-surface .bg-slate-100) {
-  background-color: var(--surface-elevated) !important;
+.device-runtime-adopt-latest:hover {
+  background-color: var(--surface-control-hover);
+  color: var(--warning);
 }
 
-:global(:root[data-theme='dark'] .device-dialog-surface [class*="from-white"]),
-:global(:root[data-theme='dark'] .device-dialog-surface [class*="from-slate-50"]) {
-  background-image: none !important;
-  background-color: var(--surface-elevated) !important;
-}
-
-:global(:root[data-theme='dark'] .device-dialog-surface [class*="hover:bg-slate-"]:hover) {
-  background-color: var(--surface-muted) !important;
-}
-
-:global(:root[data-theme='dark'] .device-dialog-surface [class*="hover:bg-blue-"]:hover) {
-  background-color: color-mix(in srgb, var(--accent) 18%, var(--surface-elevated)) !important;
-}
-
-:global(:root[data-theme='dark'] .device-dialog-surface [class*="hover:bg-emerald-"]:hover),
-:global(:root[data-theme='dark'] .device-dialog-surface .group:hover [class*="group-hover:bg-emerald-"]) {
-  background-color: color-mix(in srgb, var(--success) 18%, var(--surface-elevated)) !important;
-}
-
-:global(:root[data-theme='dark'] .device-dialog-surface [class*="hover:bg-rose-"]:hover) {
-  background-color: color-mix(in srgb, #f43f5e 18%, var(--surface-elevated)) !important;
-}
-
-:global(:root[data-theme='dark'] .device-dialog-surface .text-slate-900),
-:global(:root[data-theme='dark'] .device-dialog-surface .text-slate-800),
-:global(:root[data-theme='dark'] .device-dialog-surface .text-slate-700) {
-  color: var(--text) !important;
-}
-
-:global(:root[data-theme='dark'] .device-dialog-surface .text-slate-600),
-:global(:root[data-theme='dark'] .device-dialog-surface .text-slate-500),
-:global(:root[data-theme='dark'] .device-dialog-surface .text-slate-400) {
-  color: var(--text-muted) !important;
-}
-
-:global(:root[data-theme='dark'] .device-dialog-surface .border-slate-100),
-:global(:root[data-theme='dark'] .device-dialog-surface .border-slate-200),
-:global(:root[data-theme='dark'] .device-dialog-surface .divide-slate-100) {
-  border-color: var(--border) !important;
-}
-
-:global(:root[data-theme='dark'] .device-dialog-surface .device-runtime-panel) {
-  border-color: color-mix(in srgb, var(--accent-strong) 42%, var(--border)) !important;
-  background-color: color-mix(in srgb, var(--accent-strong) 10%, var(--surface-elevated)) !important;
-}
-
-:global(:root[data-theme='dark'] .device-dialog-surface .device-runtime-security) {
-  border-color: color-mix(in srgb, var(--accent-strong) 34%, var(--border)) !important;
-}
-
-:global(:root[data-theme='dark'] .device-dialog-surface .device-runtime-security > summary) {
-  color: color-mix(in srgb, #a78bfa 72%, var(--text)) !important;
-}
-
-:global(:root[data-theme='dark'] .device-dialog-surface input),
-:global(:root[data-theme='dark'] .device-dialog-surface select),
-:global(:root[data-theme='dark'] .device-dialog-surface textarea) {
-  border-color: var(--border) !important;
-  background: var(--surface-control) !important;
-  color: var(--text) !important;
-  color-scheme: dark;
-}
-
-:global(:root[data-theme='dark'] .device-dialog-surface .device-runtime-conflict) {
-  border-color: color-mix(in srgb, var(--warning) 55%, var(--border)) !important;
-  background-color: color-mix(in srgb, var(--warning) 14%, var(--surface-elevated)) !important;
-  color: var(--text) !important;
-}
-
-:global(:root[data-theme='dark'] .device-dialog-surface .device-runtime-conflict button) {
-  border-color: color-mix(in srgb, var(--warning) 58%, var(--border)) !important;
-}
-
-:global(:root[data-theme='dark'] .device-dialog-surface .device-runtime-conflict .device-runtime-adopt-latest) {
-  border-color: var(--warning) !important;
-  background-color: #451a03 !important;
-  color: #fef3c7 !important;
-}
-
-:global(:root[data-theme='dark'] .device-dialog-surface .device-runtime-conflict .device-runtime-adopt-latest:hover) {
-  background-color: #78350f !important;
-  color: var(--warning-surface) !important;
-}
-
-:global(:root[data-theme='dark'] .device-dialog-surface .device-runtime-conflict .device-runtime-adopt-latest:focus-visible) {
-  outline: 2px solid var(--warning);
+.device-runtime-adopt-latest:focus-visible {
+  outline: 2px solid var(--warning-border);
   outline-offset: 2px;
 }
 

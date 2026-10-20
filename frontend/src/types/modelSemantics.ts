@@ -59,5 +59,11 @@ export interface ModelRunSnapshot {
   environmentProvenance?: EnvironmentValueProvenance[]
 }
 
-/** Local UI comparison between a submitted run input and the board currently open in this tab. */
+/** Authoritative identities of the current persisted board, captured together. */
+export interface BoardModelFingerprints {
+  verification: string
+  simulation: string
+}
+
+/** A run's captured model compared with the current persisted board. */
 export type RunBoardComparison = 'UNCHANGED' | 'CHANGED' | 'UNAVAILABLE' | 'NOT_COMPARED'

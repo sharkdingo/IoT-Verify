@@ -12,7 +12,7 @@ import { describe, expect, it } from 'vitest'
  * "silent fallback turning an unknown into apparent success" the root CLAUDE.md rules out.
  *
  * Tokens that legitimately have no declaration are the ones **injected at runtime** through an inline
- * `:style` binding — `--node-accent-color`, `--canvas-zoom`, `--resize-hit-size`, and friends. For those the
+ * `:style` binding — for example `--node-accent-color`. For those the
  * fallback *is* the default and must stay, so this test requires them to be provably injected rather than
  * taking their absence on trust.
  */
@@ -41,7 +41,21 @@ const stripComments = (text: string) =>
     .replace(/\/\*[\s\S]*?\*\//g, match => match.replace(/[^\n]/g, ' '))
     .replace(/^\s*\/\/.*$/gm, '')
 
+const declaredCustomProperties = (text: string) => Array.from(
+  // A CSS declaration block may also begin inside a script's template-literal style value.
+  text.matchAll(/(^|[;{`])\s*(--[a-zA-Z0-9-]+)\s*:/g), match => match[2]!
+)
+
 describe('token reference integrity', () => {
+  it('recognizes CSS text declarations without treating references or comments as declarations', () => {
+    const text = stripComments([
+      'const style = `--scale:${zoom};--lines:3`',
+      'const reference = `var(--misspelled-scale)`',
+      '// const unused = `--commented:value`'
+    ].join('\n'))
+    expect(declaredCustomProperties(text)).toEqual(['--scale', '--lines'])
+  })
+
   it('never references a custom property that nothing declares or injects', () => {
     const files = sources().filter(f => !f.name.includes('__tests__'))
 
@@ -49,13 +63,11 @@ describe('token reference integrity', () => {
     const injected = new Set<string>()
     for (const { text } of files) {
       const clean = stripComments(text)
-      // Declared in CSS: `--name:` at the start of a declaration slot.
-      for (const m of clean.matchAll(/(^|[;{])\s*(--[a-zA-Z0-9-]+)\s*:/g)) declared.add(m[2])
+      for (const token of declaredCustomProperties(clean)) declared.add(token)
       // Injected from script: `'--name':` in a style object, or built by template literal.
       for (const m of clean.matchAll(/['"](--[a-zA-Z0-9-]+)['"]\s*:/g)) injected.add(m[1])
       for (const m of clean.matchAll(/`(--[a-zA-Z0-9-]+)\$\{/g)) injected.add(m[1])
-      // A literal `style="--x: …"` attribute in a template counts too: `Board.vue` sets
-      // `--board-tool-accent` that way per panel, which no object-literal pattern would find.
+      // Literal template style declarations are not covered by object-literal patterns.
       for (const m of clean.matchAll(/style="\s*(--[a-zA-Z0-9-]+)\s*:/g)) injected.add(m[1])
     }
 

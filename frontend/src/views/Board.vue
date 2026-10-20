@@ -241,11 +241,6 @@ export const createScopedBoardInvalidationBinding = <Message,>(
   }
 }
 
-export const isAccountDeletionOutcomeUncertain = (error: unknown): boolean => {
-  const status = Number((error as { response?: { status?: unknown } } | null)?.response?.status)
-  return !Number.isInteger(status) || status < 400 || status >= 500
-}
-
 export const collectBundledEnvironmentNames = (
   providers: readonly { bundled: boolean; names: readonly string[] }[]
 ): string[] => {
@@ -274,6 +269,7 @@ export const shouldRedirectNarrowPanelFocus = (
     && !scrim?.contains(target)
     && !target.closest('.board-nav-bar')
     && !target.closest('[aria-modal="true"]')
+    && !target.closest('[data-testid^="template-preview-"]')
 }
 
 type NarrowPanelName = 'control' | 'inspector'
@@ -304,14 +300,16 @@ export type ReconciledBoardNodeLayout = Pick<ReconciledBoardNode, 'position' | '
  * Pending local layouts also win over older targeted-mutation snapshots from the server.
  */
 export const reconcileBoardNodeSnapshot = <T extends ReconciledBoardNode>(
-  currentNodes: readonly T[],
+  currentNodes: T[],
   incomingNodes: readonly T[],
   pendingLayouts: ReadonlyMap<string, { layout: ReconciledBoardNodeLayout }>,
   activeNodeIds: ReadonlySet<string>
 ): T[] => {
   const currentById = new Map(currentNodes.map(node => [node.id, node]))
-  return incomingNodes.map(incoming => {
+  let changed = currentNodes.length !== incomingNodes.length
+  const reconciled = incomingNodes.map((incoming, index) => {
     const current = currentById.get(incoming.id)
+    if (current !== currentNodes[index]) changed = true
     if (!current) {
       return { ...incoming, position: { ...incoming.position } }
     }
@@ -324,14 +322,24 @@ export const reconcileBoardNodeSnapshot = <T extends ReconciledBoardNode>(
         }
       : pendingLayouts.get(incoming.id)?.layout
 
-    Object.assign(current, incoming, { position: { ...incoming.position } })
-    if (preservedLayout) {
-      current.position = { ...preservedLayout.position }
-      current.width = preservedLayout.width
-      current.height = preservedLayout.height
+    const next = {
+      ...incoming,
+      ...(preservedLayout || {}),
+      position: { ...(preservedLayout || incoming).position }
+    }
+    // Layout responses include every node. Replacing equal runtime collections would fire
+    // synchronous model watchers for each node, repeatedly serializing the entire board.
+    for (const key of Object.keys(next) as Array<keyof T>) {
+      const value = next[key]
+      if (current[key] === value) continue
+      if (value !== null && typeof value === 'object'
+        && JSON.stringify(current[key]) === JSON.stringify(value)) continue
+      current[key] = value
+      changed = true
     }
     return current
   })
+  return changed ? reconciled : currentNodes
 }
 
 export const clampFloatingMenuPosition = (
@@ -413,15 +421,14 @@ export type ScenarioRecommendationTargetRequest = Record<ScenarioRecommendationC
   userRequirement: string
 }
 
-export const requestScenarioRecommendationWithTargets = <T,>(
+export const buildScenarioRecommendationTargetRequest = (
   input: Record<ScenarioRecommendationCountField, unknown> & {
     language: string
     userRequirement: string
   },
   validateCount: (value: unknown, field: ScenarioRecommendationCountField) => number,
-  rangeError: (field: 'devices' | 'rules' | 'specifications') => Error,
-  recommend: (request: ScenarioRecommendationTargetRequest) => Promise<T>
-): Promise<T> => {
+  rangeError: (field: 'devices' | 'rules' | 'specifications') => Error
+): ScenarioRecommendationTargetRequest => {
   const request: ScenarioRecommendationTargetRequest = {
     minDevices: validateCount(input.minDevices, 'minDevices'),
     minRules: validateCount(input.minRules, 'minRules'),
@@ -435,7 +442,7 @@ export const requestScenarioRecommendationWithTargets = <T,>(
   if (request.minDevices > request.maxDevices) throw rangeError('devices')
   if (request.minRules > request.maxRules) throw rangeError('rules')
   if (request.minSpecs > request.maxSpecs) throw rangeError('specifications')
-  return recommend(request)
+  return request
 }
 
 export const canonicalBoardSnapshotValue = (value: unknown): unknown => {
@@ -555,14 +562,15 @@ export const formalRunReadinessIssue = (
 /* =================================================================================
  * 1. Imports & Setup
  * ================================================================================= */
-import {ref, reactive, computed, defineAsyncComponent, nextTick, onMounted, onBeforeUnmount, watch, h, type Ref} from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import FieldSelect from '@/components/common/FieldSelect.vue'
+import {ref, shallowRef, reactive, computed, defineAsyncComponent, nextTick, onMounted, onBeforeUnmount, watch, watchPostEffect, h, type Ref} from 'vue'
+import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useChatStore } from '@/stores/chat'
 import { useAuth } from '@/stores/auth'
 import { subscribeBoardInvalidation } from '@/utils/boardInvalidation'
 import { ACTION_DOCK_RAIL_PX, BOARD_FLOATING_GAP_CSS, COLLAPSED_PANEL_RAIL_PX } from '@/constants/boardLayout'
-import { authApi } from '@/api/auth'
+import ProductMark from '@/components/common/ProductMark.vue'
 // Icons
 
 // Types
@@ -575,19 +583,21 @@ import type { RuleForm, RuleSourceItemType } from '../types/rule'
 import type { SpecCondition, Specification, SpecTemplateId } from '../types/spec'
 import type {
   ModelGenerationIssue,
+  PersistedTrace,
   Trace,
   TraceDevice,
   TraceSummary,
+  TraceState,
   TraceTriggeredRule,
   TraceVariable,
-  VerificationRequest,
   VerificationResult,
   VerificationRun,
   VerificationRunSummary,
   VerificationTask,
   VerificationTaskSummary
 } from '@/types/verify'
-import type { SimulationRequest, SimulationResult, SimulationState, SimulationTask, SimulationTaskSummary, SimulationTraceSummary } from '@/types/simulation'
+import type { SimulationResult, SimulationTask, SimulationTaskSummary, SimulationTraceSummary } from '@/types/simulation'
+import { simulationResultFromTrace, summarizeSimulationResult, type SavedSimulationResult } from './board/simulationResult'
 import type { AttackScenario, AttackScenarioMode } from '@/types/attackScenario'
 import type {
   AvailableFuzzingRunSummary,
@@ -604,7 +614,8 @@ import type {
   FuzzingTaskSummary
 } from '@/types/fuzzing'
 import { isValidFuzzPaperDomainFingerprint } from '@/types/fuzzing'
-import type { ModelSemantics, RunBoardComparison } from '@/types/modelSemantics'
+import { compareModelSnapshot } from '@/utils/modelComparison'
+import type { BoardModelFingerprints, ModelRunSnapshot, ModelSemantics, RunBoardComparison } from '@/types/modelSemantics'
 import type {
   EnvironmentVariableUpdateRequest,
   ModelEnvironmentVariable,
@@ -614,23 +625,25 @@ import type {
 import { isRunInitiator } from '@/types/model'
 import type { InteractiveOperationStage, TaskCancellationResult, TaskProgressStage } from '@/types/task'
 import type { FixApplyResult } from '@/types/fix'
-import type { ChatLogoutPreparation } from '@/types/chat'
 import type { PortableSceneFile } from '@/types/scene'
 // Panel types removed
 
 // Utils
-import { getNodeIcon as resolveNodeIcon } from '../utils/device'
+import { getNodeIcon as resolveNodeIcon, indexDeviceTemplates } from '../utils/device'
 import {
   acknowledge,
+  acknowledgeFailure,
   confirmChoice,
   confirmDestructive,
   dismissAllNotifications,
+  dismissCompletionNotifications,
   notifyBlocked,
+  notifyAvailableResult,
   notifyError,
   notifyInfo,
   notifySuccess
 } from '@/utils/feedback'
-import { getVerificationOutcome, normalizeSpecResults } from './board/verificationResult'
+import { getVerificationOutcome, presentSpecificationResult } from './board/verificationResult'
 import {
   applyBoardRunTarget,
   hasUnusableBoardRunParams,
@@ -678,8 +691,6 @@ import {
 import { buildTraceEdgePlaybackStates } from '@/utils/traceEdgePlayback'
 import {
   buildSimulationRequestPayload,
-  buildLocalSceneFingerprint,
-  buildModelRunSignature,
   buildVerificationRequestPayload,
   normalizeModelRelation,
   specificationsRequirePrivacy
@@ -692,9 +703,11 @@ import {
   getAttackSelectionIssue,
   selectedAttackPoints
 } from './board/attackSurface'
-import { verdictVariableSourceKeys } from './board/verdictVariableSource'
 import { recommendedReadingKey } from './board/recommendedReadingSuffix'
-import { localizedErrorMessage, localizedTextOrFallback } from '@/utils/userMessage'
+import { errorDetails, technicalErrorLines, localizedErrorMessage, localizedTextOrFallback, type ApiErrorDetails } from '@/utils/userMessage'
+import { resolveImpactEnvironmentDefinition } from '@/utils/device'
+import { diagnoseJsonParseError } from '@/utils/jsonParseDiagnostics'
+import FailureDetails from '@/components/FailureDetails.vue'
 import { requestInteractiveCancellation } from '@/utils/interactiveCancellation'
 import {
   isRecommendationPostOutcomeUnknown,
@@ -723,7 +736,6 @@ import {
 import {
   FUZZ_INLINE_RESULT_RECOVERY_MAX_FAILURES,
   classifyTrackedFuzzRunError,
-  clearStoredFuzzNotifications,
   fuzzNotificationStorageKeyForUser,
   fuzzRunRetryDelayMs,
   isTransientTaskHttpStatus
@@ -771,6 +783,7 @@ import {
   resetDeviceRuntimeDraft,
   templateVariableHasEnumValues,
   templateVariableUsesNumericBounds,
+  validateTemplateVariableValue,
   validateDeviceRuntimeConfig,
   type DeviceRuntimeConfig
 } from '@/utils/deviceRuntime'
@@ -810,31 +823,26 @@ import SystemInspector from '../components/SystemInspector.vue'
 import LanguageToggle from '@/components/common/LanguageToggle.vue'
 import ThemeToggle from '@/components/common/ThemeToggle.vue'
 import InfoTooltip from '@/components/common/InfoTooltip.vue'
+import BackgroundTaskSummary from '@/components/BackgroundTaskSummary.vue'
+import { describeSpecification, presentRule } from '@/utils/modelPresentation'
 import ToggleSwitch from '@/components/common/ToggleSwitch.vue'
 import ScenarioObjectiveIssues from '@/components/ScenarioObjectiveIssues.vue'
 import { useModalAccessibility } from '@/composables/useModalAccessibility'
 import { openModalDepth } from '@/composables/useBodyScrollLock'
-import { useTheme } from '@/composables/useTheme'
 import { useBoardUndo } from '@/composables/useBoardUndo'
-import { useTimelineRail } from '@/composables/useTimelineRail'
 
-const LogoutConfirmDialog = defineAsyncComponent(() => import('@/components/LogoutConfirmDialog.vue'))
-const AccountDeleteDialog = defineAsyncComponent(() => import('@/components/AccountDeleteDialog.vue'))
 const DeviceDialog = defineAsyncComponent(() => import('../components/DeviceDialog.vue'))
-const RuleBuilderDialog = defineAsyncComponent(() => import('../components/RuleBuilderDialog.vue'))
 const SimulationTimeline = defineAsyncComponent(() => import('../components/SimulationTimeline.vue'))
 const FixResultDialog = defineAsyncComponent(() => import('../components/FixResultDialog.vue'))
 const RecommendationProgressStatus = defineAsyncComponent(
   () => import('../components/RecommendationProgressStatus.vue')
 )
-const PlaybackChangePopover = defineAsyncComponent(() => import('../components/PlaybackChangePopover.vue'))
+const PlaybackChangesPanel = defineAsyncComponent(() => import('../components/PlaybackChangesPanel.vue'))
+const PlaybackTerminal = defineAsyncComponent(() => import('../components/PlaybackTerminal.vue'))
+const PlaybackStateDetails = defineAsyncComponent(() => import('../components/PlaybackStateDetails.vue'))
 const FuzzingPanel = defineAsyncComponent(() => import('../components/FuzzingPanel.vue'))
 const FuzzingResultDialog = defineAsyncComponent(() => import('../components/FuzzingResultDialog.vue'))
 const TraceHistoryPanel = defineAsyncComponent(() => import('../components/TraceHistoryPanel.vue'))
-
-const props = defineProps<{
-  prepareChatForLogout?: () => Promise<ChatLogoutPreparation>
-}>()
 
 const { t, te, locale } = useI18n()
 const router = useRouter()
@@ -863,8 +871,7 @@ const assistantButtonLabel = computed(() => {
     ? t('app.chat.unreadResults', { count: chatStore.state.unreadCount })
     : t('app.aiAssistant')
 })
-const { state: authState, logout, logoutIfTokenMatches, getToken } = useAuth()
-const { theme } = useTheme()
+const { state: authState, getToken, isCurrentSessionToken } = useAuth()
 
 /**
  * Set once the deep-link layer is initialised. The result-surface closers are declared
@@ -872,10 +879,7 @@ const { theme } = useTheme()
  */
 let clearRunDeepLink: () => void = () => {}
 
-const showLogoutDialog = ref(false)
-const showDeleteAccountDialog = ref(false)
-const isLoggingOut = ref(false)
-const isDeletingAccount = ref(false)
+const isOpeningAccount = ref(false)
 type InteractiveLogoutPreparation = 'ready' | 'outcome-unknown'
 const fixResultDialogRef = ref<{
   canOpenTrace?: (traceId: number) => boolean
@@ -883,6 +887,8 @@ const fixResultDialogRef = ref<{
 } | null>(null)
 const currentUser = computed(() => authState.user)
 const currentAuthUserId = computed(() => currentUser.value?.userId ?? null)
+// Teardown can flush after shared auth changes, so retain the account that mounted this board.
+const boardOwnerUserId = currentAuthUserId.value
 const isAuthScopeTransitioning = ref(false)
 let boardAuthScopeEpoch = 0
 const isCurrentBoardAuthScope = (epoch: number) =>
@@ -903,130 +909,85 @@ const unreadFuzzNotificationCount = computed(() => unreadFuzzNotifications.value
 const unreadFailedFuzzCount = computed(() =>
   unreadFuzzNotifications.value.filter(item => item.kind === 'FAILED').length)
 
-const handleLogout = () => {
-  showLogoutDialog.value = true
+const openAccount = () => {
+  if (isOpeningAccount.value) return
+  void router.push({ name: 'account', query: { returnTo: route.fullPath } })
 }
 
-const handleLogoutConfirm = async () => {
-  if (isLoggingOut.value) return
-  isLoggingOut.value = true
-  let shouldLogout = false
+onBeforeRouteLeave(async to => {
+  if (to.name !== 'account') return true
+  if (isOpeningAccount.value) return false
+  if (isSceneReplacementInProgress.value) {
+    notifyBlocked(t('app.sceneReplacementInProgress'))
+    return false
+  }
+  const requestToken = getToken()
+  const requestAuthScopeEpoch = boardAuthScopeEpoch
+  const ownsNavigation = () => requestToken !== null
+    && isCurrentBoardAuthScope(requestAuthScopeEpoch) && isCurrentSessionToken(requestToken)
+  if (!ownsNavigation()) return false
+  isOpeningAccount.value = true
   try {
-    let chatPreparation: ChatLogoutPreparation = 'ready'
+    let recommendations: InteractiveLogoutPreparation = 'outcome-unknown'
+    let fixSearch: InteractiveLogoutPreparation = 'outcome-unknown'
     try {
-      chatPreparation = await props.prepareChatForLogout?.() ?? 'ready'
-    } catch (error) {
-      console.error('Failed to prepare the active assistant request for logout', error)
-      chatPreparation = 'reconciliation-failed'
-    }
-    if (chatPreparation === 'reconciliation-failed') {
-      notifyError(t('app.chat.logoutReconcileFailed'))
-      return
-    }
-    if (chatPreparation === 'outcome-unknown') {
-      const proceed = await confirmChoice({
-        title: t('app.chat.logoutOutcomeUnknownTitle'),
-        message: t('app.chat.logoutOutcomeUnknownMessage'),
-        confirmText: t('app.chat.logoutOutcomeUnknownConfirm')
-      })
-      if (!proceed) return
-    }
-
-    let interactivePreparation: InteractiveLogoutPreparation = 'ready'
-    try {
-      const [recommendations, fixSearch] = await Promise.all([
+      const preparation = await Promise.all([
         prepareActiveRecommendationsForLogout(),
         fixResultDialogRef.value?.prepareForLogout?.() ?? Promise.resolve('ready' as const)
       ])
-      if (recommendations === 'outcome-unknown' || fixSearch === 'outcome-unknown') {
-        interactivePreparation = 'outcome-unknown'
-      }
+      recommendations = preparation[0]
+      fixSearch = preparation[1]
     } catch (error) {
-      console.error('Failed to stop active recommendation or automatic-fix work before logout', error)
-      interactivePreparation = 'outcome-unknown'
+      console.warn('Could not confirm local interactive work stopped before account navigation', error)
     }
-    if (interactivePreparation === 'outcome-unknown') {
+    if (!ownsNavigation()) return false
+    if (recommendations === 'outcome-unknown' || fixSearch === 'outcome-unknown') {
       const proceed = await confirmChoice({
-        title: t('app.logoutInteractiveOutcomeUnknownTitle'),
-        message: t('app.logoutInteractiveOutcomeUnknownMessage'),
-        confirmText: t('app.logoutInteractiveOutcomeUnknownConfirm')
+        title: t('account.workspaceStopUnknownTitle'),
+        message: t('account.workspaceStopUnknownMessage'),
+        confirmText: t('account.openPage')
       })
-      if (!proceed) return
+      if (!ownsNavigation() || !proceed) return false
     }
-
-    try {
-      layoutSaveFeedbackSuppressed = true
-      await flushPendingBoardLayout({
-        silent: true,
-        timeoutMs: LAYOUT_LOGOUT_FLUSH_TIMEOUT_MS
-      })
-    } catch {
-      // A layout flush failure must not trap the user in the current login session.
-    }
-    try {
-      // API failure does not prevent local logout after the user confirmed it.
-      await authApi.logout()
-    } catch {
-      // Local logout remains authoritative for this browser session.
-    }
-    shouldLogout = true
-  } finally {
-    if (shouldLogout) {
-      logout()
-      showLogoutDialog.value = false
-      router.push({ path: '/', query: { mode: 'login' } })
-    }
-    isLoggingOut.value = false
-  }
-}
-
-const handleLogoutCancel = () => {
-  showLogoutDialog.value = false
-}
-
-const handleOpenDeleteAccount = () => {
-  if (isLoggingOut.value) return
-  showLogoutDialog.value = false
-  showDeleteAccountDialog.value = true
-}
-
-const handleDeleteAccountConfirm = async (payload: { password: string; confirmation: string }) => {
-  if (isDeletingAccount.value) return
-  isDeletingAccount.value = true
-  const requestToken = getToken()
-  const deletedAccountNotificationStorageKey = fuzzNotificationStorageKeyForUser(
-    currentUser.value?.userId
-  )
-  try {
-    await authApi.deleteAccount(payload)
-    clearStoredFuzzNotifications(deletedAccountNotificationStorageKey)
-    unreadFuzzNotifications.value = []
-    trackedFuzzTaskIds.value = []
-    if (logoutIfTokenMatches(requestToken)) {
-      showDeleteAccountDialog.value = false
-      await router.replace({ path: '/', query: { mode: 'register' } })
-      await nextTick()
-      notifySuccess(t('app.deleteAccountSuccess'))
-    }
-  } catch (error: any) {
-    if (isAccountDeletionOutcomeUncertain(error)) {
-      clearStoredFuzzNotifications(deletedAccountNotificationStorageKey)
-      unreadFuzzNotifications.value = []
-      trackedFuzzTaskIds.value = []
-      if (logoutIfTokenMatches(requestToken)) {
-        showDeleteAccountDialog.value = false
-        await router.replace({ path: '/', query: { mode: 'login' } })
-        await nextTick()
-        notifyBlocked(t('app.deleteAccountOutcomeUnknown'))
+    // Node geometry and semantic edits share this queue; the layout flush only owns view state.
+    let settledQueue: Promise<void>
+    do {
+      settledQueue = boardMutationQueue
+      await waitForPendingBoardMutations()
+      if (!ownsNavigation()) return false
+      try {
+        await flushPendingBoardLayout({ silent: true, timeoutMs: LAYOUT_LOGOUT_FLUSH_TIMEOUT_MS })
+      } catch {
+        // A failed view-layout save does not prevent account access; semantic writes were awaited.
       }
-    } else if (getToken() === requestToken) {
-      const message = localizedErrorMessage(error, t('app.deleteAccountFailed'), locale.value)
-      notifyError(message)
+      if (!ownsNavigation()) return false
+    } while (settledQueue !== boardMutationQueue)
+    const hasLocalResult = Boolean(verificationResult.value
+      && verificationResult.value.historyPersistence.status !== 'SAVED')
+      || Boolean(lastSimulationResult.value
+        && lastSimulationResult.value.historyPersistence.status !== 'SAVED')
+      || unsavedRunNotifications.size > 0
+      || (activePlaybackKind.value === 'counterexample' && Boolean(currentTrace.value)
+        && currentTrace.value?.id === undefined)
+    if (hasLocalResult) {
+      const proceed = await confirmChoice({
+        title: t('account.localResultTitle'),
+        message: t('account.localResultMessage'),
+        confirmText: t('account.leaveWorkspace')
+      })
+      if (!ownsNavigation() || !proceed) return false
     }
+    // Existing assistant work can reconcile another write while the discard decision is open.
+    while (settledQueue !== boardMutationQueue) {
+      settledQueue = boardMutationQueue
+      await waitForPendingBoardMutations()
+      if (!ownsNavigation()) return false
+    }
+    return ownsNavigation()
   } finally {
-    isDeletingAccount.value = false
+    isOpeningAccount.value = false
   }
-}
+})
 
 /* =================================================================================
  * 2. Constants & Configuration
@@ -1186,8 +1147,8 @@ class FuzzTaskRecoveryPendingError extends Error {
 }
 
 class FuzzCompletedResultUnavailableError extends Error {
-  constructor(message: string) {
-    super(message)
+  constructor(readonly originalError: unknown) {
+    super('Completed exploration result could not be read')
     this.name = 'FuzzCompletedResultUnavailableError'
   }
 }
@@ -1195,8 +1156,8 @@ class FuzzCompletedResultUnavailableError extends Error {
 class CompletedTaskResultUnavailableError extends Error {
   readonly kind: 'verification' | 'simulation'
 
-  constructor(kind: 'verification' | 'simulation', message: string) {
-    super(message)
+  constructor(kind: 'verification' | 'simulation', readonly originalError: unknown) {
+    super('Completed task result could not be read')
     this.name = 'CompletedTaskResultUnavailableError'
     this.kind = kind
   }
@@ -1254,7 +1215,7 @@ let layoutSaveFeedbackSuppressed = false
 let persistedWideLayout: BoardLayoutDto | null = null
 
 type ControlCenterSection = 'devices' | 'templates' | 'rules' | 'specs'
-type InspectorSection = 'devices' | 'rules' | 'specs'
+type InspectorSection = 'devices' | 'rules' | 'specs' | 'environment'
 
 const isNarrowViewport = () =>
   typeof window !== 'undefined'
@@ -1266,7 +1227,7 @@ const isControlCenterSection = (value?: string): value is ControlCenterSection =
   value === 'devices' || value === 'templates' || value === 'rules' || value === 'specs'
 
 const isInspectorSection = (value?: string): value is InspectorSection =>
-  value === 'devices' || value === 'rules' || value === 'specs'
+  value === 'devices' || value === 'rules' || value === 'specs' || value === 'environment'
 
 const clampPanelWidth = (value: unknown, fallback: number): number => {
   const width = typeof value === 'number' ? value : fallback
@@ -1291,6 +1252,8 @@ type ActionDockMode = 'expanded' | 'compact' | 'packed'
 
 const actionDockViewportWidth = ref(typeof window !== 'undefined' ? window.innerWidth : 1440)
 const boardViewportHeight = ref(typeof window !== 'undefined' ? window.innerHeight : 900)
+const playbackPanelOpen = ref(true)
+const playbackTerminalTab = ref<'changes' | 'details' | 'run'>('changes')
 const isNarrowBoardLayout = computed(() =>
   actionDockViewportWidth.value < 1024 || boardViewportHeight.value < 600
 )
@@ -1449,6 +1412,8 @@ const updateActionDockViewport = () => {
 }
 
 const layoutHydrated = ref(false)
+const boardLayoutLoadError = ref<ApiErrorDetails | null>(null)
+const loadingBoardLayout = ref(false)
 let layoutSaveErrorShown = false
 let panelStateTouchedBeforeLayout = false
 let canvasStateTouchedBeforeLayout = false
@@ -1471,14 +1436,27 @@ let canvasStateTouchedBeforeLayout = false
  * declared at `:root`. It is not. Restoring the fallback would only hide it again — a fixed element positioned by
  * variables it cannot see is the actual defect, so the variables are injected onto it instead.
  */
+const playbackToolbarStacked = computed(() => {
+  const width = isNarrowBoardLayout.value
+    ? actionDockViewportWidth.value - 32
+    : actionDockViewportWidth.value
+      - (boardPanels.control.collapsed ? COLLAPSED_PANEL_RAIL_PX : effectiveControlPanelWidth.value)
+      - (boardPanels.inspector.collapsed ? COLLAPSED_PANEL_RAIL_PX : effectiveInspectorPanelWidth.value)
+  return width < 640
+})
+
 const boardShellStyle = computed(() => ({
   '--board-control-width': `${boardPanels.control.collapsed ? COLLAPSED_PANEL_RAIL_PX : effectiveControlPanelWidth.value}px`,
   '--board-inspector-width': `${boardPanels.inspector.collapsed ? COLLAPSED_PANEL_RAIL_PX : effectiveInspectorPanelWidth.value}px`,
   '--board-action-rail-width': actionDockRailWidth.value,
-  '--board-floating-gap': BOARD_FLOATING_GAP_CSS
+  '--board-floating-gap': BOARD_FLOATING_GAP_CSS,
+  '--board-status-height': !isBoardDataReady.value && failedBoardDataKeys.value.length === 0 ? '2.25rem' : '0px',
+  '--board-playback-height': isModelPlaybackActive.value && playbackPanelOpen.value
+    ? boardViewportHeight.value < 600 ? 'clamp(7rem, 36dvh, 14rem)'
+      : 'clamp(14rem, 32dvh, 20rem)'
+    : '0px',
+  '--board-playback-toolbar-height': isModelPlaybackActive.value ? (playbackToolbarStacked.value ? '128px' : '88px') : '0px'
 }))
-
-const boardHeaderTone = computed(() => theme.value === 'dark' ? 'dark' : 'light')
 
 const applyViewportPanelConstraints = () => {
   if (!isNarrowViewport()) return
@@ -1500,23 +1478,14 @@ const openNarrowPanelName = computed<NarrowPanelName | null>(() => {
 const showNarrowPanelScrim = computed(() => openNarrowPanelName.value !== null)
 
 const boardPanelScrimRef = ref<HTMLButtonElement | null>(null)
-const narrowPanelFocusableSelector = [
-  'button:not([disabled])',
-  'a[href]',
-  'input:not([disabled])',
-  'select:not([disabled])',
-  'textarea:not([disabled])',
-  '[tabindex]:not([tabindex="-1"])'
-].join(',')
-
 const getOpenNarrowPanel = () => document.querySelector<HTMLElement>(
   !boardPanels.control.collapsed
     ? '[data-testid="control-center"].is-expanded'
     : '[data-testid="system-inspector"].is-expanded'
 )
 
-const focusOpenNarrowPanel = (panel: HTMLElement | null) => {
-  panel?.querySelector<HTMLElement>(narrowPanelFocusableSelector)?.focus()
+const focusSidePanelTab = (panel: HTMLElement | null) => {
+  panel?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus({ preventScroll: true })
 }
 
 const handleBoardFocusIn = (event: FocusEvent) => {
@@ -1527,7 +1496,7 @@ const handleBoardFocusIn = (event: FocusEvent) => {
     panel,
     boardPanelScrimRef.value
   )) {
-    focusOpenNarrowPanel(panel)
+    focusSidePanelTab(panel)
   }
 }
 
@@ -1541,7 +1510,7 @@ watch(openNarrowPanelName, (open, previous) => {
         panel,
         boardPanelScrimRef.value
       )) {
-        focusOpenNarrowPanel(panel)
+        focusSidePanelTab(panel)
       }
       return
     }
@@ -1561,6 +1530,8 @@ const nodes = ref<DeviceNode[]>([])
 const activePlaybackScene = ref<ModelPlaybackScene | null>(null)
 const playbackCanvasPan = ref<CanvasPan>({ x: 0, y: 0 })
 const playbackCanvasZoom = ref(1)
+let playbackViewportFollowsFit = true
+let playbackCanvasFrame: ReturnType<typeof getVisibleCanvasFrame> = null
 const environmentVariables = ref<ModelEnvironmentVariable[]>([])
 const environmentMutationPending = ref(false)
 const edges = ref<DeviceEdge[]>([])
@@ -1611,7 +1582,7 @@ const closeSceneActionsMenu = (restoreFocus = false) => {
   menu.removeAttribute('open')
   sceneActionsMenuOpen.value = false
   if (restoreFocus) {
-    void nextTick(() => menu.querySelector<HTMLElement>('summary')?.focus())
+    menu.querySelector<HTMLElement>('summary')?.focus()
   }
 }
 const handleSceneActionsMenuToggle = () => {
@@ -1657,6 +1628,7 @@ const boardDataLoadState = reactive<Record<BoardDataKey, BoardDataLoadState>>({
   specs: 'loading'
 })
 const allBoardDataKeys: BoardDataKey[] = ['templates', 'nodes', 'environment', 'rules', 'specs']
+const boardSnapshotError = ref<ApiErrorDetails | null>(null)
 // A failed refresh must not erase ownership of the last accepted snapshot;
 // otherwise the next retry could accept a changed scene without fencing stale work.
 let hydratedBoardAuthScopeEpoch: number | null = null
@@ -1717,66 +1689,26 @@ const assertRulesHaveTriggers = (candidateRules: RuleForm[]): boolean => {
   }
 }
 
-const countLogMarker = (logs: string[] | undefined, marker: string): number => {
-  return (logs || []).filter(log => String(log).includes(marker)).length
+const getGenerationIssues = (result: Pick<VerificationResult, 'generationIssues'> | null): ModelGenerationIssue[] =>
+  result?.generationIssues ?? []
+
+const getGenerationWarningCounts = (
+  result: Pick<VerificationResult, 'disabledRuleCount' | 'skippedSpecCount'> | null
+) => {
+  const disabledRuleCount = result?.disabledRuleCount ?? 0
+  const skippedSpecCount = result?.skippedSpecCount ?? 0
+  return { disabledRuleCount, skippedSpecCount, total: disabledRuleCount + skippedSpecCount }
 }
 
-const getGenerationIssues = (result: any): ModelGenerationIssue[] => {
-  if (!Array.isArray(result?.generationIssues)) return []
-  return result.generationIssues
-    .filter((issue: unknown) => issue && typeof issue === 'object')
-    .map((issue: any) => ({
-      issueType: String(issue.issueType || 'MODEL_ITEM_OMITTED'),
-      itemLabel: String(issue.itemLabel || t('app.unknownModelItem')),
-      reasonCode: String(issue.reasonCode || 'UNCLASSIFIED_GENERATION_ISSUE') as ModelGenerationIssue['reasonCode'],
-      reason: String(issue.reason || t('app.unknownOmissionReason'))
-    }))
-}
+const getSimulationDisabledRuleCount = (result: SimulationResult | null): number =>
+  result?.disabledRuleCount ?? 0
 
-const getGenerationWarningCounts = (result: any) => {
-  const logs = result?.checkLogs || []
-  const issues = getGenerationIssues(result)
-  const disabledRuleCount = Number(result?.disabledRuleCount ?? (issues.length > 0
-    ? issues.filter(issue => issue.issueType === 'RULE_DISABLED').length
-    : countLogMarker(logs, '[rule-disabled]')))
-  const skippedSpecCount = Number(result?.skippedSpecCount ?? (issues.length > 0
-    ? issues.filter(issue => issue.issueType === 'SPECIFICATION_SKIPPED').length
-    : countLogMarker(logs, '[spec-skipped]')))
-  return {
-    disabledRuleCount,
-    skippedSpecCount,
-    total: disabledRuleCount + skippedSpecCount
-  }
-}
+const isSimulationModelComplete = (result: SimulationResult | null): boolean =>
+  result?.modelComplete === true
 
-const getSimulationDisabledRuleCount = (result: any): number => {
-  const issues = getGenerationIssues(result)
-  return Number(result?.disabledRuleCount ?? (issues.length > 0
-    ? issues.filter(issue => issue.issueType === 'RULE_DISABLED').length
-    : countLogMarker(result?.logs || result?.checkLogs, '[rule-disabled]')))
-}
+const getSimulationActualStepCount = (result: SimulationResult | null): number => result?.steps ?? 0
 
-const isSimulationModelComplete = (result: any): boolean => {
-  return result?.modelComplete === true
-}
-
-const getSimulationStateCount = (result: any): number =>
-  Array.isArray(result?.states) ? result.states.length : 0
-
-const getSimulationActualStepCount = (result: any): number => {
-  const steps = Number(result?.steps)
-  return Number.isInteger(steps) && steps >= 0
-    ? steps
-    : Math.max(getSimulationStateCount(result) - 1, 0)
-}
-
-const getSimulationRequestedStepCount = (result: any): number => {
-  const steps = Number(result?.requestedSteps)
-  return Number.isInteger(steps) && steps >= 0 ? steps : 0
-}
-
-const isSimulationHorizonShorterThanRequested = (result: any): boolean =>
-  getSimulationActualStepCount(result) < getSimulationRequestedStepCount(result)
+const getSimulationRequestedStepCount = (result: SimulationResult | null): number => result?.requestedSteps ?? 0
 
 const isSimulationModelSemanticsConsistent = (result: any): boolean =>
   isModelSemanticsConsistent(result?.modelSemantics, {
@@ -1890,37 +1822,42 @@ const isDefinitiveMutationRejection = (error: any): boolean => {
 
 type AsyncTaskStatus = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
 
-const formatAsyncTaskStatus = (status?: AsyncTaskStatus | string): string => {
+const taskProgressStatusKey = (
+  stage?: TaskProgressStage | null,
+  status?: AsyncTaskStatus | string
+): string => {
+  const activeStage = activeTaskProgressStage(stage, status)
+  if (activeStage) return `app.taskProgressStage_${activeStage}`
   switch (status) {
     case 'PENDING':
-      return t('app.taskStatusPending')
+      return 'app.taskStatusPending'
     case 'RUNNING':
-      return t('app.taskStatusRunning')
+      return 'app.taskStatusRunning'
     case 'COMPLETED':
-      return t('app.taskStatusCompleted')
+      return 'app.taskStatusCompleted'
     case 'FAILED':
-      return t('app.taskStatusFailed')
+      return 'app.taskStatusFailed'
     case 'CANCELLED':
-      return t('app.taskStatusCancelled')
+      return 'app.taskStatusCancelled'
     default:
-      return status || t('app.taskInitializing')
+      return 'app.taskInitializing'
   }
 }
 
 const formatTaskProgressStage = (
   stage?: TaskProgressStage | null,
   status?: AsyncTaskStatus | string
-): string => {
-  const activeStage = activeTaskProgressStage(stage, status)
-  return activeStage ? t(`app.taskProgressStage_${activeStage}`) : formatAsyncTaskStatus(status)
-}
+): string => t(taskProgressStatusKey(stage, status))
+
+const formatWatchedTaskStatus = (statusKey: string, cancelling: boolean): string =>
+  t(cancelling ? 'app.taskCancelling' : statusKey)
 
 const buildVerificationResultFromTask = (task: VerificationTask, traces: Trace[] = []): VerificationResult => {
   const completedTask = validateCompletedVerificationTask(task)
   return {
     outcome: completedTask.outcome,
     traces,
-    specResults: normalizeSpecResults(completedTask.specResults),
+    specResults: completedTask.specResults,
     checkLogs: completedTask.checkLogs,
     disabledRuleCount: completedTask.disabledRuleCount,
     skippedSpecCount: completedTask.skippedSpecCount,
@@ -1942,7 +1879,7 @@ const buildVerificationResultFromTask = (task: VerificationTask, traces: Trace[]
 const buildVerificationResultFromRun = (run: VerificationRun, traces: Trace[] = []): VerificationResult => ({
   outcome: run.outcome,
   traces,
-  specResults: normalizeSpecResults(run.specResults),
+  specResults: run.specResults,
   checkLogs: run.checkLogs,
   disabledRuleCount: run.disabledRuleCount,
   skippedSpecCount: run.skippedSpecCount,
@@ -1971,25 +1908,25 @@ const getSpecResultDisplayTitle = (spec: Specification | undefined, index: numbe
   return spec?.templateLabel || detail?.label || t('app.specificationNumber', { number: index + 1 })
 }
 
-const getTraceSpecDisplayTitle = (trace: Pick<Trace, 'violatedSpecId' | 'violatedSpec'> | null | undefined): string => {
+const getTraceSpecDisplayTitle = (trace: (Pick<Trace, 'violatedSpecId' | 'violatedSpec'> & Partial<Pick<Trace, 'states'>>) | null | undefined): string => {
   if (!trace) return t('app.unknown')
   if (trace.violatedSpec) {
-    const summary = formatTraceSpec(trace.violatedSpec, t)
+    const summary = formatTraceSpec(trace.violatedSpec, t, Object.fromEntries(
+      (trace.states?.[0]?.devices || []).map(device => [device.deviceId, device.modelTokenSource])
+    ))
     if (summary) return summary
   }
-  const matchedSpec = specifications.value.find(spec => spec.id === trace.violatedSpecId)
-  if (matchedSpec) return getSpecResultDisplayTitle(matchedSpec, 0)
-  return t('app.unknown')
+  return t('app.unknownSpecification')
 }
 
-const countVerificationFailures = (result: any): number => {
-  const failedSpecs = normalizeSpecResults(result?.specResults)
+const countVerificationFailures = (result: Pick<VerificationResult, 'specResults' | 'traces'> | null): number => {
+  const failedSpecs = (result?.specResults || [])
     .filter(specResult => specResult.outcome === 'VIOLATED').length
   const traceCount = result?.traces?.length || 0
   return Math.max(failedSpecs, traceCount)
 }
 
-const getVerificationFailureMessage = (result: any): string => {
+const getVerificationFailureMessage = (result: VerificationResult | null): string => {
   if (getVerificationOutcome(result) === 'INCONCLUSIVE') {
     return t('app.verificationInconclusiveSummary')
   }
@@ -2177,6 +2114,7 @@ interface BoardMutationQueueOptions {
 
 interface CreateDeviceInstanceOptions extends BoardMutationQueueOptions {
   onConfirmedCreate?: () => void
+  onFailure?: (error: unknown, refreshed: boolean) => void
 }
 
 const getCurrentRecommendationSceneFingerprint = (
@@ -2280,7 +2218,6 @@ let deleteDialogReturnFocusNodeId: string | null = null
 const dialogMeta = reactive<DeviceDialogMeta>({
   nodeId: '',
   deviceName: '',
-  description: '',
   label: '',
   manifest: null,
   specs: []
@@ -2294,6 +2231,15 @@ const renameDialogData = reactive({
   node: null as DeviceNode | null,
   newName: '',
   originalLabel: ''
+})
+const renameNameConflict = computed(() => nodes.value.some(node =>
+  node.id !== renameDialogData.node?.id
+  && deviceLabelKey(node.label) === deviceLabelKey(renameDialogData.newName)))
+const renameNameBlockedReason = computed(() => {
+  const name = renameDialogData.newName.trim()
+  if (!name) return t('app.enterDeviceName')
+  if (name === renameDialogData.originalLabel) return t('app.enterDifferentDeviceName')
+  return renameNameConflict.value ? t('app.deviceNameAlreadyExists') : ''
 })
 
 const deleteConfirmDialogVisible = ref(false)
@@ -2391,8 +2337,10 @@ const templateMatchesName = (template: DeviceTemplate, name: unknown): boolean =
     .some(candidate => normalizeTemplateLookupName(candidate) === target)
 }
 
+const templatesByName = computed(() => indexDeviceTemplates(deviceTemplates.value))
+
 const findTemplateByAnyName = (name: unknown): DeviceTemplate | undefined =>
-  deviceTemplates.value.find(template => templateMatchesName(template, name))
+  templatesByName.value.get(normalizeTemplateLookupName(name))
 
 const resolveTemplateForNode = (node: DeviceNode): DeviceTemplate | null => {
   return findTemplateByAnyName(node.templateName) || null
@@ -2491,21 +2439,29 @@ const getBoardNodeIcon = (node: DeviceNode, stateOverride?: string): string => {
  * 5. Canvas Interaction (Zoom & Pan)
  * ================================================================================= */
 
-const clampZoom = (value: number) =>
-  Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value))
+const getMinimumCanvasZoom = (frame = getVisibleCanvasFrame()) =>
+  Math.min(MIN_ZOOM, fittedViewportForNodes(renderedCanvasNodes.value, frame)?.zoom ?? MIN_ZOOM)
+
+const clampZoom = (value: number, frame = getVisibleCanvasFrame()) =>
+  Math.min(MAX_ZOOM, Math.max(getMinimumCanvasZoom(frame), value))
 
 const setCanvasZoom = (value: number, options: { preserveCenter?: boolean } = {}) => {
   if (isCanvasNavigationLocked.value) return
-  const nextZoom = clampZoom(value)
+  // One live frame keeps the bounds, old world center and new pan consistent without repeated layout reads.
+  const frame = getVisibleCanvasFrame()
+  const nextZoom = clampZoom(value, frame)
   if (!Number.isFinite(nextZoom)) return
   if (Math.abs(nextZoom - renderedCanvasZoom.value) < 0.001) return
   if (!activePlaybackScene.value && !layoutHydrated.value) canvasStateTouchedBeforeLayout = true
 
-  const center = options.preserveCenter ? getVisibleCanvasCenterWorld() : null
-  if (activePlaybackScene.value) playbackCanvasZoom.value = nextZoom
+  const center = options.preserveCenter ? getVisibleCanvasCenterWorld(frame) : null
+  if (activePlaybackScene.value) {
+    playbackViewportFollowsFit = false
+    playbackCanvasZoom.value = nextZoom
+  }
   else canvasZoom.value = nextZoom
   if (center) {
-    panCanvasToWorldCenter(center.x, center.y)
+    panCanvasToWorldCenter(center.x, center.y, frame)
   }
 }
 
@@ -2514,7 +2470,34 @@ const adjustCanvasZoom = (delta: number) => {
   setCanvasZoom(renderedCanvasZoom.value + delta, { preserveCenter: true })
 }
 
-const canvasZoomPercent = computed(() => Math.round(renderedCanvasZoom.value * 100))
+const canvasZoomPercent = computed(() => Number((renderedCanvasZoom.value * 100).toFixed(2)))
+
+const canvasContainer = ref<HTMLElement | null>(null)
+const canvasFrameForRendering = shallowRef<ReturnType<typeof getVisibleCanvasFrame>>(null)
+const minimumCanvasZoomForInput = ref(MIN_ZOOM)
+let canvasGeometryObserver: ResizeObserver | undefined
+const syncCanvasGeometryForRendering = () => {
+  const frame = getVisibleCanvasFrame()
+  canvasFrameForRendering.value = frame
+  minimumCanvasZoomForInput.value = getMinimumCanvasZoom(frame)
+}
+const getCanvasFrameForRendering = () => canvasFrameForRendering.value
+
+// Read frame geometry after its layout inputs change. Render-time reads forced every pan/zoom
+// update to synchronously lay out nodes even though the frame and input constraint were unchanged.
+watchPostEffect(() => {
+  void boardShellStyle.value
+  void actionDockViewportWidth.value
+  void boardViewportHeight.value
+  syncCanvasGeometryForRendering()
+})
+onMounted(() => {
+  if (canvasContainer.value && typeof ResizeObserver !== 'undefined') {
+    canvasGeometryObserver = new ResizeObserver(syncCanvasGeometryForRendering)
+    canvasGeometryObserver.observe(canvasContainer.value, { box: 'border-box' })
+  }
+})
+onBeforeUnmount(() => canvasGeometryObserver?.disconnect())
 
 const handleCanvasMapZoomInput = (event: Event) => {
   const input = event.target as HTMLInputElement | null
@@ -2535,7 +2518,7 @@ const onBoardWheel = (e: WheelEvent) => {
     if (e.ctrlKey) e.preventDefault()
     return
   }
-  if (e.ctrlKey) {
+  if (e.ctrlKey && e.deltaY !== 0) {
     if (e.deltaY > 0) {
       adjustCanvasZoom(-ZOOM_STEP)
     } else {
@@ -2601,7 +2584,10 @@ const onCanvasPointerMove = (e: PointerEvent) => {
     x: panOrigin.x + dx,
     y: panOrigin.y + dy
   }
-  if (activePlaybackScene.value) playbackCanvasPan.value = nextPan
+  if (activePlaybackScene.value) {
+    playbackViewportFollowsFit = false
+    playbackCanvasPan.value = nextPan
+  }
   else canvasPan.value = nextPan
 }
 
@@ -2647,7 +2633,10 @@ const createDeviceInstanceAt = async (
   runtime?: DeviceRuntimeConfig,
   options: CreateDeviceInstanceOptions = {}
 ) => {
-  const { onConfirmedCreate, ...mutationOptions } = options
+  const { onConfirmedCreate, onFailure, ...mutationOptions } = options
+  const requestToken = getToken()
+  const requestAuthScopeEpoch = boardAuthScopeEpoch
+  const isCreateOwnerCurrent = () => isCurrentSessionToken(requestToken) && isCurrentBoardAuthScope(requestAuthScopeEpoch)
   let createConfirmed = false
   const notifyConfirmedCreate = () => {
     if (createConfirmed) return
@@ -2687,6 +2676,7 @@ const createDeviceInstanceAt = async (
     }
     try {
       const mutation = await boardApi.addNodes([node])
+      if (!isCreateOwnerCurrent()) throw new PollingAbortedError()
       commitSemanticScene({
         nodes: mutation.currentNodes,
         environmentVariables: mutation.environmentVariables,
@@ -2696,22 +2686,30 @@ const createDeviceInstanceAt = async (
       const created = mutation.affectedDevices[0]
       notifyConfirmedCreate()
       await focusCreatedDeviceNode(created)
+      if (!isCreateOwnerCurrent()) throw new PollingAbortedError()
       return { device: created, responseConfirmed: true, environmentChanges: mutation.environmentChanges }
     } catch (error: any) {
+      if (!isCreateOwnerCurrent()) throw new PollingAbortedError()
+      let refreshed = false
       if (!isDefinitiveMutationRejection(error)) {
         const [nodesRefreshed, environmentRefreshed] = await Promise.all([
           refreshDevices(),
           refreshEnvironmentVariables()
         ])
+        if (!isCreateOwnerCurrent()) throw new PollingAbortedError()
         await reloadUndoAvailability()
+        if (!isCreateOwnerCurrent()) throw new PollingAbortedError()
+        refreshed = nodesRefreshed && environmentRefreshed
         const created = nodes.value.find(candidate => candidate.id === node.id)
         if (nodesRefreshed && environmentRefreshed && created) {
           notifyConfirmedCreate()
           await focusCreatedDeviceNode(created)
+          if (!isCreateOwnerCurrent()) throw new PollingAbortedError()
           return { device: created, responseConfirmed: false, environmentChanges: [] }
         }
       }
-      notifyError(localizedErrorMessage(error, t('app.saveNodesFailed'), locale.value))
+      if (onFailure) onFailure(error, refreshed)
+      else notifyError(localizedErrorMessage(error, t('app.saveNodesFailed'), locale.value))
       throw error
     }
   }, mutationOptions)
@@ -2875,15 +2873,18 @@ const handleNodeMovedOrResized = async (nodeId: string) => {
 
 const handleAddRule = async (request: {
   rule: RuleForm
-  complete: (saved: boolean) => void
+  complete: (saved: boolean, failure?: ApiErrorDetails) => void
 }) => {
   if (!ensurePlaybackClosedForMutation()) {
     request.complete(false)
     return
   }
+  const requestToken = getToken()
+  const requestAuthScopeEpoch = boardAuthScopeEpoch
   let saved = false
   let outcomeRefreshed = false
   let attemptedRule: RuleForm | null = null
+  let saveFailure: ApiErrorDetails | undefined
   try {
     await enqueueBoardMutation(async () => {
       try {
@@ -2915,6 +2916,21 @@ const handleAddRule = async (request: {
         saved = true
       } catch (error: any) {
         console.error('addRule error', error)
+        if (Number(error?.response?.status) === 409
+          && error?.response?.data?.data?.reasonCode === 'DUPLICATE_RULE') {
+          if (!isCurrentSessionToken(requestToken) || !isCurrentBoardAuthScope(requestAuthScopeEpoch)) return
+          await refreshRules(requestToken)
+          if (!isCurrentSessionToken(requestToken) || !isCurrentBoardAuthScope(requestAuthScopeEpoch)) return
+          await reloadUndoAvailability()
+          if (!isCurrentSessionToken(requestToken) || !isCurrentBoardAuthScope(requestAuthScopeEpoch)) return
+          saveFailure = errorDetails(error)
+          return
+        }
+        if (isDefinitiveMutationRejection(error) && [400, 422].includes(Number(error?.response?.status))) {
+          if (!isCurrentSessionToken(requestToken) || !isCurrentBoardAuthScope(requestAuthScopeEpoch)) return
+          saveFailure = errorDetails(error)
+          return
+        }
         if (!isDefinitiveMutationRejection(error) && attemptedRule) {
           const refreshed = await refreshRules()
           await reloadUndoAvailability()
@@ -2928,7 +2944,7 @@ const handleAddRule = async (request: {
       }
     })
   } finally {
-    request.complete(saved)
+    request.complete(saved, saveFailure)
     if (outcomeRefreshed) {
       await nextTick()
       notifyBlocked(t('app.ruleCreateOutcomeRefreshed'))
@@ -3011,6 +3027,21 @@ const formatRecommendedRuleCommandDevice = (command: RuleRecommendation['command
 const formatRecommendedRuleContentDevice = (command: RuleRecommendation['command']): string =>
   formatRecommendedRuleDevice(command.contentDevice, command.contentDeviceLabel)
 
+const recommendationPresentationContext = () => ({
+  t,
+  resolveDevice: (id: string) => resolveNodeRef(id),
+  formatToken: formatRecommendedNodeModelToken,
+  modeCount: (id: string) => {
+    const node = resolveNodeRef(id)
+    return node ? resolvePresentationTemplateForNode(node)?.manifest.Modes?.length || 0 : 0
+  }
+})
+
+const presentedRuleRecommendations = computed(() => ruleRecommendations.value.map(rec =>
+  presentRule(materializeRuleRecommendation(rec, 'preview'), recommendationPresentationContext())))
+const presentedSpecRecommendations = computed(() => specRecommendations.value.map(rec =>
+  describeSpecification({ ...rec, templateId: rec.templateId as SpecTemplateId }, recommendationPresentationContext())))
+
 const normalizeRuleDuplicateText = (value: unknown): string => {
   if (value === null || value === undefined) return ''
   return String(value).trim()
@@ -3087,32 +3118,46 @@ const applyRecommendation = async (rec: RuleRecommendation, index: number) => {
     notifyBlocked(t('app.recommendationAlreadyApplied'))
     return
   }
-  if (applyingRuleRecommendations.value.has(index)) return
+  if (applyingRuleRecommendations.value.has(index) || recommendationApplyFailures.rule[index]?.outcomeUnknown) return
 
   const recommendationEpoch = ruleRecommendationRequestEpoch
   const requestSceneGeneration = recommendationSceneGeneration
   const applyAuthScopeEpoch = boardAuthScopeEpoch
+  const requestToken = getToken()
+  const isApplyAccountCurrent = () => isCurrentBoardAuthScope(applyAuthScopeEpoch) && isCurrentSessionToken(requestToken)
+  const isApplyCandidateCurrent = () => isApplyAccountCurrent()
+    && recommendationEpoch === ruleRecommendationRequestEpoch && requestSceneGeneration === recommendationSceneGeneration
+  delete recommendationApplyFailures.rule[index]
   let recommendationConfirmedApplied = false
 
   let attemptedRule: RuleForm | null = null
   const reportFailure = async (error: any) => {
-    if (!isCurrentBoardAuthScope(applyAuthScopeEpoch)) return
+    if (!isApplyAccountCurrent()) return
     console.error('applyRecommendation error', error)
+    let refreshed = false
     if (!isDefinitiveMutationRejection(error) && attemptedRule) {
-      const refreshed = await refreshRules()
-      if (!isCurrentBoardAuthScope(applyAuthScopeEpoch)) return
+      refreshed = await refreshRules(requestToken)
+      if (!isApplyAccountCurrent()) return
       await reloadUndoAvailability()
+      if (!isApplyAccountCurrent()) return
       if (refreshed && ruleExists(attemptedRule)) {
         recommendationConfirmedApplied = true
-        if (recommendationEpoch === ruleRecommendationRequestEpoch
-          && requestSceneGeneration === recommendationSceneGeneration) {
+        if (isApplyCandidateCurrent()) {
           appliedRuleRecommendations.value.add(index)
           notifyBlocked(t('app.ruleCreateOutcomeRefreshed'))
         }
         return
       }
     }
-    notifyError(extractApiErrorMessage(error, t('app.failedToApplyRule')))
+    if (!isApplyCandidateCurrent()) return
+    if (error?.response?.data?.data?.reasonCode === 'DUPLICATE_RULE') {
+      notifyBlocked(t('app.duplicateRuleExists'))
+      return
+    }
+    const outcomeUnknown = !isDefinitiveMutationRejection(error)
+    reportRecommendationApplyFailure('rule', index, error, t(outcomeUnknown
+      ? refreshed ? 'app.recommendationApplyOutcomeRefreshed' : 'app.recommendationApplyOutcomeUnknown'
+      : 'app.failedToApplyRule'), outcomeUnknown)
   }
   try {
     if (!ensureBoardItemCapacity('rules', rules.value.length, 1, REQUEST_LIMITS.rules)) return
@@ -3143,16 +3188,16 @@ const applyRecommendation = async (rec: RuleRecommendation, index: number) => {
         || isSceneReplacementInProgress.value) return
       try {
         const mutation = await boardApi.addRule(JSON.parse(JSON.stringify(newRule)))
+        if (!isApplyAccountCurrent()) return
         commitSemanticScene({ rules: mutation.currentItems, availability: mutation })
         recommendationConfirmedApplied = true
         const createdRule = mutation.affectedItem
         if (createdRule?.id) {
           await focusRuleOnCanvas(createdRule.id)
         }
-        if (recommendationEpoch === ruleRecommendationRequestEpoch) {
+        if (isApplyCandidateCurrent()) {
           appliedRuleRecommendations.value.add(index)
         }
-        notifySuccess(t('app.ruleAddedSuccessfully'))
       } catch (error: any) {
         await reportFailure(error)
       }
@@ -3219,7 +3264,6 @@ const bindDeviceDialogNode = (node: DeviceNode) => {
   dialogMeta.nodeId = node.id
   dialogMeta.label = node.label
   dialogMeta.deviceName = manifest?.Name || tpl?.manifest?.Name || node.templateName
-  dialogMeta.description = manifest?.Description || tpl?.manifest?.Description || ''
   dialogMeta.manifest = manifest
   dialogMeta.specs = specifications.value.filter(spec =>
     isSpecRelatedToNode(spec, node.id)
@@ -3230,7 +3274,6 @@ const clearDeviceDialogMeta = () => {
   dialogMeta.nodeId = ''
   dialogMeta.label = ''
   dialogMeta.deviceName = ''
-  dialogMeta.description = ''
   dialogMeta.manifest = null
   dialogMeta.specs = []
 }
@@ -3431,7 +3474,10 @@ const handleRenameDevice = async (
   })
 }
 
-const handleDeviceRuntimeSave = async (nodeId: string, runtime: DeviceRuntimeConfig) => {
+const handleDeviceRuntimeSave = async (
+  nodeId: string, runtime: DeviceRuntimeConfig,
+  complete?: (saved: boolean, failure?: ApiErrorDetails) => void
+) => {
   if (!ensurePlaybackClosedForMutation()) return
   if (!ensureBoardDataReady(['nodes', 'templates'])) return
   if (deviceRuntimeSaving.value) return
@@ -3446,9 +3492,15 @@ const handleDeviceRuntimeSave = async (nodeId: string, runtime: DeviceRuntimeCon
 
   const validationMessage = validateDeviceRuntimeConfig(template, runtime, t, { variableScope: 'local' })
   if (validationMessage) {
-    notifyBlocked(validationMessage)
+    if (complete) complete(false, { cause: validationMessage, details: [], fields: {} })
+    else notifyBlocked(validationMessage)
     return
   }
+  const requestToken = getToken()
+  const requestAuthScopeEpoch = boardAuthScopeEpoch
+  const isRequestCurrent = () => isCurrentSessionToken(requestToken) && isCurrentBoardAuthScope(requestAuthScopeEpoch)
+  let saved = false
+  let saveFailure: ApiErrorDetails | undefined
 
   const runtimeRequest: DeviceRuntimeConfig = deepClone(runtime)
   const expectedRuntime = deviceRuntimeSnapshot(node)
@@ -3461,19 +3513,24 @@ const handleDeviceRuntimeSave = async (nodeId: string, runtime: DeviceRuntimeCon
           expected: expectedRuntime,
           desired: runtimeRequest
         })
+        if (!isRequestCurrent()) return
         commitSemanticScene({
           nodes: mutation.currentNodes,
           availability: mutation,
           semanticChanged: mutation.operation === 'updated'
         })
+        saved = true
         notifySuccess(mutation.operation === 'updated'
           ? t('app.instanceConfigSaved')
           : t('app.instanceConfigUnchanged'))
       } catch (error: any) {
         console.error('Failed to save device instance configuration', error)
+        if (!isRequestCurrent()) return
         if (error?.response?.data?.data?.reasonCode === 'DEVICE_RUNTIME_STALE') {
           const refreshed = await refreshDevices()
+          if (!isRequestCurrent()) return
           await reloadUndoAvailability()
+          if (!isRequestCurrent()) return
           if (refreshed) {
             const persisted = nodes.value.find(candidate => candidate.id === nodeId)
             notifyBlocked(deviceRuntimeMatches(persisted, runtimeRequest, template)
@@ -3486,18 +3543,25 @@ const handleDeviceRuntimeSave = async (nodeId: string, runtime: DeviceRuntimeCon
         }
         if (!isDefinitiveMutationRejection(error)) {
           const nodesRefreshed = await refreshDevices()
+          if (!isRequestCurrent()) return
           await reloadUndoAvailability()
+          if (!isRequestCurrent()) return
           const persisted = nodes.value.find(candidate => candidate.id === nodeId)
           if (nodesRefreshed && deviceRuntimeMatches(persisted, runtimeRequest, template)) {
             notifyBlocked(t('app.deviceRuntimeOutcomeRefreshed'))
             return
           }
+          notifyBlocked(t(nodesRefreshed
+            ? 'app.deviceRuntimeOutcomeNotMatched' : 'app.deviceRuntimeOutcomeUnknownRefreshFailed'))
+          return
         }
-        notifyError(extractApiErrorMessage(error, t('app.instanceConfigSaveFailed')))
+        if (isDefinitiveMutationRejection(error) && complete) saveFailure = errorDetails(error)
+        else notifyError(extractApiErrorMessage(error, t('app.instanceConfigSaveFailed')))
       }
     })
   } finally {
     deviceRuntimeSaving.value = false
+    if (isRequestCurrent()) complete?.(saved, saveFailure)
   }
 }
 
@@ -3778,7 +3842,7 @@ const handleDialogDelete = () => {
 const confirmRename = async () => {
   if (renameDialogSubmitting.value
     || !renameDialogData.node
-    || !renameDialogData.newName.trim()) return
+    || renameNameBlockedReason.value) return
 
   renameDialogSubmitting.value = true
   try {
@@ -4161,7 +4225,9 @@ const applyBoardLayout = (layout?: BoardLayoutDto | null) => {
     }
   }
   if (typeof layout.canvasZoom === 'number' && !canvasStateTouchedBeforeLayout) {
-    canvasZoom.value = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, layout.canvasZoom))
+    canvasZoom.value = Number.isFinite(layout.canvasZoom) && layout.canvasZoom > 0
+      ? Math.min(MAX_ZOOM, layout.canvasZoom)
+      : 1
   }
 
   const shouldApplyPanelLayout = !panelStateTouchedBeforeLayout
@@ -4188,6 +4254,7 @@ const applyBoardLayout = (layout?: BoardLayoutDto | null) => {
 
 type QueuedBoardLayoutSave = {
   payload: BoardLayoutDto
+  authToken: string
   silent: boolean
   resolve: Array<(saved: boolean) => void>
 }
@@ -4197,9 +4264,10 @@ let boardLayoutSaveDrainRunning = false
 let boardLayoutSaveIdleResolvers: Array<() => void> = []
 
 const persistBoardLayout = async (request: QueuedBoardLayoutSave): Promise<boolean> => {
-  if (!getToken()) return false
+  if (currentAuthUserId.value !== boardOwnerUserId || !isCurrentSessionToken(request.authToken)) return false
   try {
-    await boardApi.saveLayout(request.payload)
+    await boardApi.saveLayout(request.payload, request.authToken)
+    if (currentAuthUserId.value !== boardOwnerUserId || !isCurrentSessionToken(request.authToken)) return false
     persistedWideLayout = request.payload
     layoutSaveErrorShown = false
     return true
@@ -4207,7 +4275,8 @@ const persistBoardLayout = async (request: QueuedBoardLayoutSave): Promise<boole
     const mayShowFeedback = !request.silent
       && !layoutSaveFeedbackSuppressed
       && !boardLifecycleDisposed
-      && Boolean(getToken())
+      && currentAuthUserId.value === boardOwnerUserId
+      && isCurrentSessionToken(request.authToken)
     if (mayShowFeedback) {
       console.error('Failed to save canvas layout', e)
       if (!layoutSaveErrorShown) {
@@ -4243,9 +4312,15 @@ const waitForBoardLayoutSaveIdle = (): Promise<void> => {
 }
 
 const saveBoardLayout = (options: { silent?: boolean } = {}): Promise<boolean> => {
-  if (!getToken()) return Promise.resolve(false)
+  const requestToken = getToken()
+  if (!requestToken || currentAuthUserId.value !== boardOwnerUserId
+    || !isCurrentSessionToken(requestToken)) return Promise.resolve(false)
   const payload = buildBoardLayoutPayload()
   return new Promise(resolve => {
+    if (pendingBoardLayoutSave && pendingBoardLayoutSave.authToken !== requestToken) {
+      pendingBoardLayoutSave.resolve.forEach(finish => finish(false))
+      pendingBoardLayoutSave = null
+    }
     if (pendingBoardLayoutSave) {
       pendingBoardLayoutSave.payload = payload
       pendingBoardLayoutSave.silent = options.silent === true
@@ -4253,6 +4328,7 @@ const saveBoardLayout = (options: { silent?: boolean } = {}): Promise<boolean> =
     } else {
       pendingBoardLayoutSave = {
         payload,
+        authToken: requestToken,
         silent: options.silent === true,
         resolve: [resolve]
       }
@@ -4318,7 +4394,9 @@ watch(
     boardPanels.inspector.width,
     boardPanels.inspector.activeSection
   ],
-  scheduleBoardLayoutSave
+  // Restoring the initial layout happens before layoutHydrated; observe that boundary synchronously.
+  scheduleBoardLayoutSave,
+  { flush: 'sync' }
 )
 
 const openControlSection = (section: InspectorSection) => {
@@ -4342,6 +4420,7 @@ const handleControlCollapsedUpdate = (value: boolean) => {
   }
   boardPanels.control.collapsed = value
   if (!value && isNarrowViewport()) boardPanels.inspector.collapsed = true
+  if (!value) void nextTick(() => focusSidePanelTab(document.querySelector('[data-testid="control-center"]')))
 }
 
 const handleControlActiveSectionUpdate = (value: ControlCenterSection) => {
@@ -4357,6 +4436,7 @@ const handleInspectorCollapsedUpdate = (value: boolean) => {
   }
   boardPanels.inspector.collapsed = value
   if (!value && isNarrowViewport()) boardPanels.control.collapsed = true
+  if (!value) void nextTick(() => focusSidePanelTab(document.querySelector('[data-testid="system-inspector"]')))
 }
 
 const handleInspectorActiveSectionUpdate = (value: InspectorSection) => {
@@ -4412,7 +4492,6 @@ const syncRuleDerivedEdges = () => {
   edges.value = generateEdgesFromRules()
 }
 
-const ruleBuilderVisible = ref(false)
 
 const refreshDeviceTemplates = async (): Promise<boolean> => {
   templatesLoading.value = true
@@ -4456,7 +4535,7 @@ const handleAuthoritativeBoardStateUnavailable = (
   const affectedKeys = new Set(keys)
   affectedKeys.forEach(key => { boardDataLoadState[key] = 'error' })
   templatesLoading.value = false
-  invalidateCurrentFuzzingModelFingerprint()
+  invalidateCurrentBoardModelFingerprints()
   invalidateRecommendationsForSceneChange({ notify: true })
 }
 
@@ -4498,6 +4577,7 @@ const refreshEnvironmentVariables = async (): Promise<boolean> => {
 
 const refreshBoardSnapshot = async (): Promise<boolean> => {
   const authScopeEpoch = boardAuthScopeEpoch
+  boardSnapshotError.value = null
   allBoardDataKeys.forEach(key => { boardDataLoadState[key] = 'loading' })
   templatesLoading.value = true
   try {
@@ -4516,18 +4596,19 @@ const refreshBoardSnapshot = async (): Promise<boolean> => {
     syncRuleDerivedEdges()
     hydratedBoardAuthScopeEpoch = authScopeEpoch
     allBoardDataKeys.forEach(key => { boardDataLoadState[key] = 'ready' })
-    void refreshCurrentFuzzingModelFingerprint()
+    boardSnapshotError.value = null
+    void refreshCurrentBoardModelFingerprints()
     // Undo history is server state and some commands reset or advance it (scene replacement,
     // automatic fixes, another tab's work). A wholesale reload must re-read it too, or the button
     // would keep offering an undo the journal no longer has. Called explicitly rather than left to
-    // the isBoardDataReady watcher: that only fires because this function flips every load-state key
-    // through 'loading' first, so availability would break silently if that flicker ever stopped.
+    // readiness transitions, so availability does not depend on a loading-state flicker.
     void loadBoardUndoAvailability()
     return true
   } catch (error) {
     if (!isCurrentBoardAuthScope(authScopeEpoch)) return false
     console.error('Failed to load the canvas semantic snapshot:', error)
     allBoardDataKeys.forEach(key => { boardDataLoadState[key] = 'error' })
+    boardSnapshotError.value = errorDetails(error)
     return false
   } finally {
     if (isCurrentBoardAuthScope(authScopeEpoch)) templatesLoading.value = false
@@ -4574,14 +4655,14 @@ const requestBoardSnapshotRefresh = ({
 }
 
 const refreshBoardOnForeground = () => {
-  if (!boardForegroundRefreshPromise) invalidateCurrentFuzzingModelFingerprint()
+  if (!boardForegroundRefreshPromise) invalidateCurrentBoardModelFingerprints()
   requestBoardSnapshotRefresh({ queueIfBusy: false })
 }
 
 const boardInvalidationBinding = createScopedBoardInvalidationBinding(
   subscribeBoardInvalidation,
   () => {
-    invalidateCurrentFuzzingModelFingerprint()
+    invalidateCurrentBoardModelFingerprints()
     requestBoardSnapshotRefresh()
   }
 )
@@ -4599,29 +4680,46 @@ const formatEnvironmentPatchResults = (results: EnvironmentVariablePatchResult[]
     return `${formatBoardEnvironmentModelToken(result.name, result.name)} (${fields.map(environmentPatchFieldLabel).join(', ')})`
   }).join('; ')
 
-const saveEnvironmentVariables = async (patches: EnvironmentVariableUpdateRequest[]) => {
+const saveEnvironmentVariables = async (
+  patches: EnvironmentVariableUpdateRequest[],
+  complete: (saved: boolean, failure?: ApiErrorDetails) => void
+) => {
   if (!ensurePlaybackClosedForMutation()) return
   if (!ensureBoardDataReady(['nodes', 'templates', 'environment'])) return
+  const requestToken = getToken()
+  const requestAuthScopeEpoch = boardAuthScopeEpoch
+  const isRequestCurrent = () => isCurrentSessionToken(requestToken) && isCurrentBoardAuthScope(requestAuthScopeEpoch)
+  for (const [index, patch] of patches.entries()) {
+    if (patch.desired.value === undefined) continue
+    const definition = nodes.value.map(node => resolveImpactEnvironmentDefinition(resolveTemplateForNode(node)?.manifest, patch.name))
+      .find(variable => variable !== undefined)
+    const reason = !patch.desired.value.trim() ? t('app.variableValueRequired')
+      : definition ? validateTemplateVariableValue(definition, patch.desired.value, t) : ''
+    if (reason) {
+      complete(false, { details: [], fields: { [`environmentVariables[${index}].desired.value`]: reason } })
+      return
+    }
+  }
   if (environmentMutationPending.value) {
     notifyInfo(t('app.environmentSaveInProgress'))
     return
   }
   environmentMutationPending.value = true
+  let saved = false
+  let saveFailure: ApiErrorDetails | undefined
   try {
     await enqueueBoardMutation(async () => {
       try {
         const mutation = await boardApi.saveEnvironment(patches)
+        if (!isRequestCurrent()) return
         commitSemanticScene({
           environmentVariables: mutation.environmentVariables,
           availability: mutation,
           semanticChanged: mutation.operation === 'updated'
         })
+        saved = true
         const changedPatches = mutation.patchResults.filter(result => result.changedFields.length > 0)
-        if (changedPatches.length > 0) {
-          notifySuccess(t('app.environmentPatchApplied', {
-            items: formatEnvironmentPatchResults(changedPatches)
-          }))
-        } else {
+        if (changedPatches.length === 0) {
           notifyInfo(t('app.environmentPatchUnchanged', {
             items: formatEnvironmentPatchResults(mutation.patchResults)
           }))
@@ -4632,30 +4730,36 @@ const saveEnvironmentVariables = async (patches: EnvironmentVariableUpdateReques
         ))
       } catch (e: any) {
         console.error('Failed to save the environment variable pool', e)
+        if (!isRequestCurrent()) return
         if (e?.response?.data?.data?.reasonCode === 'ENVIRONMENT_VARIABLE_STALE') {
           // A stale CAS can also mean that another tab removed a device or
           // template which sourced this variable. Reconcile the full semantic
           // snapshot so the inspector cannot keep ghost entries.
           const refreshed = await refreshBoardSnapshot()
+          if (!isRequestCurrent()) return
           await reloadUndoAvailability()
+          if (!isRequestCurrent()) return
           if (refreshed) markVerificationResultStale()
           notifyBlocked(refreshed
             ? t('app.environmentVariableStaleRefreshed')
             : t('app.environmentVariableStaleRefreshFailed'))
         } else if (!isDefinitiveMutationRejection(e)) {
           const refreshed = await refreshBoardSnapshot()
+          if (!isRequestCurrent()) return
           await reloadUndoAvailability()
+          if (!isRequestCurrent()) return
           if (refreshed) markVerificationResultStale()
           notifyBlocked(refreshed
             ? t('app.environmentSaveOutcomeRefreshed')
             : t('app.environmentSaveOutcomeUnknownRefreshFailed'))
         } else {
-          notifyError(extractApiErrorMessage(e, t('app.saveEnvironmentFailed')))
+          saveFailure = errorDetails(e)
         }
       }
     })
   } finally {
     environmentMutationPending.value = false
+    if (isRequestCurrent()) complete(saved, saveFailure)
   }
 }
 
@@ -4668,6 +4772,7 @@ const {
   assertSceneEnvironmentCoverage,
   assertUniqueSceneDeviceIds,
   assertSceneReferences,
+  serializeSceneFile,
   canonicalizeSceneFile,
   normalizeSceneFile
 } = createSceneCodec(t)
@@ -4779,10 +4884,24 @@ const showSceneImportError = async (error: any) => {
   const status = error?.response?.status
   const message = error?.response?.data?.message || error?.message || ''
 
-  // Handle 409 Conflict - Template mismatch
+  // A conflict's reason code owns its meaning; HTTP 409 also covers duplicate rules and specs.
   if (status === 409) {
-    const templateMatch = message.match(/template.*:\s*(.+)$/i)
-    const templateName = templateMatch ? templateMatch[1] : t('app.unknown')
+    const data = error?.response?.data?.data
+    const reasonCode = data?.reasonCode
+    if (reasonCode !== 'SCENE_TEMPLATE_MISMATCH' || typeof data?.templateName !== 'string') {
+      const duplicateRule = reasonCode === 'DUPLICATE_RULE'
+      const duplicateSpec = reasonCode === 'DUPLICATE_SPECIFICATION'
+      await acknowledgeFailure({
+        title: t('app.sceneImportConflictTitle'),
+        message: t(duplicateRule ? 'app.sceneImportDuplicateRule'
+          : duplicateSpec ? 'app.sceneImportDuplicateSpecification' : 'app.sceneImportConflictGeneral'),
+        suggestion: t(duplicateRule ? 'app.sceneImportDuplicateRuleHint'
+          : duplicateSpec ? 'app.sceneImportDuplicateSpecificationHint' : 'app.sceneImportConflictGeneralHint'),
+        ...errorDetails(error)
+      })
+      return
+    }
+    const templateName = data.templateName
 
     await acknowledge({
       title: t('app.sceneImportConflictTitle'),
@@ -4808,7 +4927,7 @@ const showSceneImportError = async (error: any) => {
   }
 
   // Handle 400 Bad Request - Scene format/reference errors
-  if (status === 400) {
+  if (status === 400 && getStructuredValidationErrors(error).length === 0) {
     // Unsupported scene version
     if (message.includes('Unsupported scene file')) {
       const versionMatch = message.match(/version (\d+).*version\s+(\d+|null)/s)
@@ -4975,7 +5094,12 @@ const showSceneImportError = async (error: any) => {
   // Handle 422 Validation errors with structured field errors
   const entries = getStructuredValidationErrors(error)
   if (entries.length === 0) {
-    notifyError(getSceneErrorMessage(error))
+    await acknowledgeFailure({
+      title: t('app.sceneImportValidationTitle'),
+      message: localizedErrorMessage(error, t('app.sceneImportFailed'), locale.value),
+      suggestion: t('app.sceneImportValidationNextStep'),
+      ...errorDetails(error)
+    })
     return
   }
 
@@ -4989,6 +5113,8 @@ const showSceneImportError = async (error: any) => {
     message: h('div', { class: 'space-y-3 text-left' }, [
         h('p', { class: 'text-sm', style: { color: 'var(--text-muted)' } },
           t('app.sceneImportValidationSummary', { count: entries.length })),
+        h('p', { class: 'text-sm', style: { color: 'var(--text-muted)' } },
+          t('app.sceneImportValidationNextStep')),
 
         // Environment variable errors section
         ...(envVarErrors.length > 0 ? [
@@ -5130,23 +5256,38 @@ const importScene = async (
     try {
       replacementPreview = await boardApi.previewBoardReplacement()
     } catch (error: any) {
+      if (!isAdmitted()) return false
       notifyError(localizedErrorMessage(error, t('app.sceneReplacementPreviewFailed'), locale.value))
       return false
     }
     if (!isAdmitted()) return false
     if (!await confirmDestructive({
       title: t('app.sceneImportConfirmTitle'),
-      message: t('app.sceneImportConfirmMessage', {
-        currentDevices: replacementPreview.deviceCount,
-        currentVariables: replacementPreview.environmentVariableCount,
-        currentRules: replacementPreview.ruleCount,
-        currentSpecs: replacementPreview.specificationCount,
-        historyEntries: replacementPreview.editHistoryEntryCount,
-        devices: scene.devices.length,
-        variables: scene.environmentVariables.length,
-        rules: scene.rules.length,
-        specs: scene.specs.length
-      }),
+      message: h('div', { class: 'scene-import-preview' }, [
+        h('table', { 'data-testid': 'scene-import-comparison' }, [
+          h('thead', [h('tr', [
+            h('th', { scope: 'col' }, t('app.sceneContents')),
+            h('th', { scope: 'col' }, t('app.currentScene')),
+            h('th', { scope: 'col' }, t('app.sceneAfterImport'))
+          ])]),
+          h('tbody', [
+            ['app.devices', replacementPreview.deviceCount, scene.devices.length],
+            ['app.environmentVariables', replacementPreview.environmentVariableCount, scene.environmentVariables.length],
+            ['app.rules', replacementPreview.ruleCount, scene.rules.length],
+            ['app.specifications', replacementPreview.specificationCount, scene.specs.length]
+          ].map(([label, current, incoming]) => h('tr', [
+            h('th', { scope: 'row' }, t(String(label))),
+            h('td', String(current)), h('td', String(incoming))
+          ])))
+        ]),
+        h('p', { class: 'iot-dialog__consequence', 'data-testid': 'scene-import-consequence' },
+          t('app.sceneImportConfirmMessage', { historyEntries: replacementPreview.editHistoryEntryCount })),
+        h('details', { 'data-testid': 'scene-import-template-rule-details' }, [
+          h('summary', t('app.sceneImportTemplateRuleHandling')),
+          h('p', t('app.sceneImportTemplateNotice')),
+          h('p', t('app.sceneImportRulePriorityNotice'))
+        ])
+      ]),
       confirmText: t('app.sceneImportConfirmAction'),
       customClass: 'scene-replacement-confirm'
     })) return false
@@ -5157,7 +5298,7 @@ const importScene = async (
       try {
         saved = await boardApi.importScene({
           impactToken: replacementPreview.impactToken,
-          scene: canonicalizeSceneFile(scene)
+          scene: serializeSceneFile(scene)
         })
         if (!savedBatchMatchesScene(saved, scene)) {
           throw new Error('Scene replacement response did not match the requested semantic scene')
@@ -5312,10 +5453,16 @@ const clearScene = async () => {
   }
 }
 
+let sceneImportSelectionVersion = 0
 const handleSceneImportFile = async (event: Event) => {
   const input = event.target as HTMLInputElement | null
   const file = input?.files?.[0]
   if (!file) return
+  const selectionVersion = ++sceneImportSelectionVersion
+  const requestToken = getToken()
+  const authScopeEpoch = boardAuthScopeEpoch
+  const ownsSelection = () => selectionVersion === sceneImportSelectionVersion
+    && isCurrentSessionToken(requestToken) && isCurrentBoardAuthScope(authScopeEpoch)
   try {
     if (isSceneReplacementInProgress.value) {
       notifyBlocked(t('app.sceneReplacementInProgress'))
@@ -5325,13 +5472,36 @@ const handleSceneImportFile = async (event: Event) => {
       notifyError(t('app.importFileTooLarge', { size: '64 MiB' }))
       return
     }
-    const text = await file.text()
+    let text: string
+    try {
+      text = await file.text()
+    } catch (error) {
+      if (!ownsSelection()) return
+      console.error('Failed to read scene file', error)
+      await acknowledgeFailure({
+        title: t('app.sceneFileReadFailed'),
+        message: t('app.sceneFileReadFailed'),
+        suggestion: t('app.sceneFileReadNextStep'),
+        ...errorDetails(error)
+      })
+      return
+    }
+    if (!ownsSelection()) return
     let raw: unknown
     try {
       raw = JSON.parse(text)
     } catch (error) {
       console.error('Failed to parse scene JSON', error)
-      notifyError(t('app.invalidJsonFile'))
+      const diagnostic = diagnoseJsonParseError(text, error)
+      await acknowledgeFailure({
+        title: t('app.jsonSyntaxInvalidTitle'),
+        message: [t('app.jsonSyntaxInvalidMessage'),
+          ...(diagnostic.line !== undefined && diagnostic.column !== undefined
+            ? [t('app.jsonSyntaxLocation', { line: diagnostic.line, column: diagnostic.column })] : [])].join(' '),
+        suggestion: t('app.jsonSyntaxCorrectionHint'),
+        cause: diagnostic.reason,
+        details: [diagnostic.reason]
+      })
       return
     }
     let scene: BoardSceneModel
@@ -5339,26 +5509,29 @@ const handleSceneImportFile = async (event: Event) => {
       scene = normalizeSceneFile(raw)
     } catch (error) {
       console.error('Scene file validation failed', error)
-      notifyError(error instanceof Error && error.message.trim()
-        ? error.message
-        : t('app.sceneImportFailed'))
+      await acknowledgeFailure({
+        title: t('app.sceneImportValidationTitle'),
+        message: localizedErrorMessage(error, t('app.sceneImportFailed'), locale.value),
+        suggestion: t('app.sceneImportValidationNextStep'),
+        ...errorDetails(error)
+      })
       return
     }
-    await importScene(scene)
-  } catch (error) {
-    console.error('Failed to read scene file', error)
-    notifyError(getSceneErrorMessage(error))
+    await importScene(scene, ownsSelection)
   } finally {
-    if (input) input.value = ''
+    if (input && ownsSelection()) input.value = ''
   }
 }
 
 // 2.定义刷新规则的函数（edges 由 rules 动态生成）
-const refreshRules = async (): Promise<boolean> => {
+const refreshRules = async (expectedToken: string | null = getToken()): Promise<boolean> => {
+  const authScopeEpoch = boardAuthScopeEpoch
+  if (!isCurrentSessionToken(expectedToken) || !isCurrentBoardAuthScope(authScopeEpoch)) return false
   boardDataLoadState.rules = 'loading'
   try {
     // 只获取规则列表
     const rulesData = await boardApi.getRules()
+    if (!isCurrentSessionToken(expectedToken) || !isCurrentBoardAuthScope(authScopeEpoch)) return false
     rules.value = rulesData
     reconcileDanglingBoardFocus({ rules: rulesData })
     // 动态生成 edges
@@ -5366,6 +5539,7 @@ const refreshRules = async (): Promise<boolean> => {
     boardDataLoadState.rules = 'ready'
     return true
   } catch (e) {
+    if (!isCurrentSessionToken(expectedToken) || !isCurrentBoardAuthScope(authScopeEpoch)) return false
     console.error('Failed to load rules', e)
     boardDataLoadState.rules = 'error'
     return false
@@ -5373,15 +5547,19 @@ const refreshRules = async (): Promise<boolean> => {
 }
 
 // 3.定义刷新规约的函数
-const refreshSpecifications = async (): Promise<boolean> => {
+const refreshSpecifications = async (expectedToken: string | null = getToken()): Promise<boolean> => {
+  const authScopeEpoch = boardAuthScopeEpoch
+  if (!isCurrentSessionToken(expectedToken) || !isCurrentBoardAuthScope(authScopeEpoch)) return false
   boardDataLoadState.specs = 'loading'
   try {
     const specsData = await boardApi.getSpecs()
+    if (!isCurrentSessionToken(expectedToken) || !isCurrentBoardAuthScope(authScopeEpoch)) return false
     specifications.value = specsData
     reconcileDanglingBoardFocus({ specs: specsData })
     boardDataLoadState.specs = 'ready'
     return true
   } catch(e) {
+    if (!isCurrentSessionToken(expectedToken) || !isCurrentBoardAuthScope(authScopeEpoch)) return false
     console.error('Failed to load specifications', e)
     boardDataLoadState.specs = 'error'
     return false
@@ -5431,22 +5609,42 @@ const applyLoadedBoardLayout = (layout: BoardLayoutDto | null, initialHydration:
   }
 }
 
+const loadBoardLayout = async (
+  initialHydration = false,
+  snapshotReady: Promise<boolean> | null = boardForegroundRefreshPromise
+): Promise<boolean> => {
+  const authScopeEpoch = boardAuthScopeEpoch
+  if (!isCurrentBoardAuthScope(authScopeEpoch) || loadingBoardLayout.value) return false
+  loadingBoardLayout.value = true
+  try {
+    // Narrow-screen fitting needs the scene, but the task inbox does not own layout readiness.
+    const [layout] = await Promise.all([boardApi.getLayout(), snapshotReady])
+    if (!isCurrentBoardAuthScope(authScopeEpoch)) return false
+    applyLoadedBoardLayout(layout, initialHydration)
+    boardLayoutLoadError.value = null
+    return true
+  } catch (error) {
+    if (!isCurrentBoardAuthScope(authScopeEpoch)) return false
+    console.error('Failed to load canvas layout:', error)
+    boardLayoutLoadError.value = errorDetails(error)
+    return false
+  } finally {
+    if (isCurrentBoardAuthScope(authScopeEpoch)) loadingBoardLayout.value = false
+  }
+}
+
 const loadBoardAuthScope = async (
   expectedAuthScopeEpoch: number,
   options: { hydrateNotifications?: boolean; initialLayout?: boolean } = {}
 ) => {
   if (currentAuthUserId.value === null || !isCurrentBoardAuthScope(expectedAuthScopeEpoch)) return
   if (options.hydrateNotifications) hydrateFuzzNotificationState()
-  const [boardLoaded, , layout] = await Promise.all([
-    requestBoardSnapshotRefresh({ force: true }),
-    loadTaskInbox(false, { showLoading: false }),
-    boardApi.getLayout().catch(() => null)
+  const snapshotReady = requestBoardSnapshotRefresh({ force: true })
+  await Promise.all([
+    snapshotReady,
+    loadTaskInbox({ showLoading: false }),
+    loadBoardLayout(options.initialLayout === true, snapshotReady)
   ])
-  if (!isCurrentBoardAuthScope(expectedAuthScopeEpoch)) return
-  if (!boardLoaded || !isBoardDataReady.value) {
-    notifyError(t('app.boardDataLoadFailed'))
-  }
-  applyLoadedBoardLayout(layout, options.initialLayout === true)
 }
 
 onMounted(async () => {
@@ -5514,7 +5712,7 @@ const canvasMapData = computed(() => {
     maxY = Math.max(maxY, y + height)
   })
 
-  const frame = getVisibleCanvasFrame()
+  const frame = canvasFrameForRendering.value
   let visibleWorldWidth = 900
   let visibleWorldHeight = 600
   if (frame && renderedCanvasZoom.value > 0) {
@@ -5635,58 +5833,39 @@ const getNodeBounds = (targetNodes: DeviceNode[] = nodes.value) => {
   })
 }
 
-const getCanvasInnerOffset = () => {
+const getCanvasTopInset = () => {
   const canvas = document.querySelector('.canvas') as HTMLElement | null
-  if (!canvas) return { x: 0, y: 64 }
+  if (!canvas) return 64
   const style = getComputedStyle(canvas)
-  return {
-    x: Number.parseFloat(style.paddingLeft || '0') || 0,
-    y: Number.parseFloat(style.paddingTop || '0') || 0
-  }
+  return Number.parseFloat(style.paddingTop || '0') || 0
 }
 
 const getVisibleCanvasFrame = () => {
   const canvasEl = document.querySelector('.canvas-container')
   if (!canvasEl) return null
   const rect = canvasEl.getBoundingClientRect()
-  const leftInset = boardPanels.control.collapsed ? COLLAPSED_PANEL_RAIL_PX : effectiveControlPanelWidth.value
-  // `actionDockReservedWidth` already includes the dock's gap, so nothing is added here. It used to add a
-  // further 8 or 16px on top, which double-counted the gap and put this frame out of step with the dock's
-  // real position by up to 12px — in a function whose whole job is to know where the free canvas is.
-  const rightInset = (boardPanels.inspector.collapsed ? COLLAPSED_PANEL_RAIL_PX : effectiveInspectorPanelWidth.value)
+  // Narrow panels overlay the stage; navigation keeps its underlying rail frame.
+  const leftInset = isNarrowBoardLayout.value || boardPanels.control.collapsed
+    ? COLLAPSED_PANEL_RAIL_PX : effectiveControlPanelWidth.value
+  // The dock reservation includes its gap.
+  const rightInset = (isNarrowBoardLayout.value || boardPanels.inspector.collapsed
+    ? COLLAPSED_PANEL_RAIL_PX : effectiveInspectorPanelWidth.value)
     + actionDockReservedWidth.value
-  const canvasOffset = getCanvasInnerOffset()
-  const topInset = canvasOffset.y
-  const timelineVisible = simulationAnimationState.value.visible || traceAnimationState.value.visible
-  // Measure the playback overlay, as the left and right insets already measure their panels.
-  //
-  // This was `min(260, max(160, innerHeight * 0.28))` — a fraction of the window, while the overlay's
-  // height is content-driven. Measured at 1440×900: the reservation came to **252px** against an overlay
-  // rendering at **384px**, so the fit believed it had 132px more room than it did and anything placed in
-  // that band sat underneath the overlay. Every other inset in this function reads a live value
-  // (`effectiveControlPanelWidth`, `actionDockReservedWidth`); the bottom was the one that guessed.
-  //
-  // The old expression survives as the fallback for the frame before the overlay has laid out, which is
-  // the only case where there is nothing to measure.
-  const playbackOverlay = timelineVisible
-    ? document.querySelector<HTMLElement>('.board-timeline-host')
-    : null
-  const measuredOverlayHeight = playbackOverlay?.getBoundingClientRect().height ?? 0
-  const bottomInset = timelineVisible
-    ? Math.max(measuredOverlayHeight, Math.min(260, Math.max(160, window.innerHeight * 0.28)))
-    : 24
-  const availableWidth = Math.max(240, rect.width - leftInset - rightInset)
-  const availableHeight = Math.max(180, rect.height - topInset - bottomInset)
+  const topInset = getCanvasTopInset()
+  // The dock has its own layout space; the canvas rectangle already excludes it.
+  const bottomInset = 24
+  const availableWidth = rect.width - leftInset - rightInset
+  const availableHeight = rect.height - topInset - bottomInset
+  if (availableWidth <= 0 || availableHeight <= 0) return null
   return {
-    left: leftInset - canvasOffset.x,
-    top: 0,
+    left: leftInset,
+    top: topInset,
     width: availableWidth,
     height: availableHeight
   }
 }
 
-const getVisibleCanvasCenterWorld = () => {
-  const frame = getVisibleCanvasFrame()
+const getVisibleCanvasCenterWorld = (frame = getVisibleCanvasFrame()) => {
   if (!frame || renderedCanvasZoom.value <= 0) return null
   return {
     x: (frame.left + frame.width / 2 - renderedCanvasPan.value.x) / renderedCanvasZoom.value,
@@ -5731,15 +5910,17 @@ const canvasMapPointFromEvent = (event: PointerEvent, rect?: DOMRect | null) => 
   }
 }
 
-const panCanvasToWorldCenter = (worldX: number, worldY: number) => {
-  const frame = getVisibleCanvasFrame()
+const panCanvasToWorldCenter = (worldX: number, worldY: number, frame = getVisibleCanvasFrame()) => {
   if (!frame) return
   if (!activePlaybackScene.value && !layoutHydrated.value) canvasStateTouchedBeforeLayout = true
   const nextPan = {
     x: frame.left + frame.width / 2 - worldX * renderedCanvasZoom.value,
     y: frame.top + frame.height / 2 - worldY * renderedCanvasZoom.value
   }
-  if (activePlaybackScene.value) playbackCanvasPan.value = nextPan
+  if (activePlaybackScene.value) {
+    playbackViewportFollowsFit = false
+    playbackCanvasPan.value = nextPan
+  }
   else canvasPan.value = nextPan
 }
 
@@ -5828,7 +6009,7 @@ const focusSpecInInspector = async (specId?: string | null) => {
 
 const canvasMapViewportRect = computed(() => {
   const bounds = canvasMapData.value.bounds
-  const frame = getVisibleCanvasFrame()
+  const frame = canvasFrameForRendering.value
   if (!bounds || !frame || renderedCanvasZoom.value <= 0) return null
 
   const visibleMinX = (frame.left - renderedCanvasPan.value.x) / renderedCanvasZoom.value
@@ -5920,32 +6101,27 @@ const onCanvasMapPointerLost = (event: PointerEvent) => {
   finishCanvasMapDrag(event.pointerId)
 }
 
-const fittedViewportForNodes = (targetNodes: DeviceNode[]) => {
+const fittedViewportForNodes = (targetNodes: DeviceNode[], frame = getVisibleCanvasFrame()) => {
   const bounds = getNodeBounds(targetNodes)
-  const frame = getVisibleCanvasFrame()
   if (!bounds || !frame) return null
 
-  const padding = 72
+  const paddingX = Math.min(72, frame.width / 8)
+  const paddingY = Math.min(72, frame.height / 8)
   const contentWidth = Math.max(1, bounds.maxX - bounds.minX)
   const contentHeight = Math.max(1, bounds.maxY - bounds.minY)
   const zoom = Math.min(
     MAX_ZOOM,
-    Math.max(
-      MIN_ZOOM,
-      Math.min(
-        (frame.width - padding * 2) / contentWidth,
-        (frame.height - padding * 2) / contentHeight
-      )
-    )
+    (frame.width - paddingX * 2) / contentWidth,
+    (frame.height - paddingY * 2) / contentHeight
   )
+  if (!Number.isFinite(zoom) || zoom <= 0) return null
   const centerX = (bounds.minX + bounds.maxX) / 2
   const centerY = (bounds.minY + bounds.maxY) / 2
-  const fittedZoom = Number.isFinite(zoom) ? zoom : 1
   return {
-    zoom: fittedZoom,
+    zoom,
     pan: {
-      x: frame.left + frame.width / 2 - centerX * fittedZoom,
-      y: frame.top + frame.height / 2 - centerY * fittedZoom
+      x: frame.left + frame.width / 2 - centerX * zoom,
+      y: frame.top + frame.height / 2 - centerY * zoom
     }
   }
 }
@@ -5961,17 +6137,44 @@ const fitNodesToCanvas = (targetNodes: DeviceNode[] = nodes.value) => {
 }
 
 const activatePlaybackScene = (scene: ModelPlaybackScene) => {
+  playbackViewportFollowsFit = true
+  playbackCanvasFrame = null
   activePlaybackScene.value = deepClone(scene)
-  void nextTick(() => {
-    const viewport = fittedViewportForNodes(activePlaybackScene.value?.nodes || [])
-    if (!viewport) return
-    playbackCanvasZoom.value = viewport.zoom
-    playbackCanvasPan.value = viewport.pan
-  })
 }
+
+// Overview follows the free frame; manual navigation retains its scale and world center.
+watch([
+  activePlaybackScene, actionDockViewportWidth, boardViewportHeight, playbackPanelOpen,
+  () => boardPanels.control.collapsed, () => boardPanels.inspector.collapsed,
+  effectiveControlPanelWidth, effectiveInspectorPanelWidth, actionDockReservedWidth
+], () => {
+  if (!activePlaybackScene.value) return
+  void nextTick(() => {
+    const scene = activePlaybackScene.value
+    if (!scene) return
+    const frame = getVisibleCanvasFrame()
+    if (!frame) return
+    if (!playbackViewportFollowsFit && playbackCanvasFrame) {
+      playbackCanvasPan.value = {
+        x: playbackCanvasPan.value.x + frame.left + frame.width / 2
+          - playbackCanvasFrame.left - playbackCanvasFrame.width / 2,
+        y: playbackCanvasPan.value.y + frame.top + frame.height / 2
+          - playbackCanvasFrame.top - playbackCanvasFrame.height / 2
+      }
+    } else {
+      const viewport = fittedViewportForNodes(scene.nodes)
+      if (!viewport) return
+      playbackCanvasZoom.value = viewport.zoom
+      playbackCanvasPan.value = viewport.pan
+    }
+    playbackCanvasFrame = frame
+  })
+})
 
 const deactivatePlaybackScene = () => {
   activePlaybackScene.value = null
+  playbackViewportFollowsFit = true
+  playbackCanvasFrame = null
   playbackCanvasZoom.value = 1
   playbackCanvasPan.value = { x: 0, y: 0 }
 }
@@ -5984,6 +6187,8 @@ const fitToContent = () => {
     return
   }
   if (activePlaybackScene.value) {
+    playbackViewportFollowsFit = true
+    playbackCanvasFrame = getVisibleCanvasFrame()
     playbackCanvasZoom.value = viewport.zoom
     playbackCanvasPan.value = viewport.pan
     return
@@ -5997,7 +6202,7 @@ const handleCreateDevice = async (data: {
   template: DeviceTemplate
   customName: string
   runtime?: DeviceRuntimeConfig
-  complete: (saved: boolean) => void
+  complete: (saved: boolean, failure?: ApiErrorDetails) => void
 }) => {
   if (!ensurePlaybackClosedForMutation()) {
     data.complete(false)
@@ -6011,8 +6216,12 @@ const handleCreateDevice = async (data: {
     data.complete(false)
     return
   }
+  const requestToken = getToken()
+  const requestAuthScopeEpoch = boardAuthScopeEpoch
+  const isRequestCurrent = () => isCurrentSessionToken(requestToken) && isCurrentBoardAuthScope(requestAuthScopeEpoch)
   return enqueueBoardMutation(async () => {
     let saved = false
+    let saveFailure: ApiErrorDetails | undefined
     let requestedNode: DeviceNode | null = null
     let environmentChanges: EnvironmentVariableChange[] = []
     let refreshedDeviceLabel: string | null = null
@@ -6037,6 +6246,7 @@ const handleCreateDevice = async (data: {
       }
       requestedNode = node
       const mutation = await boardApi.addNodes([node])
+      if (!isRequestCurrent()) return
       commitSemanticScene({
         nodes: mutation.currentNodes,
         environmentVariables: mutation.environmentVariables,
@@ -6046,33 +6256,45 @@ const handleCreateDevice = async (data: {
       environmentChanges = mutation.environmentChanges
       const created = mutation.affectedDevices[0]
       await focusCreatedDeviceNode(created)
+      if (!isRequestCurrent()) return
       saved = true
     } catch (error: any) {
+      if (!isRequestCurrent()) return
       if (!isDefinitiveMutationRejection(error) && requestedNode) {
         const [nodesRefreshed, environmentRefreshed] = await Promise.all([
           refreshDevices(),
           refreshEnvironmentVariables()
         ])
+        if (!isRequestCurrent()) return
         await reloadUndoAvailability()
+        if (!isRequestCurrent()) return
         const created = nodes.value.find(candidate => candidate.id === requestedNode?.id)
         if (nodesRefreshed && environmentRefreshed && created) {
           await focusCreatedDeviceNode(created)
+          if (!isRequestCurrent()) return
           refreshedDeviceLabel = created.label
           saved = true
           return
         }
+        notifyBlocked(t(nodesRefreshed && environmentRefreshed
+          ? 'app.deviceCreateOutcomeNotMatched' : 'app.deviceCreateOutcomeUnknownRefreshFailed'))
+        return
       }
-      notifyError(localizedErrorMessage(error, t('app.saveNodesFailed'), locale.value))
+      saveFailure = errorDetails(error)
     } finally {
-      data.complete(saved)
-      if (saved) {
+      data.complete(saved, saveFailure)
+      if (saved && isRequestCurrent()) {
         await nextTick()
+        if (!isRequestCurrent()) return
         reportEnvironmentChanges(environmentChanges)
         if (refreshedDeviceLabel !== null) {
           notifyBlocked(t('app.deviceCreateOutcomeRefreshed', { name: refreshedDeviceLabel }))
         }
       }
     }
+  }).catch(error => {
+    if (!isPollingAbortedError(error)) throw error
+    data.complete(false)
   })
 }
 
@@ -6200,7 +6422,6 @@ const handleCreateDevices = async (data: {
 const openRuleBuilder = () => {
   if (!ensurePlaybackClosedForMutation()) return
   openControlSection('rules')
-  ruleBuilderVisible.value = true
 }
 
 const handleAddSpec = async (data: { 
@@ -6210,15 +6431,18 @@ const handleAddSpec = async (data: {
   aConditions: SpecCondition[],
   ifConditions: SpecCondition[],
   thenConditions: SpecCondition[],
-  complete: (saved: boolean) => void
+  complete: (saved: boolean, failure?: ApiErrorDetails) => void
 }) => {
   if (!ensurePlaybackClosedForMutation()) {
     data.complete(false)
     return
   }
+  const requestToken = getToken()
+  const requestAuthScopeEpoch = boardAuthScopeEpoch
   let saved = false
   let outcomeRefreshed = false
   let attemptedSpec: Specification | null = null
+  let saveFailure: ApiErrorDetails | undefined
   try {
     await enqueueBoardMutation(async () => {
       try {
@@ -6265,6 +6489,21 @@ const handleAddSpec = async (data: {
         saved = true
       } catch (error: any) {
         console.error('[Board] Failed to add specification:', error)
+        if (Number(error?.response?.status) === 409
+          && error?.response?.data?.data?.reasonCode === 'DUPLICATE_SPECIFICATION') {
+          if (!isCurrentSessionToken(requestToken) || !isCurrentBoardAuthScope(requestAuthScopeEpoch)) return
+          await refreshSpecifications(requestToken)
+          if (!isCurrentSessionToken(requestToken) || !isCurrentBoardAuthScope(requestAuthScopeEpoch)) return
+          await reloadUndoAvailability()
+          if (!isCurrentSessionToken(requestToken) || !isCurrentBoardAuthScope(requestAuthScopeEpoch)) return
+          saveFailure = errorDetails(error)
+          return
+        }
+        if (isDefinitiveMutationRejection(error) && [400, 422].includes(Number(error?.response?.status))) {
+          if (!isCurrentSessionToken(requestToken) || !isCurrentBoardAuthScope(requestAuthScopeEpoch)) return
+          saveFailure = errorDetails(error)
+          return
+        }
         if (!isDefinitiveMutationRejection(error) && attemptedSpec) {
           const refreshed = await refreshSpecifications()
           await reloadUndoAvailability()
@@ -6278,7 +6517,7 @@ const handleAddSpec = async (data: {
       }
     })
   } finally {
-    data.complete(saved)
+    data.complete(saved, saveFailure)
     if (outcomeRefreshed) {
       await nextTick()
       notifyBlocked(t('app.specCreateOutcomeRefreshed'))
@@ -6427,10 +6666,7 @@ onBeforeUnmount(() => {
 })
 
 // Assistant device/environment/rule/spec edits go through journal-recording write paths, so they change undo
-// availability — but these refreshes only reload one collection, and the `isBoardDataReady` watcher
-// that reloads availability fires on the *aggregate* state changing. When the other keys are already
-// 'ready', that flag never leaves `true`, the watcher never runs, and the affordance silently depends
-// on some later unrelated refresh. Re-read it here instead.
+// availability. Partial collection refreshes must re-read it just as the full snapshot reader does.
 //
 // Called through a late-bound reference because `useBoardUndo` is set up further down this file and
 // `const` does not hoist.
@@ -6505,7 +6741,7 @@ defineExpose({
   refreshRunHistory: refreshRunHistoryFromChat,
   refreshAllBoardState: refreshAllBoardStateFromChat,
   getChatSuggestionContext,
-  isChatInteractionLocked: () => isSceneReplacementInProgress.value,
+  isChatInteractionLocked: () => !isBoardDataReady.value || isSceneReplacementInProgress.value || isOpeningAccount.value,
   prepareChatInteraction: () => prepareBoardChatInteraction({
     sceneReplacementInProgress: isSceneReplacementInProgress.value,
     tracePlaybackVisible: traceAnimationState.value.visible,
@@ -6518,14 +6754,85 @@ defineExpose({
 // ==== Verification Logic ====
 const isVerifying = ref(false)
 const verificationResult = ref<VerificationResultView | null>(null)
-const verificationError = ref<string | null>(null)
+type RunFailure = { key: string; error?: unknown; diagnostics: ApiErrorDetails }
+const makeRunFailure = (key: string, error?: unknown): RunFailure => {
+  const completedResult = isCompletedTaskResultUnavailableError(error) || isFuzzCompletedResultUnavailableError(error)
+  const originalError = completedResult ? (error as CompletedTaskResultUnavailableError | FuzzCompletedResultUnavailableError).originalError : error
+  const code = (originalError as any)?.code
+  return {
+    key: completedResult ? 'app.completedTaskResultUnavailable'
+      : code === RUN_RESPONSE_INCOMPLETE_CODE ? 'app.runResponseIncomplete'
+      : code === FUZZ_RESPONSE_INCOMPLETE_CODE ? 'app.fuzzResponseIncomplete'
+      : code === 'TASK_POLL_TIMEOUT' ? key === 'app.verificationFailed' ? 'app.verificationTimeout' : 'app.simulationTimeout'
+      : key,
+    error: originalError,
+    diagnostics: errorDetails(originalError)
+  }
+}
+const runFailureTitle = (kind: 'verification' | 'simulation' | 'fuzzing', failure: RunFailure) => t(
+  failure.key === 'app.completedTaskResultUnavailable'
+    ? kind === 'verification' ? 'app.failedToLoadVerificationRun'
+      : kind === 'simulation' ? 'app.failedToLoadSimulationRun' : 'app.failedToLoadFuzzingRun'
+    : failure.key === 'app.verificationTimeout' || failure.key === 'app.simulationTimeout'
+      ? 'app.taskStatusUnavailable'
+      : kind === 'verification' ? 'app.verificationFailed' : kind === 'simulation' ? 'app.simulationFailed' : 'app.fuzzSearchFailed'
+)
+const formatRunFailure = (kind: 'verification' | 'simulation' | 'fuzzing', failure: RunFailure) => {
+  const completedResult = failure.key === 'app.completedTaskResultUnavailable'
+  const trackingInterrupted = failure.key === 'app.verificationTimeout' || failure.key === 'app.simulationTimeout'
+  const status = (failure.error as any)?.response?.status
+  const message = (kind === 'fuzzing' ? fuzzTaskQuotaMessage(failure.error)
+    : formalOperationBusyMessage(failure.error) || asyncTaskQuotaMessage(failure.error, kind)) || t(failure.key)
+  return {
+    message,
+    suggestion: t(completedResult ? 'app.completedTaskResultNextStep'
+      : trackingInterrupted ? 'app.taskStatusNextStep'
+      : status === 400 || status === 422 ? 'app.runValidationNextStep' : 'app.runFailureNextStep'),
+    details: technicalErrorLines(failure.diagnostics), fields: {}
+  }
+}
+const verificationError = ref<RunFailure | null>(null)
+const runFailureDiagnostics = computed(() => ({
+  verification: verificationError.value ? formatRunFailure('verification', verificationError.value) : null,
+  simulation: simulationError.value ? formatRunFailure('simulation', simulationError.value) : null
+}))
 // A displayed verdict describes the model that was verified. Any semantic board change
 // (applying a fix, editing rules/specs/devices from the inspector or chat) makes it stale,
 // so the counterexample actions must stop claiming to describe the current board.
 const verificationResultStale = ref(false)
+const verificationFixApplied = ref(false)
+watch(verificationResult, () => { verificationFixApplied.value = false }, { flush: 'sync' })
 // Simulation conclusions become stale after a semantic edit too. Replay remains available because
 // it uses the run's frozen visual scene; stale only means the conclusion is not about the live board.
 const simulationResultStale = ref(false)
+
+const presentRunFailure = (kind: 'verification' | 'simulation', messageKey: string, error?: unknown) => {
+  const failure = makeRunFailure(messageKey, error)
+  if (!isModelPlaybackActive.value) {
+    if (kind === 'verification') verificationError.value = failure
+    else simulationError.value = failure
+    return
+  }
+  const ownerAuthScopeEpoch = boardAuthScopeEpoch
+  const ownerUserId = currentAuthUserId.value
+  let close!: () => void
+  close = notifyAvailableResult({
+    title: () => runFailureTitle(kind, failure),
+    message: () => formatRunFailure(kind, failure).message,
+    actionLabel: () => t('app.viewDetails'),
+    discardLabel: () => t('app.close'),
+    onAction: () => {
+      if (!isCurrentBoardAuthScope(ownerAuthScopeEpoch) || currentAuthUserId.value !== ownerUserId) return true
+      if (!ensureHistoricalPlaybackUiAdmission()) return false
+      closeOtherWorkflowSurfaces()
+      if (kind === 'verification') verificationError.value = failure
+      else simulationError.value = failure
+      return true
+    },
+    onClose: () => unsavedRunNotifications.delete(close)
+  })
+  unsavedRunNotifications.add(close)
+}
 
 /*
  * Semantic scene changes since load, counted.
@@ -6547,11 +6854,10 @@ let semanticSceneChangeCount = 0
 // Called from the single semantic-scene-change hook in the board mutation queue, so every
 // mutation path (fix apply, chat tool, inspector edit) is covered by one rule.
 const markVerificationResultStale = () => {
+  verificationFixApplied.value = false
   semanticSceneChangeCount += 1
   if (verificationResult.value) verificationResultStale.value = true
-  // Keyed on the surviving run, not the details dialog: the dialog can be closed and reopened from
-  // `lastSimulationResult`, and replay admission is decided for the run. Watching the dialog ref
-  // meant a board change while only the timeline was open never set the flag at all.
+  // The run survives hiding the terminal, so staleness must follow that run.
   if (lastSimulationResult.value) simulationResultStale.value = true
 }
 
@@ -6574,60 +6880,13 @@ const commitSemanticScene = createBoardSemanticCommit({
   clearDanglingFocus: scene => reconcileDanglingBoardFocus(scene)
 })
 
-type RunSubmission<T> = { request: T; signature: string; taskId?: number }
+type VerificationResultView = VerificationResult
+type SimulationResultView = SimulationResult
 
-const activeVerificationSubmission = ref<RunSubmission<VerificationRequest> | null>(null)
-const activeSimulationSubmission = ref<RunSubmission<SimulationRequest> | null>(null)
-
-/** A run result as held by the board: the server payload plus the locally-attached submission. */
-type VerificationResultView = VerificationResult & { localRunSubmission?: RunSubmission<VerificationRequest> }
-/**
- * A simulation result as held by the board.
- *
- * `historyPersistence` stays optional because a preview-only run genuinely has none: it is the save
- * outcome, and an unsaved run was never saved.
- *
- * This comment used to add "the board never reads it off this ref", which was the false premise behind a
- * real defect. The board *does* read it — `simulationRunSmvAvailable` and
- * `downloadCurrentSimulationRunSmv` both take the download's run id from it — so the history-replay
- * builder dropping the field made the same trajectory offer its model right after executing and refuse
- * it after a reload. Optional means "may be absent on a preview", not "never consulted".
- */
-type SimulationResultView =
-  Omit<SimulationResult, 'historyPersistence'>
-  & Partial<Pick<SimulationResult, 'historyPersistence'>>
-  & { localRunSubmission?: RunSubmission<SimulationRequest> }
-
-const attachLocalRunSubmission = <T extends Record<string, any>, R>(
-  result: T,
-  submission: RunSubmission<R> | null
-): T => submission ? { ...result, localRunSubmission: submission } : result
-
-const compareRunToCurrentBoard = (result: any, kind: 'verification' | 'simulation'): RunBoardComparison => {
-  const submission = result?.localRunSubmission as RunSubmission<VerificationRequest | SimulationRequest> | undefined
-  if (!submission) return 'NOT_COMPARED'
-  try {
-    // Compare the scene this tab holds against the one captured at submission. The request itself
-    // no longer carries a scene, so the fingerprint is built locally for this warning only.
-    const request = buildLocalSceneFingerprint({
-      nodes: nodes.value,
-      deviceTemplates: deviceTemplates.value,
-      environmentVariables: environmentVariables.value,
-      rules: rules.value,
-      attackScenario: submission.request.attackScenario,
-      enablePrivacy: submission.request.enablePrivacy,
-      ...(kind === 'verification' ? { specifications: specifications.value } : {})
-    })
-    return buildModelRunSignature(request, deviceTemplates.value) === submission.signature
-      ? 'UNCHANGED'
-      : 'CHANGED'
-  } catch {
-    return 'UNAVAILABLE'
-  }
-}
-
-const submissionForTask = <T,>(submission: RunSubmission<T> | null, taskId: number): RunSubmission<T> | null =>
-  submission?.taskId === taskId ? submission : null
+const compareRunToCurrentBoard = (
+  result: { modelSnapshot?: ModelRunSnapshot } | null,
+  kind: 'verification' | 'simulation'
+): RunBoardComparison => compareModelSnapshot(result?.modelSnapshot, currentBoardModelFingerprints.value, kind)
 
 // ==== Rule Recommendation Logic ====
 const isRecommendingRules = ref(false)
@@ -6776,6 +7035,34 @@ const specificationExists = (recommendation: any): boolean => {
 }
 
 type RecommendationPanelKind = 'rule' | 'device' | 'spec' | 'scenario'
+const recommendationFailures = reactive<Partial<Record<RecommendationPanelKind,
+  ApiErrorDetails & { message: string; suggestion: string; outcomeUnknown: boolean }>>>({})
+const recommendationApplyFailures = reactive<Record<'rule' | 'device' | 'spec', Record<number,
+  ApiErrorDetails & { message: string; suggestion: string; outcomeUnknown: boolean }>>>({ rule: {}, device: {}, spec: {} })
+
+const reportRecommendationApplyFailure = (
+  kind: 'rule' | 'device' | 'spec', index: number, error: unknown, message: string, outcomeUnknown = false
+) => {
+  recommendationApplyFailures[kind][index] = {
+    ...errorDetails(error), message, outcomeUnknown,
+    suggestion: outcomeUnknown ? '' : t('app.recommendationApplyRejectedHint')
+  }
+}
+
+const reportRecommendationFailure = (
+  kind: RecommendationPanelKind,
+  error: unknown,
+  fallback: string,
+  outcomeUnknown = false
+) => {
+  recommendationFailures[kind] = {
+    outcomeUnknown,
+    message: outcomeUnknown ? t('app.recommendationResponseLostRecovering')
+      : extractRecommendationErrorMessage(error, fallback),
+    suggestion: t(outcomeUnknown ? 'app.recommendationUnknownNextStep' : 'app.recommendationFailureNextStep'),
+    ...errorDetails(error)
+  }
+}
 
 /**
  * The in-flight request identity for one recommendation panel.
@@ -6903,7 +7190,15 @@ const releaseRecommendationTracking = (
       recovery.requestIdRef.value,
       requestId
     )
-    if (wasCurrent) recovery.setRunning(false)
+    if (wasCurrent) {
+      recovery.setRunning(false)
+      const failure = recommendationFailures[kind]
+      if (failure?.outcomeUnknown) {
+        failure.outcomeUnknown = false
+        failure.message = t('app.recommendationEndedWithoutResult')
+        failure.suggestion = t('app.recommendationFailureNextStep')
+      }
+    }
   }
   recommendationRequestOwners.delete(requestId)
   recommendationOutcomeUnknownWarnings.delete(requestId)
@@ -6941,9 +7236,11 @@ const settleRecommendationPost = (
 
 const beginUnknownRecommendationRecovery = (
   panel: RecommendationRequestHandle,
-  requestId: string
+  requestId: string,
+  error?: unknown
 ) => {
   if (panel.requestId.value !== requestId) return
+  if (error !== undefined) reportRecommendationFailure(panel.kind, error, '', true)
   if (!recommendationOutcomeUnknownWarnings.has(requestId)) {
     recommendationOutcomeUnknownWarnings.add(requestId)
     notifyBlocked(t('app.recommendationResponseLostRecovering'))
@@ -7173,6 +7470,8 @@ const canOpenRecommendationPanel = (kind: RecommendationPanelKind): boolean => {
 }
 
 const resetRuleRecommendationResults = () => {
+  recommendationApplyFailures.rule = {}
+  delete recommendationFailures.rule
   ruleRecommendations.value = []
   ruleRecommendationMessage.value = ''
   ruleRecommendationFilteredCount.value = 0
@@ -7188,6 +7487,8 @@ const resetRuleRecommendationResults = () => {
 }
 
 const resetDeviceRecommendationResults = () => {
+  recommendationApplyFailures.device = {}
+  delete recommendationFailures.device
   deviceRecommendations.value = []
   deviceRecommendationMessage.value = ''
   deviceRecommendationFilteredCount.value = 0
@@ -7203,6 +7504,8 @@ const resetDeviceRecommendationResults = () => {
 }
 
 const resetSpecRecommendationResults = () => {
+  recommendationApplyFailures.spec = {}
+  delete recommendationFailures.spec
   specRecommendations.value = []
   specRecommendationMessage.value = ''
   specRecommendationFilteredCount.value = 0
@@ -7218,6 +7521,7 @@ const resetSpecRecommendationResults = () => {
 }
 
 const resetScenarioRecommendationResults = () => {
+  delete recommendationFailures.scenario
   scenarioRecommendationResult.value = null
   scenarioRecommendationMessage.value = ''
   scenarioRecommendationRequested.value = false
@@ -7236,7 +7540,6 @@ function closeResultSurfaces() {
   fuzzingResultRequestEpoch += 1
   verificationResult.value = null
   verificationError.value = null
-  simulationResult.value = null
   simulationError.value = null
   fuzzingResult.value = null
   fuzzingError.value = null
@@ -7330,7 +7633,9 @@ const fetchRuleRecommendations = async () => {
   if (!requestOwner) return
 
   isRecommendingRules.value = true
+  recommendationApplyFailures.rule = {}
   ruleRecommendationRequested.value = true
+  delete recommendationFailures.rule
   ruleRecommendations.value = []
   ruleRecommendationMessage.value = ''
   ruleRecommendationFilteredCount.value = 0
@@ -7385,14 +7690,15 @@ const fetchRuleRecommendations = async () => {
       return
     }
     if (requestDispatched && !postTerminal && isRecommendationPostOutcomeUnknown(error)) {
-      beginUnknownRecommendationRecovery(ruleRecommendationPanel, requestId)
+      beginUnknownRecommendationRecovery(ruleRecommendationPanel, requestId,
+        requestEpoch === ruleRecommendationRequestEpoch && requestSceneGeneration === recommendationSceneGeneration ? error : undefined)
       return
     }
     postTerminal = true
     if (requestEpoch !== ruleRecommendationRequestEpoch
       || requestSceneGeneration !== recommendationSceneGeneration) return
     console.error('Failed to fetch rule recommendations:', error)
-    notifyError(extractRecommendationErrorMessage(error, t('app.failedToFetchRuleRecommendations')))
+    reportRecommendationFailure('rule', error, t('app.failedToFetchRuleRecommendations'))
   } finally {
     if (postTerminal) {
       settleRecommendationPost(ruleRecommendationPanel, requestId, controller)
@@ -7512,6 +7818,39 @@ const scenarioRecommendationFilters = reactive({
 })
 let scenarioRecommendationRequestEpoch = 0
 let scenarioRecommendationCriteriaVersion = 0
+const scenarioRecommendationInput = computed(() => {
+  const invalidFields: ScenarioRecommendationCountField[] = []
+  const countLabels: Record<ScenarioRecommendationCountField, string> = {
+    minDevices: t('app.minDevicesField'), minRules: t('app.minRulesField'), minSpecs: t('app.minSpecsField'),
+    maxDevices: t('app.maxDevicesField'), maxRules: t('app.maxRulesField'), maxSpecs: t('app.maxSpecsField')
+  }
+  const rangeLabels = {
+    devices: t('app.devicesTool'), rules: t('app.rulesTool'), specifications: t('app.specificationsTool')
+  }
+  const rangeFields: Record<keyof typeof rangeLabels, ScenarioRecommendationCountField[]> = {
+    devices: ['minDevices', 'maxDevices'], rules: ['minRules', 'maxRules'], specifications: ['minSpecs', 'maxSpecs']
+  }
+  try {
+    const request = buildScenarioRecommendationTargetRequest(
+      { ...scenarioRecommendationFilters, language: locale.value },
+      (value, field) => {
+        try {
+          return requireIntegerInRange(value, countLabels[field], 1, 10)
+        } catch (error) {
+          invalidFields.push(field)
+          throw error
+        }
+      },
+      field => {
+        invalidFields.push(...rangeFields[field])
+        return new Error(t('app.scenarioMinimumExceedsMaximum', { field: rangeLabels[field] }))
+      }
+    )
+    return { request, error: '', invalidFields }
+  } catch (error) {
+    return { request: null, error: (error as Error).message, invalidFields }
+  }
+})
 const recommendedScenarioScene = computed(() => scenarioRecommendationResult.value?.scene || null)
 
 const prepareActiveRecommendationsForLogout = async (): Promise<InteractiveLogoutPreparation> => {
@@ -7585,7 +7924,9 @@ const fetchDeviceRecommendations = async () => {
   if (!requestOwner) return
   
   isRecommendingDevices.value = true
+  recommendationApplyFailures.device = {}
   deviceRecommendationRequested.value = true
+  delete recommendationFailures.device
   deviceRecommendations.value = []
   deviceRecommendationMessage.value = ''
   deviceRecommendationFilteredCount.value = 0
@@ -7640,14 +7981,15 @@ const fetchDeviceRecommendations = async () => {
       return
     }
     if (requestDispatched && !postTerminal && isRecommendationPostOutcomeUnknown(error)) {
-      beginUnknownRecommendationRecovery(deviceRecommendationPanel, requestId)
+      beginUnknownRecommendationRecovery(deviceRecommendationPanel, requestId,
+        requestEpoch === deviceRecommendationRequestEpoch && requestSceneGeneration === recommendationSceneGeneration ? error : undefined)
       return
     }
     postTerminal = true
     if (requestEpoch !== deviceRecommendationRequestEpoch
       || requestSceneGeneration !== recommendationSceneGeneration) return
     console.error('Failed to fetch device recommendations:', error)
-    notifyError(extractRecommendationErrorMessage(error, t('app.failedToFetchDeviceRecommendations')))
+    reportRecommendationFailure('device', error, t('app.failedToFetchDeviceRecommendations'))
   } finally {
     if (postTerminal) {
       settleRecommendationPost(deviceRecommendationPanel, requestId, controller)
@@ -7686,7 +8028,9 @@ const fetchSpecRecommendations = async () => {
   if (!requestOwner) return
 
   isRecommendingSpecs.value = true
+  recommendationApplyFailures.spec = {}
   specRecommendationRequested.value = true
+  delete recommendationFailures.spec
   specRecommendations.value = []
   specRecommendationMessage.value = ''
   specRecommendationFilteredCount.value = 0
@@ -7741,14 +8085,15 @@ const fetchSpecRecommendations = async () => {
       return
     }
     if (requestDispatched && !postTerminal && isRecommendationPostOutcomeUnknown(error)) {
-      beginUnknownRecommendationRecovery(specRecommendationPanel, requestId)
+      beginUnknownRecommendationRecovery(specRecommendationPanel, requestId,
+        requestEpoch === specRecommendationRequestEpoch && requestSceneGeneration === recommendationSceneGeneration ? error : undefined)
       return
     }
     postTerminal = true
     if (requestEpoch !== specRecommendationRequestEpoch
       || requestSceneGeneration !== recommendationSceneGeneration) return
     console.error('Failed to fetch specification recommendations:', error)
-    notifyError(extractRecommendationErrorMessage(error, t('app.failedToFetchSpecificationRecommendations')))
+    reportRecommendationFailure('spec', error, t('app.failedToFetchSpecificationRecommendations'))
   } finally {
     if (postTerminal) {
       settleRecommendationPost(specRecommendationPanel, requestId, controller)
@@ -7782,11 +8127,14 @@ const fetchScenarioRecommendation = async () => {
     return
   }
 
+  const request = scenarioRecommendationInput.value.request
+  if (!request) return
   const requestOwner = captureRecommendationRequestOwner()
   if (!requestOwner) return
 
   isRecommendingScenario.value = true
   scenarioRecommendationRequested.value = true
+  delete recommendationFailures.scenario
   scenarioRecommendationResult.value = null
   scenarioRecommendationMessage.value = ''
   const requestEpoch = ++scenarioRecommendationRequestEpoch
@@ -7799,38 +8147,13 @@ const fetchScenarioRecommendation = async () => {
   recommendationRequestOwners.set(requestId, requestOwner)
   recommendationProgressRequestId.value = requestId
   let postTerminal = false
-  let requestDispatched = false
 
   try {
-    const countLabels: Record<ScenarioRecommendationCountField, string> = {
-      minDevices: t('app.minDevicesField'),
-      minRules: t('app.minRulesField'),
-      minSpecs: t('app.minSpecsField'),
-      maxDevices: t('app.maxDevicesField'),
-      maxRules: t('app.maxRulesField'),
-      maxSpecs: t('app.maxSpecsField')
-    }
-    const rangeLabels = {
-      devices: t('app.devicesTool'),
-      rules: t('app.rulesTool'),
-      specifications: t('app.specificationsTool')
-    }
-    const response = await requestScenarioRecommendationWithTargets(
-      {
-        ...scenarioRecommendationFilters,
-        language: locale.value
-      },
-      (value, field) => requireIntegerInRange(value, countLabels[field], 1, 10),
-      field => new Error(t('app.scenarioMinimumExceedsMaximum', { field: rangeLabels[field] })),
-      request => {
-        requestDispatched = true
-        return boardApi.recommendScenario(request, {
-          requestId,
-          authToken: requestOwner.authToken,
-          signal: controller.signal
-        })
-      }
-    )
+    const response = await boardApi.recommendScenario(request, {
+      requestId,
+      authToken: requestOwner.authToken,
+      signal: controller.signal
+    })
     postTerminal = true
     if (requestEpoch !== scenarioRecommendationRequestEpoch
       || requestCriteriaVersion !== scenarioRecommendationCriteriaVersion
@@ -7873,15 +8196,16 @@ const fetchScenarioRecommendation = async () => {
     if (error.name === 'CanceledError' || error.code === 'ERR_CANCELED') {
       return
     }
-    if (requestDispatched && !postTerminal && isRecommendationPostOutcomeUnknown(error)) {
-      beginUnknownRecommendationRecovery(scenarioRecommendationPanel, requestId)
+    if (!postTerminal && isRecommendationPostOutcomeUnknown(error)) {
+      beginUnknownRecommendationRecovery(scenarioRecommendationPanel, requestId,
+        requestEpoch === scenarioRecommendationRequestEpoch && requestSceneGeneration === recommendationSceneGeneration ? error : undefined)
       return
     }
     postTerminal = true
     if (requestEpoch !== scenarioRecommendationRequestEpoch
       || requestSceneGeneration !== recommendationSceneGeneration) return
     console.error('Failed to fetch scenario recommendation:', error)
-    notifyError(extractRecommendationErrorMessage(error, t('app.failedToFetchScenarioRecommendation')))
+    reportRecommendationFailure('scenario', error, t('app.failedToFetchScenarioRecommendation'))
   } finally {
     if (postTerminal) {
       settleRecommendationPost(scenarioRecommendationPanel, requestId, controller)
@@ -7907,18 +8231,20 @@ const preserveAppliedRecommendationAfterSceneChange = (
   kind: 'rule' | 'device' | 'spec',
   appliedIndex: number
 ) => {
+  recommendationApplyFailures[kind] = {}
   if (kind === 'rule') {
     const appliedRecommendation = ruleRecommendations.value[appliedIndex]
     if (!appliedRecommendation) {
       invalidateRecommendationsForSceneChange({ notify: true })
       return
     }
+    const hadOtherCandidates = ruleRecommendations.value.length > 1
     recommendationSceneGeneration += 1
     closeDeviceRecommendationPanel()
     closeSpecRecommendationPanel()
     closeScenarioRecommendationPanel()
     ruleRecommendations.value = [appliedRecommendation]
-    ruleRecommendationMessage.value = t('app.appliedRecommendationOnlyNotice')
+    ruleRecommendationMessage.value = hadOtherCandidates ? t('app.appliedRecommendationOnlyNotice') : ''
     ruleRecommendationFilteredCount.value = 0
     ruleRecommendationFilteredItems.value = []
     ruleRecommendationAdjustedItems.value = keepAppliedRecommendationAdjustments(
@@ -7939,12 +8265,13 @@ const preserveAppliedRecommendationAfterSceneChange = (
       invalidateRecommendationsForSceneChange({ notify: true })
       return
     }
+    const hadOtherCandidates = deviceRecommendations.value.length > 1
     recommendationSceneGeneration += 1
     closeRecommendationPanel()
     closeSpecRecommendationPanel()
     closeScenarioRecommendationPanel()
     deviceRecommendations.value = [appliedRecommendation]
-    deviceRecommendationMessage.value = t('app.appliedRecommendationOnlyNotice')
+    deviceRecommendationMessage.value = hadOtherCandidates ? t('app.appliedRecommendationOnlyNotice') : ''
     deviceRecommendationFilteredCount.value = 0
     deviceRecommendationFilteredItems.value = []
     deviceRecommendationAdjustedItems.value = keepAppliedRecommendationAdjustments(
@@ -7965,12 +8292,13 @@ const preserveAppliedRecommendationAfterSceneChange = (
     invalidateRecommendationsForSceneChange({ notify: true })
     return
   }
+  const hadOtherCandidates = specRecommendations.value.length > 1
   recommendationSceneGeneration += 1
   closeRecommendationPanel()
   closeDeviceRecommendationPanel()
   closeScenarioRecommendationPanel()
   specRecommendations.value = [appliedRecommendation]
-  specRecommendationMessage.value = t('app.appliedRecommendationOnlyNotice')
+  specRecommendationMessage.value = hadOtherCandidates ? t('app.appliedRecommendationOnlyNotice') : ''
   specRecommendationFilteredCount.value = 0
   specRecommendationFilteredItems.value = []
   specRecommendationRawCandidateCount.value = 0
@@ -8149,9 +8477,15 @@ const applySpecRecommendation = async (recommendation: SpecificationRecommendati
     notifyBlocked(t('app.recommendationAlreadyApplied'))
     return
   }
-  if (applyingSpecRecommendations.value.has(index)) return
+  if (applyingSpecRecommendations.value.has(index) || recommendationApplyFailures.spec[index]?.outcomeUnknown) return
   const recommendationEpoch = specRecommendationRequestEpoch
   const requestSceneGeneration = recommendationSceneGeneration
+  const requestToken = getToken()
+  const applyAuthScopeEpoch = boardAuthScopeEpoch
+  const isApplyAccountCurrent = () => isCurrentBoardAuthScope(applyAuthScopeEpoch) && isCurrentSessionToken(requestToken)
+  const isApplyCandidateCurrent = () => isApplyAccountCurrent()
+    && recommendationEpoch === specRecommendationRequestEpoch && requestSceneGeneration === recommendationSceneGeneration
+  delete recommendationApplyFailures.spec[index]
   let recommendationConfirmedApplied = false
 
   // Reject an invalid recommendation before issuing the targeted create request.
@@ -8224,27 +8558,39 @@ const applySpecRecommendation = async (recommendation: SpecificationRecommendati
         || isSceneReplacementInProgress.value) return
       try {
         const mutation = await boardApi.addSpec(newSpec)
+        if (!isApplyAccountCurrent()) return
         commitSemanticScene({ specs: mutation.currentItems, availability: mutation })
         recommendationConfirmedApplied = true
-        if (recommendationEpoch === specRecommendationRequestEpoch) {
+        if (isApplyCandidateCurrent()) {
           appliedSpecRecommendations.value.add(index)
         }
-        notifySuccess(t('app.specificationAddedSuccessfully'))
       } catch (error: any) {
+        if (!isApplyAccountCurrent()) return
         console.error('Failed to save specification:', error)
+        let refreshed = false
         if (!isDefinitiveMutationRejection(error)) {
-          const refreshed = await refreshSpecifications()
+          refreshed = await refreshSpecifications(requestToken)
+          if (!isApplyAccountCurrent()) return
           await reloadUndoAvailability()
+          if (!isApplyAccountCurrent()) return
           if (refreshed && specifications.value.some(spec => isSameSpecification(spec, newSpec))) {
             recommendationConfirmedApplied = true
-            if (recommendationEpoch === specRecommendationRequestEpoch) {
+            if (isApplyCandidateCurrent()) {
               appliedSpecRecommendations.value.add(index)
+              notifyBlocked(t('app.specCreateOutcomeRefreshed'))
             }
-            notifyBlocked(t('app.specCreateOutcomeRefreshed'))
             return
           }
         }
-        notifyError(extractApiErrorMessage(error, t('app.failedToSaveSpecification')))
+        if (!isApplyCandidateCurrent()) return
+        if (error?.response?.data?.data?.reasonCode === 'DUPLICATE_SPECIFICATION') {
+          notifyBlocked(t('app.specDuplicate'))
+          return
+        }
+        const outcomeUnknown = !isDefinitiveMutationRejection(error)
+        reportRecommendationApplyFailure('spec', index, error, t(outcomeUnknown
+          ? refreshed ? 'app.recommendationApplyOutcomeRefreshed' : 'app.recommendationApplyOutcomeUnknown'
+          : 'app.failedToSaveSpecification'), outcomeUnknown)
       }
     }, {
       onSemanticChange: () => handleRecommendationApplySceneChange(
@@ -8372,13 +8718,18 @@ const applyDeviceRecommendation = async (recommendation: DeviceRecommendation, i
     notifyBlocked(t('app.recommendationAlreadyApplied'))
     return
   }
-  if (applyingDeviceRecommendations.value.has(index)) return
+  if (applyingDeviceRecommendations.value.has(index) || recommendationApplyFailures.device[index]?.outcomeUnknown) return
   const recommendationEpoch = deviceRecommendationRequestEpoch
   const requestSceneGeneration = recommendationSceneGeneration
+  const requestToken = getToken()
+  const applyAuthScopeEpoch = boardAuthScopeEpoch
+  const isApplyAccountCurrent = () => isCurrentBoardAuthScope(applyAuthScopeEpoch) && isCurrentSessionToken(requestToken)
+  delete recommendationApplyFailures.device[index]
   let recommendationConfirmedApplied = false
-  const isRecommendationCurrent = () =>
-    recommendationEpoch === deviceRecommendationRequestEpoch
+  const isApplyCandidateCurrent = () =>
+    isApplyAccountCurrent() && recommendationEpoch === deviceRecommendationRequestEpoch
     && requestSceneGeneration === recommendationSceneGeneration
+  const isRecommendationCurrent = () => isApplyCandidateCurrent()
     && isBoardDataReady.value
     && !isSceneReplacementInProgress.value
 
@@ -8427,7 +8778,6 @@ const applyDeviceRecommendation = async (recommendation: DeviceRecommendation, i
   }
   if (!isRecommendationCurrent()) return
   
-  // createDeviceInstanceAt 内部已保存并在失败时回滚+抛错，这里只需处理成功/失败提示。
   applyingDeviceRecommendations.value.add(index)
   try {
     const outcome = await createDeviceInstanceAt(
@@ -8438,6 +8788,13 @@ const applyDeviceRecommendation = async (recommendation: DeviceRecommendation, i
       {
         admissionGuard: isRecommendationCurrent,
         onConfirmedCreate: () => { recommendationConfirmedApplied = true },
+        onFailure: (error, refreshed) => {
+          if (!isApplyCandidateCurrent()) return
+          const outcomeUnknown = !isDefinitiveMutationRejection(error)
+          reportRecommendationApplyFailure('device', index, error, t(outcomeUnknown
+            ? refreshed ? 'app.recommendationApplyOutcomeRefreshed' : 'app.recommendationApplyOutcomeUnknown'
+            : 'app.saveNodesFailed'), outcomeUnknown)
+        },
         onSemanticChange: () => handleRecommendationApplySceneChange(
           recommendationConfirmedApplied,
           () => preserveAppliedRecommendationAfterSceneChange('device', index),
@@ -8445,18 +8802,16 @@ const applyDeviceRecommendation = async (recommendation: DeviceRecommendation, i
         )
       }
     )
-    if (recommendationEpoch === deviceRecommendationRequestEpoch
-      && requestSceneGeneration === recommendationSceneGeneration) {
+    if (!isApplyAccountCurrent()) return
+    if (isApplyCandidateCurrent()) {
       appliedDeviceRecommendations.value.add(index)
     }
     reportEnvironmentChanges(outcome.environmentChanges)
-    if (outcome.responseConfirmed) {
-      notifySuccess(t('app.deviceAddedWithName', { name: outcome.device.label }))
-    } else {
+    if (!outcome.responseConfirmed && isApplyCandidateCurrent()) {
       notifyBlocked(t('app.deviceCreateOutcomeRefreshed', { name: outcome.device.label }))
     }
   } catch {
-    // createDeviceInstanceAt already displayed the server failure.
+    // The creating helper reports the failure to this candidate's owner.
   } finally {
     if (recommendationEpoch === deviceRecommendationRequestEpoch) {
       applyingDeviceRecommendations.value.delete(index)
@@ -8466,12 +8821,17 @@ const applyDeviceRecommendation = async (recommendation: DeviceRecommendation, i
 
 // ==== Simulation Logic ====
 const isSimulating = ref(false)
-const simulationResult = ref<SimulationResultView | null>(null)
-const simulationError = ref<string | null>(null)
+const simulationError = ref<RunFailure | null>(null)
 // Result of the last successful simulation, kept so its logs / NuSMV diagnostics stay reachable while
 // the timeline is open. The result dialog only auto-opens on error; on success we go straight to the
 // timeline (by design) and let the user open the logs on demand via openSimulationLogs().
 const lastSimulationResult = ref<SimulationResultView | null>(null)
+// Only notification handles live here; each notice owns its local result through its action closure.
+const unsavedRunNotifications = new Set<() => void>()
+onBeforeUnmount(() => {
+  unsavedRunNotifications.forEach(close => close())
+  unsavedRunNotifications.clear()
+})
 
 /**
  * Make a completed run *the* current trajectory: the one every simulation surface describes.
@@ -8491,6 +8851,21 @@ const adoptSimulationRunResult = (
 ) => {
   lastSimulationResult.value = result
   simulationResultStale.value = semanticSceneChangeCount !== submissionSceneChanges
+}
+
+/** Adopt an arriving verdict and its saved run together, without refetching the result just received. */
+const adoptVerificationRunResult = (result: VerificationResult, submissionSceneChanges: number) => {
+  // A history read started earlier must not replace this verdict after its URL has changed.
+  historyDetailRequests.invalidate()
+  deepLinkLoadRequests.invalidate()
+  verificationResult.value = result
+  verificationResultStale.value = semanticSceneChangeCount !== submissionSceneChanges
+  if (result.historyPersistence.status === 'SAVED') {
+    staleDeepLink.value = false
+    void navigateToRunTarget({ kind: 'verification', runId: result.historyPersistence.runId }, 'push')
+  } else {
+    clearRunDeepLink()
+  }
 }
 
 // Simulation form state (moved from ControlCenter)
@@ -8806,6 +9181,25 @@ const simulationRunBlockedReason = computed(() => {
     || simulationAttackConfigurationError.value
 })
 
+const verificationRunBlockedDescriptionId = computed(() => {
+  if (!verificationRunBlockedReason.value) return undefined
+  if (verificationRunBlockedReason.value === verificationAttackConfigurationError.value) {
+    if (!hasModeledAttackEffect.value) return 'verification-attack-unavailable'
+    if (verificationForm.isAttack) return verificationForm.attackMode === 'ANY_UP_TO_BUDGET'
+      ? 'verification-attack-budget-invalid' : 'verification-attack-points-invalid'
+  }
+  return 'verification-run-blocked-reason'
+})
+
+const simulationRunBlockedDescriptionId = computed(() => {
+  if (!simulationRunBlockedReason.value) return undefined
+  if (simulationRunBlockedReason.value === simulationAttackConfigurationError.value) {
+    if (!hasModeledAttackEffect.value) return 'simulation-attack-unavailable'
+    if (simulationForm.isAttack) return 'simulation-attack-points-invalid'
+  }
+  return 'simulation-run-blocked-reason'
+})
+
 const hasPrivacySpecification = computed(() =>
   specificationsRequirePrivacy(specifications.value))
 
@@ -8832,11 +9226,11 @@ const validateSimulationSteps = (value: unknown) =>
 const asyncVerificationTask = ref<{
   taskId: number | null
   progress: number
-  status: string
+  statusKey: string
 }>({
   taskId: null,
   progress: 0,
-  status: t('app.taskInitializing')
+  statusKey: 'app.taskInitializing'
 })
 const asyncVerificationActive = ref(false)
 const cancellingVerificationTask = ref(false)
@@ -8845,11 +9239,11 @@ const verificationCancelRequested = ref(false)
 const asyncFuzzingTask = ref<{
   taskId: number | null
   progress: number
-  status: string
+  statusKey: string
 }>({
   taskId: null,
   progress: 0,
-  status: t('app.taskInitializing')
+  statusKey: 'app.taskInitializing'
 })
 const isFuzzing = ref(false)
 const asyncFuzzingActive = ref(false)
@@ -8858,8 +9252,12 @@ const fuzzingCancelRequested = ref(false)
 const showFuzzingPanel = ref(false)
 const showFuzzingResultDialog = ref(false)
 const fuzzingResult = ref<FuzzingRun | null>(null)
-const fuzzingError = ref<string | null>(null)
-const fuzzingSettingsNotice = ref<string | null>(null)
+const fuzzingError = ref<RunFailure | null>(null)
+const fuzzingFailureDetails = computed(() => fuzzingError.value ? formatRunFailure('fuzzing', fuzzingError.value) : null)
+const fuzzingErrorMessage = computed(() => fuzzingFailureDetails.value?.message || null)
+const fuzzingSettingsNotice = ref<{ key: string; params?: Record<string, number> } | null>(null)
+const fuzzingSettingsNoticeMessage = computed(() => fuzzingSettingsNotice.value
+  ? t(fuzzingSettingsNotice.value.key, fuzzingSettingsNotice.value.params || {}) : '')
 const fuzzingResultLoading = ref(false)
 const activeFuzzingFinding = ref<FuzzingFinding | null>(null)
 let fuzzingResultRequestEpoch = 0
@@ -9148,71 +9546,79 @@ onBeforeUnmount(() => {
   historyDetailRequests.invalidate()
 })
 
-const currentFuzzingModelFingerprint = ref<string | null>(null)
+const currentBoardModelFingerprints = ref<BoardModelFingerprints | null>(null)
+const loadingCurrentBoardModelFingerprints = ref(false)
 let boardModelRevision = 0
-let fingerprintModelRevision = -1
 const fingerprintRequestGuard = createLatestBoardRequestGuard()
 
-const invalidateCurrentFuzzingModelFingerprint = () => {
+// Geometry and display names can change during canvas work without changing the model.
+const boardModelSource = computed(() => JSON.stringify({
+  devices: nodes.value.map(node => ({
+    id: node.id,
+    templateName: node.templateName,
+    state: node.state,
+    currentStateTrust: node.currentStateTrust,
+    currentStatePrivacy: node.currentStatePrivacy,
+    variables: node.variables,
+    privacies: node.privacies
+  })),
+  rules: rules.value,
+  specifications: specifications.value,
+  environmentVariables: environmentVariables.value,
+  deviceTemplates: deviceTemplates.value
+}))
+
+const invalidateCurrentBoardModelFingerprints = () => {
   boardModelRevision += 1
-  fingerprintModelRevision = -1
-  currentFuzzingModelFingerprint.value = null
+  currentBoardModelFingerprints.value = null
   fingerprintRequestGuard.invalidate()
+  loadingCurrentBoardModelFingerprints.value = false
 }
 
-watch(
-  [nodes, rules, specifications, environmentVariables, deviceTemplates],
-  invalidateCurrentFuzzingModelFingerprint,
-  { flush: 'sync' }
-)
+watch(boardModelSource, invalidateCurrentBoardModelFingerprints, { flush: 'sync' })
+watch(boardModelSource, () => {
+  // Snapshot adoption already starts a read for this revision before post-flush watchers run.
+  if (!loadingCurrentBoardModelFingerprints.value) void refreshCurrentBoardModelFingerprints()
+}, { flush: 'post' })
 
-const refreshCurrentFuzzingModelFingerprint = async (
+const refreshCurrentBoardModelFingerprints = async (
   expectedModelRevision = boardModelRevision
-): Promise<string | null> => {
+): Promise<BoardModelFingerprints | null> => {
   const requestEpoch = fingerprintRequestGuard.begin()
+  currentBoardModelFingerprints.value = null
+  loadingCurrentBoardModelFingerprints.value = true
   try {
-    const fingerprint = await fuzzingApi.getCurrentModelFingerprint()
-    if (!boardLifecycleDisposed
-      && fingerprintRequestGuard.isCurrent(requestEpoch)
+    const fingerprints = await boardApi.getModelFingerprints()
+    if (!boardLifecycleDisposed && fingerprintRequestGuard.isCurrent(requestEpoch)
       && expectedModelRevision === boardModelRevision) {
-      currentFuzzingModelFingerprint.value = fingerprint
-      fingerprintModelRevision = expectedModelRevision
+      currentBoardModelFingerprints.value = fingerprints
     }
-    return fingerprint
+    return fingerprints
   } catch {
-    if (!boardLifecycleDisposed
-      && fingerprintRequestGuard.isCurrent(requestEpoch)
+    if (!boardLifecycleDisposed && fingerprintRequestGuard.isCurrent(requestEpoch)
       && expectedModelRevision === boardModelRevision) {
-      currentFuzzingModelFingerprint.value = null
-      fingerprintModelRevision = -1
+      currentBoardModelFingerprints.value = null
     }
     return null
+  } finally {
+    if (!boardLifecycleDisposed && fingerprintRequestGuard.isCurrent(requestEpoch)) {
+      loadingCurrentBoardModelFingerprints.value = false
+    }
   }
 }
 
-const currentFuzzingBoardScope = computed(() => ({
-  deviceCount: nodes.value.length,
-  ruleCount: rules.value.length,
-  specificationCount: specifications.value.length,
-  environmentVariableCount: environmentVariables.value.length,
-  deviceTemplateCount: new Set(nodes.value
-    .map(device => device.templateName?.trim())
-    .filter((name): name is string => Boolean(name))).size,
-  modelFingerprint: fingerprintModelRevision === boardModelRevision
-    ? currentFuzzingModelFingerprint.value
-    : null
-}))
-
 const fuzzRunHasBoardDrift = (run: AvailableFuzzingRunSummary | FuzzingRun): boolean => {
-  const snapshot = run.modelSnapshot
-  const current = currentFuzzingBoardScope.value
-  return snapshot.modelFingerprint !== current.modelFingerprint
+  return compareModelSnapshot(run.modelSnapshot, currentBoardModelFingerprints.value, 'fuzzing') !== 'UNCHANGED'
 }
 
 const fuzzingResultBoardDrifted = computed(() => {
   const run = fuzzingResult.value
   return run ? fuzzRunHasBoardDrift(run) : false
 })
+
+const fuzzingBoardComparison = computed(() => compareModelSnapshot(
+  fuzzingResult.value?.modelSnapshot, currentBoardModelFingerprints.value, 'fuzzing'
+))
 
 type HistoryLayer = 'tasks' | 'results'
 type HistoryResultFilter = 'all' | 'verification' | 'fuzzing' | 'simulation'
@@ -9354,13 +9760,14 @@ const historyDetailRequests = createPagedRequestCoordinator()
 let historyPanelIntentEpoch = 0
 let fuzzingHistoryAppendPromise: Promise<boolean> | null = null
 const showHistoryPanel = ref(false)
-const activeHistoryLayer = ref<HistoryLayer>('tasks')
+const activeHistoryLayer = ref<HistoryLayer>('results')
 const activeHistoryResultFilter = ref<HistoryResultFilter>('all')
 const loadingTaskHistory = ref(false)
+const taskInboxError = ref<ApiErrorDetails | null>(null)
 const loadingResultHistory = ref(false)
 const pendingTaskActionKeys = ref<Set<string>>(new Set())
 const pendingHistoryDeleteKeys = ref<Set<string>>(new Set())
-const historyResultErrors = reactive<Record<HistoryResultSource, string | null>>({
+const historyResultErrors = reactive<Record<HistoryResultSource, ApiErrorDetails | null>>({
   verification: null,
   fuzzing: null,
   simulation: null
@@ -9620,6 +10027,11 @@ const activeBackgroundTaskCount = computed(() =>
   activeVerificationTasks.value.length + activeSimulationTasks.value.length + activeFuzzingTasks.value.length
 )
 
+const runningVerificationTask = computed(() => isVerifying.value && asyncVerificationActive.value
+  ? verificationTasks.value.find(task => task.id === asyncVerificationTask.value.taskId) : undefined)
+const runningSimulationTask = computed(() => isSimulating.value && asyncSimulationActive.value
+  ? simulationTasks.value.find(task => task.id === asyncSimulationTask.value.taskId) : undefined)
+
 const miniTaskItems = computed(() => {
   const items: Array<{
     key: string
@@ -9637,7 +10049,7 @@ const miniTaskItems = computed(() => {
       kind: 'verification',
       id: currentVerificationId,
       label: t('app.verification'),
-      status: asyncVerificationTask.value.status,
+      status: formatWatchedTaskStatus(asyncVerificationTask.value.statusKey, cancellingVerificationTask.value),
       progress: normalizeTaskProgress(asyncVerificationTask.value.progress)
     })
   }
@@ -9660,7 +10072,7 @@ const miniTaskItems = computed(() => {
       kind: 'fuzzing',
       id: currentFuzzingId,
       label: t('app.fuzzSearch'),
-      status: asyncFuzzingTask.value.status,
+      status: formatWatchedTaskStatus(asyncFuzzingTask.value.statusKey, cancellingFuzzingTask.value),
       progress: normalizeTaskProgress(asyncFuzzingTask.value.progress)
     })
   }
@@ -9683,7 +10095,7 @@ const miniTaskItems = computed(() => {
       kind: 'simulation',
       id: currentSimulationId,
       label: t('app.simulation'),
-      status: asyncSimulationTask.value.status,
+      status: formatWatchedTaskStatus(asyncSimulationTask.value.statusKey, cancellingSimulationTask.value),
       progress: normalizeTaskProgress(asyncSimulationTask.value.progress)
     })
   }
@@ -9864,8 +10276,8 @@ const fetchFuzzingTasks = async (): Promise<TaskInboxBatch<FuzzingTaskSummary>> 
   return { tasks: tasks || [], excludedIds }
 }
 
+// Only a current, applied read can acknowledge unread task failures.
 const loadTaskInbox = async (
-  showError = true,
   options: { showLoading?: boolean } = {}
 ): Promise<boolean> => {
   if (boardLifecycleDisposed) return false
@@ -9879,13 +10291,13 @@ const loadTaskInbox = async (
       fetchSimulationTasks(),
       fetchFuzzingTasks()
     ])
-    if (!taskInboxRequests.isCurrent(token)) return true
+    if (!taskInboxRequests.isCurrent(token)) return false
     await reconcileTrackedFuzzTasks(
       fuzzing.tasks,
       fuzzing.excludedIds,
       () => taskInboxRequests.isCurrent(token)
     )
-    if (!taskInboxRequests.isCurrent(token)) return true
+    if (!taskInboxRequests.isCurrent(token)) return false
     verificationTasks.value = mergeTaskSummariesPreservingExcluded(
       verificationTasks.value,
       verification.tasks,
@@ -9901,13 +10313,12 @@ const loadTaskInbox = async (
       fuzzing.tasks,
       fuzzing.excludedIds
     )
+    taskInboxError.value = null
     return true
   } catch (e: any) {
-    if (!taskInboxRequests.isCurrent(token)) return true
+    if (!taskInboxRequests.isCurrent(token)) return false
     console.error('Failed to load async tasks:', e)
-    if (showError) {
-      notifyError(extractApiErrorMessage(e, t('app.failedToLoadTasks')))
-    }
+    taskInboxError.value = errorDetails(e)
     return false
   } finally {
     if (loadingEpoch === taskInboxLoadingEpoch) loadingTaskHistory.value = false
@@ -9918,7 +10329,7 @@ const loadTaskInbox = async (
 const refreshTaskInboxInBackground = (): Promise<boolean> => {
   if (boardLifecycleDisposed) return Promise.resolve(false)
   if (taskInboxBackgroundRefreshPromise) return taskInboxBackgroundRefreshPromise
-  const refresh = loadTaskInbox(false, { showLoading: false })
+  const refresh = loadTaskInbox({ showLoading: false })
   taskInboxBackgroundRefreshPromise = refresh
   void refresh.finally(() => {
     if (taskInboxBackgroundRefreshPromise === refresh) {
@@ -9928,24 +10339,24 @@ const refreshTaskInboxInBackground = (): Promise<boolean> => {
   return refresh
 }
 
+const isHistoryResultErrorVisible = (source: HistoryResultSource): boolean =>
+  showHistoryPanel.value && activeHistoryLayer.value === 'results'
+  && (activeHistoryResultFilter.value === 'all' || activeHistoryResultFilter.value === source)
+
 const loadVerificationRuns = async (showError = true): Promise<boolean> => {
   if (boardLifecycleDisposed) return false
   const token = verificationHistoryRequests.beginReplace()
   try {
     const runs = await boardApi.getVerificationRuns()
-    if (!verificationHistoryRequests.isCurrent(token)) return true
+    if (!verificationHistoryRequests.isCurrent(token)) return false
     verificationRuns.value = retainKnownVerificationHistoryAvailability(runs || [])
     historyResultErrors.verification = null
     return true
   } catch (e: any) {
-    if (!verificationHistoryRequests.isCurrent(token)) return true
+    if (!verificationHistoryRequests.isCurrent(token)) return false
     console.error('Failed to load verification run history:', e)
-    historyResultErrors.verification = localizedErrorMessage(
-      e,
-      t('app.failedToLoadVerificationHistory'),
-      locale.value
-    )
-    if (showError) {
+    historyResultErrors.verification = errorDetails(e)
+    if (showError && !isHistoryResultErrorVisible('verification')) {
       notifyError(t('app.failedToLoadVerificationHistory'))
     }
     return false
@@ -9959,19 +10370,15 @@ const loadSimulationRuns = async (showError = true): Promise<boolean> => {
   const token = simulationHistoryRequests.beginReplace()
   try {
     const runs = await simulationApi.getUserSimulations()
-    if (!simulationHistoryRequests.isCurrent(token)) return true
+    if (!simulationHistoryRequests.isCurrent(token)) return false
     simulationRuns.value = retainKnownSimulationHistoryAvailability(runs || [])
     historyResultErrors.simulation = null
     return true
   } catch (e: any) {
-    if (!simulationHistoryRequests.isCurrent(token)) return true
+    if (!simulationHistoryRequests.isCurrent(token)) return false
     console.error('Failed to load simulation run history:', e)
-    historyResultErrors.simulation = localizedErrorMessage(
-      e,
-      t('app.failedToLoadSimulationHistory'),
-      locale.value
-    )
-    if (showError) {
+    historyResultErrors.simulation = errorDetails(e)
+    if (showError && !isHistoryResultErrorVisible('simulation')) {
       notifyError(t('app.failedToLoadSimulationHistory'))
     }
     return false
@@ -9989,9 +10396,9 @@ const executeFuzzingRunsRequest = async (
   try {
     const [runs] = await Promise.all([
       fuzzingApi.getRuns(page, FUZZ_RUN_HISTORY_PAGE_SIZE),
-      refreshCurrentFuzzingModelFingerprint()
+      refreshCurrentBoardModelFingerprints()
     ])
-    if (!fuzzingHistoryRequests.isCurrent(token)) return true
+    if (!fuzzingHistoryRequests.isCurrent(token)) return false
     const retainedRuns = retainKnownFuzzingHistoryAvailability(runs)
     if (append) {
       const existingIds = new Set(fuzzingRuns.value.map(run => run.id))
@@ -10009,15 +10416,11 @@ const executeFuzzingRunsRequest = async (
     fuzzingRunsHasMore.value = runs.length === FUZZ_RUN_HISTORY_PAGE_SIZE
     return true
   } catch (e: any) {
-    if (!fuzzingHistoryRequests.isCurrent(token)) return true
+    if (!fuzzingHistoryRequests.isCurrent(token)) return false
     console.error('Failed to load fuzzing run history:', e)
-    historyResultErrors.fuzzing = localizedErrorMessage(
-      e,
-      t('app.failedToLoadFuzzingHistory'),
-      locale.value
-    )
-    if (showError) {
-      notifyError(extractApiErrorMessage(e, t('app.failedToLoadFuzzingHistory')))
+    historyResultErrors.fuzzing = errorDetails(e)
+    if (showError && !isHistoryResultErrorVisible('fuzzing')) {
+      notifyError(t('app.failedToLoadFuzzingHistory'))
     }
     return false
   } finally {
@@ -10037,7 +10440,7 @@ const loadFuzzingRuns = (
   const token = append
     ? fuzzingHistoryRequests.beginAppend()
     : fuzzingHistoryRequests.beginReplace()
-  if (!token) return Promise.resolve(true)
+  if (!token) return Promise.resolve(false)
 
   if (!append) return executeFuzzingRunsRequest(token, showError, page, false)
 
@@ -10059,7 +10462,7 @@ const loadMoreFuzzingRuns = async () => {
   await loadFuzzingRuns(true, { page: fuzzingRunsPage.value + 1, append: true })
 }
 
-const loadHistoryResults = async (showError = true): Promise<boolean> => {
+const loadHistoryResults = async (): Promise<boolean> => {
   if (boardLifecycleDisposed) return false
   const loadingEpoch = ++historyResultsLoadingEpoch
   loadingResultHistory.value = true
@@ -10069,16 +10472,7 @@ const loadHistoryResults = async (showError = true): Promise<boolean> => {
       loadSimulationRuns(false),
       loadFuzzingRuns(false)
     ])
-    const failedSources = [
-      !results[0] ? t('app.verificationRunResult') : null,
-      !results[1] ? t('app.simulationRunResult') : null,
-      !results[2] ? t('app.fuzzRunResult') : null
-    ].filter((source): source is string => Boolean(source))
-    if (failedSources.length > 0 && showError) {
-      notifyError(t('app.failedToLoadRunResultSources', {
-          sources: failedSources.join(locale.value.toLowerCase().startsWith('zh') ? '、' : ', ')
-        }))
-    }
+    if (loadingEpoch !== historyResultsLoadingEpoch) return false
     return results.every(Boolean)
   } finally {
     if (loadingEpoch === historyResultsLoadingEpoch) loadingResultHistory.value = false
@@ -10087,8 +10481,8 @@ const loadHistoryResults = async (showError = true): Promise<boolean> => {
 
 const refreshRunHistory = async (): Promise<boolean> => {
   const results = await Promise.all([
-    loadTaskInbox(false, { showLoading: false }),
-    loadHistoryResults(false)
+    loadTaskInbox({ showLoading: false }),
+    loadHistoryResults()
   ])
   /*
    * An authoritative history reload can reveal that the run on screen is gone, and the open surface has to
@@ -10115,10 +10509,13 @@ const refreshAllBoardState = async (): Promise<boolean> => {
 
 const refreshHistoryLayer = async (layer: HistoryLayer = activeHistoryLayer.value): Promise<boolean> => {
   historyDetailRequests.invalidate()
-  if (layer === 'tasks') {
-    return loadTaskInbox()
-  }
-  return loadHistoryResults()
+  // Result loading already refreshes fingerprints alongside the fuzzing history request.
+  if (layer === 'results') return loadHistoryResults()
+  const [loaded] = await Promise.all([
+    loadTaskInbox(),
+    refreshCurrentBoardModelFingerprints()
+  ])
+  return loaded
 }
 
 const setHistoryLayer = async (layer: HistoryLayer) => {
@@ -10281,14 +10678,12 @@ const openVerificationRun = async (
     const run = await boardApi.getVerificationRun(runId)
     if (!historyDetailRequests.isCurrent(requestToken) || boardLifecycleDisposed) return false
     runDetailLoaded = true
+    void refreshCurrentBoardModelFingerprints()
     const traces = shouldLoadVerificationEvidence(run.counterexampleCount)
       ? await boardApi.getVerificationRunTraces(runId)
       : []
     if (!historyDetailRequests.isCurrent(requestToken) || boardLifecycleDisposed) return false
-    verificationResult.value = attachLocalRunSubmission(
-      buildVerificationResultFromRun(run, traces),
-      null
-    )
+    verificationResult.value = buildVerificationResultFromRun(run, traces)
     verificationResultStale.value = false
     closeHistoryPanel(false)
     return true
@@ -10312,7 +10707,7 @@ const openVerificationRun = async (
     if (shouldReportUnusableHistoryDeepLink(isCurrentDeepLinkLoad(deepLinkLoad), e)) {
       reportUnusableDeepLink(deepLinkLoad)
     }
-    else notifyError(extractApiErrorMessage(e, t('app.failedToLoadVerificationRun')))
+    else notifyError(t('app.failedToLoadVerificationRun'))
     return false
   } finally {
     historyDetailRequests.finish(requestToken)
@@ -10330,6 +10725,7 @@ const watchVerificationTask = async (taskId: number) => {
     return
   }
   const taskSummary = verificationTasks.value.find(task => task.id === taskId)
+  verificationError.value = null
   isVerifying.value = true
   asyncVerificationActive.value = true
   verificationCancelRequested.value = false
@@ -10337,22 +10733,19 @@ const watchVerificationTask = async (taskId: number) => {
   asyncVerificationTask.value = {
     taskId,
     progress: normalizeTaskProgress(taskSummary?.progress),
-    status: formatTaskProgressStage(taskSummary?.progressStage, taskSummary?.status) || t('app.taskInitializing')
+    statusKey: taskProgressStatusKey(taskSummary?.progressStage, taskSummary?.status)
   }
   closeHistoryPanel()
+  showVerificationPanel.value = true
   try {
     await pollAsyncVerification(taskId, { presentResult: true })
   } catch (error: any) {
     if (!isPollingAbortedError(error)) {
-      const message = isCompletedTaskResultUnavailableError(error)
-        ? error.message
-        : extractApiErrorMessage(error, t('app.verificationFailed'))
       if (isAsyncTaskCancelledError(error)) {
         verificationError.value = null
-        notifyInfo(t('app.verificationCancelled'))
+        if (!verificationCancelRequested.value) notifyInfo(t('app.verificationCancelled'))
       } else {
-        verificationError.value = message
-        notifyError(message)
+        presentRunFailure('verification', 'app.verificationFailed', error)
       }
     }
   } finally {
@@ -10361,7 +10754,7 @@ const watchVerificationTask = async (taskId: number) => {
     cancellingVerificationTask.value = false
     verificationCancelRequested.value = false
     if (!boardLifecycleDisposed) {
-      await loadTaskInbox(false, { showLoading: false })
+      await loadTaskInbox({ showLoading: false })
     }
   }
 }
@@ -10377,6 +10770,7 @@ const watchSimulationTask = async (taskId: number) => {
     return
   }
   const taskSummary = simulationTasks.value.find(task => task.id === taskId)
+  simulationError.value = null
   isSimulating.value = true
   asyncSimulationActive.value = true
   simulationCancelRequested.value = false
@@ -10384,87 +10778,50 @@ const watchSimulationTask = async (taskId: number) => {
   asyncSimulationTask.value = {
     taskId,
     progress: normalizeTaskProgress(taskSummary?.progress),
-    status: formatTaskProgressStage(taskSummary?.progressStage, taskSummary?.status) || t('app.taskInitializing')
+    statusKey: taskProgressStatusKey(taskSummary?.progressStage, taskSummary?.status)
   }
   closeHistoryPanel()
+  showSimulationPanel.value = true
   /*
    * Same exposure as a run started from the panel, and reached more often: watching a task from the
    * inbox is exactly when a user carries on editing. `handleSimulate` documents the mechanism.
    */
   const watchSubmissionSceneChanges = semanticSceneChangeCount
   try {
-    const result = attachLocalRunSubmission(
-      await pollAsyncSimulation(taskId),
-      submissionForTask(activeSimulationSubmission.value, taskId)
-    )
-    if (result.traceId) {
+    const result = await pollAsyncSimulation(taskId)
+    const summary = summarizeSimulationResult(result)
+    if (summary) {
       simulationHistoryRequests.invalidate()
-      simulationRuns.value = [
-        {
-          id: result.traceId,
-          initiator: taskSummary?.initiator ?? 'UNKNOWN',
-          requestedSteps: result.requestedSteps,
-          steps: result.steps,
-          modelComplete: isSimulationModelComplete(result),
-          disabledRuleCount: getSimulationDisabledRuleCount(result),
-          generationIssues: getGenerationIssues(result),
-          isAttack: result.isAttack === true,
-          attackBudget: result.attackBudget ?? 0,
-          enablePrivacy: result.enablePrivacy === true,
-          modelSnapshot: result.modelSnapshot,
-          createdAt: result.createdAt || new Date().toISOString(),
-          dataAvailable: true
-        },
-        ...simulationRuns.value.filter(item => item.id !== result.traceId)
-      ]
+      simulationRuns.value = [summary, ...simulationRuns.value.filter(item => item.id !== summary.id)]
     }
     /*
      * Adopted only when this run is the one about to be shown, which is why the write sits below the
      * deferral branches rather than straight after the poll.
      *
-     * `lastSimulationResult` is the manifest every simulation surface reads: the replay bar takes its
-     * attack/privacy chips, step counts and `modelSnapshot` from it, while the states it animates come
-     * from `savedSimulationStates`. Writing it on arrival while a bar was already up therefore repainted
-     * the *visible* run's header with a different run's semantics — one trajectory's steps under another's
-     * attack budget — and left `openSimulationRunDetails` opening the wrong run entirely. Reachable
-     * because `ensureHistoricalPlaybackUiAdmission` does not consider `isSimulating`: starting an async
-     * run and then replaying something from history is a normal thing to do while waiting.
-     *
-     * The deferral notice is the honest outcome here. Silently adopting the result was the alternative
-     * that looked like success.
+     * `lastSimulationResult` owns the replay context and its derived states. Adopting an arriving run
+     * would replace the visible trajectory, while the canvas still owns the opened run's frozen scene.
+     * Playback admission permits replaying history while an async run is pending, so completion must
+     * remain in history until that replay is closed.
      */
-    if (result.states && result.states.length > 0) {
-      if (traceAnimationState.value.visible || simulationAnimationState.value.visible) {
-        notifySimulationOutcome(result, true)
-        notifyAutomaticPlaybackDeferredForReplay()
-        return
-      }
-      if (isLiveBoardEditorVisible.value) {
-        notifySimulationOutcome(result, true)
-        notifyAutomaticPlaybackDeferred()
-        return
-      }
-      adoptSimulationRunResult(result, watchSubmissionSceneChanges)
-      savedSimulationStates.value = [...result.states]
-      openSimulationAnimationFromSavedStates()
+    if (traceAnimationState.value.visible || simulationAnimationState.value.visible) {
       notifySimulationOutcome(result, true)
+      notifyAutomaticPlaybackDeferredForReplay(result, watchSubmissionSceneChanges)
       return
     }
-    // No states to replay, so no surface will show it — but the run still happened, and the task inbox
-    // and history reference it. Adopting it here keeps "the last simulation" meaning the last one that
-    // ran, which is what the details dialog reports when reopened.
+    if (isLiveBoardEditorVisible.value) {
+      notifySimulationOutcome(result, true)
+      notifyAutomaticPlaybackDeferred()
+      return
+    }
     adoptSimulationRunResult(result, watchSubmissionSceneChanges)
+    openSimulationAnimationFromSavedStates()
   } catch (error: any) {
     if (!isPollingAbortedError(error)) {
-      const message = isCompletedTaskResultUnavailableError(error)
-        ? error.message
-        : extractApiErrorMessage(error, t('app.simulationFailed'))
       if (isAsyncTaskCancelledError(error)) {
         simulationError.value = null
-        notifyInfo(t('app.simulationCancelled'))
+        if (!simulationCancelRequested.value) notifyInfo(t('app.simulationCancelled'))
       } else {
-        simulationError.value = message
-        notifyError(message)
+        presentRunFailure('simulation', 'app.simulationFailed', error)
       }
     }
   } finally {
@@ -10473,7 +10830,7 @@ const watchSimulationTask = async (taskId: number) => {
     cancellingSimulationTask.value = false
     simulationCancelRequested.value = false
     if (!boardLifecycleDisposed) {
-      await loadTaskInbox(false, { showLoading: false })
+      await loadTaskInbox({ showLoading: false })
     }
   }
 }
@@ -10517,7 +10874,6 @@ const presentFuzzingRun = (run: FuzzingRun) => {
   upsertFuzzingRunSummary(summary)
   fuzzingError.value = null
   fuzzingResult.value = run
-  void refreshCurrentFuzzingModelFingerprint()
   showFuzzingResultDialog.value = true
   clearFuzzNotifications(undefined, run.id)
 }
@@ -10537,6 +10893,7 @@ const watchFuzzingTask = async (taskId: number) => {
   // Keep the running request separate from the editable form. Its persisted summary is
   // the only truthful source after a refresh or after the current Board has changed.
   fuzzingWatchedTask.value = taskSummary || null
+  fuzzingSettingsNotice.value = null
   isFuzzing.value = true
   asyncFuzzingActive.value = true
   fuzzingCancelRequested.value = false
@@ -10546,7 +10903,7 @@ const watchFuzzingTask = async (taskId: number) => {
   asyncFuzzingTask.value = {
     taskId,
     progress: normalizeTaskProgress(taskSummary?.progress),
-    status: formatTaskProgressStage(taskSummary?.progressStage, taskSummary?.status) || t('app.taskInitializing')
+    statusKey: taskProgressStatusKey(taskSummary?.progressStage, taskSummary?.status)
   }
   trackFuzzTask(taskId)
   closeHistoryPanel()
@@ -10555,18 +10912,7 @@ const watchFuzzingTask = async (taskId: number) => {
     const run = await pollAsyncFuzzing(taskId)
     untrackFuzzTask(taskId)
     showFuzzingPanel.value = false
-    /*
-     * A replay on screen is not something to open a modal over. `FuzzingResultDialog` is
-     * `aria-modal="true"`, so presenting it takes the focus trap and the background scroll lock while the
-     * replay bar — a non-modal region — keeps animating underneath, and the user's playback controls are
-     * behind a trap they did not ask for. `handleFuzzing` already declines to present when its panel is
-     * closed and routes the run to the task notification instead; this path presented unconditionally,
-     * which is the only reason the two disagreed.
-     *
-     * The run is not lost: it goes to the notification the task inbox and the history badge already read,
-     * exactly as `handleFuzzing`'s non-presenting branch and the background recovery path both do, so the
-     * user opens it once the replay is closed.
-     */
+    // A result modal would trap focus away from the active replay; retain the run in the task inbox instead.
     if (isModelPlaybackActive.value) {
       const notificationShown = markFuzzNotificationUnread({
         taskId,
@@ -10587,19 +10933,20 @@ const watchFuzzingTask = async (taskId: number) => {
       }
       return
     }
+    void refreshCurrentBoardModelFingerprints()
     presentFuzzingRun(run)
   } catch (error: any) {
     if (!isPollingAbortedError(error)) {
       if (isAsyncTaskCancelledError(error)) {
         untrackFuzzTask(taskId)
         fuzzingError.value = null
-        notifyInfo(t('app.fuzzSearchCancelled'))
+        if (!fuzzingCancelRequested.value) notifyInfo(t('app.fuzzSearchCancelled'))
       } else if (isFuzzTaskRecoveryPendingError(error)) {
         fuzzingError.value = null
-        fuzzingSettingsNotice.value = t('app.fuzzResultRecoveryPending')
-        notifyInfo(fuzzingSettingsNotice.value)
+        fuzzingSettingsNotice.value = { key: 'app.fuzzResultRecoveryPending' }
+        if (!showFuzzingPanel.value) notifyInfo(fuzzingSettingsNoticeMessage.value)
       } else if (isFuzzCompletedResultUnavailableError(error)) {
-        fuzzingError.value = error.message || t('app.failedToLoadFuzzingRun')
+        fuzzingError.value = makeRunFailure('app.failedToLoadFuzzingRun', error)
         markFuzzNotificationUnread({
           taskId,
           runId: taskId,
@@ -10609,7 +10956,7 @@ const watchFuzzingTask = async (taskId: number) => {
         })
       } else {
         console.error('Fuzz task watch failed:', error)
-        fuzzingError.value = localizedErrorMessage(error, t('app.fuzzSearchFailed'), locale.value)
+        fuzzingError.value = makeRunFailure('app.fuzzSearchFailed', error)
         if (showFuzzingPanel.value) {
           untrackFuzzTask(taskId)
         } else {
@@ -10619,7 +10966,7 @@ const watchFuzzingTask = async (taskId: number) => {
             initiator: taskSummary?.initiator ?? 'UNKNOWN',
             createdAt: new Date().toISOString()
           })
-          notifyError(fuzzingError.value)
+          notifyError(fuzzingErrorMessage.value!)
         }
       }
     }
@@ -10630,7 +10977,7 @@ const watchFuzzingTask = async (taskId: number) => {
     fuzzingCancelRequested.value = false
     fuzzingWatchedTask.value = null
     if (!boardLifecycleDisposed) {
-      await loadTaskInbox(false, { showLoading: false })
+      await loadTaskInbox({ showLoading: false })
     }
   }
 }
@@ -10652,7 +10999,7 @@ const cancelVerificationTaskFromInbox = (taskId: number) => withTaskActionLock(
       notifyError(t('app.failedToCancelVerificationTask'))
     } finally {
       if (!boardLifecycleDisposed) {
-        await loadTaskInbox(false, { showLoading: false })
+        await loadTaskInbox({ showLoading: false })
       }
     }
   }
@@ -10675,7 +11022,7 @@ const cancelSimulationTaskFromInbox = (taskId: number) => withTaskActionLock(
       notifyError(t('app.failedToCancelSimulationTask'))
     } finally {
       if (!boardLifecycleDisposed) {
-        await loadTaskInbox(false, { showLoading: false })
+        await loadTaskInbox({ showLoading: false })
       }
     }
   }
@@ -10698,7 +11045,7 @@ const cancelFuzzingTaskFromInbox = (taskId: number) => withTaskActionLock(
       notifyError(t('app.failedToCancelFuzzingTask'))
     } finally {
       if (!boardLifecycleDisposed) {
-        await loadTaskInbox(false, { showLoading: false })
+        await loadTaskInbox({ showLoading: false })
       }
     }
   }
@@ -10716,7 +11063,7 @@ const dismissVerificationTask = (taskId: number) => withTaskActionLock(
     } catch (e: any) {
       if (boardLifecycleDisposed) return
       notifyError(extractApiErrorMessage(e, t('app.failedToDismissTask')))
-      await loadTaskInbox(false, { showLoading: false })
+      await loadTaskInbox({ showLoading: false })
     }
   }
 )
@@ -10733,7 +11080,7 @@ const dismissSimulationTask = (taskId: number) => withTaskActionLock(
     } catch (e: any) {
       if (boardLifecycleDisposed) return
       notifyError(extractApiErrorMessage(e, t('app.failedToDismissTask')))
-      await loadTaskInbox(false, { showLoading: false })
+      await loadTaskInbox({ showLoading: false })
     }
   }
 )
@@ -10753,7 +11100,7 @@ const dismissFuzzingTask = (taskId: number) => withTaskActionLock(
       if (boardLifecycleDisposed) return
       console.error('Failed to dismiss fuzzing task:', e)
       notifyError(t('app.failedToDismissTask'))
-      await loadTaskInbox(false, { showLoading: false })
+      await loadTaskInbox({ showLoading: false })
     }
   }
 )
@@ -10768,7 +11115,7 @@ const openTaskInbox = async () => {
   closeOtherWorkflowSurfaces()
   activeHistoryLayer.value = 'tasks'
   showHistoryPanel.value = true
-  const loaded = await loadTaskInbox(false)
+  const loaded = await loadTaskInbox()
   if (loaded && isCurrentHistoryPanelIntent(intentEpoch, 'tasks')) {
     clearFuzzNotifications('FAILED')
   }
@@ -10872,7 +11219,10 @@ const selectAndPlayVerificationTrace = async (
   }
 }
 
-const openFixForVerificationTrace = (trace: { id: number; violatedSpecId?: string }) => {
+const openFixForVerificationTrace = (trace: TraceSummary) => {
+  const run = verificationRuns.value.find(item => item.id === trace.verificationTaskId)
+  if (!trace.dataAvailable || !run?.dataAvailable
+    || compareModelSnapshot(run.modelSnapshot, currentBoardModelFingerprints.value, 'verification') !== 'UNCHANGED') return
   if (!trace.violatedSpecId) {
     notifyBlocked(t('app.traceMissingViolatedSpec'))
     return
@@ -10910,8 +11260,7 @@ const downloadVerificationRunSmv = async (runId: number) => {
  * where the two disagree. Verification is the case where they differ — a run owns many traces — which
  * is why only that side has a separate run-keyed endpoint.
  *
- * 404 handling covers trajectories persisted before the model was stored; that is a fact about the
- * record, not a fault, so it is reported as blocked rather than as an error.
+ * A 404 means the record or model is unavailable, including deletion after the list was loaded.
  */
 const downloadSimulationTraceSmv = async (traceId: number) => {
   try {
@@ -10936,36 +11285,8 @@ const selectAndPlaySimulationTrace = async (
   try {
     const trace = await simulationApi.getSimulation(traceId)
     if (!await revalidateHistoricalPlaybackAfterLoad(requestToken, initialMutationEpoch)) return
-    if (!trace?.states?.length) {
-      notifyBlocked(t('app.simulationRunHasNoStates'))
-      return
-    }
 
-    const result = {
-      states: trace.states,
-      steps: trace.steps,
-      requestedSteps: trace.requestedSteps,
-      logs: trace.logs || [],
-      nusmvOutput: trace.nusmvOutput || '',
-      modelComplete: trace.modelComplete,
-      disabledRuleCount: trace.disabledRuleCount,
-      generationIssues: getGenerationIssues(trace),
-      isAttack: trace.isAttack === true,
-      attackBudget: trace.attackBudget ?? 0,
-      enablePrivacy: trace.enablePrivacy === true,
-      modelSemantics: trace.modelSemantics,
-      modelSnapshot: trace.modelSnapshot,
-      playbackScene: trace.playbackScene,
-      // The third writer of `lastSimulationResult`, and it dropped these two while the sync and async
-      // paths carried them — so whether the run-details dialog offered the model download depended on
-      // *which UI path opened the run*, not on the run. The same trajectory offered the download right
-      // after executing and then claimed "model not available (may be a record saved before model
-      // persistence was enabled)" after a refresh and History → Replay → Run details. That message is
-      // specific enough to be believed, so the user would not retry — while the model sat on disk and
-      // `GET /api/simulate/traces/{id}/smv` would have served it.
-      hasSmvModel: trace.hasSmvModel,
-      historyPersistence: trace.historyPersistence
-    }
+    const result = simulationResultFromTrace(trace)
 
     closeHistoryPanel(false)
     lastSimulationResult.value = result
@@ -10977,8 +11298,6 @@ const selectAndPlaySimulationTrace = async (
     // whereas a stored trajectory has no such window. This is not written through that helper because
     // the comparison it performs is exactly what does not apply here.
     simulationResultStale.value = false
-    simulationResult.value = null
-    savedSimulationStates.value = [...trace.states]
     openSimulationAnimationFromSavedStates()
   } catch (e: any) {
     if (!historyDetailRequests.isCurrent(requestToken) || boardLifecycleDisposed) return
@@ -11016,8 +11335,7 @@ const deleteSimulationRun = async (run: SimulationTraceSummary) => {
     await simulationApi.deleteSimulation(traceId)
     if (boardLifecycleDisposed) return
     // No surface teardown here, unlike `deleteVerificationRun`: reaching this line means the history panel
-    // is open, and both simulation surfaces exclude it (the panel button is disabled while
-    // `isModelPlaybackActive`, and the details dialog is `aria-modal` over the whole screen), so the run
+    // is open, and the history panel button is disabled while `isModelPlaybackActive`, so the run
     // being deleted cannot be the one on screen. The reachable paths — the assistant's
     // `DeleteSimulationTraceTool` and another tab — arrive as a history reload and are handled by
     // `reconcileOpenSimulationRunAgainstHistory`.
@@ -11058,19 +11376,19 @@ const openFuzzingRun = async (
   }
   const requestEpoch = ++fuzzingResultRequestEpoch
   const requestToken = historyDetailRequests.beginReplace()
-  closeHistoryPanel(false)
   try {
-    await nextTick()
-    if (requestEpoch !== fuzzingResultRequestEpoch
-      || !historyDetailRequests.isCurrent(requestToken)
-      || boardLifecycleDisposed) return false
     fuzzingError.value = null
     fuzzingResult.value = null
     fuzzingResultLoading.value = true
     showFuzzingResultDialog.value = true
+    // Its ready event dismisses history after the lazy dialog captures its opener.
+    await nextTick()
+    if (requestEpoch !== fuzzingResultRequestEpoch
+      || !historyDetailRequests.isCurrent(requestToken)
+      || boardLifecycleDisposed) return false
     const [run] = await Promise.all([
       fuzzingApi.getRun(runId),
-      refreshCurrentFuzzingModelFingerprint()
+      refreshCurrentBoardModelFingerprints()
     ])
     if (requestEpoch !== fuzzingResultRequestEpoch
       || !historyDetailRequests.isCurrent(requestToken)
@@ -11102,7 +11420,7 @@ const openFuzzingRun = async (
     if (shouldReportUnusableHistoryDeepLink(isCurrentDeepLinkLoad(deepLinkLoad), e)) {
       reportUnusableDeepLink(deepLinkLoad)
     }
-    else notifyError(extractApiErrorMessage(e, t('app.failedToLoadFuzzingRun')))
+    else notifyError(t('app.failedToLoadFuzzingRun'))
     return false
   } finally {
     if (requestEpoch === fuzzingResultRequestEpoch) {
@@ -11189,7 +11507,7 @@ const deleteFuzzingRun = async (run: FuzzingRunSummary) => {
 
 const selectAndPlayFuzzingFinding = async (
   findingId: number,
-  runId?: number,
+  runId: number,
   deepLinkLoad?: DeepLinkLoadContext
 ) => {
   if (!ensureHistoricalPlaybackUiAdmission()) return
@@ -11198,7 +11516,7 @@ const selectAndPlayFuzzingFinding = async (
   try {
     const replay = await fuzzingApi.getFinding(findingId)
     if (!await revalidateHistoricalPlaybackAfterLoad(requestToken, initialMutationEpoch)) return
-    if (runId !== undefined && !fuzzingFindingBelongsToRun(replay.finding, runId)) {
+    if (!fuzzingFindingBelongsToRun(replay.finding, runId)) {
       if (isCurrentDeepLinkLoad(deepLinkLoad)) reportUnusableDeepLink(deepLinkLoad)
       else notifyError(t('app.failedToLoadFuzzingFinding'))
       return
@@ -11229,7 +11547,7 @@ const selectAndPlayFuzzingFinding = async (
     savedTraces.value = [trace]
     openTraceAnimationAt(0)
     // Open on the step the finding names, and let `goToState` write both selection refs. Previously this
-    // forced state 0 while `openTraceAnimationAt` had selected the final state, so the change popover and
+    // forced state 0 while `openTraceAnimationAt` had selected the final state, so the changes tab and
     // the timeline disagreed and neither pointed at the violation.
     //
     // For a well-formed finding this lands where `openTraceAnimationAt` already did: the backend truncates
@@ -11265,7 +11583,7 @@ const selectAndPlayFuzzingFinding = async (
     if (shouldReportUnusableHistoryDeepLink(isCurrentDeepLinkLoad(deepLinkLoad), e)) {
       reportUnusableDeepLink(deepLinkLoad)
     } else {
-      notifyError(extractApiErrorMessage(e, t('app.failedToLoadFuzzingFinding')))
+      notifyError(t('app.failedToLoadFuzzingFinding'))
     }
   } finally {
     historyDetailRequests.finish(requestToken)
@@ -11381,10 +11699,10 @@ const reuseFuzzingSettings = () => {
   // Keep unavailable explicit IDs visible so the user, not filtering code, chooses a replacement scope.
   fuzzingForm.targetSpecIds = historicalTargetIds
   fuzzingSettingsNotice.value = usedFrozenAllTargets
-    ? t('app.fuzzSettingsReusedAllTargets')
+    ? { key: 'app.fuzzSettingsReusedAllTargets' }
     : unavailableTargetCount > 0
-      ? t('app.fuzzSettingsReusedWithMissingTargets', { count: unavailableTargetCount })
-      : t('app.fuzzSettingsReused')
+      ? { key: 'app.fuzzSettingsReusedWithMissingTargets', params: { count: unavailableTargetCount } }
+      : { key: 'app.fuzzSettingsReused' }
   dismissFuzzingResult()
   closeHistoryPanel()
   showSimulationPanel.value = false
@@ -11400,11 +11718,11 @@ const verificationActionButtonRef = ref<HTMLButtonElement | null>(null)
 const asyncSimulationTask = ref<{
   taskId: number | null
   progress: number
-  status: string
+  statusKey: string
 }>({
   taskId: null,
   progress: 0,
-  status: ''
+  statusKey: 'app.taskInitializing'
 })
 const asyncSimulationActive = ref(false)
 const synchronousVerificationRunning = computed(() =>
@@ -11421,16 +11739,28 @@ const notifyTaskCancellationResult = (
   const task = t(kind === 'verification'
     ? 'app.verificationTaskName'
     : kind === 'fuzzing' ? 'app.fuzzTaskName' : 'app.simulationTaskName')
+  const statusVisible = (showHistoryPanel.value && activeHistoryLayer.value === 'tasks')
+    || (kind === 'verification' ? showVerificationPanel.value
+      : kind === 'fuzzing' ? showFuzzingPanel.value : showSimulationPanel.value)
   switch (result.cancellationOutcome) {
     case 'ACCEPTED':
+      if (statusVisible) return
       notifyInfo(t(result.executionMayStillBeStopping
           ? 'app.taskCancellationAcceptedStopping'
           : 'app.taskCancellationAccepted', { task }))
       break
     case 'ALREADY_CANCELLED':
+      if (statusVisible) return
       notifyInfo(t('app.taskAlreadyCancelled', { task }))
       break
     case 'ALREADY_COMPLETED':
+      if (kind === 'verification' && showResultDialog.value
+        && verificationResult.value?.historyPersistence.status === 'SAVED'
+        && verificationResult.value.historyPersistence.runId === result.taskId) return
+      if (kind === 'simulation' && simulationAnimationState.value.visible
+        && lastSimulationResult.value?.historyPersistence.status === 'SAVED'
+        && simulationTasks.value.some(task => task.id === result.taskId
+          && task.simulationTraceId === lastSimulationResult.value?.historyPersistence.runId)) return
       notifyBlocked(t('app.taskAlreadyCompleted', { task }))
       break
     case 'ALREADY_FAILED':
@@ -11526,16 +11856,29 @@ const openFixDialog = (traceId: number, violatedSpecId: string) => {
   }
   fixTraceId.value = traceId
   fixViolatedSpecId.value = violatedSpecId
+  dismissCompletionNotifications()
   showFixDialog.value = true
 }
 
-const canFixVerificationResultTrace = (trace: Trace): boolean => (
-  !verificationResultStale.value
+const verificationFixBlockedReason = computed(() => {
+  if (verificationResultStale.value || verificationBoardComparison.value === 'CHANGED') {
+    return t('app.verificationResultStaleReverify')
+  }
+  if (verificationBoardComparison.value === 'UNCHANGED') return null
+  if (verificationBoardComparison.value === 'UNAVAILABLE') {
+    return t(loadingCurrentBoardModelFingerprints.value
+      ? 'app.runBoardComparisonLoading' : 'app.runBoardComparisonUnavailable')
+  }
+  return t('app.runBoardNotCompared')
+})
+
+const canFixVerificationResultTrace = (trace: Trace): trace is PersistedTrace => (
+  verificationFixBlockedReason.value === null
   && hasPersistedVerificationTrace(verificationResult.value, trace)
 )
 
 const openFixForVerificationResultTrace = (trace: Trace) => {
-  if (!hasPersistedVerificationTrace(verificationResult.value, trace)) return
+  if (!canFixVerificationResultTrace(trace)) return
   openFixDialog(trace.id, trace.violatedSpecId)
 }
 
@@ -11545,11 +11888,13 @@ const cancelAsyncVerification = async () => {
 
   verificationCancelRequested.value = true
   cancellingVerificationTask.value = true
-  asyncVerificationTask.value.status = t('app.taskCancelling')
   try {
     const result = await boardApi.cancelTask(taskId)
     if (boardLifecycleDisposed) return
     notifyTaskCancellationResult('verification', result)
+    if (asyncVerificationTask.value.taskId === taskId) {
+      asyncVerificationTask.value.statusKey = taskProgressStatusKey(undefined, result.taskStatus)
+    }
     if (result.cancellationAccepted || result.cancellationOutcome === 'ALREADY_CANCELLED') {
       verificationCancelRequested.value = true
     } else {
@@ -11559,7 +11904,8 @@ const cancelAsyncVerification = async () => {
     if (boardLifecycleDisposed) return
     verificationCancelRequested.value = false
     const msg = localizedErrorMessage(error, t('app.failedToCancelVerificationTask'), locale.value)
-    notifyError(msg)
+    await acknowledgeFailure({ title: t('app.failedToCancelVerificationTask'), message: msg,
+      suggestion: t('app.cancelFailureNextStep'), ...errorDetails(error) })
   } finally {
     cancellingVerificationTask.value = false
   }
@@ -11571,11 +11917,13 @@ const cancelAsyncSimulation = async () => {
 
   simulationCancelRequested.value = true
   cancellingSimulationTask.value = true
-  asyncSimulationTask.value.status = t('app.taskCancelling')
   try {
     const result = await simulationApi.cancelTask(taskId)
     if (boardLifecycleDisposed) return
     notifyTaskCancellationResult('simulation', result)
+    if (asyncSimulationTask.value.taskId === taskId) {
+      asyncSimulationTask.value.statusKey = taskProgressStatusKey(undefined, result.taskStatus)
+    }
     if (result.cancellationAccepted || result.cancellationOutcome === 'ALREADY_CANCELLED') {
       simulationCancelRequested.value = true
     } else {
@@ -11585,7 +11933,8 @@ const cancelAsyncSimulation = async () => {
     if (boardLifecycleDisposed) return
     simulationCancelRequested.value = false
     const msg = localizedErrorMessage(error, t('app.failedToCancelSimulationTask'), locale.value)
-    notifyError(msg)
+    await acknowledgeFailure({ title: t('app.failedToCancelSimulationTask'), message: msg,
+      suggestion: t('app.cancelFailureNextStep'), ...errorDetails(error) })
   } finally {
     cancellingSimulationTask.value = false
   }
@@ -11597,18 +11946,22 @@ const cancelAsyncFuzzing = async () => {
 
   fuzzingCancelRequested.value = true
   cancellingFuzzingTask.value = true
-  asyncFuzzingTask.value.status = t('app.taskCancelling')
   try {
     const result = await fuzzingApi.cancelTask(taskId)
     if (boardLifecycleDisposed) return
     notifyTaskCancellationResult('fuzzing', result)
+    if (asyncFuzzingTask.value.taskId === taskId) {
+      asyncFuzzingTask.value.statusKey = taskProgressStatusKey(undefined, result.taskStatus)
+    }
     fuzzingCancelRequested.value = result.cancellationAccepted
       || result.cancellationOutcome === 'ALREADY_CANCELLED'
   } catch (error: any) {
     if (boardLifecycleDisposed) return
     fuzzingCancelRequested.value = false
     console.error('Failed to cancel fuzzing task:', error)
-    notifyError(t('app.failedToCancelFuzzingTask'))
+    await acknowledgeFailure({ title: t('app.failedToCancelFuzzingTask'),
+      message: localizedErrorMessage(error, t('app.failedToCancelFuzzingTask'), locale.value),
+      suggestion: t('app.cancelFailureNextStep'), ...errorDetails(error) })
   } finally {
     cancellingFuzzingTask.value = false
   }
@@ -11618,17 +11971,13 @@ const cancelAsyncFuzzing = async () => {
 let pendingFixRefreshPromise: Promise<boolean> | null = null
 
 const handleFixApplied = (result: FixApplyResult) => {
+  const resultAtApply = verificationResult.value
+  const authScopeEpoch = boardAuthScopeEpoch
   // A fix is one user action even when it edits/removes several rules. The server journals the
   // complete ordered rule collection, so availability comes from the committed response.
-  syncBoardUndoAvailability(result)
   const refreshPromise = enqueueBoardMutation(async () => {
-    const refreshed = await refreshRules()
-    if (refreshed) return true
-
-    rules.value = result.rules
-    syncRuleDerivedEdges()
-    notifyBlocked(t('app.fixAppliedRefreshFallbackSignedEvidence'))
-    return false
+    commitSemanticScene({ rules: result.rules, availability: result })
+    return true
   })
   pendingFixRefreshPromise = refreshPromise
   const clearPendingRefresh = () => {
@@ -11636,7 +11985,13 @@ const handleFixApplied = (result: FixApplyResult) => {
       pendingFixRefreshPromise = null
     }
   }
-  void refreshPromise.then(clearPendingRefresh, clearPendingRefresh)
+  void refreshPromise.then(() => {
+    clearPendingRefresh()
+    if (!isCurrentBoardAuthScope(authScopeEpoch)) return
+    // The old verdict remains open; show its apply receipt inline instead of covering its header.
+    if (showResultDialog.value && verificationResult.value === resultAtApply) verificationFixApplied.value = true
+    else notifySuccess(t('app.fixAppliedWithSignedEvidence'))
+  }, clearPendingRefresh)
 }
 
 const handleFixOutcomeUncertain = async () => {
@@ -11672,6 +12027,7 @@ const togglePanel = (panel: 'simulation' | 'fuzzing' | 'verification') => {
     return
   }
 
+  dismissCompletionNotifications()
   closeResultSurfaces()
   closeHistoryPanel()
   closeRecommendationPanel()
@@ -11779,9 +12135,7 @@ const simulationAnimationState = ref({
 })
 
 /**
- * Open the simulation playback surface over `savedSimulationStates`, highlighting its first
- * state. Callers set `savedSimulationStates` first; this pairs opening with the rewind so the
- * timeline can never appear while the canvas still highlights a previous run's state.
+ * Open the adopted run's playback at its first state, so the timeline and canvas rewind together.
  */
 const openSimulationAnimationFromSavedStates = () => {
   const scene = lastSimulationResult.value?.playbackScene
@@ -11790,6 +12144,7 @@ const openSimulationAnimationFromSavedStates = () => {
     return
   }
   activatePlaybackScene(scene)
+  playbackPanelOpen.value = true
   simulationAnimationState.value = { visible: true }
   highlightedTrace.value = {
     states: savedSimulationStates.value,
@@ -11799,18 +12154,23 @@ const openSimulationAnimationFromSavedStates = () => {
   // give the animation its room back. Applied here as a sibling rather than left for the next reader to notice —
   // a focus rule that holds for one playback surface and not the other is worse than none.
   focusCanvasForReplay()
+  const persistence = lastSimulationResult.value?.historyPersistence
+  if (persistence?.status === 'SAVED') {
+    staleDeepLink.value = false
+    void navigateToRunTarget({ kind: 'simulation', runId: persistence.runId }, 'push')
+  } else clearRunDeepLink()
 }
 
-// 独立保存的模拟 states 数据（用于对话框关闭后）
-const savedSimulationStates = ref<SimulationState[]>([])
+// Replay states and context belong to the same adopted run, including while its surface is hidden.
+const savedSimulationStates = computed(() => lastSimulationResult.value?.states ?? [])
 
 // 反例路径高亮状态
-// Deliberately untyped: this one ref feeds three consumers whose playback shapes disagree
-// today -- CanvasBoard requires `states[].devices`, while utils/traceEdgePlayback's
-// TracePlaybackLike and the local ActivePlaybackState both make it optional, with different
-// device types. Narrowing it needs those three contracts reconciled first; typing it here
-// only relocates the mismatch into casts.
-const highlightedTrace = ref<any>(null)
+type HighlightedPlayback = {
+  states: TraceState[]
+  selectedStateIndex: number
+  violatedSpec?: Trace['violatedSpec']
+}
+const highlightedTrace = ref<HighlightedPlayback | null>(null)
 
 // 反例路径动画控制状态
 const traceAnimationState = ref({
@@ -11846,6 +12206,7 @@ const openTraceAnimationAt = (selectedTraceIndex: number) => {
     return
   }
   activatePlaybackScene(scene)
+  playbackPanelOpen.value = true
   // Opens on the last state, which is where the evidence is under either shape: for a safety template
   // NuSMV emits the violating state last (`LAST_STATE_VIOLATION_TEMPLATES`), and for a liveness template
   // the last state is the one that closes the cycle, so the panel's loop explanation is the first thing
@@ -11858,8 +12219,8 @@ const openTraceAnimationAt = (selectedTraceIndex: number) => {
     selectedStateIndex: lastStateIndex,
     isPlaying: false
   }
-  // `highlightedTrace` must move with it: it feeds the change popover, and this entry point left it at its
-  // previous position — so the popover read "State 1 / 27" while the timeline read 27/27, and it described
+  // `highlightedTrace` must move with it: it feeds the changes panel, and this entry point left it at its
+  // previous position — so the changes panel read "State 1 / 27" while the timeline read 27/27, and it described
   // the changes of a step the user was not looking at. Two independent reviews caught the contradiction and
   // could not tell which panel to believe; neither could a user.
   //
@@ -11870,31 +12231,7 @@ const openTraceAnimationAt = (selectedTraceIndex: number) => {
   focusCanvasForReplay()
 }
 
-/**
- * Give the canvas back to the animation when a trace opens.
- *
- * Replay is the one moment where attention belongs on the canvas: the user is watching devices change state,
- * step by step, to understand *why* a property failed. Measured during a real replay, five surfaces held the
- * canvas at once — Control Center 320px on the left, System Inspector 320px on the right, the trace timeline
- * below, the change popover above, and the floating action dock over the middle. Together they covered **67.7%
- * of a 1440x900 viewport and 73.6% at 1440x700**, leaving an 800px-wide letterbox for the thing being watched.
- *
- * Each panel was reasonable alone, which is how this accumulated. But during replay the two side panels are
- * *authoring* surfaces: the Control Center creates devices, rules and specs, and the Inspector inspects the
- * live board — neither of which is the frozen scene on screen. The information a replay reader actually needs
- * is already on the surfaces that own it: the canvas nodes carry the per-step device state, its previous value
- * and the `changed` tint; the timeline carries the step position and the rule that produced it; the change
- * popover carries the `previous → current` transition. (This used to say the timeline carried the device and
- * environment values — it did, as a second copy of the canvas, and those blocks are gone.)
- *
- * So this collapses rather than hides: both panels keep their rail and reopen on one click, and nothing is
- * removed from the DOM or from the accessibility tree. Collapsing is the same mechanism narrow viewports
- * already use, so there is no second layout path to maintain.
- *
- * Deliberately not applied to the timeline, the popover or the dock. The timeline *is* the replay control, the
- * popover explains the step being watched, and the dock is how the user leaves. Removing meaning to gain space
- * would trade one honesty problem for another.
- */
+/** Collapse authoring panels so the frozen scene owns the canvas during replay. */
 const focusCanvasForReplay = () => {
   boardPanels.control.collapsed = true
   boardPanels.inspector.collapsed = true
@@ -11916,6 +12253,8 @@ const focusCanvasForReplay = () => {
     const viewport = fittedViewportForNodes(renderedCanvasNodes.value)
     if (!viewport) return
     if (activePlaybackScene.value) {
+      playbackViewportFollowsFit = true
+      playbackCanvasFrame = getVisibleCanvasFrame()
       playbackCanvasZoom.value = viewport.zoom
       playbackCanvasPan.value = viewport.pan
       return
@@ -11956,6 +12295,20 @@ const simulationPlaybackSemantics = computed(
 )
 const isModelPlaybackActive = isAnimationLocked
 
+const hidePlaybackPanel = () => {
+  playbackPanelOpen.value = false
+  void nextTick(() => document.querySelector<HTMLButtonElement>('[data-testid="playback-panel-toggle"]')?.focus())
+}
+
+const togglePlaybackPanel = () => {
+  if (playbackPanelOpen.value) {
+    hidePlaybackPanel()
+    return
+  }
+  playbackPanelOpen.value = true
+  void nextTick(() => document.querySelector<HTMLButtonElement>('.playback-terminal__tabs [aria-selected="true"]')?.focus())
+}
+
 /* ===== Board edit undo/redo =====
  * Reverses one persisted user action: device edits, Environment Pool edits, rule/spec edits,
  * rule reorder, or automatic-fix apply. Deliberately separate
@@ -11973,6 +12326,7 @@ const isBoardUndoBlocked = () => isModelPlaybackActive.value
   || isSceneReplacementInProgress.value
   || !isBoardDataReady.value
   || openModalDepth.value > 0
+  || activeNodeLayoutInteractions.size > 0
 
 let offerClearUnusableUndoHistory: () => Promise<void> = async () => undefined
 
@@ -12039,23 +12393,19 @@ const {
   }
 })
 
-/**
- * Say what an applied undo or redo actually reversed.
- *
- * A successful undo used to report nothing. That reads as sufficient when the affected object is on the canvas —
- * a device reappears and the board is its own feedback — but `BOARD_EDIT_ENTITY_TYPES` also covers `RULE`,
- * `SPECIFICATION`, `RULE_ORDER`, `RULE_SET` and `ENVIRONMENT`, none of which need be visible when Ctrl+Z fires.
- * Two reviews of a mid-edit undo said the same thing: the board changed and nothing confirmed that the last
- * change had been reversed or which one it was.
- *
- * The response already carries `entityType` and `originalOperation` — the server names the edit — and nothing
- * read them. This is the third instance this audit has found of data arriving and being discarded, after
- * `previousValue` on the canvas node and the `.device-runtime-chip__previous` style that had no markup.
- *
- * `notifyInfo`, not success: a reversal is a neutral state change, and the failure and "nothing to apply" paths
- * beside it already own the louder tones. The message is skipped when the server names neither field, because
- * "something was undone" is not worth a toast.
- */
+const applyBoardHistoryFromControl = async (direction: 'undo' | 'redo', event: MouseEvent) => {
+  const source = event.currentTarget as HTMLButtonElement
+  await (direction === 'undo' ? undoBoardEdit() : redoBoardEdit())
+  await nextTick()
+  // Disabling the clicked control drops browser focus; do not move it if the user has moved on.
+  if (!source.isConnected || (document.activeElement !== document.body && document.activeElement !== source)) return
+  const target = source.disabled
+    ? document.querySelector<HTMLButtonElement>(`[data-testid="board-${direction === 'undo' ? 'redo' : 'undo'}"]`)
+    : source
+  if (target && !target.disabled) target.focus({ preventScroll: true })
+}
+
+/** Name the reversed edit; rules and specifications may be outside the visible canvas. */
 const announceAppliedBoardUndo = (result: BoardUndoResult) => {
   const entity = result.entityType
   const operation = result.originalOperation
@@ -12068,6 +12418,7 @@ const announceAppliedBoardUndo = (result: BoardUndoResult) => {
   const action = redone
     ? t(`app.boardEditOperation_${operation}`)
     : t(`app.boardEditInverse_${operation}`)
+  dismissCompletionNotifications()
   notifyInfo(t(redone ? 'app.boardUndoRedoApplied' : 'app.boardUndoApplied', {
     action,
     entity: t(`app.boardEditEntity_${entity}`)
@@ -12131,19 +12482,6 @@ watch(isCanvasInteractionLocked, locked => {
   finishCanvasMapDrag()
 })
 
-const playbackChangesDismissedKey = ref<string | null>(null)
-const playbackChangePosition = ref({ x: 0, y: 0 })
-
-// The popover's position is a drag *offset* from the CSS-pinned top-right corner; nothing ties it to the
-// device that changed. Measured: a card reading "Temperature Sensor · Temperature 25->26" rendered at (596, 85)
-// while that sensor sat at (392, 257), overlapping **the other** node. Two reviews called it competing with
-// the nodes for prominence.
-//
-// Deliberately not re-anchored. The popover is draggable by design, and a card that jumps to a different node
-// on every step is worse than one that stays where the user put it. The node-to-card link is already carried
-// by `trace-changed` — a 4px accent ring, a 28px glow and a pulse, which reviews credited with identifying the
-// changed device. What was missing was not the link but the node's ability to show its own values, and that is
-// fixed above in the grid and chip measurements.
 
 const activePlaybackKind = computed<'simulation' | 'counterexample' | 'fuzzing' | null>(() => {
   if (simulationAnimationState.value.visible) return 'simulation'
@@ -12151,6 +12489,25 @@ const activePlaybackKind = computed<'simulation' | 'counterexample' | 'fuzzing' 
   if (traceAnimationState.value.visible) return 'counterexample'
   return null
 })
+
+let playbackFocusFallbackId = 'open-verification-panel'
+watch(activePlaybackKind, kind => {
+  if (!kind) return
+  playbackFocusFallbackId = kind === 'simulation' ? 'open-simulation-panel'
+    : kind === 'fuzzing' ? 'open-fuzzing-panel' : 'open-verification-panel'
+}, { flush: 'sync' })
+
+const {
+  setDialogRef: setPlaybackToolbarRef,
+  handleModalKeydown: handlePlaybackKeydown
+} = useModalAccessibility(
+  isModelPlaybackActive,
+  () => traceAnimationState.value.visible ? closeTraceAnimation() : closeSimulationTimeline(),
+  opener => document.querySelector<HTMLElement>(opener?.closest('[data-testid="trace-history-panel"]')
+    ? '[data-testid="open-history-panel"]' : `[data-testid="${playbackFocusFallbackId}"]`),
+  { trapFocus: false, shouldRestoreFocus: () => !isModelPlaybackActive.value
+    && !isResultSurfaceVisible.value && !isWorkflowPanelOpen.value }
+)
 
 /**
  * Wrapped trace passed to the canvas, with violation information gated by playback kind.
@@ -12275,30 +12632,13 @@ const activeFuzzingStepInputEvents = computed<Array<FuzzingInputEvent & { target
     })
 })
 
-const activePlaybackCompromisedLinks = computed<TraceTriggeredRule[]>(() =>
-  activePlaybackStates.value[activePlaybackStateIndex.value]?.compromisedAutomationLinks || [])
-
-const activePlaybackEdgeCounts = computed(() => {
+const activePlaybackAnimatedEdgeCount = computed(() => {
   let animated = 0
-  let compromised = 0
   for (const state of buildTraceEdgePlaybackStates(allEdges.value, highlightedTrace.value).values()) {
     if (state.shouldAnimate) animated++
-    if (state.linkCompromised) compromised++
   }
-  return { animated, compromised }
+  return animated
 })
-const activePlaybackAnimatedEdgeCount = computed(() => activePlaybackEdgeCounts.value.animated)
-const activePlaybackCompromisedEdgeCount = computed(() => activePlaybackEdgeCounts.value.compromised)
-
-const activePlaybackChangeKey = computed(() => {
-  if (!activePlaybackKind.value || activePlaybackStates.value.length === 0) return null
-  return `${activePlaybackKind.value}:${activePlaybackStateIndex.value}`
-})
-
-const showPlaybackChangePopover = computed(() =>
-  activePlaybackChangeKey.value !== null
-  && playbackChangesDismissedKey.value !== activePlaybackChangeKey.value
-)
 
 // ============================================================================
 // Loop handling for infinite counterexamples (liveness violations)
@@ -12340,7 +12680,7 @@ const activePlaybackIsLivenessViolation = computed(() => {
  * to the entry and looks like an ordinary step — so the range is what lets the panel name the cycle
  * either way; see `TraceStateDto#loopBack`.
  *
- * Shown in the PlaybackChangePopover on the loop-back step, where the shipped wording names this range
+ * Shown in the PlaybackChangesPanel on the loop-back step, where the shipped wording names this range
  * and says the cycle is the violation (`app.traceLoopExplanation`).
  */
 const activePlaybackLoopRange = computed<{ start: number; end: number } | null>(() => {
@@ -12354,7 +12694,7 @@ const activePlaybackLoopRange = computed<{ start: number; end: number } | null>(
    * end. `SmvTraceParserTest.parseCounterexample_usesTheLastMarkerWhenNuSmvPrintsSeveral` pins a
    * five-state trace where states 3 and 4 both carry `loopStart` and state 5 carries `loopBack`.
    *
-   * `findIndex` disagreed with that: it named states 3–5 where the cycle is 4–5, so the popover said
+   * `findIndex` disagreed with that: it named states 3–5 where the cycle is 4–5, so the changes panel said
    * "State 5 loops back to state 3" — a wrong statement about formal evidence, in the one place a reader
    * goes to find out why the final step shows nothing moving.
    *
@@ -12386,7 +12726,7 @@ const activePlaybackLoopRange = computed<{ start: number; end: number } | null>(
 /**
  * Whether the current playback step is the loop-back state.
  *
- * When true, the PlaybackChangePopover explains the cycle instead of describing this step like any other.
+ * When true, the PlaybackChangesPanel explains the cycle instead of describing this step like any other.
  * On a one-state cycle that displaces the generic "no observable changes" message, because there the
  * absence of changes *is* the state's meaning; on a longer cycle the step carries real changes and the
  * explanation is what stops it from reading as the path continuing.
@@ -12396,27 +12736,17 @@ const activePlaybackIsLoopBackState = computed(() => {
   return currentState?.loopBack === true
 })
 
-const dismissPlaybackChanges = () => {
-  playbackChangesDismissedKey.value = activePlaybackChangeKey.value
+const resetPlaybackTerminal = () => {
+  playbackTerminalTab.value = 'changes'
 }
 
-const movePlaybackChanges = (position: { x: number; y: number }) => {
-  playbackChangePosition.value = position
-}
-
-const resetPlaybackChanges = () => {
-  playbackChangesDismissedKey.value = null
-  playbackChangePosition.value = { x: 0, y: 0 }
-}
-
-watch(activePlaybackKind, resetPlaybackChanges)
+watch(activePlaybackKind, resetPlaybackTerminal)
 
 const isLiveBoardEditorVisible = computed(() =>
   templateInstanceDialogVisible.value ||
   dialogVisible.value ||
   renameDialogVisible.value ||
   deleteConfirmDialogVisible.value ||
-  ruleBuilderVisible.value ||
   showFixDialog.value
 )
 
@@ -12434,15 +12764,34 @@ const notifyAutomaticPlaybackDeferred = () => {
   notifyInfo(t('app.simulationPlaybackDeferredForEditor'))
 }
 
-/**
- * The same deferral, for a run that arrives while a replay is already on screen.
- *
- * Its own string rather than the one above: that copy names the open editor as the reason, and a client
- * asserting a cause it knows to be wrong is the defect this session has been fixing elsewhere. Both say
- * where the trajectory went, because the alternative is a completed run that leaves no trace on screen.
- */
-const notifyAutomaticPlaybackDeferredForReplay = () => {
-  notifyInfo(t('app.simulationPlaybackDeferredForReplay'))
+/** Saved results stay in history; other results need a local owner until explicitly opened or discarded. */
+const notifyAutomaticPlaybackDeferredForReplay = (
+  result: SimulationResultView,
+  submissionSceneChanges: number
+) => {
+  if (result.historyPersistence.status === 'SAVED') {
+    notifyInfo(t('app.simulationPlaybackDeferredForReplay'))
+    return
+  }
+  const ownerAuthScopeEpoch = boardAuthScopeEpoch
+  const ownerUserId = currentAuthUserId.value
+  let close!: () => void
+  close = notifyAvailableResult({
+    title: t('app.simulationTemporaryResultTitle'),
+    message: t('app.simulationTemporaryResultMessage'),
+    actionLabel: t('app.simulationTemporaryResultOpen'),
+    discardLabel: t('app.discardLocalResult'),
+    onAction: () => {
+      if (!isCurrentBoardAuthScope(ownerAuthScopeEpoch) || currentAuthUserId.value !== ownerUserId) return true
+      if (!ensureHistoricalPlaybackUiAdmission()) return false
+      closeOtherWorkflowSurfaces()
+      adoptSimulationRunResult(result, submissionSceneChanges)
+      openSimulationAnimationFromSavedStates()
+      return true
+    },
+    onClose: () => unsavedRunNotifications.delete(close)
+  })
+  unsavedRunNotifications.add(close)
 }
 
 const ensurePlaybackClosedForMutation = (): boolean => {
@@ -12483,7 +12832,7 @@ const isWorkflowPanelOpen = computed(() =>
 
 /*
  * There is no `isCanvasMapHidden…` predicate any more, because the collision it guarded against cannot
- * happen. The map lives in the inspector's overview slot, and the floating panels are positioned with a
+ * happen. The map lives in the inspector's overview dock, and the floating panels are positioned with a
  * `right` inset that clears the inspector and the action rail — measured at 1440x900 the panel spans
  * x=660..948 against an inspector at 1120..1440, and at 1100x800 it is 336..692 against 780..1100. Neither
  * touches the inspector, let alone the map card inside it. At narrow widths the inspector collapses to a
@@ -12522,14 +12871,7 @@ const currentTraceState = computed(() => {
 })
 
 
-const currentTraceTriggeredRules = computed(() => currentTraceState.value?.triggeredRules || [])
 const currentTraceCompromisedAutomationLinks = computed(() => currentTraceState.value?.compromisedAutomationLinks || [])
-const currentTraceCompromisedPointCount = computed(() => {
-  const raw = currentTraceState.value?.globalVariables
-    ?.find((variable: { name: string; value: string }) => variable.name === 'compromisedPointCount')?.value
-  const parsed = Number.parseInt(String(raw ?? ''), 10)
-  return Number.isFinite(parsed) ? parsed : null
-})
 const currentBoardRuleIds = computed(() => rules.value
   .map(rule => rule.id)
   .filter((id): id is string => !!id)
@@ -12541,24 +12883,6 @@ const currentBoardDeviceIds = computed(() => nodes.value.map(node => normalizePl
 
 
 
-
-const traceTriggeredRuleLabel = (rule: { ruleIndex?: number; ruleId?: string | null; ruleLabel?: string | null }, index: number) => {
-  if (rule.ruleLabel?.trim()) return rule.ruleLabel.trim()
-  const frozenRule = rule.ruleId != null
-    ? activePlaybackScene.value?.rules.find(candidate => String(candidate.id) === String(rule.ruleId))
-    : activePlaybackScene.value?.rules[Number.isSafeInteger(rule.ruleIndex) ? Number(rule.ruleIndex) : index]
-  return frozenRule?.ruleString || t('app.ruleNumber', { number: index + 1 })
-}
-
-const traceTriggeredRuleExistsOnBoard = (rule: { ruleIndex?: number; ruleId?: string | null }) =>
-  rule.ruleId != null && currentBoardRuleIds.value.includes(String(rule.ruleId))
-
-// Three controls once answered "which step" — the rail, a scrub slider, and the number field. The scrub
-// slider was the one with no unique job and is gone (the two remaining `type="range"` inputs in this file
-// are run-configuration controls: attack budget and simulation steps). The number field stayed, so
-// `selectedTraceStateNumber` above is still live as its 1-based adapter — `trace-timeline-step-input`, with
-// the simulation bar carrying the same pair. This note used to say the field and the adapter had both been
-// deleted, which was true of neither bar and pointed a maintainer at working code as dead.
 
 // 选择并播放指定索引的反例路径动画
 const selectAndPlayTrace = (traceIndex: number) => {
@@ -12575,7 +12899,12 @@ const selectAndPlayTrace = (traceIndex: number) => {
   if (!ensureLiveBoardEditorClosedForPlayback()) return
   const traces = verificationResult.value?.traces
   if (traces && traceIndex >= 0 && traceIndex < traces.length) {
-    resetPlaybackChanges()
+    const trace = traces[traceIndex]
+    if (hasPersistedVerificationTrace(verificationResult.value, trace)) {
+      void openVerificationTraceFromHistory(trace.id)
+      return
+    }
+    resetPlaybackTerminal()
     activeFuzzingFinding.value = null
     // 保存 traces 数据到独立变量
     savedTraces.value = [...traces]
@@ -12586,33 +12915,30 @@ const selectAndPlayTrace = (traceIndex: number) => {
     // `openTraceAnimationAt` selects the violating state and writes both selection refs through
     // `goToState`. A second write to `highlightedTrace` here used to force it back to state 0 — the
     // stale intent of an older design where a trace opened at its beginning — which is what made the
-    // change popover describe step 1 while the timeline sat on step 27.
+    // changes panel describe step 1 while the timeline sat on step 27.
     openTraceAnimationAt(traceIndex)
   }
 }
 
 // 关闭反例路径动画
 /**
- * Closes a replay. Both call sites are the user's own close button, so this leaves the
- * addressed artifact entirely and the deep link goes with it — otherwise the URL would still
- * name the run and the sync watcher would reopen its result surface.
+ * User dismissal clears the replay address. Navigation teardown preserves the incoming address
+ * so Back/Forward can load the selected result without a competing URL rewrite.
  */
-const closeTraceAnimation = () => {
+const closeTraceAnimation = (clearDeepLink = true) => {
   stopTraceAnimation()
   traceAnimationState.value.visible = false
   highlightedTrace.value = null
   activeFuzzingFinding.value = null
   deactivatePlaybackScene()
-  resetPlaybackChanges()
-  clearRunDeepLink()
+  resetPlaybackTerminal()
+  if (clearDeepLink) clearRunDeepLink()
 }
 
 /**
  * Close any open result surface whose run an authoritative history reload no longer lists.
  *
- * One entry point for all three run kinds, called from `refreshRunHistory` after a *successful* reload. It
- * dispatches rather than deciding, so a new run kind gets a sibling here instead of another call site on
- * the reload — exploration and simulation were both missing for exactly that reason.
+ * Called after a successful reload; dispatch every run kind here so none misses out-of-band deletion.
  */
 const reconcileOpenRunAgainstHistory = () => {
   reconcileOpenVerificationRunAgainstHistory()
@@ -12621,25 +12947,8 @@ const reconcileOpenRunAgainstHistory = () => {
 }
 
 /**
- * Close the open verification result if an authoritative history reload no longer lists its run.
- *
- * The counterpart to `dismissRunSurfacesForDeletedVerificationRun` for deletions this tab did not
- * perform: the assistant's `DeleteVerificationRunTool` and another tab's deletion both arrive as a
- * history reload, which used to refresh the lists and leave the dialog rendering a record the server had
- * dropped.
- *
- * Deliberately narrow. It acts only when the run has a persisted id AND the reloaded list is non-empty:
- * an empty list is also what a scoped-empty or still-loading history looks like, and closing a live result
- * over that would destroy a verdict the user is reading. A run absent from a populated list is the only
- * case treated as deleted.
- *
- * The open run is read from the *replaying counterexample* as well as from the dialog, because those are
- * two different states rather than one: opening a counterexample calls `closeResultDialog`, so
- * `verificationResult` is null for the whole replay and reading only it made this return early on exactly
- * the surface most expensive to get wrong — an animating trace whose run the assistant or another tab had
- * just deleted, still offering Run details and the SMV download for a record the server had dropped.
- * `verificationTaskId` exists only on a `PersistedTrace`, which is precisely the replay-from-history case;
- * an immediate trace has no run to reconcile against.
+ * Only absence from a populated authoritative history counts as deletion; an empty list may be scoped/loading.
+ * Replay clears the dialog ref, so its persisted trace supplies the owning run id as a fallback.
  */
 const reconcileOpenVerificationRunAgainstHistory = () => {
   const openRunId = verificationResult.value?.historyPersistence?.runId
@@ -12647,14 +12956,8 @@ const reconcileOpenVerificationRunAgainstHistory = () => {
   if (typeof openRunId !== 'number') return
   if (verificationRuns.value.length === 0) return
   if (verificationRuns.value.some(run => run.id === openRunId)) return
-  // Which surface is going away decides the wording: the existing notice says the panel was closed, which
-  // is simply false when what ended was a replay. Read before the teardown, since it clears the state.
-  //
-  // The visibility check is load-bearing rather than defensive: `currentTrace` falls back to
-  // `verificationResult.traces[selectedTraceIndex]`, so with only the dialog open it still resolves to a
-  // trace carrying this run's id — reporting "playback ended" to a user who was reading a dialog.
-  // `activePlaybackKind` is the existing owner of "what is on screen", so the answer comes from there
-  // rather than from a second reading of the animation flags.
+  // currentTrace also resolves from an open dialog; only activePlaybackKind proves replay is visible.
+  // Capture the surface before teardown to choose accurate wording.
   const wasReplaying = activePlaybackKind.value === 'counterexample'
     && currentTrace.value?.verificationTaskId === openRunId
   dismissRunSurfacesForDeletedVerificationRun(openRunId)
@@ -12664,85 +12967,38 @@ const reconcileOpenVerificationRunAgainstHistory = () => {
 }
 
 /**
- * The same reconciliation for an open exploration run.
- *
- * `delete_fuzz_run` is a shipped assistant tool and emits the same `REFRESH_DATA run_history` signal as
- * `delete_verification_run` (`ChatToolProgressPresenter.potentialRefreshTargets` lists both), and another
- * tab's deletion arrives through this reload too — so exploration has exactly the two reachable
- * out-of-band paths verification has. It had no reconciliation, so the dialog kept rendering a run,
- * its findings and its eligibility report for a record the server had dropped.
- *
- * `FuzzingResultDialog` is `aria-modal="true"`, so — as with verification — the *same-tab* history-panel
- * deletion is the unreachable path, which is why this hangs off the reload rather than the delete handler.
- *
- * Same two guards as above, for the same reasons: only a persisted run id counts, and only absence from
- * a populated list means deleted. An empty list is also a still-loading or scoped-empty history, and
- * closing a live result over that would destroy findings the user is reading.
+ * Reconcile exploration after authoritative history reload, with the same persisted-id/non-empty guards.
  */
 const reconcileOpenFuzzingRunAgainstHistory = () => {
-  // Read from the replaying finding as well, for the reason verification documents: `selectAndPlayFuzzing
-  // Finding` calls `closeFuzzingResult()` before opening the bar, so `fuzzingResult` is null for the whole
-  // replay and the dialog id alone never saw the animating surface. `fuzzTaskId` is the owning run
-  // (`fuzzingFindingBelongsToRun` matches on it).
+  // Opening a finding clears the dialog ref; replay evidence retains the owning run id.
   const openRunId = fuzzingResult.value?.id ?? activeFuzzingFinding.value?.fuzzTaskId
   if (typeof openRunId !== 'number') return
   if (fuzzingRuns.value.length === 0) return
   if (fuzzingRuns.value.some(run => run.id === openRunId)) return
-  // Exploration is the one paginated history (25 per page, `createdAt DESC`, against a 100-run stored
-  // quota), and a reload replaces the list with page 0 — so a run the user opened from page 2 is
-  // legitimately absent here and must not be reported as deleted. Verification and simulation both load
-  // their whole list, which is why only this kind needs the check. `hasMore` after a page-0 replace means
-  // "later pages exist that this list does not describe", so absence proves nothing.
+  // A reload replaces exploration history with page 0; absence from a partial list proves nothing.
   if (fuzzingRunsHasMore.value) return
-  // A replaying finding is a different surface from the dialog and needs its own teardown: `dismiss
-  // FuzzingResult` closes a dialog that is already closed during a replay, which would have left the bar
-  // animating candidate evidence for a deleted run. Read before tearing down, since the state is cleared.
-  // Gated on `activePlaybackKind` for the reason the verification sibling documents: `activeFuzzingFinding`
-  // is not cleared when a simulation replay starts over it (see `playbackViolationSteps`), so the ref alone
-  // does not mean a finding is the thing on screen.
+  // The finding ref can survive another replay; choose the visible surface before clearing state.
   const wasReplaying = activePlaybackKind.value === 'fuzzing'
     && activeFuzzingFinding.value?.fuzzTaskId === openRunId
   if (wasReplaying) {
     // Clears the deep link too, so the URL sync cannot reopen the deleted finding.
     closeTraceAnimation()
     savedTraces.value = []
-    traceDetailsView.value = null
   }
   // Clears the deep link with the surface, so the URL sync cannot reopen the deleted run.
   dismissFuzzingResult()
-  // Its own string, not the verification one: that copy says "verification result" and offers "re-run to
-  // get a conclusion", which would describe bounded exploration as formal verification. Exploration
-  // produces candidate findings.
+  // Exploration produces candidate findings, so its notice must not promise a formal conclusion.
   notifyBlocked(t(wasReplaying
     ? 'app.openFuzzingFindingRunDeletedElsewhere'
     : 'app.openFuzzingRunDeletedElsewhere'))
 }
 
 /**
- * The same reconciliation for an open simulation trajectory, whose surfaces differ from the other two.
- *
- * `DeleteSimulationTraceTool` ships and `run_history` routes to `refreshRunHistory`, so a deleted
- * trajectory arrives here exactly as the other kinds do. What made this the worst of the three is that a
- * simulation's primary surface is the *replay bar*, not a dialog: it is a `role="region"` sibling of the
- * board rather than a modal, so the assistant is one click away the whole time it is up (the chat button
- * is gated on `isBoardDataReady` alone). The trajectory kept animating, and its Run details → download
- * still read `historyPersistence.runId` off the deleted record — the same misleading 404 the verification
- * fix was written for.
- *
- * Both surfaces are matched by one id because `historyPersistence.runId` *is* the saved trace id
- * (`SimulationServiceImpl` sets `RunPersistenceDto.saved(saved.getId())`), and `simulationRuns` is keyed
- * by that id.
- *
- * The visibility check is the difference from the siblings, and it is not defensive: their ids come from
- * refs that are cleared on close (`verificationResult`, `fuzzingResult`), so "has an id" already implies
- * "is on screen". `lastSimulationResult` deliberately outlives every surface, so reading the id off it
- * alone would announce that a panel was closed while nothing was showing.
- *
- * Then the same two guards as the siblings, for the same reasons: only a persisted run id counts, and
- * only absence from a populated list means deleted.
+ * lastSimulationResult outlives its surfaces, so check visibility before announcing deletion.
+ * historyPersistence.runId is the saved trajectory id used by simulationRuns; empty history proves nothing.
  */
 const reconcileOpenSimulationRunAgainstHistory = () => {
-  if (!simulationAnimationState.value.visible && !simulationResult.value) return
+  if (!simulationAnimationState.value.visible) return
   const openRunId = lastSimulationResult.value?.historyPersistence?.runId
   if (typeof openRunId !== 'number') return
   if (simulationRuns.value.length === 0) return
@@ -12755,13 +13011,14 @@ const reconcileOpenSimulationRunAgainstHistory = () => {
  * Tear down every surface showing the open simulation trajectory.
  *
  * No id argument: unlike verification, only one trajectory is loaded at a time — `lastSimulationResult`
- * is the single owner and the bar, the details dialog and the canvas highlight all read it — so the
+ * is the single owner and the playback controls, terminal and canvas highlight all read it — so the
  * caller has already established that *this* run is the deleted one.
  *
  * Branched so `run=simulation:<id>` is cleared exactly once, by whichever closer owns the addressed
  * surface: for `run=simulation:<id>` the bar *is* the addressed surface and `closeSimulationTimeline`
- * already clears the link, so the dialog then takes the internal-transition closer. With no bar up, the
- * dialog's own close is the user-facing one and carries the link. `lastSimulationResult` is cleared after
+ * already clears the link, so the dialog then takes the internal-transition closer. With no bar up,
+ * deletion passes its known run identity to the error closer so a newer URL target survives.
+ * `lastSimulationResult` is cleared after
  * both, because the bar's props read through it.
  */
 const dismissSimulationSurfacesForDeletedRun = () => {
@@ -12769,9 +13026,8 @@ const dismissSimulationSurfacesForDeletedRun = () => {
     closeSimulationTimeline()
     closeSimulationResultDialog()
   } else {
-    dismissSimulationResultDialog()
+    dismissSimulationResultDialog(lastSimulationResult.value?.historyPersistence.runId)
   }
-  savedSimulationStates.value = []
   lastSimulationResult.value = null
   // Not the "closing a surface must not clear the stale flag" case: that rule exists because
   // `lastSimulationResult` survives a close and reopening it must still warn that the canvas moved. Here
@@ -12801,7 +13057,6 @@ const dismissRunSurfacesForDeletedVerificationRun = (runId: number) => {
     // Closes the replay and clears the deep link, so a reload cannot reopen the deleted run.
     closeTraceAnimation()
     savedTraces.value = []
-    traceDetailsView.value = null
   }
 
   if (openRunId === runId) {
@@ -12814,6 +13069,7 @@ const dismissRunSurfacesForDeletedVerificationRun = (runId: number) => {
 // 选择违规规约
 // 跳转到指定状态
 const goToState = (index: number) => {
+  stopTraceAnimation()
   const lastIndex = Math.max(totalStates.value - 1, 0)
   traceAnimationState.value.selectedStateIndex = Math.min(Math.max(index, 0), lastIndex)
   const trace = currentTrace.value
@@ -12824,30 +13080,6 @@ const goToState = (index: number) => {
     }
   }
 }
-
-const selectPreviousTraceState = () => {
-  goToState(traceAnimationState.value.selectedStateIndex - 1)
-}
-
-const selectNextTraceState = () => {
-  goToState(traceAnimationState.value.selectedStateIndex + 1)
-}
-
-const selectedTraceStateNumber = computed({
-  get: () => traceAnimationState.value.selectedStateIndex + 1,
-  set: (value: number) => {
-    if (!Number.isFinite(value)) return
-    goToState(Math.trunc(value) - 1)
-  }
-})
-
-// Timeline rail interaction logic (pointer scrubbing, keyboard navigation, button scrolling)
-const traceRail = useTimelineRail({
-  totalStates,
-  selectedStateIndex: computed(() => traceAnimationState.value.selectedStateIndex),
-  onSelectState: (index: number) => goToState(index),
-  testIdPrefix: 'trace-timeline'
-})
 
 /**
  * Which step of the counterexample is the violation.
@@ -12967,7 +13199,7 @@ const counterexampleViolationStep = computed<number | undefined>(() => {
  * liveness cycle is correct here too: there the cycle is the violation, and `loopBackSentence` says so
  * instead of a badge naming a single state.
  *
- * Gated on the playback kind for the same reason `canvasHighlightedTrace` is: this popover is shared with
+ * Gated on the playback kind for the same reason `canvasHighlightedTrace` is: this changes panel is shared with
  * simulation replay, and neither `savedTraces` nor `activeFuzzingFinding` is cleared when one starts, so an
  * ungated read would badge a state of a run that violated nothing. The component's old
  * `kind === 'fuzzing'` test was doing this incidentally; making the badge kind-agnostic there means the gate
@@ -13024,7 +13256,7 @@ const counterexampleViolationSteps = computed<number[]>(() => {
  * Reads `counterexampleViolationSteps`, the same set the canvas emphasis reads, because a liveness
  * counterexample has no single failing step: templates 2/5/6 are refuted by an infinite lasso path, so
  * `counterexampleViolationStep` is `undefined` for them by design and the rail — which tested only that
- * singular step — marked nothing at all. The canvas lit up every device in the cycle and the popover
+ * singular step — marked nothing at all. The canvas lit up every device in the cycle and the changes panel
  * explained the loop, while the one surface whose job is to show *where* in the path the failure lives
  * showed only the cursor star. That is the same silence template 4 had, in the branch that fix did not
  * reach. Measured on NuSMV 2.7.1 with the generator's own template-5 shape, `AG(motion -> AF(light))`
@@ -13042,38 +13274,11 @@ const traceStateViolationLabel = (index: number): string | null => {
   return counterexampleViolationSteps.value.includes(index) ? t('app.traceViolationCycle') : null
 }
 
-/**
- * The same word, but printed on screen only once per cycle.
- *
- * Every step of the cycle is ringed and carries the word in its accessible name — a reader who lands on
- * step 5 needs to know it is inside the failing loop. The *visible* text cannot repeat that way: the
- * label is `whitespace-nowrap` and about 80px wide, while the rail packs its markers 38px apart (the
- * `minWidth` above), so a cycle spanning several states would stack overlapping labels across its own
- * rings. The rings already carry the extent, which is the rail's job — it shows shape, not values — so
- * the word appears once, at the step where the cycle begins. `counterexampleViolationSteps` is built by
- * ascending loop, so its first element is that step.
- */
-const traceStateViolationMarker = (index: number): string | null => {
-  const label = traceStateViolationLabel(index)
-  if (label === null) return null
-  if (counterexampleViolationStep.value === index) return label
-  return counterexampleViolationSteps.value[0] === index ? label : null
-}
-
 const getTraceStateAriaLabel = (index: number) => {
   const base = `${t('app.traceVisualization.state', { index: index + 1 })} (${index + 1}/${totalStates.value})`
-  // The visible marker on this same button shows this word, so the accessible name must match it. It read
-  // `fuzzFirstViolation` unconditionally, which told a screen-reader user "First violation" on a
-  // verification counterexample while the sighted label beside it said "Violation" — one state, two names.
+  // The badge, marker hint and accessible name share the violation wording.
   const label = traceStateViolationLabel(index)
   return label ? `${base}, ${label}` : base
-}
-
-// Wrapper to stop playback when scrubbing starts
-const scrubTraceStateFromPointer = (event: PointerEvent) => {
-  // Scrubbing is a deliberate seek, so it stops playback rather than fighting the timer for the index.
-  stopTraceAnimation()
-  traceRail.scrubStateFromPointer(event)
 }
 
 // 播放/停止动画
@@ -13109,17 +13314,6 @@ const startTraceAnimation = () => {
         ...activeTrace,
         selectedStateIndex: traceAnimationState.value.selectedStateIndex
       }
-      /*
-       * Keep the advancing step in view.
-       *
-       * Above 15 states the rail stops fitting and becomes a horizontal scroll region — `max-content` at 38px
-       * per step. Every *manual* way of moving already scrolled the new step into the middle
-       * (`handleTraceStateKeydown`, `selectTraceStateFromTimelinePointer`, and `stopTraceAnimation`), but this
-       * tick did not: pressing play on a long trace advanced the selection past the right edge and left the user
-       * watching a rail that never moved. `inline: 'center'` and `block: 'nearest'` mean it pans the rail without
-       * scrolling the overlay itself.
-       */
-      traceRail.revealStateButton(traceAnimationState.value.selectedStateIndex, false)
       if (traceAnimationState.value.selectedStateIndex >= totalStates.value - 1) {
         stopTraceAnimation()
       }
@@ -13138,21 +13332,13 @@ const stopTraceAnimation = () => {
   }
 }
 
-watch(
-  () => traceAnimationState.value.selectedStateIndex,
-  index => {
-    if (traceAnimationState.value.visible) {
-      traceRail.revealStateButton(index, false)
-    }
-  }
-)
 
 // `formattedSpec` lived here to feed the deleted "Violated Specification" card. The header states the
 // specification via `getTraceSpecDisplayTitle`, which reads the same trace snapshot, so this second
 // formatter had no remaining reader — `vue-tsc` said so, which is the check earning its place.
 
 // 高亮反例路径
-const handleHighlightTrace = (trace: any) => {
+const handleHighlightTrace = (trace: HighlightedPlayback | null) => {
   if (trace && trace.states) {
     highlightedTrace.value = {
       states: trace.states,
@@ -13164,63 +13350,24 @@ const handleHighlightTrace = (trace: any) => {
 // 清除高亮
 // ==== Simulation Timeline Animation Logic ====
 
-// 打开模拟时间轴动画
-const openSimulationTimeline = () => {
-  // 互斥检查：如果反例路径动画正在显示，则不允许打开模拟动画
-  if (traceAnimationState.value.visible) {
-    notifyBlocked(t('app.closeCounterexampleFirst'))
-    return
-  }
-  
-  if (isAnyRecommendationPanelVisible()) {
-    notifyBlocked(t('app.closeRecommendationPanelsFirst'))
-    return
-  }
-  if (!ensureLiveBoardEditorClosedForPlayback()) return
-  const simulationStates = simulationResult.value?.states
-  if (simulationStates && simulationStates.length > 0) {
-    resetPlaybackChanges()
-    // 保存模拟 states 数据到独立变量
-    savedSimulationStates.value = [...simulationStates]
-    
-    // 关闭模拟结果对话框
-    simulationResult.value = null
-    
-    // 打开模拟时间轴动画
-    openSimulationAnimationFromSavedStates()
-  }
-}
-
-const handleSimulationTimelineAction = () => {
-  if (simulationAnimationState.value.visible) {
-    simulationResult.value = null
-    simulationError.value = null
-    return
-  }
-  openSimulationTimeline()
-}
-
 // 关闭模拟时间轴动画
-const closeSimulationTimeline = () => {
+const closeSimulationTimeline = (clearDeepLink = true) => {
   simulationAnimationState.value.visible = false
   highlightedTrace.value = null
   deactivatePlaybackScene()
-  resetPlaybackChanges()
+  resetPlaybackTerminal()
   // For `run=simulation:<id>` the timeline *is* the addressed surface, so the URL must stop naming
   // it. Otherwise a refresh or a shared link reopens the playback the user deliberately closed, and
   // the board re-enters read-only playback mode.
-  clearRunDeepLink()
-}
-
-// 处理 SimulationTimeline 组件的关闭事件
-const handleSimulationTimelineClose = (visible: boolean) => {
-  if (!visible) {
-    closeSimulationTimeline()
-  }
+  if (clearDeepLink) clearRunDeepLink()
 }
 
 const handleVerify = async (): Promise<boolean> => {
   if (isVerifying.value) return false
+  const requestAuthScopeEpoch = boardAuthScopeEpoch
+  const ownerUserId = currentAuthUserId.value
+  const ownsRun = () => isCurrentBoardAuthScope(requestAuthScopeEpoch)
+    && currentAuthUserId.value === ownerUserId
   if (!verificationForm.isAsync && synchronousSimulationRunning.value) {
     notifyBlocked(t('app.formalOperationBusy'))
     return false
@@ -13231,6 +13378,7 @@ const handleVerify = async (): Promise<boolean> => {
   }
   await waitForPendingFixRefresh()
   await waitForPendingBoardMutations()
+  if (!ownsRun()) return false
   if (!ensureBoardDataReady()) return false
   if (nodes.value.length === 0) {
     notifyBlocked(t('app.noDevicesToVerify'))
@@ -13251,6 +13399,7 @@ const handleVerify = async (): Promise<boolean> => {
     validateAttackBudget(verificationForm.attackBudget)
   }
 
+  dismissCompletionNotifications()
   isVerifying.value = true
   asyncVerificationActive.value = false
   verificationCancelRequested.value = false
@@ -13268,18 +13417,6 @@ const handleVerify = async (): Promise<boolean> => {
       attackScenario: buildRunAttackScenario(verificationForm),
       enablePrivacy: verificationForm.enablePrivacy
     })
-    const submission: RunSubmission<VerificationRequest> = {
-      request: req,
-      signature: buildModelRunSignature(buildLocalSceneFingerprint({
-        nodes: nodes.value,
-        deviceTemplates: deviceTemplates.value,
-        environmentVariables: environmentVariables.value,
-        rules: rules.value,
-        specifications: specifications.value,
-        attackScenario: req.attackScenario,
-        enablePrivacy: req.enablePrivacy
-      }), deviceTemplates.value)
-    }
 
     // Handle async or sync verification
     if (verificationForm.isAsync) {
@@ -13288,51 +13425,59 @@ const handleVerify = async (): Promise<boolean> => {
       // the progress UI vanishes immediately and the button re-enables mid-run,
       // letting the user launch duplicate tasks.
       asyncVerificationActive.value = true
-      asyncVerificationTask.value = { taskId: null, progress: 0, status: t('app.taskInitializing') }
+      asyncVerificationTask.value = { taskId: null, progress: 0, statusKey: 'app.taskInitializing' }
 
       const submittedTask = await boardApi.verifyAsync(req)
+      if (!ownsRun()) return false
       const taskId = submittedTask.id
-      submission.taskId = taskId
       asyncVerificationTask.value.taskId = taskId
       asyncVerificationTask.value.progress = submittedTask.progress ?? 0
-      asyncVerificationTask.value.status = formatTaskProgressStage(
+      asyncVerificationTask.value.statusKey = taskProgressStatusKey(
         submittedTask.progressStage, submittedTask.status)
       upsertVerificationTaskSummary(submittedTask)
 
-      await pollAsyncVerification(taskId, { submission })
+      await pollAsyncVerification(taskId)
       return true
     }
 
     // Sync verification (original logic)
-    const result = await boardApi.verify(req)
-    const presented = attachLocalRunSubmission({
-      ...result,
-      specResults: normalizeSpecResults((result as any).specResults)
-    }, submission)
+    const presented = await boardApi.verify(req)
+    if (!ownsRun()) return false
     // Same window as the async path (see `pollAsyncVerification`): this await is long enough for the user
     // to open a replay, and `closeResultDialog` nulls `verificationResult` when they do, so assigning it
     // here would raise the modal dialog over a running trace.
     if (isModelPlaybackActive.value) {
       notifyVerificationOutcome(presented)
-      // The save warning must survive the deferral, and it comes first: without it the notice below would
-      // point the user at a run history that does not contain this verdict.
-      if (['FAILED', 'OUTCOME_UNKNOWN'].includes(result.historyPersistence.status)) {
-        notifyBlocked(result.historyPersistence.status === 'OUTCOME_UNKNOWN'
+      if (['FAILED', 'OUTCOME_UNKNOWN'].includes(presented.historyPersistence.status)) {
+        notifyBlocked(presented.historyPersistence.status === 'OUTCOME_UNKNOWN'
             ? t('app.verificationHistorySaveOutcomeUnknown')
             : t('app.verificationHistorySaveFailed'))
+        let close!: () => void
+        close = notifyAvailableResult({
+          title: t('app.verificationTemporaryResultTitle'),
+          message: t('app.verificationTemporaryResultMessage'),
+          actionLabel: t('app.openResult'),
+          discardLabel: t('app.discardLocalResult'),
+          onAction: () => {
+            if (!ownsRun()) return true
+            if (!ensureHistoricalPlaybackUiAdmission()) return false
+            closeOtherWorkflowSurfaces()
+            adoptVerificationRunResult(presented, verifySubmissionSceneChanges)
+            return true
+          },
+          onClose: () => unsavedRunNotifications.delete(close)
+        })
+        unsavedRunNotifications.add(close)
       } else {
         notifyInfo(t('app.verificationResultDeferredForPlayback'))
       }
-      // Unconditional here, unlike the presenting path below: run history is the only surface that will
-      // show this verdict, so it has to be current whether or not the save reported a problem.
+      // Refresh confirmed saved runs and reconcile an uncertain save without claiming the local result exists there.
       void loadVerificationRuns(false)
       return true
     }
-    verificationResult.value = presented
-    verificationResultStale.value =
-      semanticSceneChangeCount !== verifySubmissionSceneChanges
-    if (['FAILED', 'OUTCOME_UNKNOWN'].includes(result.historyPersistence.status)) {
-      notifyBlocked(result.historyPersistence.status === 'OUTCOME_UNKNOWN'
+    adoptVerificationRunResult(presented, verifySubmissionSceneChanges)
+    if (['FAILED', 'OUTCOME_UNKNOWN'].includes(presented.historyPersistence.status)) {
+      notifyBlocked(presented.historyPersistence.status === 'OUTCOME_UNKNOWN'
           ? t('app.verificationHistorySaveOutcomeUnknown')
           : t('app.verificationHistorySaveFailed'))
       void loadVerificationRuns(false)
@@ -13341,21 +13486,16 @@ const handleVerify = async (): Promise<boolean> => {
     return true
 
   } catch (error: any) {
+    if (!ownsRun()) return false
     if (isPollingAbortedError(error)) {
       return false
     }
-    const message = isCompletedTaskResultUnavailableError(error)
-      ? error.message
-      : formalOperationBusyMessage(error)
-        || asyncTaskQuotaMessage(error, 'verification')
-        || extractApiErrorMessage(error, t('app.verificationFailed'))
     if (isAsyncTaskCancelledError(error)) {
       verificationError.value = null
-      notifyInfo(t('app.verificationCancelled'))
+      if (!verificationCancelRequested.value) notifyInfo(t('app.verificationCancelled'))
     } else {
       console.error('Verification failed:', error)
-      verificationError.value = message
-      notifyError(verificationError.value || t('app.verificationFailed'))
+      presentRunFailure('verification', 'app.verificationFailed', error)
     }
     return false
   } finally {
@@ -13452,7 +13592,7 @@ const runFuzzing = async (): Promise<boolean> => {
   fuzzingCancelRequested.value = false
   fuzzingError.value = null
   fuzzingSettingsNotice.value = null
-  asyncFuzzingTask.value = { taskId: null, progress: 0, status: t('app.taskInitializing') }
+  asyncFuzzingTask.value = { taskId: null, progress: 0, statusKey: 'app.taskInitializing' }
   let submittedTaskId: number | null = null
   let submittedTaskInitiator: RunInitiator = 'USER'
 
@@ -13464,7 +13604,7 @@ const runFuzzing = async (): Promise<boolean> => {
     asyncFuzzingTask.value = {
       taskId: submittedTask.id,
       progress: normalizeTaskProgress(submittedTask.progress),
-      status: formatTaskProgressStage(submittedTask.progressStage, submittedTask.status)
+      statusKey: taskProgressStatusKey(submittedTask.progressStage, submittedTask.status)
     }
     upsertFuzzingTaskSummary(submittedTask)
     fuzzingWatchedTask.value = submittedTask
@@ -13474,6 +13614,7 @@ const runFuzzing = async (): Promise<boolean> => {
     const shouldPresent = showFuzzingPanel.value
     showFuzzingPanel.value = false
     if (shouldPresent) {
+      void refreshCurrentBoardModelFingerprints()
       presentFuzzingRun(run)
     } else {
       const notificationShown = markFuzzNotificationUnread({
@@ -13496,16 +13637,15 @@ const runFuzzing = async (): Promise<boolean> => {
     if (isAsyncTaskCancelledError(error)) {
       if (submittedTaskId) untrackFuzzTask(submittedTaskId)
       fuzzingError.value = null
-      notifyInfo(t('app.fuzzSearchCancelled'))
+      if (!fuzzingCancelRequested.value) notifyInfo(t('app.fuzzSearchCancelled'))
     } else if (submittedTaskId && isFuzzTaskRecoveryPendingError(error)) {
       fuzzingError.value = null
-      fuzzingSettingsNotice.value = t('app.fuzzResultRecoveryPending')
+      fuzzingSettingsNotice.value = { key: 'app.fuzzResultRecoveryPending' }
       if (!showFuzzingPanel.value) {
-        notifyInfo(fuzzingSettingsNotice.value)
+        notifyInfo(fuzzingSettingsNoticeMessage.value)
       }
     } else if (submittedTaskId && isFuzzCompletedResultUnavailableError(error)) {
-      const unavailableMessage = error.message || t('app.failedToLoadFuzzingRun')
-      fuzzingError.value = unavailableMessage
+      fuzzingError.value = makeRunFailure('app.failedToLoadFuzzingRun', error)
       markFuzzNotificationUnread({
         taskId: submittedTaskId,
         runId: submittedTaskId,
@@ -13514,7 +13654,7 @@ const runFuzzing = async (): Promise<boolean> => {
         createdAt: new Date().toISOString()
       })
       if (!showFuzzingPanel.value) {
-        notifyError(unavailableMessage)
+        notifyError(fuzzingErrorMessage.value!)
       }
     } else {
       console.error('Fuzz search failed:', error)
@@ -13526,17 +13666,16 @@ const runFuzzing = async (): Promise<boolean> => {
         const boardRefreshed = await refreshSceneForReconciliation()
         if (boardRefreshed) markVerificationResultStale()
         invalidatePaperDomainPreview()
-        fuzzingError.value = t(boardRefreshed
+        fuzzingError.value = makeRunFailure(boardRefreshed
           ? 'app.fuzzPaperDomainStale'
-          : 'app.fuzzPaperDomainStaleBoardRefreshFailed')
+          : 'app.fuzzPaperDomainStaleBoardRefreshFailed', error)
         if (boardRefreshed && showFuzzingPanel.value && validPaperPathLength()) {
           schedulePaperDomainPreview()
-        } else {
-          notifyBlocked(fuzzingError.value)
+        } else if (!showFuzzingPanel.value) {
+          notifyBlocked(fuzzingErrorMessage.value!)
         }
       } else {
-        fuzzingError.value = fuzzTaskQuotaMessage(error)
-          || extractApiErrorMessage(error, t('app.fuzzSearchFailed'))
+        fuzzingError.value = makeRunFailure('app.fuzzSearchFailed', error)
       }
       if (submittedTaskId && !showFuzzingPanel.value) {
         markFuzzNotificationUnread({
@@ -13545,11 +13684,11 @@ const runFuzzing = async (): Promise<boolean> => {
           initiator: submittedTaskInitiator,
           createdAt: new Date().toISOString()
         })
-        notifyError(fuzzingError.value)
+        notifyError(fuzzingErrorMessage.value!)
       } else if (submittedTaskId) {
         untrackFuzzTask(submittedTaskId)
       } else if (!showFuzzingPanel.value && !stalePaperDomain) {
-        notifyError(fuzzingError.value)
+        notifyError(fuzzingErrorMessage.value!)
       }
     }
     return false
@@ -13560,7 +13699,7 @@ const runFuzzing = async (): Promise<boolean> => {
     fuzzingCancelRequested.value = false
     fuzzingWatchedTask.value = null
     if (!boardLifecycleDisposed) {
-      await loadTaskInbox(false, { showLoading: false })
+      await loadTaskInbox({ showLoading: false })
     }
   }
 }
@@ -13581,6 +13720,10 @@ const handleSimulate = async (simConfig: {
   saveToHistory?: boolean
 }): Promise<boolean> => {
   if (isSimulating.value) return false
+  const requestAuthScopeEpoch = boardAuthScopeEpoch
+  const ownerUserId = currentAuthUserId.value
+  const ownsRun = () => isCurrentBoardAuthScope(requestAuthScopeEpoch)
+    && currentAuthUserId.value === ownerUserId
   if (!simConfig.isAsync && synchronousVerificationRunning.value) {
     notifyBlocked(t('app.formalOperationBusy'))
     return false
@@ -13591,6 +13734,7 @@ const handleSimulate = async (simConfig: {
   }
   await waitForPendingFixRefresh()
   await waitForPendingBoardMutations()
+  if (!ownsRun()) return false
   if (!ensureBoardDataReady(['templates', 'nodes', 'environment', 'rules'])) return false
   if (nodes.value.length === 0) {
     notifyBlocked(t('app.noDevicesToSimulate'))
@@ -13618,7 +13762,6 @@ const handleSimulate = async (simConfig: {
   simulationCancelRequested.value = false
   cancellingSimulationTask.value = false
   simulationError.value = null
-  simulationResult.value = null
   simulationResultStale.value = false
   /*
    * See `pollAsyncVerification` for the reasoning; a simulation trajectory has the same exposure. An
@@ -13631,7 +13774,7 @@ const handleSimulate = async (simConfig: {
   // 重置异步任务状态
   if (normalizedSimConfig.isAsync) {
     asyncSimulationActive.value = true
-    asyncSimulationTask.value = { taskId: null, progress: 0, status: t('app.taskInitializing') }
+    asyncSimulationTask.value = { taskId: null, progress: 0, statusKey: 'app.taskInitializing' }
   }
 
   try {
@@ -13640,29 +13783,16 @@ const handleSimulate = async (simConfig: {
       attackScenario: buildRunAttackScenario(normalizedSimConfig),
       enablePrivacy: normalizedSimConfig.enablePrivacy
     })
-    const submission: RunSubmission<SimulationRequest> = {
-      request: req,
-      signature: buildModelRunSignature(buildLocalSceneFingerprint({
-        nodes: nodes.value,
-        deviceTemplates: deviceTemplates.value,
-        environmentVariables: environmentVariables.value,
-        rules: rules.value,
-        attackScenario: req.attackScenario,
-        enablePrivacy: req.enablePrivacy
-      }), deviceTemplates.value)
-    }
-    activeSimulationSubmission.value = submission
     
-    let result: any
+    let result: SimulationResult | SavedSimulationResult
 
     if (normalizedSimConfig.isAsync) {
       // 异步模拟：创建任务并轮询进度
       const submittedTask = await simulationApi.simulateAsync(req)
       const taskId = submittedTask.id
-      submission.taskId = taskId
       asyncSimulationTask.value.taskId = taskId
       asyncSimulationTask.value.progress = submittedTask.progress ?? 0
-      asyncSimulationTask.value.status = formatTaskProgressStage(
+      asyncSimulationTask.value.statusKey = taskProgressStatusKey(
         submittedTask.progressStage, submittedTask.status)
       upsertSimulationTaskSummary(submittedTask)
 
@@ -13672,32 +13802,13 @@ const handleSimulate = async (simConfig: {
       // 同步模拟
       if (normalizedSimConfig.saveToHistory) {
         const trace = await simulationApi.simulateAndSave(req)
-        result = {
-          traceId: trace.id,
-          states: trace.states,
-          steps: trace.steps,
-          requestedSteps: trace.requestedSteps,
-          createdAt: trace.createdAt,
-          logs: trace.logs || [],
-          nusmvOutput: trace.nusmvOutput || '',
-          modelComplete: trace.modelComplete,
-          disabledRuleCount: trace.disabledRuleCount,
-          generationIssues: getGenerationIssues(trace),
-          isAttack: trace.isAttack === true,
-          attackBudget: trace.attackBudget ?? 0,
-          enablePrivacy: trace.enablePrivacy === true,
-          modelSemantics: trace.modelSemantics,
-          modelSnapshot: trace.modelSnapshot,
-          playbackScene: trace.playbackScene,
-          // The saved trajectory's own answer about the model, which is what gates the download.
-          hasSmvModel: trace.hasSmvModel,
-          historyPersistence: trace.historyPersistence
-        }
+        result = simulationResultFromTrace(trace)
       } else {
         result = await simulationApi.simulate(req)
       }
     }
 
+    if (!ownsRun()) return false
     if (['FAILED', 'OUTCOME_UNKNOWN'].includes(result.historyPersistence?.status)) {
       notifyBlocked(result.historyPersistence.status === 'OUTCOME_UNKNOWN'
           ? t('app.simulationHistorySaveOutcomeUnknown')
@@ -13707,96 +13818,54 @@ const handleSimulate = async (simConfig: {
     
     // Keep the full result so its logs / NuSMV diagnostics remain reachable from the timeline via
     // openSimulationLogs(); the success path opens the timeline (below), not the result dialog.
-    result = attachLocalRunSubmission(result, submission)
-    if (result.traceId) {
+    const summary = 'createdAt' in result ? summarizeSimulationResult(result) : null
+    if (summary) {
       simulationHistoryRequests.invalidate()
-      simulationRuns.value = [
-        {
-          id: result.traceId,
-          initiator: 'USER',
-          requestedSteps: result.requestedSteps,
-          steps: result.steps,
-          modelComplete: isSimulationModelComplete(result),
-          disabledRuleCount: getSimulationDisabledRuleCount(result),
-          generationIssues: getGenerationIssues(result),
-          isAttack: result.isAttack === true,
-          attackBudget: result.attackBudget ?? 0,
-          enablePrivacy: result.enablePrivacy === true,
-          modelSnapshot: result.modelSnapshot,
-          createdAt: result.createdAt || new Date().toISOString(),
-          dataAvailable: true
-        },
-        ...simulationRuns.value.filter(item => item.id !== result.traceId)
-      ]
+      simulationRuns.value = [summary, ...simulationRuns.value.filter(item => item.id !== summary.id)]
     }
 
     // 直接打开时间轴动画，不显示结果对话框
-    if (result.states && result.states.length > 0) {
-      if (normalizedSimConfig.isAsync) {
-        // A replay that is already on screen keeps its own manifest. `adoptSimulationRunResult` documents
-        // why: the bar reads its chips, step counts and snapshot from `lastSimulationResult` while
-        // animating `savedSimulationStates`, so adopting here would describe the visible trajectory with
-        // this run's semantics. Split out of the combined deferral below because the other two reasons —
-        // the panel being closed, or the live editor being open — leave no surface to contradict.
-        if (traceAnimationState.value.visible || simulationAnimationState.value.visible) {
-          notifySimulationOutcome(result, true)
-          notifyAutomaticPlaybackDeferredForReplay()
-          return true
-        }
-        if (!showSimulationPanel.value || isLiveBoardEditorVisible.value) {
-          adoptSimulationRunResult(result, simulationSubmissionSceneChanges)
-          notifySimulationOutcome(result, true)
-          if (isLiveBoardEditorVisible.value) notifyAutomaticPlaybackDeferred()
-          return true
-        }
-
+    // The visible replay owns the trajectory and frozen scene, regardless of how the new run was executed.
+    if (traceAnimationState.value.visible || simulationAnimationState.value.visible) {
+      notifySimulationOutcome(result, result.historyPersistence.status === 'SAVED')
+      notifyAutomaticPlaybackDeferredForReplay(result, simulationSubmissionSceneChanges)
+      return true
+    }
+    if (normalizedSimConfig.isAsync) {
+      if (!showSimulationPanel.value || isLiveBoardEditorVisible.value) {
         adoptSimulationRunResult(result, simulationSubmissionSceneChanges)
-        savedSimulationStates.value = [...result.states]
-        showSimulationPanel.value = false
-        openSimulationAnimationFromSavedStates()
         notifySimulationOutcome(result, true)
+        if (isLiveBoardEditorVisible.value) notifyAutomaticPlaybackDeferred()
         return true
       }
 
-      // The manifest and the states it describes are written as a pair, immediately before the bar opens
-      // over them.
       adoptSimulationRunResult(result, simulationSubmissionSceneChanges)
-      savedSimulationStates.value = [...result.states]
-
-      // 关闭模拟配置面板
       showSimulationPanel.value = false
-
-      // 打开模拟时间轴动画
       openSimulationAnimationFromSavedStates()
-
-      notifySimulationOutcome(result, !!normalizedSimConfig.saveToHistory)
       return true
-    } else {
-      // No states, so no bar opens — but the run happened and its logs and NuSMV output are the point of
-      // the error dialog, which reads them off this manifest.
-      adoptSimulationRunResult(result, simulationSubmissionSceneChanges)
-      const failureReason = t('app.simulationCompletedNoStates')
-      simulationError.value = failureReason
-      notifyError(failureReason)
-      return false
     }
 
+    // Adopting the run also selects its states before playback opens.
+    adoptSimulationRunResult(result, simulationSubmissionSceneChanges)
+
+    // 关闭模拟配置面板
+    showSimulationPanel.value = false
+
+    // 打开模拟时间轴动画
+    openSimulationAnimationFromSavedStates()
+    return true
+
   } catch (error: any) {
+    if (!ownsRun()) return false
     if (isPollingAbortedError(error)) {
       return false
     }
-    const message = isCompletedTaskResultUnavailableError(error)
-      ? error.message
-      : formalOperationBusyMessage(error)
-        || asyncTaskQuotaMessage(error, 'simulation')
-        || extractApiErrorMessage(error, t('app.simulationFailed'))
     if (isAsyncTaskCancelledError(error)) {
       simulationError.value = null
-      notifyInfo(t('app.simulationCancelled'))
+      if (!simulationCancelRequested.value) notifyInfo(t('app.simulationCancelled'))
     } else {
       console.error('Simulation failed:', error)
-      simulationError.value = message
-      notifyError(simulationError.value || t('app.simulationFailed'))
+      presentRunFailure('simulation', 'app.simulationFailed', error)
     }
     return false
   } finally {
@@ -13805,15 +13874,6 @@ const handleSimulate = async (simConfig: {
     cancellingSimulationTask.value = false
     simulationCancelRequested.value = false
   }
-}
-
-// Open the saved run summary and technical details without replacing the primary timeline view.
-const openSimulationRunDetails = () => {
-  if (!lastSimulationResult.value) {
-    notifyInfo(t('app.noSimulationRunDetailsAvailable'))
-    return
-  }
-  simulationResult.value = lastSimulationResult.value
 }
 
 // A status/progress fetch error is "permanent" (fail fast, don't retry to timeout) when
@@ -13832,16 +13892,7 @@ const isPermanentPollError = (error: any): boolean => {
 const completedTaskResultError = (
   kind: 'verification' | 'simulation',
   error: unknown
-) => new CompletedTaskResultUnavailableError(
-  kind,
-  localizedErrorMessage(
-    error,
-    kind === 'verification'
-      ? t('app.failedToLoadVerificationRun')
-      : t('app.failedToLoadSimulationRun'),
-    locale.value
-  )
-)
+) => new CompletedTaskResultUnavailableError(kind, error)
 
 const loadCompletedTaskResult = async <T,>(
   load: () => Promise<T>,
@@ -13862,7 +13913,7 @@ const loadCompletedTaskResult = async <T,>(
 // 若某次状态查询超过 1s 也不会并发发起下一轮、不会重复 toast 或旧响应覆盖新进度。
 const pollAsyncVerification = async (
   taskId: number,
-  options: { presentResult?: boolean; submission?: RunSubmission<VerificationRequest> } = {}
+  options: { presentResult?: boolean } = {}
 ): Promise<void> => {
   let pollCount = 0
   const expectedPollingEpoch = pollingEpoch
@@ -13889,7 +13940,7 @@ const pollAsyncVerification = async (
       task = await boardApi.getTask(taskId)
       throwIfPollingAborted(expectedPollingEpoch)
       asyncVerificationTask.value.progress = normalizeTaskProgress(task.progress)
-      asyncVerificationTask.value.status = formatTaskProgressStage(task.progressStage, task.status)
+      asyncVerificationTask.value.statusKey = taskProgressStatusKey(task.progressStage, task.status)
       upsertVerificationTaskSummary(task)
     } catch (e: any) {
       if (isPollingAbortedError(e)) {
@@ -13922,14 +13973,8 @@ const pollAsyncVerification = async (
         throw completedTaskResultError('verification', error)
       }
       throwIfPollingAborted(expectedPollingEpoch)
-      const result = attachLocalRunSubmission(
-        buildVerificationResultFromTask(task, traces),
-        options.submission || submissionForTask(activeVerificationSubmission.value, taskId)
-      )
+      const result = buildVerificationResultFromTask(task, traces)
       upsertVerificationTaskSummary({ ...task, progress: 100 })
-      // A semantic board change while this run was in flight means the verdict already describes a
-      // superseded scene, so it arrives stale rather than being presented as current.
-      const boardChangedDuringRun = semanticSceneChangeCount !== submissionSceneChanges
       /*
        * A replay on screen outranks presenting a new verdict, and here that is not merely a matter of
        * stacking: opening a counterexample calls `closeResultDialog`, so `verificationResult` is null for
@@ -13948,8 +13993,7 @@ const pollAsyncVerification = async (
       const wouldPresent = options.presentResult || showVerificationPanel.value
       const deferForPlayback = wouldPresent && isModelPlaybackActive.value
       if (wouldPresent && !deferForPlayback) {
-        verificationResult.value = result
-        verificationResultStale.value = boardChangedDuringRun
+        adoptVerificationRunResult(result, submissionSceneChanges)
         notifyVerificationOutcome(verificationResult.value, { presenting: true })
         showVerificationPanel.value = false
       } else {
@@ -13975,11 +14019,11 @@ const pollAsyncVerification = async (
     pollCount++
   }
 
-  throw new Error(t('app.verificationTimeout'))
+  throw Object.assign(new Error('Verification task status polling timed out'), { code: 'TASK_POLL_TIMEOUT' })
 }
 
 // 轮询异步模拟任务
-const pollAsyncSimulation = async (taskId: number): Promise<any> => {
+const pollAsyncSimulation = async (taskId: number): Promise<SavedSimulationResult> => {
   let pollCount = 0
   const expectedPollingEpoch = pollingEpoch
 
@@ -13991,7 +14035,7 @@ const pollAsyncSimulation = async (taskId: number): Promise<any> => {
       task = await simulationApi.getTask(taskId)
       throwIfPollingAborted(expectedPollingEpoch)
       asyncSimulationTask.value.progress = normalizeTaskProgress(task.progress)
-      asyncSimulationTask.value.status = formatTaskProgressStage(task.progressStage, task.status)
+      asyncSimulationTask.value.statusKey = taskProgressStatusKey(task.progressStage, task.status)
       upsertSimulationTaskSummary(task)
     } catch (error: any) {
       if (isPollingAbortedError(error)) {
@@ -14028,28 +14072,7 @@ const pollAsyncSimulation = async (taskId: number): Promise<any> => {
         throwIfPollingAborted(expectedPollingEpoch)
         upsertSimulationTaskSummary({ ...task, progress: 100 })
         await loadSimulationRuns()
-        return {
-          traceId: trace.id,
-          states: trace.states,
-          steps: trace.steps,
-          requestedSteps: trace.requestedSteps,
-          createdAt: trace.createdAt,
-          logs: trace.logs || [],
-          nusmvOutput: trace.nusmvOutput,
-          modelComplete: trace.modelComplete,
-          disabledRuleCount: trace.disabledRuleCount,
-          generationIssues: getGenerationIssues(trace),
-          isAttack: trace.isAttack === true,
-          attackBudget: trace.attackBudget ?? 0,
-          enablePrivacy: trace.enablePrivacy === true,
-          modelSemantics: trace.modelSemantics,
-          modelSnapshot: trace.modelSnapshot,
-          playbackScene: trace.playbackScene,
-          // As in the sync path: the flag the download button reads, plus the persistence record that
-          // supplies the run id it downloads by.
-          hasSmvModel: trace.hasSmvModel,
-          historyPersistence: trace.historyPersistence
-        }
+        return simulationResultFromTrace(trace)
       }
       upsertSimulationTaskSummary({ ...task, progress: 100 })
       throw new Error(t('app.taskCompletedNoTraceFound'))
@@ -14065,7 +14088,7 @@ const pollAsyncSimulation = async (taskId: number): Promise<any> => {
   }
 
   // 超出最大轮询次数
-  throw new Error(t('app.simulationTimeout'))
+  throw Object.assign(new Error('Simulation task status polling timed out'), { code: 'TASK_POLL_TIMEOUT' })
 }
 
 const pollAsyncFuzzing = async (taskId: number): Promise<FuzzingRun> => {
@@ -14080,7 +14103,7 @@ const pollAsyncFuzzing = async (taskId: number): Promise<FuzzingRun> => {
       task = await fuzzingApi.getTask(taskId)
       throwIfPollingAborted(expectedPollingEpoch)
       asyncFuzzingTask.value.progress = normalizeTaskProgress(task.progress)
-      asyncFuzzingTask.value.status = formatTaskProgressStage(task.progressStage, task.status)
+      asyncFuzzingTask.value.statusKey = taskProgressStatusKey(task.progressStage, task.status)
       upsertFuzzingTaskSummary(task)
     } catch (error: any) {
       if (isPollingAbortedError(error)) throw error
@@ -14099,11 +14122,9 @@ const pollAsyncFuzzing = async (taskId: number): Promise<FuzzingRun> => {
         return run
       } catch (error: any) {
         if (classifyTrackedFuzzRunError(error) !== 'RETRY') {
-          throw new FuzzCompletedResultUnavailableError(
-            localizedErrorMessage(error, t('app.failedToLoadFuzzingRun'), locale.value)
-          )
+          throw new FuzzCompletedResultUnavailableError(error)
         }
-        asyncFuzzingTask.value.status = t('app.fuzzResultRecoveryPending')
+        asyncFuzzingTask.value.statusKey = 'app.fuzzResultRecoveryPending'
         const retryDelay = scheduleFuzzRunRecovery(taskId)
         completedResultFailures++
         if (completedResultFailures >= FUZZ_INLINE_RESULT_RECOVERY_MAX_FAILURES) {
@@ -14143,14 +14164,26 @@ const closeResultDialog = () => {
 }
 
 const dismissResultDialog = () => {
-  // A user-facing close must also invalidate any in-flight run load. `openVerificationRun` only
-  // guards on `isCurrent(token)`, which stays true for the newest request — so a load still resolving
-  // when the user pressed Escape re-assigned `verificationResult` and the dialog reappeared on its
-  // own. Deep-linking a run is exactly the case that leaves a load outstanding while the surface is
-  // already visible.
-  historyDetailRequests.invalidate()
+  const target = deepLinkTarget.value
+  const dismissesDeepLink = !isModelPlaybackActive.value
+    && target?.kind === 'verification'
+    && target.traceId === undefined
+    && verificationResult.value?.historyPersistence.runId === target.runId
+  // Closing the displayed result cancels its load; a newer URL target keeps its own request.
+  if (dismissesDeepLink || !target) historyDetailRequests.invalidate()
   closeResultDialog()
-  clearRunDeepLink()
+  if (dismissesDeepLink) clearRunDeepLink()
+}
+
+const reopenVerificationSettingsFromResult = () => {
+  if (isModelPlaybackActive.value || isAnyRecommendationRunning()) {
+    openVerificationFromActionDock()
+    return
+  }
+  dismissResultDialog()
+  // The dock toggles visibility; this action must always open settings after leaving the old run.
+  showVerificationPanel.value = false
+  openVerificationFromActionDock()
 }
 const {
   setDialogRef: setVerificationResultDialogRef,
@@ -14158,19 +14191,21 @@ const {
 } = useModalAccessibility(
   showResultDialog,
   dismissResultDialog,
-  () => document.querySelector<HTMLElement>('[data-testid="open-verification-panel"]')
+  opener => document.querySelector<HTMLElement>(opener?.closest('[data-testid="trace-history-panel"]')
+    ? '[data-testid="open-history-panel"]' : '[data-testid="open-verification-panel"]')
 )
-const isSimulationResultDialogOpen = computed(() => !!simulationResult.value || !!simulationError.value)
-// Closing the details dialog hides a surface; it does not produce a fresh result, so the stale flag
-// must survive it. Only a new run (or a wholesale board reload) clears it.
+const isSimulationResultDialogOpen = computed(() => !!simulationError.value)
 const closeSimulationResultDialog = () => {
-  simulationResult.value = null
   simulationError.value = null
 }
 
-const dismissSimulationResultDialog = () => {
+const dismissSimulationResultDialog = (deletedRunId?: number) => {
+  // This surface presents errors only; deletion teardown supplies the run identity it owns.
+  const dismissesDeepLink = !isModelPlaybackActive.value
+    && deepLinkTarget.value?.kind === 'simulation'
+    && deepLinkTarget.value.runId === deletedRunId
   closeSimulationResultDialog()
-  clearRunDeepLink()
+  if (dismissesDeepLink) clearRunDeepLink()
 }
 const {
   setDialogRef: setSimulationResultDialogRef,
@@ -14178,51 +14213,19 @@ const {
 } = useModalAccessibility(
   isSimulationResultDialogOpen,
   dismissSimulationResultDialog,
-  () => document.querySelector<HTMLElement>('[data-testid="open-simulation-panel"]')
+  () => document.querySelector<HTMLElement>('[data-testid="run-simulation"]:not(:disabled)')
+    ?? document.querySelector<HTMLElement>('[data-testid="open-simulation-panel"]')
 )
 
-// ==== Trace Details Dialog ====
-const traceDetailsView = ref<Trace | null>(null)
-const showTraceDetailsDialog = computed(() => !!traceDetailsView.value)
-
-const openVerificationTraceDetails = () => {
-  if (!currentTrace.value) {
-    notifyInfo(t('app.noTraceDetailsAvailable'))
-    return
-  }
-  traceDetailsView.value = currentTrace.value
-}
-
-const dismissTraceDetailsDialog = () => {
-  traceDetailsView.value = null
-}
-
-/**
- * Escalate from one counterexample to the run that produced it.
- *
- * Declared below `openRunTarget` in source order but only called from a click handler, so the
- * hoisted-const reference is resolved by then. Goes through the deep-link opener rather than
- * assigning `verificationResult` from a retained ref: a counterexample can be opened straight from
- * history with no run loaded, and the URL is the single authority for which run is on screen.
- */
+// The owning run is addressed by URL even when replay was opened directly from history.
 const openOwningVerificationRun = (runId: number) => {
-  dismissTraceDetailsDialog()
   void openRunTarget({ kind: 'verification', runId })
 }
 
-const {
-  setDialogRef: setTraceDetailsDialogRef,
-  handleModalKeydown: handleTraceDetailsDialogKeydown
-} = useModalAccessibility(
-  showTraceDetailsDialog,
-  dismissTraceDetailsDialog,
-  () => document.querySelector<HTMLElement>('[data-testid="trace-timeline-run-details"]')
-)
-
 /* ===== Deep-linkable run surfaces =====
- * The URL is the single authority for "which run result is open"; board state mirrors it
- * one-way. Openers navigate instead of assigning state directly, so back/forward, refresh,
- * and a pasted link all take the same code path. Panel layout and canvas transform stay out
+ * The URL owns which saved run is open. History openers load through it; run completion
+ * adopts the result already received and its URL together, so refresh can use the same loader.
+ * Back/forward and pasted links use that loader too. Panel layout and canvas transform stay out
  * of the URL on purpose — they are already persisted server-side per user.
  * Contract: docs/guides/frontend-ui-conventions.md */
 const deepLinkTarget = computed(() => parseBoardRunTarget(route.query))
@@ -14237,9 +14240,9 @@ const isCurrentDeepLinkLoad = (context: DeepLinkLoadContext | undefined): boolea
 
 /**
  * Navigation we initiate ourselves must not be re-applied by the target watcher (a redundant
- * refetch) and must not clear a stale-link notice this navigation was made to report. So the
- * URL is written first and the surface is loaded here, with `appliedDeepLinkTarget` recording
- * what is on screen. Recording the target is deterministic, unlike a boolean whose lifetime
+ * refetch) and must not clear a stale-link notice this navigation was made to report.
+ * History openers load after writing the URL; completion already has the result.
+ * Recording `appliedDeepLinkTarget` is deterministic, unlike a boolean whose lifetime
  * depends on when the watcher happens to flush.
  */
 const navigateToRunTarget = async (target: BoardRunTarget | null, mode: 'push' | 'replace') => {
@@ -14274,9 +14277,15 @@ clearRunDeepLink = () => {
 
 
 const isResultSurfaceVisible = computed(() =>
-  showResultDialog.value || !!simulationResult.value || !!simulationError.value
+  showResultDialog.value || !!simulationError.value
   || showFuzzingResultDialog.value
 )
+
+// The incoming URL already owns navigation; ending the old replay must not rewrite it.
+const closePlaybackForNavigation = () => {
+  if (traceAnimationState.value.visible) closeTraceAnimation(false)
+  if (simulationAnimationState.value.visible) closeSimulationTimeline(false)
+}
 
 /**
  * Applies the URL target to the board. Loaders already guard against races and stale
@@ -14285,6 +14294,7 @@ const isResultSurfaceVisible = computed(() =>
 const applyDeepLinkTarget = async (target: BoardRunTarget | null) => {
   const deepLinkLoad: DeepLinkLoadContext = { requestEpoch: deepLinkLoadRequests.begin() }
   appliedDeepLinkTarget = target
+  closePlaybackForNavigation()
   // The URL is changing authority. Leaving A visible while B is loading makes a temporary B
   // failure look like A succeeded, and lets its child id be checked against the wrong parent.
   closeResultSurfaces()
@@ -14335,6 +14345,7 @@ const syncBoardToDeepLink = async () => {
   if (hasUnusableBoardRunParams(route.query)) {
     deepLinkLoadRequests.invalidate()
     appliedDeepLinkTarget = null
+    closePlaybackForNavigation()
     closeResultSurfaces()
     // Stripped directly: `navigateToRunTarget(null)` would see an already-`null` target and
     // decide there is nothing to do, leaving the dead params in the URL.
@@ -14350,12 +14361,6 @@ const syncBoardToDeepLink = async () => {
 
 watch([() => route.query, isBoardDataReady], syncBoardToDeepLink, { immediate: true })
 
-// Undo history is server state, so read it once the board is loaded rather than assuming a fresh
-// page has none: the account may have reversible edits from an earlier session or another tab.
-watch(isBoardDataReady, ready => {
-  if (ready) void loadBoardUndoAvailability()
-}, { immediate: true })
-
 /**
  * A link can be malformed, or name a run that was deleted or belongs to another account.
  * Both degrade to the plain board with one persistent, dismissible explanation — never a
@@ -14366,6 +14371,7 @@ const reportUnusableDeepLink = (deepLinkLoad?: DeepLinkLoadContext) => {
   staleDeepLink.value = true
   deepLinkLoadRequests.invalidate()
   appliedDeepLinkTarget = null
+  closePlaybackForNavigation()
   closeResultSurfaces()
   // Strip directly rather than via `navigateToRunTarget`, which no-ops when the parsed
   // target is already `null` (a well-formed link whose run failed to load, or dead params).
@@ -14375,8 +14381,8 @@ const reportUnusableDeepLink = (deepLinkLoad?: DeepLinkLoadContext) => {
 const dismissStaleDeepLink = () => { staleDeepLink.value = false }
 
 /**
- * History-panel entry points. They navigate; the deep-link watcher performs the load, so a
- * click, a refresh, and a pasted link cannot diverge.
+ * Run-artifact entry points navigate and apply the URL target through one loader, so a
+ * history click, result-dialog replay, refresh, and pasted link cannot diverge.
  *
  * A verification trace is addressed by its own run, which the panel knows from the row it
  * was clicked on. `runIdForOpenTrace` resolves it from already-loaded state so opening a
@@ -14410,10 +14416,8 @@ const openSimulationRunFromHistory = (runId: number) =>
 const openFuzzingRunFromHistory = (runId: number) =>
   openRunTarget({ kind: 'exploration', runId })
 
-const openFuzzingFindingFromHistory = (findingId: number, runId?: number) => {
-  if (runId === undefined) return selectAndPlayFuzzingFinding(findingId)
-  return openRunTarget({ kind: 'exploration', runId, findingId })
-}
+const openFuzzingFinding = (findingId: number, runId: number) =>
+  openRunTarget({ kind: 'exploration', runId, findingId })
 const showCanvasEmptyState = computed(() =>
   isBoardDataReady.value
   && nodes.value.length === 0
@@ -14440,8 +14444,8 @@ const verificationRunSmvAvailable = computed(() =>
 
 /** The same two conditions for a simulation trajectory; see `verificationRunSmvAvailable`. */
 const simulationRunSmvAvailable = computed(() =>
-  simulationResult.value?.hasSmvModel === true
-  && typeof simulationResult.value?.historyPersistence?.runId === 'number')
+  lastSimulationResult.value?.hasSmvModel === true
+  && typeof lastSimulationResult.value?.historyPersistence?.runId === 'number')
 
 // The mapping lives in `board/smvUnavailableReason.ts` (a pure rule, unit-tested there); these only
 // bind it to the two result refs.
@@ -14449,7 +14453,7 @@ const verificationSmvUnavailableReason = computed(() =>
   smvUnavailableReasonKey(verificationResult.value?.historyPersistence))
 
 const simulationSmvUnavailableReason = computed(() =>
-  smvUnavailableReasonKey(simulationResult.value?.historyPersistence))
+  smvUnavailableReasonKey(lastSimulationResult.value?.historyPersistence))
 
 /*
  * The two artifact buttons read their id here rather than asserting it non-null in the template.
@@ -14466,25 +14470,16 @@ const downloadCurrentVerificationRunSmv = () => {
 }
 
 const downloadCurrentSimulationRunSmv = () => {
-  const runId = simulationResult.value?.historyPersistence?.runId
+  const runId = lastSimulationResult.value?.historyPersistence?.runId
   if (typeof runId !== 'number') return
   void downloadSimulationTraceSmv(runId)
 }
-// Rule extracted to `board/verdictVariableSource.ts` so it is unit-testable; this only resolves the id
-// against the current specifications and translates.
-const verdictVariableSourceLabels = (specId: string | undefined): string[] =>
-  verdictVariableSourceKeys(specifications.value.find(candidate => candidate.id === specId)).map(key => t(key))
-
 const verificationSpecResultSummary = computed(() => {
-  const results = normalizeSpecResults(verificationResult.value?.specResults).map((result, index) => {
-    const submittedSpecSnapshot = {
-      templateId: result.templateId,
-      templateLabel: result.specificationLabel
-    } as Specification
+  const results = (verificationResult.value?.specResults || []).map((result, index) => {
     return {
       ...result,
-      displayTitle: getSpecResultDisplayTitle(submittedSpecSnapshot, index),
-      variableSourceLabels: verdictVariableSourceLabels(result.specId),
+      ...presentSpecificationResult(result, t),
+      displayTitle: t('app.specificationNumber', { number: index + 1 }),
       presentation: result.outcome === 'SATISFIED'
         ? {
             borderClass: 'board-border-subtle',
@@ -14581,6 +14576,14 @@ const verificationVerdictTone = (tone: 'warning' | 'success' | 'danger') => ({
 })
 
 const verificationResultStatus = computed(() => {
+  if (verificationError.value) {
+    return {
+      ...verificationVerdictTone('danger'),
+      icon: 'error',
+      title: runFailureTitle('verification', verificationError.value),
+      detail: ''
+    }
+  }
   const outcome = getVerificationOutcome(verificationResult.value)
   if (outcome === 'INCONCLUSIVE') {
     return {
@@ -14634,6 +14637,16 @@ const simulationBoardComparison = computed<RunBoardComparison>(() =>
   compareRunToCurrentBoard(lastSimulationResult.value, 'simulation')
 )
 
+// A late run may set the conservative flag after comparison already matched, so watch both.
+watch([verificationBoardComparison, simulationBoardComparison, verificationResultStale, simulationResultStale], ([verification, simulation]) => {
+  if (verification === 'UNCHANGED' || verification === 'CHANGED') {
+    verificationResultStale.value = verification === 'CHANGED'
+  }
+  if (simulation === 'UNCHANGED' || simulation === 'CHANGED') {
+    simulationResultStale.value = simulation === 'CHANGED'
+  }
+})
+
 const traceModelSemanticsConsistent = computed(() => isModelSemanticsConsistent(
   currentTrace.value?.modelSemantics,
   activeTraceContext.value
@@ -14649,55 +14662,19 @@ const attackPointDisplay = (semantics: ModelSemantics | null | undefined): strin
 const attackSelectionSummary = (
   semantics: ModelSemantics | null | undefined,
   attackBudget: number | null | undefined,
-  detailed = false
+  kind: 'verification' | 'simulation'
 ): string => {
   if (semantics?.attackSelectionPolicy === 'EXACT_ATTACK_POINTS') {
-    const points = attackPointDisplay(semantics)
-    return detailed
-      ? t('app.attackExactSelectionDetail', {
-          count: semantics.selectedAttackPoints?.length ?? 0,
-          points
-        })
-      : t('app.attackExactSelectionShort', {
-          count: semantics.selectedAttackPoints?.length ?? 0
-        })
+    return t('app.attackExactSelectionDetail', {
+      count: semantics.selectedAttackPoints?.length ?? 0,
+      points: attackPointDisplay(semantics)
+    })
   }
-  return detailed
-    ? t('app.attackExhaustiveSelectionDetail', {
-        count: attackBudget ?? 0,
-        total: semantics?.modeledAttackPointCount ?? 0
-      })
-    : t('app.attackExhaustiveSelectionShort', { count: attackBudget ?? 0 })
+  return t(kind === 'simulation' ? 'app.simulationAttackBudgetScope' : 'app.attackExhaustiveSelectionDetail', {
+    count: attackBudget ?? 0,
+    total: semantics?.modeledAttackPointCount ?? 0
+  })
 }
-
-const counterexampleTraceHelpText = computed(() => {
-  if (activeFuzzingFinding.value) {
-    return [
-      t('app.fuzzFindingReplayHint'),
-      t('app.traceVisualization.playbackSnapshotReadOnly')
-    ].join('\n\n')
-  }
-  const context = activeTraceContext.value
-  const details = [
-    t('app.traceVisualization.counterexampleTraceHint'),
-    t('app.traceVisualization.playbackSnapshotReadOnly')
-  ]
-
-  if (!traceModelSemanticsConsistent.value) {
-    details.push(t('app.modelSemanticsUnavailable'))
-    return details.join('\n\n')
-  }
-
-  details.push(context.isAttack
-    ? attackSelectionSummary(currentTrace.value?.modelSemantics, context.attackBudget, true)
-    : t('app.traceVisualization.simulationNoAttackContext'))
-  details.push(context.enablePrivacy
-    ? t('app.traceVisualization.privacyPropagationEnabled')
-    : t('app.traceVisualization.privacyPropagationNotModeled'))
-  details.push(t('app.environmentEvolutionIncluded'))
-  details.push(t('app.labelPropagationScopeSummary'))
-  return details.join('\n\n')
-})
 
 </script>
 
@@ -14710,27 +14687,27 @@ const counterexampleTraceHelpText = computed(() => {
         'has-narrow-panel-open': showNarrowPanelScrim,
         'has-control-panel-open': isNarrowBoardLayout && !boardPanels.control.collapsed,
         'has-inspector-panel-open': isNarrowBoardLayout && !boardPanels.inspector.collapsed,
-        'has-playback-change-popover': showPlaybackChangePopover
       }
     ]"
     data-testid="board-root"
-    :aria-busy="!isBoardDataReady"
+    :aria-busy="!isBoardDataReady || isOpeningAccount"
+    :inert="isOpeningAccount"
     :style="boardShellStyle"
     @focusin="handleBoardFocusIn"
   >
     <!-- Navigation Bar - 与首页风格一致 -->
     <nav class="board-nav-bar" :aria-label="t('app.title')" data-toast-anchor>
       <div class="nav-content">
-        <h1 class="board-title">
+        <h1 class="board-title" :aria-label="t('app.title')">
           <button
             type="button"
             class="logo-left"
             :aria-label="t('app.resetWorkspace')"
             @click="resetWorkspace"
           >
+            <ProductMark />
             <span class="logo-wordmark">IoT-Verify</span>
             <span class="logo-short" aria-hidden="true">IoT</span>
-            <sup class="logo-sup">®</sup>
           </button>
         </h1>
 
@@ -14744,7 +14721,7 @@ const counterexampleTraceHelpText = computed(() => {
               data-testid="board-undo"
               :aria-label="t('app.boardUndo')"
               :disabled="!canUndoBoardEdit || isApplyingBoardEditUndo"
-              @click="undoBoardEdit"
+              @click="applyBoardHistoryFromControl('undo', $event)"
             >
               <span class="material-symbols-outlined" aria-hidden="true">undo</span>
             </button>
@@ -14756,13 +14733,13 @@ const counterexampleTraceHelpText = computed(() => {
               data-testid="board-redo"
               :aria-label="t('app.boardRedo')"
               :disabled="!canRedoBoardEdit || isApplyingBoardEditUndo"
-              @click="redoBoardEdit"
+              @click="applyBoardHistoryFromControl('redo', $event)"
             >
               <span class="material-symbols-outlined" aria-hidden="true">redo</span>
             </button>
           </HintTooltip>
-          <ThemeToggle :tone="boardHeaderTone" compact />
-          <LanguageToggle :tone="boardHeaderTone" compact />
+          <ThemeToggle compact />
+          <LanguageToggle compact />
           <input
             ref="sceneImportInputRef"
             data-testid="scene-import-file"
@@ -14859,23 +14836,17 @@ const counterexampleTraceHelpText = computed(() => {
                 <span>{{ t('app.sceneClear') }}</span>
               </button>
 
-              <!-- Session chrome, shown here only on a phone (CSS-gated by .nav-overflow-only).
-                   The nav needs 390px intrinsically; at 375px the last control was clipped and at
-                   320px both the assistant and Log Out were unreachable with no way to scroll to
-                   them. Theme, language, and sign-out are set-once controls, so they move into this
+              <!-- Session chrome is CSS-gated by .nav-overflow-only below 640px so the
+                   wordmark and account control cannot clip the last actions. Theme, language,
+                   the account entry move into this
                    overflow while Undo/Redo/Scene/AI — the actions used while working — stay on the
                    bar. Every control keeps a 44px target; none is shrunk below the tap minimum. -->
               <div class="scene-actions-menu__section nav-overflow-only" role="group" :aria-label="t('app.navPreferences')">
-                <ThemeToggle :tone="boardHeaderTone" />
-                <LanguageToggle :tone="boardHeaderTone" />
-                <button
-                  type="button"
-                  class="scene-actions-menu__danger"
-                  data-testid="nav-overflow-logout"
-                  @click="closeSceneActionsMenu(); handleLogout()"
-                >
-                  <span class="material-symbols-outlined" aria-hidden="true">logout</span>
-                  <span>{{ t('app.logout') }}</span>
+                <ThemeToggle />
+                <LanguageToggle />
+                <button type="button" data-testid="nav-overflow-account" @click="closeSceneActionsMenu(true); openAccount()">
+                  <span class="material-symbols-outlined" aria-hidden="true">manage_accounts</span>
+                  <span>{{ t('account.title') }}</span>
                 </button>
               </div>
             </div>
@@ -14890,7 +14861,6 @@ const counterexampleTraceHelpText = computed(() => {
             }"
             data-testid="open-ai-assistant"
             :aria-label="assistantButtonLabel"
-            :disabled="!isBoardDataReady"
             @click="toggleChat"
           >
             <span class="material-symbols-outlined">smart_toy</span>
@@ -14914,14 +14884,10 @@ const counterexampleTraceHelpText = computed(() => {
               aria-hidden="true"
             >{{ chatStore.state.unreadCount > 9 ? '9+' : chatStore.state.unreadCount }}</span>
           </button>
-          <HintTooltip :content="t('app.logout')">
-            <button
-              type="button"
-              class="nav-logout-btn"
-              :aria-label="t('app.logout')"
-              @click="handleLogout"
-            >
-              <span class="material-symbols-outlined">logout</span>
+          <HintTooltip :content="t('account.title')">
+            <button type="button" class="nav-action-btn nav-account-btn" data-testid="open-account-center"
+              :aria-label="t('account.title')" :disabled="isOpeningAccount" @click="openAccount">
+              <span class="material-symbols-outlined" aria-hidden="true">manage_accounts</span>
             </button>
           </HintTooltip>
         </div>
@@ -14929,7 +14895,7 @@ const counterexampleTraceHelpText = computed(() => {
     </nav>
 
     <div
-      v-if="!isBoardDataReady || staleDeepLink"
+      v-if="!isBoardDataReady || boardLayoutLoadError || staleDeepLink"
       class="pointer-events-none fixed inset-x-0 top-[var(--board-nav-height)] z-[var(--z-board-alert)] flex flex-col items-center"
       data-testid="board-status-stack"
       data-toast-anchor
@@ -14952,15 +14918,39 @@ const counterexampleTraceHelpText = computed(() => {
         data-testid="board-data-load-error"
       >
         <span class="material-symbols-outlined shrink-0" aria-hidden="true">sync_problem</span>
-        <span class="min-w-0 flex-1 break-words">
-          {{ t('app.boardDataLoadFailedWithCollections', {
+        <div class="min-w-0 flex-1 break-words">
+          <p>{{ t('app.boardDataLoadFailedWithCollections', {
             collections: failedBoardDataKeys.map(boardDataKeyLabel).join(', ')
-          }) }}
-        </span>
+          }) }}</p>
+          <FailureDetails v-if="boardSnapshotError" v-bind="boardSnapshotError" suggestion="" />
+        </div>
         <button
           type="button"
           class="pointer-events-auto inline-flex shrink-0 items-center gap-1 rounded-md px-2.5 py-1.5 font-semibold hover:board-chip-danger dark:hover:bg-[color:var(--danger-surface)]"
           @click="retryBoardDataLoad"
+        >
+          <span class="material-symbols-outlined text-base" aria-hidden="true">refresh</span>
+          {{ t('app.retry') }}
+        </button>
+      </div>
+
+      <div
+        v-if="boardLayoutLoadError"
+        class="mt-[var(--board-floating-gap)] flex w-[min(92vw,720px)] items-center gap-3 rounded-md board-surface-warning px-4 py-3 text-sm board-text-warning shadow-lg"
+        role="alert"
+        data-testid="board-layout-load-error"
+      >
+        <span class="material-symbols-outlined shrink-0" aria-hidden="true">sync_problem</span>
+        <div class="min-w-0 flex-1 break-words">
+          <p>{{ t('app.loadLayoutFailed') }}</p>
+          <FailureDetails v-bind="boardLayoutLoadError" suggestion="" class="pointer-events-auto" />
+        </div>
+        <button
+          type="button"
+          class="pointer-events-auto inline-flex shrink-0 items-center gap-1 rounded-md px-2.5 py-1.5 font-semibold hover:board-chip-warning"
+          :disabled="loadingBoardLayout"
+          :aria-busy="loadingBoardLayout"
+          @click="loadBoardLayout(true)"
         >
           <span class="material-symbols-outlined text-base" aria-hidden="true">refresh</span>
           {{ t('app.retry') }}
@@ -14990,25 +14980,6 @@ const counterexampleTraceHelpText = computed(() => {
         </HintTooltip>
       </div>
     </div>
-
-    <!-- Logout Confirmation Dialog -->
-    <LogoutConfirmDialog
-      v-if="showLogoutDialog"
-      v-model:visible="showLogoutDialog"
-      :loading="isLoggingOut"
-      @confirm="handleLogoutConfirm"
-      @cancel="handleLogoutCancel"
-      @delete-account="handleOpenDeleteAccount"
-    />
-
-    <AccountDeleteDialog
-      v-if="showDeleteAccountDialog"
-      v-model:visible="showDeleteAccountDialog"
-      :username="currentUser?.username"
-      :phone="currentUser?.phone"
-      :loading="isDeletingAccount"
-      @confirm="handleDeleteAccountConfirm"
-    />
 
     <div
       v-if="templateInstanceDialogVisible"
@@ -15041,13 +15012,13 @@ const counterexampleTraceHelpText = computed(() => {
         </div>
 
         <div class="iot-dialog__body iot-scroll-region">
-        <label class="block text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+        <label class="board-form-label block">
           {{ t('app.deviceName') }}
         </label>
         <input
           v-model="templateInstanceDialogData.name"
           data-testid="template-instance-name"
-          class="mt-1 w-full rounded-xl border-2 border-slate-200 bg-white px-3 py-2.5 text-sm font-semibold text-slate-900 outline-none transition focus:border-[color:var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-border)] dark:border-slate-700 dark:bg-slate-950 dark:text-white dark:focus:border-[color:var(--accent)] dark:focus:ring-[color:var(--accent-border)]"
+          class="board-field mt-1"
           :placeholder="t('app.deviceNamePlaceholder')"
           :disabled="templateInstanceSaving"
           @keydown.enter.prevent="confirmTemplateInstanceCreate"
@@ -15069,53 +15040,50 @@ const counterexampleTraceHelpText = computed(() => {
         >
           <summary
             data-testid="template-instance-runtime-toggle"
-            class="flex cursor-pointer select-none items-center justify-between gap-2 text-[11px] font-bold text-slate-600 dark:text-slate-300"
+            class="board-form-label flex cursor-pointer select-none items-center justify-between gap-2"
           >
             <span class="inline-flex min-w-0 items-center gap-1.5">
               <span class="material-symbols-outlined text-sm board-text-warning" aria-hidden="true">tune</span>
               {{ t('app.advancedInitialValuesOverrides') }}
             </span>
-            <span class="material-symbols-outlined text-sm text-slate-400" aria-hidden="true">expand_more</span>
+            <span class="material-symbols-outlined text-sm board-text-muted" aria-hidden="true">expand_more</span>
           </summary>
 
-          <p class="mt-2 text-[length:var(--iot-font-min)] leading-relaxed text-slate-500 dark:text-slate-400">
+          <p class="mt-2 text-xs leading-relaxed board-text-muted">
             {{ t('app.initialValuesHint') }}
           </p>
 
           <div v-if="templateInstanceHasModes" class="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
             <label class="min-w-0">
-              <span class="mb-1 block text-[length:var(--iot-font-min)] font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">{{ t('app.initialState') }}</span>
-              <select
+              <span class="mb-1 board-form-label block">{{ t('app.initialState') }}</span>
+              <FieldSelect
                 v-model="templateInstanceRuntime.state"
                 data-testid="template-instance-state"
-                class="w-full rounded-lg border-2 border-slate-200 bg-white px-2 py-2 text-xs text-slate-700 shadow-sm transition focus:border-[color:var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-border)] dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:focus:ring-[color:var(--accent-border)]"
               >
                 <option v-for="state in templateInstanceWorkingStates" :key="state.Name" :value="state.Name">{{ formatTemplateModelToken(templateInstanceDialogData.template, state.Name) }}</option>
-              </select>
+              </FieldSelect>
             </label>
 
             <label class="min-w-0">
-              <span class="mb-1 block text-[length:var(--iot-font-min)] font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">{{ t('app.stateTrust') }}</span>
-              <select
+              <span class="mb-1 board-form-label block">{{ t('app.stateTrust') }}</span>
+              <FieldSelect
                 v-model="templateInstanceRuntime.currentStateTrust"
                 data-testid="template-instance-state-trust"
-                class="w-full rounded-lg border-2 border-slate-200 bg-white px-2 py-2 text-xs text-slate-700 shadow-sm transition focus:border-[color:var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-border)] dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:focus:ring-[color:var(--accent-border)]"
               >
                 <option value="">{{ t('app.useTemplateDefaultWithValue', { value: t(`app.${findTemplateStateTrust(templateInstanceDialogData.template, templateInstanceRuntime.state) || 'trusted'}`) }) }}</option>
                 <option v-for="trust in TRUST_OPTIONS" :key="trust" :value="trust">{{ t(`app.${trust}`) }}</option>
-              </select>
+              </FieldSelect>
             </label>
 
             <label class="min-w-0">
-              <span class="mb-1 block text-[length:var(--iot-font-min)] font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">{{ t('app.statePrivacy') }}</span>
-              <select
+              <span class="mb-1 board-form-label block">{{ t('app.statePrivacy') }}</span>
+              <FieldSelect
                 v-model="templateInstanceRuntime.currentStatePrivacy"
                 data-testid="template-instance-state-privacy"
-                class="w-full rounded-lg border-2 border-slate-200 bg-white px-2 py-2 text-xs text-slate-700 shadow-sm transition focus:border-[color:var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-border)] dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:focus:ring-[color:var(--accent-border)]"
               >
                 <option value="">{{ t('app.useTemplateDefaultWithValue', { value: t(`app.${findTemplateStatePrivacy(templateInstanceDialogData.template, templateInstanceRuntime.state) || 'public'}`) }) }}</option>
                 <option v-for="privacy in PRIVACY_OPTIONS" :key="privacy" :value="privacy">{{ t(`app.${privacy}`) }}</option>
-              </select>
+              </FieldSelect>
             </label>
           </div>
 
@@ -15123,71 +15091,68 @@ const counterexampleTraceHelpText = computed(() => {
             <div
               v-for="variable in templateInstanceInternalVariables"
               :key="variable.Name"
-              class="rounded-lg border border-slate-200 bg-white/80 p-2 dark:border-slate-700 dark:bg-slate-950/80"
+              class="rounded-lg border board-border-subtle board-bg-elevated p-2"
             >
-              <div class="mb-2 flex items-center justify-between gap-2">
-                <span class="truncate text-[11px] font-bold text-slate-700 dark:text-slate-200" :title="formatTemplateModelToken(templateInstanceDialogData.template, variable.Name)">{{ formatTemplateModelToken(templateInstanceDialogData.template, variable.Name) }}</span>
-                <span v-if="templateVariableUsesNumericBounds(variable)" class="text-[length:var(--iot-font-min)] font-semibold text-slate-500 dark:text-slate-500">
+              <div class="mb-2 flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
+                <span class="max-w-full break-words text-sm font-semibold board-text-strong" :title="formatTemplateModelToken(templateInstanceDialogData.template, variable.Name)">{{ formatTemplateModelToken(templateInstanceDialogData.template, variable.Name) }}</span>
+                <span v-if="templateVariableUsesNumericBounds(variable)" class="max-w-full break-words text-[length:var(--iot-font-min)] font-semibold board-text-muted">
                   {{ templateVariableInputPlaceholder(variable) }}
                 </span>
               </div>
 
               <div class="grid grid-cols-[minmax(0,1fr)_5.8rem_5.8rem] gap-2 max-[520px]:grid-cols-1">
                 <label class="min-w-0">
-                  <span class="mb-1 block text-[length:var(--iot-font-min)] font-bold uppercase text-slate-500 dark:text-slate-500">{{ t('app.variableValue') }}</span>
+                  <span class="mb-1 board-form-label block">{{ t('app.variableValue') }}</span>
                   <!-- The state's consequence, not an instance choice: see
                        `templateVariableIsStateDerived`. -->
                   <div
                     v-if="templateVariableIsStateDerived(templateInstanceDialogData.template, variable.Name)"
                     :data-testid="`template-instance-variable-derived-${variable.Name}`"
-                    class="flex min-w-0 items-center gap-2 rounded-lg border border-dashed border-slate-200 bg-slate-50 px-2 py-1.5 dark:border-slate-700 dark:bg-slate-900"
+                    class="flex min-w-0 items-center gap-2 rounded-lg border border-dashed board-border-subtle board-bg-muted px-2 py-1.5"
                   >
-                    <span class="min-w-0 break-words text-xs font-medium text-slate-700 dark:text-slate-100">
+                    <span class="min-w-0 break-words text-xs font-medium board-text-strong">
                       {{ formatTemplateModelToken(templateInstanceDialogData.template, templateInstanceRuntime.variables[variable.Name]) }}
                     </span>
-                    <span class="shrink-0 text-[length:var(--iot-font-min)] text-slate-500">{{ t('app.variableFollowsState') }}</span>
+                    <span class="shrink-0 text-[length:var(--iot-font-min)] board-text-muted">{{ t('app.variableFollowsState') }}</span>
                   </div>
-                  <select
+                  <FieldSelect
                     v-else-if="templateVariableHasEnumValues(variable)"
                     v-model="templateInstanceRuntime.variables[variable.Name]"
                     :data-testid="`template-instance-variable-${variable.Name}`"
-                    class="w-full min-w-0 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
                   >
                     <option value="">{{ t('app.useTemplateDefaultWithValue', { value: formatTemplateModelToken(templateInstanceDialogData.template, getTemplateVariableDefaultValue(variable, templateInstanceDialogData.template, templateInstanceRuntime.state)) }) }}</option>
                     <option v-for="value in variable.Values" :key="value" :value="String(value)">{{ formatTemplateModelToken(templateInstanceDialogData.template, value) }}</option>
-                  </select>
+                  </FieldSelect>
                   <input
                     v-else
                     v-model="templateInstanceRuntime.variables[variable.Name]"
                     :data-testid="`template-instance-variable-${variable.Name}`"
-                    class="w-full min-w-0 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-700 placeholder:text-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                    class="board-field"
                     :placeholder="templateVariableInputPlaceholder(variable)"
                     type="text"
                   />
                 </label>
 
                 <label class="min-w-0">
-                  <span class="mb-1 block text-[length:var(--iot-font-min)] font-bold uppercase text-slate-500 dark:text-slate-500">{{ t('app.variableTrust') }}</span>
-                  <select
+                  <span class="mb-1 board-form-label block">{{ t('app.variableTrust') }}</span>
+                  <FieldSelect
                     v-model="templateInstanceRuntime.variableTrusts[variable.Name]"
                     :data-testid="`template-instance-variable-trust-${variable.Name}`"
-                    class="w-full min-w-0 rounded-lg border border-slate-200 bg-white px-1.5 py-1.5 text-[11px] text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
                   >
                     <option value="">{{ t('app.useTemplateDefaultWithValue', { value: t(`app.${variable.Trust || 'trusted'}`) }) }}</option>
                     <option v-for="trust in TRUST_OPTIONS" :key="trust" :value="trust">{{ t(`app.${trust}`) }}</option>
-                  </select>
+                  </FieldSelect>
                 </label>
 
                 <label class="min-w-0">
-                  <span class="mb-1 block text-[length:var(--iot-font-min)] font-bold uppercase text-slate-500 dark:text-slate-500">{{ t('app.privacy') }}</span>
-                  <select
+                  <span class="mb-1 board-form-label block">{{ t('app.privacy') }}</span>
+                  <FieldSelect
                     v-model="templateInstanceRuntime.privacies[variable.Name]"
                     :data-testid="`template-instance-privacy-${variable.Name}`"
-                    class="w-full min-w-0 rounded-lg border border-slate-200 bg-white px-1.5 py-1.5 text-[11px] text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
                   >
                     <option value="">{{ t('app.useTemplateDefaultWithValue', { value: t(`app.${variable.Privacy || 'public'}`) }) }}</option>
                     <option v-for="privacy in PRIVACY_OPTIONS" :key="privacy" :value="privacy">{{ t(`app.${privacy}`) }}</option>
-                  </select>
+                  </FieldSelect>
                 </label>
               </div>
             </div>
@@ -15236,7 +15201,7 @@ const counterexampleTraceHelpText = computed(() => {
       @create-devices="handleCreateDevices"
       @template-drag-start="handleTemplateDragStart"
       @template-drag-end="handleTemplateDragEnd"
-      @open-rule-builder="openRuleBuilder"
+      @save-rule="handleAddRule"
       @add-spec="handleAddSpec"
       @replace-template-catalog="replaceTemplateCatalog"
       @replace-template-state="replaceTemplateState"
@@ -15260,6 +15225,7 @@ const counterexampleTraceHelpText = computed(() => {
       :width="effectiveInspectorPanelWidth"
       :active-section="boardPanels.inspector.activeSection"
       :data-unavailable="failedBoardDataKeys.length > 0"
+      :data-loading="!isBoardDataReady"
       :read-only="isModelPlaybackActive || isSceneReplacementInProgress"
       :read-only-message="isSceneReplacementInProgress ? t('app.sceneReplacementInProgress') : t('app.playbackReadOnlyCloseFirst')"
       :rules-reordering="rulesReordering"
@@ -15277,81 +15243,74 @@ const counterexampleTraceHelpText = computed(() => {
       @update:active-section="handleInspectorActiveSectionUpdate"
     >
       <template #overview>
-        <!--
-          The map surface stays mounted whenever the inspector is expanded.
-
-          It used to be hidden whenever any result surface was open, which also took away the zoom
-          field, the zoom buttons and fit-to-content — the only pointer zoom controls on the board —
-          leaving a user mid-review with the scroll wheel and no indication of where the controls had
-          gone. Only the *map viewport* competes for space with a result panel, so only it yields;
-          the viewport controls belong to the canvas and stay put. The `inspector.collapsed` half of
-          the old condition was dead: this slot renders inside the inspector's own `v-if`.
-        -->
-        <div
+        <!-- Keep navigation available while reviewing a result. -->
+        <details
           data-testid="canvas-map"
-          class="canvas-map w-full p-3 border rounded-lg shadow-sm bg-white/90 border-slate-200 dark:bg-slate-950/90 dark:border-slate-700"
+          class="canvas-map"
+          :open="boardViewportHeight >= 600"
         >
-          <div class="canvas-map__header flex items-center justify-between mb-2">
-            <span class="canvas-map__title min-w-0 text-[length:var(--iot-font-min)] uppercase font-bold text-slate-500 dark:text-slate-500">{{ t('app.canvasMap') }}</span>
-            <div class="canvas-map__zoom-controls flex items-center gap-1" data-testid="canvas-map-zoom-controls">
-              <HintTooltip :content="t('app.zoomOut')">
-                <button
-                  type="button"
-                  class="canvas-map__tool inline-flex h-6 w-6 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white"
-                  data-testid="canvas-map-zoom-out"
-                  :aria-label="t('app.zoomOut')"
-                  :disabled="isCanvasNavigationLocked"
-                  @click="adjustCanvasZoom(-ZOOM_STEP)"
-                >
-                  <span class="material-symbols-outlined text-sm" aria-hidden="true">remove</span>
-                </button>
-              </HintTooltip>
-              <label class="canvas-map__zoom-input-wrap" :title="t('app.zoomLevel')">
-                <input
-                  class="canvas-map__zoom-input"
-                  data-testid="canvas-map-zoom-input"
-                  type="number"
-                  :min="Math.round(MIN_ZOOM * 100)"
-                  :max="Math.round(MAX_ZOOM * 100)"
-                  step="5"
-                  :value="canvasZoomPercent"
-                  :aria-label="t('app.zoomLevel')"
-                  :disabled="isCanvasNavigationLocked"
-                  @input="handleCanvasMapZoomInput"
-                  @change="handleCanvasMapZoomInput"
-                  @keydown.stop
-                />
-                <span aria-hidden="true">%</span>
-              </label>
-              <HintTooltip :content="t('app.zoomIn')">
-                <button
-                  type="button"
-                  class="canvas-map__tool inline-flex h-6 w-6 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white"
-                  data-testid="canvas-map-zoom-in"
-                  :aria-label="t('app.zoomIn')"
-                  :disabled="isCanvasNavigationLocked"
-                  @click="adjustCanvasZoom(ZOOM_STEP)"
-                >
-                  <span class="material-symbols-outlined text-sm" aria-hidden="true">add</span>
-                </button>
-              </HintTooltip>
-              <HintTooltip :content="t('app.fitToContent')">
-                <button
-                  type="button"
-                  class="canvas-map__tool inline-flex h-6 w-6 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white"
-                  data-testid="canvas-map-fit"
-                  :aria-label="t('app.fitToContent')"
-                  :disabled="isCanvasNavigationLocked"
-                  @click="fitToContent"
-                >
-                  <span class="material-symbols-outlined text-sm" aria-hidden="true">fit_screen</span>
-                </button>
-              </HintTooltip>
-            </div>
+          <summary class="canvas-map__header" data-testid="canvas-map-toggle" :aria-label="t('app.canvasMap')">
+            <span class="canvas-map__title">{{ t('app.canvasMapShort') }}</span>
+            <span class="material-symbols-outlined canvas-map__chevron" aria-hidden="true">expand_more</span>
+          </summary>
+          <div class="canvas-map__zoom-controls" role="group" :aria-label="t('app.zoomLevel')" data-testid="canvas-map-zoom-controls">
+            <HintTooltip :content="t('app.zoomOut')">
+              <button
+                type="button"
+                class="board-panel-icon-action canvas-map__tool"
+                data-testid="canvas-map-zoom-out"
+                :aria-label="t('app.zoomOut')"
+                :disabled="isCanvasNavigationLocked"
+                @click="adjustCanvasZoom(-ZOOM_STEP)"
+              >
+                <span class="material-symbols-outlined text-sm" aria-hidden="true">remove</span>
+              </button>
+            </HintTooltip>
+            <label class="canvas-map__zoom-input-wrap" :title="t('app.zoomLevel')">
+              <input
+                class="canvas-map__zoom-input"
+                data-testid="canvas-map-zoom-input"
+                type="number"
+                :min="Number((minimumCanvasZoomForInput * 100).toFixed(2))"
+                :max="Math.round(MAX_ZOOM * 100)"
+                step="any"
+                :value="canvasZoomPercent"
+                :aria-label="t('app.zoomLevel')"
+                :disabled="isCanvasNavigationLocked"
+                @input="handleCanvasMapZoomInput"
+                @change="handleCanvasMapZoomInput"
+                @keydown.stop
+              />
+              <span aria-hidden="true">%</span>
+            </label>
+            <HintTooltip :content="t('app.zoomIn')">
+              <button
+                type="button"
+                class="board-panel-icon-action canvas-map__tool"
+                data-testid="canvas-map-zoom-in"
+                :aria-label="t('app.zoomIn')"
+                :disabled="isCanvasNavigationLocked"
+                @click="adjustCanvasZoom(ZOOM_STEP)"
+              >
+                <span class="material-symbols-outlined text-sm" aria-hidden="true">add</span>
+              </button>
+            </HintTooltip>
+            <HintTooltip :content="t('app.fitToContent')">
+              <button
+                type="button"
+                class="board-panel-icon-action canvas-map__tool"
+                data-testid="canvas-map-fit"
+                :aria-label="t('app.fitToContent')"
+                :disabled="isCanvasNavigationLocked"
+                @click="fitToContent"
+              >
+                <span class="material-symbols-outlined text-sm" aria-hidden="true">fit_screen</span>
+              </button>
+            </HintTooltip>
           </div>
 
           <div
-            class="canvas-map__viewport w-full h-28 rounded bg-slate-50 border border-slate-200 relative overflow-hidden shadow-inner cursor-crosshair select-none dark:bg-slate-900 dark:border-slate-700"
+            class="canvas-map__viewport relative overflow-hidden cursor-crosshair select-none"
             data-testid="canvas-map-viewport"
             @pointerdown="onCanvasMapPointerDown"
           >
@@ -15379,7 +15338,7 @@ const counterexampleTraceHelpText = computed(() => {
                 :cy="dot.y + 4"
                 r="3.6"
                 :fill="dot.color"
-                stroke="rgba(255,255,255,0.78)"
+                stroke="var(--surface-elevated)"
                 stroke-width="1"
               />
               <rect
@@ -15394,17 +15353,14 @@ const counterexampleTraceHelpText = computed(() => {
               />
             </svg>
 
-            <div class="absolute inset-0 border-2 rounded pointer-events-none" :style="{ borderColor: 'color-mix(in srgb, var(--iot-color-accent) 20%, transparent)' }"></div>
-
-            <!-- Same rule as the inspector's device list: during a failed snapshot load the map has
-                 no basis for claiming the board is empty, so it reports what it knows. -->
-            <div v-if="canvasMapDots.length === 0" class="absolute inset-0 flex items-center justify-center text-slate-500 dark:text-slate-500 text-xs">
+            <!-- An empty map cannot establish an empty board until its snapshot is available. -->
+            <div v-if="canvasMapDots.length === 0" class="canvas-map__empty absolute inset-0 flex items-center justify-center">
               {{ failedBoardDataKeys.length > 0
                 ? t('app.boardDataUnavailableShort')
-                : t('app.noDevicesOnCanvas') }}
+                : t(isBoardDataReady ? 'app.noDevicesOnCanvas' : 'app.boardSnapshotLoading') }}
             </div>
           </div>
-        </div>
+        </details>
       </template>
     </SystemInspector>
 
@@ -15438,11 +15394,61 @@ const counterexampleTraceHelpText = computed(() => {
     </HintTooltip>
 
     <!-- Canvas Area -->
-    <div class="canvas-container" @wheel.ctrl.prevent="onBoardWheel">
+    <div
+      v-if="isModelPlaybackActive"
+      class="board-playback-bar"
+      :class="{ 'is-stacked': playbackToolbarStacked, 'has-hidden-panel': !playbackPanelOpen }"
+      data-testid="playback-toolbar"
+      :ref="setPlaybackToolbarRef"
+      tabindex="-1"
+      autofocus
+      @keydown="handlePlaybackKeydown"
+      role="toolbar"
+      :aria-label="t('app.playbackControls')"
+    >
+      <span class="board-playback-bar__title">{{ activePlaybackKind === 'simulation'
+        ? t('app.traceVisualization.modelTracePlayback')
+        : activePlaybackKind === 'fuzzing'
+          ? t('app.fuzzFindingReplay')
+          : t('app.traceVisualization.counterexampleTracePlayback') }}</span>
+      <div id="board-playback-transport" class="board-playback-bar__transport" />
+      <div id="board-playback-timeline" class="board-playback-bar__timeline" />
+      <div class="board-playback-bar__actions">
+        <div id="board-playback-locate" class="board-playback-bar__locate" />
+        <HintTooltip v-if="!playbackPanelOpen" :content="t('app.showPlaybackPanel')">
+          <button
+            type="button"
+            class="board-playback-bar__toggle"
+            data-testid="playback-panel-toggle"
+            :aria-expanded="playbackPanelOpen"
+            :aria-controls="traceAnimationState.visible ? 'trace-playback-panel' : 'simulation-playback-panel'"
+            :aria-label="t('app.showPlaybackPanel')"
+            @click="togglePlaybackPanel"
+          >
+            <span class="material-symbols-outlined" aria-hidden="true">bottom_panel_open</span>
+          </button>
+        </HintTooltip>
+        <HintTooltip :content="t('app.exitPlayback')">
+          <button
+            type="button"
+            class="board-playback-bar__exit"
+            :data-testid="traceAnimationState.visible ? 'trace-timeline-close' : 'simulation-timeline-close'"
+            :aria-label="t('app.exitPlayback')"
+            @click="traceAnimationState.visible ? closeTraceAnimation() : closeSimulationTimeline()"
+          >
+            <span class="material-symbols-outlined" aria-hidden="true">stop_circle</span>
+            <span>{{ t('app.exitPlayback') }}</span>
+          </button>
+        </HintTooltip>
+      </div>
+    </div>
+    <div ref="canvasContainer" class="canvas-container" @wheel.ctrl.prevent="onBoardWheel">
       <!-- Canvas Board -->
       <CanvasBoard
           :nodes="renderedCanvasNodes"
           :edges="allEdges"
+          :rules="activePlaybackScene ? activePlaybackScene.rules : rules"
+          :get-visible-frame="getCanvasFrameForRendering"
           :device-templates="deviceTemplates"
           :pan="renderedCanvasPan"
           :zoom="renderedCanvasZoom"
@@ -15454,7 +15460,7 @@ const counterexampleTraceHelpText = computed(() => {
           :highlighted-trace="canvasHighlightedTrace"
           :focused-node-id="focusedNodeId"
           :focused-rule-id="focusedRuleId"
-          :interaction-locked="isCanvasInteractionLocked"
+          :interaction-locked="isCanvasInteractionLocked || isApplyingBoardEditUndo"
           @canvas-pointerdown="onCanvasPointerDown"
           @canvas-dragover="onCanvasDragOver"
           @canvas-drop="onCanvasDrop"
@@ -15470,43 +15476,42 @@ const counterexampleTraceHelpText = computed(() => {
 
       <section
         v-if="showCanvasEmptyState"
-        class="canvas-empty-state pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-4 py-24 sm:px-8"
+        class="canvas-empty-state iot-scroll-region pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-4 sm:px-8"
         data-testid="canvas-empty-state"
         aria-labelledby="canvas-empty-state-title"
       >
         <div
-          class="max-w-xl text-center"
+          class="canvas-empty-state__card"
           :class="draggingTplName ? 'pointer-events-none' : 'pointer-events-auto'"
         >
-          <span class="material-symbols-outlined text-4xl text-slate-400 dark:text-slate-500" aria-hidden="true">account_tree</span>
-          <h2 id="canvas-empty-state-title" class="mt-3 text-xl font-bold text-slate-800 dark:text-slate-100">
+          <span class="canvas-empty-state__icon" aria-hidden="true">
+            <span class="material-symbols-outlined">account_tree</span>
+          </span>
+          <h2 id="canvas-empty-state-title" class="canvas-empty-state__title">
             {{ t('app.emptyCanvasTitle') }}
           </h2>
-          <p class="mt-2 text-sm text-slate-500 dark:text-slate-400">
-            {{ t('app.emptyCanvasDescription') }}
-          </p>
           <div class="mt-5 flex flex-wrap items-center justify-center gap-2">
             <button
               type="button"
-              class="inline-flex min-h-10 items-center gap-2 rounded-md bg-slate-900 px-4 text-sm font-semibold text-white shadow-sm hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-white"
+              class="board-action-inline"
               data-testid="empty-state-add-device"
               @click="openControlSection('devices')"
             >
               <span class="material-symbols-outlined text-lg" aria-hidden="true">add</span>
-              {{ t('app.emptyCanvasAddDevice') }}
+                {{ t('app.createDevice') }}
             </button>
             <button
               type="button"
-              class="inline-flex min-h-10 items-center gap-2 rounded-md border border-slate-300 bg-white/90 px-4 text-sm font-semibold text-slate-700 shadow-sm hover:bg-white dark:border-slate-600 dark:bg-slate-900/90 dark:text-slate-100 dark:hover:bg-slate-900"
+              class="board-action-inline-subtle"
               data-testid="empty-state-generate-scenario"
               @click="openScenarioRecommendationPanel"
             >
               <span class="material-symbols-outlined text-lg" aria-hidden="true">auto_awesome</span>
-              {{ t('app.emptyCanvasGenerateScenario') }}
+              {{ t('app.openScenarioRecommendations') }}
             </button>
             <button
               type="button"
-              class="inline-flex min-h-10 items-center gap-2 rounded-md border border-slate-300 bg-white/90 px-4 text-sm font-semibold text-slate-700 shadow-sm hover:bg-white dark:border-slate-600 dark:bg-slate-900/90 dark:text-slate-100 dark:hover:bg-slate-900"
+              class="board-action-inline-subtle"
               data-testid="empty-state-import-scene"
               @click="triggerSceneImport"
             >
@@ -15517,35 +15522,14 @@ const counterexampleTraceHelpText = computed(() => {
         </div>
       </section>
 
-      <PlaybackChangePopover
-        v-if="showPlaybackChangePopover && activePlaybackKind"
-        :changes="activePlaybackChanges"
-        :environment-changes="activePlaybackEnvironmentChanges"
-        :triggered-rules="activePlaybackTriggeredRules"
-        :compromised-automation-links="activePlaybackCompromisedLinks"
-        :animated-edge-count="activePlaybackAnimatedEdgeCount"
-        :compromised-edge-count="activePlaybackCompromisedEdgeCount"
-        :state-number="activePlaybackStateIndex + 1"
-        :total-states="activePlaybackStates.length"
-        :kind="activePlaybackKind"
-        :position="playbackChangePosition"
-        :input-events="activeFuzzingStepInputEvents"
-        :bundled-device-ids="bundledPlaybackDeviceIds"
-        :bundled-environment-names="bundledPlaybackEnvironmentNames"
-        :violation-state-number="activeViolationStateNumber"
-        :is-loop-back-state="activePlaybackIsLoopBackState"
-        :loop-range="activePlaybackLoopRange"
-        :is-liveness-violation="activePlaybackIsLivenessViolation"
-        @dismiss="dismissPlaybackChanges"
-        @move="movePlaybackChanges"
-      />
+
 
       <div
         v-if="draggingTplName"
-        class="pointer-events-none absolute inset-4 z-20 flex items-center justify-center rounded-2xl border-2 border-dashed border-[color:var(--warning-border)] bg-[color:var(--warning-surface)] text-sm font-extrabold board-text-warning backdrop-blur-[1px] dark:bg-[color:var(--warning)]/10"
+        class="canvas-drop-overlay pointer-events-none absolute inset-4 z-20 flex items-center justify-center"
         data-testid="template-drop-overlay"
       >
-        <span class="rounded-full border border-[color:var(--warning-border)] bg-white/90 px-4 py-2 shadow-lg dark:bg-slate-900/90">
+        <span class="canvas-drop-overlay__label">
           {{ t('app.releaseTemplateToCreateDevice') }}
         </span>
       </div>
@@ -15567,19 +15551,17 @@ const counterexampleTraceHelpText = computed(() => {
       :aria-hidden="isResultSurfaceVisible"
       :aria-label="t('app.boardTools')"
     >
-      <HintTooltip :content="actionDockRestoreLabel">
-        <button
-          v-if="isActionDockPackedMode"
-          type="button"
-          class="board-action-dock__launcher"
-          data-testid="restore-action-dock"
-          :aria-label="actionDockRestoreLabel"
-          @click="restoreActionDockFromPacked"
-        >
-          <span class="material-symbols-outlined" aria-hidden="true">toolbar</span>
-          <span v-if="hasActionDockActivity" class="board-action-dock__activity-dot" aria-hidden="true"></span>
-        </button>
-      </HintTooltip>
+      <button
+        v-if="isActionDockPackedMode"
+        type="button"
+        class="board-action-dock__launcher"
+        data-testid="restore-action-dock"
+        :aria-label="actionDockRestoreLabel"
+        @click="restoreActionDockFromPacked"
+      >
+        <span class="material-symbols-outlined" aria-hidden="true">toolbar</span>
+        <span v-if="hasActionDockActivity" class="board-action-dock__activity-dot" aria-hidden="true"></span>
+      </button>
 
       <div
         v-if="!isActionDockPackedMode"
@@ -15589,20 +15571,18 @@ const counterexampleTraceHelpText = computed(() => {
           class="board-action-dock__header"
         >
           <span class="board-action-dock__title">{{ t('app.boardTools') }}</span>
-          <HintTooltip :content="actionDockToggleLabel">
-            <button
-              type="button"
-              class="board-action-dock__toggle"
-              data-testid="toggle-action-dock"
-              :aria-label="actionDockToggleLabel"
-              :aria-expanded="actionDockMode === 'expanded'"
-              @click="cycleActionDockMode"
-            >
-              <span class="material-symbols-outlined" aria-hidden="true">
-                {{ actionDockToggleIcon }}
-              </span>
-            </button>
-          </HintTooltip>
+          <button
+            type="button"
+            class="board-action-dock__toggle"
+            data-testid="toggle-action-dock"
+            :aria-label="actionDockToggleLabel"
+            :aria-expanded="actionDockMode === 'expanded'"
+            @click="cycleActionDockMode"
+          >
+            <span class="material-symbols-outlined" aria-hidden="true">
+              {{ actionDockToggleIcon }}
+            </span>
+          </button>
         </div>
 
         <div class="board-tool-group" data-testid="run-tool-group" role="group" :aria-label="t('app.runTools')">
@@ -15611,7 +15591,7 @@ const counterexampleTraceHelpText = computed(() => {
         <div class="board-tool-wrapper group">
           <div
             v-if="simulationAnimationState.visible"
-            class="board-tool-pulse board-tool-pulse--primary"
+            class="board-tool-status"
           ></div>
           <HintTooltip :content="simulationTooltipContent">
             <button
@@ -15621,7 +15601,7 @@ const counterexampleTraceHelpText = computed(() => {
               :disabled="traceAnimationState.visible || simulationAnimationState.visible || isAnimationLocked || isAnyRecommendationRunning()"
               :aria-label="isSimulating ? t('app.simulationRunning') : t('app.openSimulationSettings')"
               :aria-pressed="showSimulationPanel || simulationAnimationState.visible"
-              class="board-tool-button board-tool-button--evidence transition-colors"
+              class="board-tool-button transition-colors"
             >
               <span v-if="isSimulating" class="material-symbols-outlined animate-spin" aria-hidden="true">sync</span>
               <span v-else class="material-symbols-outlined" aria-hidden="true">play_circle</span>
@@ -15631,7 +15611,7 @@ const counterexampleTraceHelpText = computed(() => {
         </div>
 
         <div class="board-tool-wrapper group">
-          <div v-if="isFuzzing" class="board-tool-pulse board-tool-pulse--primary"></div>
+          <div v-if="isFuzzing" class="board-tool-status"></div>
           <HintTooltip :content="fuzzingTooltipContent">
             <button
               type="button"
@@ -15642,7 +15622,7 @@ const counterexampleTraceHelpText = computed(() => {
                 ? t('app.sceneReplacementInProgress')
                 : isFuzzing ? t('app.fuzzRunning') : t('app.openFuzzSettings')"
               :aria-pressed="showFuzzingPanel"
-              class="board-tool-button board-tool-button--evidence transition-colors"
+              class="board-tool-button transition-colors"
             >
               <span v-if="isFuzzing" class="material-symbols-outlined animate-spin" aria-hidden="true">sync</span>
               <span v-else class="material-symbols-outlined" aria-hidden="true">radar</span>
@@ -15656,7 +15636,7 @@ const counterexampleTraceHelpText = computed(() => {
         <div class="board-tool-wrapper group">
           <div
             v-if="traceAnimationState.visible"
-            class="board-tool-pulse board-tool-pulse--primary"
+            class="board-tool-status"
           ></div>
           <HintTooltip :content="verificationTooltipContent">
             <button
@@ -15667,7 +15647,7 @@ const counterexampleTraceHelpText = computed(() => {
               :disabled="traceAnimationState.visible || simulationAnimationState.visible || isAnimationLocked || isAnyRecommendationRunning()"
               :aria-label="isVerifying ? t('app.verifying') : t('app.openVerificationSettings')"
               :aria-pressed="showVerificationPanel || traceAnimationState.visible"
-              class="board-tool-button board-tool-button--evidence transition-colors"
+              class="board-tool-button transition-colors"
             >
               <span v-if="isVerifying" class="material-symbols-outlined animate-spin" aria-hidden="true">sync</span>
               <span v-else class="material-symbols-outlined" aria-hidden="true">fact_check</span>
@@ -15680,17 +15660,6 @@ const counterexampleTraceHelpText = computed(() => {
 
       <div class="board-tool-separator" aria-hidden="true"></div>
 
-      <!--
-        Run History is its own group.
-
-        It sat inside the group labelled "Run" beside Simulation, Explore and Verification, styled
-        identically, but it does not run anything -- it reads results that already exist. Two
-        independent visual reviews, one per theme, raised the same point unprompted: "Run History
-        looks like a different kind of action... it suggests reviewing past results rather than
-        running analysis". Grouping follows what an action does, so this is a structural correction
-        rather than a restyle: the button keeps its filled treatment, because reading a stored verdict
-        is a primary task, not a suggestion.
-      -->
       <div class="board-tool-group" data-testid="review-tool-group" role="group" :aria-label="t('app.reviewTools')">
         <span class="board-tool-group-label">{{ t('app.reviewTools') }}</span>
 
@@ -15707,13 +15676,13 @@ const counterexampleTraceHelpText = computed(() => {
                   ? t('app.fuzzUnreadUpdates', { count: unreadFuzzNotificationCount })
                   : t('app.openRunHistory')"
               :aria-pressed="showHistoryPanel"
-              class="board-tool-button board-tool-button--view transition-colors"
+              class="board-tool-button transition-colors"
             >
               <span class="material-symbols-outlined" aria-hidden="true">history</span>
               <span class="board-tool-label">{{ t('app.runHistory') }}</span>
               <span
                 v-if="unreadFuzzNotificationCount > 0"
-                class="absolute right-0.5 top-0.5 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-[color:var(--danger-fill)] px-1 text-[length:var(--iot-font-min)] font-black text-white"
+                class="absolute right-0.5 top-0.5 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-[color:var(--danger-fill)] px-1 text-[length:var(--iot-font-min)] font-semibold text-white"
                 data-testid="fuzz-unread-badge"
                 aria-hidden="true"
               >{{ unreadFuzzNotificationCount > 99 ? '99+' : unreadFuzzNotificationCount }}</span>
@@ -15730,7 +15699,7 @@ const counterexampleTraceHelpText = computed(() => {
         <div class="board-tool-wrapper group">
           <div
             v-if="isRecommendingScenario"
-            class="board-tool-pulse bg-[color:var(--accent)]"
+            class="board-tool-status"
           ></div>
           <HintTooltip :content="scenarioTooltipContent">
             <button
@@ -15740,8 +15709,7 @@ const counterexampleTraceHelpText = computed(() => {
               :disabled="isSceneReplacementInProgress || traceAnimationState.visible || simulationAnimationState.visible || isAnimationLocked || isRecommendationRunningForAnother('scenario')"
               :aria-label="t('app.openScenarioRecommendations')"
               :aria-pressed="showScenarioRecommendationPanel || isRecommendingScenario"
-              class="board-tool-button board-tool-button--suggestion transition-colors"
-              style="--board-tool-accent: var(--iot-tool-scenario)"
+              class="board-tool-button transition-colors"
             >
               <span v-if="isRecommendingScenario" class="material-symbols-outlined animate-spin" aria-hidden="true">sync</span>
               <span v-else class="material-symbols-outlined" aria-hidden="true">account_tree</span>
@@ -15753,7 +15721,7 @@ const counterexampleTraceHelpText = computed(() => {
         <div class="board-tool-wrapper group">
           <div
             v-if="isRecommendingRules"
-            class="board-tool-pulse bg-[color:var(--warning)]"
+            class="board-tool-status board-tool-status--warning"
           ></div>
           <HintTooltip :content="ruleTooltipContent">
             <button
@@ -15763,8 +15731,7 @@ const counterexampleTraceHelpText = computed(() => {
               :disabled="isSceneReplacementInProgress || traceAnimationState.visible || simulationAnimationState.visible || isAnimationLocked || isRecommendationRunningForAnother('rule')"
               :aria-label="t('app.openRuleRecommendations')"
               :aria-pressed="showRecommendationPanel || isRecommendingRules"
-              class="board-tool-button board-tool-button--suggestion transition-colors"
-              style="--board-tool-accent: var(--iot-tool-rule)"
+              class="board-tool-button transition-colors"
             >
               <span v-if="isRecommendingRules" class="material-symbols-outlined animate-spin" aria-hidden="true">sync</span>
               <span v-else class="material-symbols-outlined" aria-hidden="true">rule_settings</span>
@@ -15776,7 +15743,7 @@ const counterexampleTraceHelpText = computed(() => {
         <div class="board-tool-wrapper group">
           <div
             v-if="isRecommendingDevices"
-            class="board-tool-pulse bg-[color:var(--accent)]"
+            class="board-tool-status"
           ></div>
           <HintTooltip :content="deviceTooltipContent">
             <button
@@ -15786,8 +15753,7 @@ const counterexampleTraceHelpText = computed(() => {
               :disabled="isSceneReplacementInProgress || traceAnimationState.visible || simulationAnimationState.visible || isAnimationLocked || isRecommendationRunningForAnother('device')"
               :aria-label="t('app.openDeviceRecommendations')"
               :aria-pressed="showDeviceRecommendationPanel || isRecommendingDevices"
-              class="board-tool-button board-tool-button--suggestion transition-colors"
-              style="--board-tool-accent: var(--iot-tool-device)"
+              class="board-tool-button transition-colors"
             >
               <span v-if="isRecommendingDevices" class="material-symbols-outlined animate-spin" aria-hidden="true">sync</span>
               <span v-else class="material-symbols-outlined" aria-hidden="true">devices_other</span>
@@ -15799,7 +15765,7 @@ const counterexampleTraceHelpText = computed(() => {
         <div class="board-tool-wrapper group">
           <div
             v-if="isRecommendingSpecs"
-            class="board-tool-pulse bg-[color:var(--danger)]"
+            class="board-tool-status board-tool-status--danger"
           ></div>
           <HintTooltip :content="specTooltipContent">
             <button
@@ -15809,8 +15775,7 @@ const counterexampleTraceHelpText = computed(() => {
               :disabled="isSceneReplacementInProgress || traceAnimationState.visible || simulationAnimationState.visible || isAnimationLocked || isRecommendationRunningForAnother('spec')"
               :aria-label="t('app.openSpecificationRecommendations')"
               :aria-pressed="showSpecRecommendationPanel || isRecommendingSpecs"
-              class="board-tool-button board-tool-button--suggestion transition-colors"
-              style="--board-tool-accent: var(--iot-tool-spec)"
+              class="board-tool-button transition-colors"
             >
               <span v-if="isRecommendingSpecs" class="material-symbols-outlined animate-spin" aria-hidden="true">sync</span>
               <span v-else class="material-symbols-outlined" aria-hidden="true">playlist_add_check</span>
@@ -15822,64 +15787,68 @@ const counterexampleTraceHelpText = computed(() => {
       </div>
     </div>
 
-    <TraceHistoryPanel
-      v-if="showHistoryPanel"
-      :active-layer="activeHistoryLayer"
-      :result-filter="activeHistoryResultFilter"
-      :verification-tasks="verificationTasks"
-      :fuzzing-tasks="fuzzingTasks"
-      :simulation-tasks="simulationTasks"
-      :verification-runs="verificationRuns"
-      :fuzzing-runs="fuzzingRuns"
-      :simulation-runs="simulationRuns"
-      :loading-tasks="loadingTaskHistory"
-      :loading-results="loadingResultHistory"
-      :result-errors="historyResultErrors"
-      :has-more-fuzzing-runs="fuzzingRunsHasMore"
-      :loading-more-fuzzing-runs="loadingMoreFuzzingRuns"
-      :pending-task-action-keys="pendingTaskActionKeys"
-      :pending-result-delete-keys="pendingHistoryDeleteKeys"
-      :action-locked="historyActionLocked"
-      :current-board-scope="currentFuzzingBoardScope"
-      @update:active-layer="setHistoryLayer"
-      @update:result-filter="setHistoryResultFilter"
-      @close="closeHistoryPanel"
-      @refresh-tasks="refreshHistoryTasks"
-      @refresh-results="refreshHistoryResults"
-      @load-more-fuzzing-runs="loadMoreFuzzingRuns"
-      @watch-verification-task="watchVerificationTask"
-      @watch-fuzzing-task="watchFuzzingTask"
-      @watch-simulation-task="watchSimulationTask"
-      @cancel-verification-task="cancelVerificationTaskFromInbox"
-      @cancel-fuzzing-task="cancelFuzzingTaskFromInbox"
-      @cancel-simulation-task="cancelSimulationTaskFromInbox"
-      @reopen-task-settings="reopenTaskSettings"
-      @dismiss-verification-task="dismissVerificationTask"
-      @dismiss-fuzzing-task="dismissFuzzingTask"
-      @dismiss-simulation-task="dismissSimulationTask"
-      @open-verification-run="openVerificationRunFromHistory"
-      @delete-verification-run="deleteVerificationRun"
-      @download-verification-run-smv="downloadVerificationRunSmv"
-      @view-verification-trace="openVerificationTraceFromHistory"
-      @fix-verification-trace="openFixForVerificationTrace"
-      @view-simulation-run="openSimulationRunFromHistory"
-      @delete-simulation-run="deleteSimulationRun"
-      @download-simulation-trace-smv="downloadSimulationTraceSmv"
-      @open-fuzzing-run="openFuzzingRunFromHistory"
-      @delete-fuzzing-run="deleteFuzzingRun"
-      @view-fuzzing-finding="openFuzzingFindingFromHistory"
-      @verify-fuzzing-finding="openFormalVerificationForFuzzFinding"
-    />
+    <KeepAlive :key="currentAuthUserId ?? undefined">
+      <TraceHistoryPanel
+        v-if="showHistoryPanel"
+        :active-layer="activeHistoryLayer"
+        :result-filter="activeHistoryResultFilter"
+        :verification-tasks="verificationTasks"
+        :fuzzing-tasks="fuzzingTasks"
+        :simulation-tasks="simulationTasks"
+        :verification-runs="verificationRuns"
+        :fuzzing-runs="fuzzingRuns"
+        :simulation-runs="simulationRuns"
+        :loading-tasks="loadingTaskHistory"
+        :task-error="taskInboxError"
+        :loading-results="loadingResultHistory"
+        :result-errors="historyResultErrors"
+        :has-more-fuzzing-runs="fuzzingRunsHasMore"
+        :loading-more-fuzzing-runs="loadingMoreFuzzingRuns"
+        :pending-task-action-keys="pendingTaskActionKeys"
+        :pending-result-delete-keys="pendingHistoryDeleteKeys"
+        :action-locked="historyActionLocked"
+        :current-model-fingerprints="currentBoardModelFingerprints"
+        :model-comparison-loading="loadingCurrentBoardModelFingerprints"
+        @update:active-layer="setHistoryLayer"
+        @update:result-filter="setHistoryResultFilter"
+        @close="closeHistoryPanel"
+        @refresh-tasks="refreshHistoryTasks"
+        @refresh-results="refreshHistoryResults"
+        @load-more-fuzzing-runs="loadMoreFuzzingRuns"
+        @watch-verification-task="watchVerificationTask"
+        @watch-fuzzing-task="watchFuzzingTask"
+        @watch-simulation-task="watchSimulationTask"
+        @cancel-verification-task="cancelVerificationTaskFromInbox"
+        @cancel-fuzzing-task="cancelFuzzingTaskFromInbox"
+        @cancel-simulation-task="cancelSimulationTaskFromInbox"
+        @reopen-task-settings="reopenTaskSettings"
+        @dismiss-verification-task="dismissVerificationTask"
+        @dismiss-fuzzing-task="dismissFuzzingTask"
+        @dismiss-simulation-task="dismissSimulationTask"
+        @open-verification-run="openVerificationRunFromHistory"
+        @delete-verification-run="deleteVerificationRun"
+        @download-verification-run-smv="downloadVerificationRunSmv"
+        @view-verification-trace="openVerificationTraceFromHistory"
+        @fix-verification-trace="openFixForVerificationTrace"
+        @view-simulation-run="openSimulationRunFromHistory"
+        @delete-simulation-run="deleteSimulationRun"
+        @download-simulation-trace-smv="downloadSimulationTraceSmv"
+        @open-fuzzing-run="openFuzzingRunFromHistory"
+        @delete-fuzzing-run="deleteFuzzingRun"
+        @view-fuzzing-finding="openFuzzingFinding"
+        @verify-fuzzing-finding="openFormalVerificationForFuzzFinding"
+      />
+    </KeepAlive>
 
     <div
-      v-if="miniTaskItems.length > 0"
+      v-if="miniTaskItems.length > 0 && !isWorkflowPanelOpen"
       data-testid="mini-task-indicator"
       class="board-mini-tasks fixed z-40 w-[360px] max-w-[calc(100vw-2rem)] rounded-xl border shadow-2xl"
     >
-      <div class="flex items-center justify-between border-b border-slate-100 px-3 py-2">
+      <div class="flex items-center justify-between border-b board-border-subtle px-3 py-2">
         <div class="flex items-center gap-2">
           <span class="material-symbols-outlined board-text-info text-lg">pending_actions</span>
-          <span class="text-xs font-bold text-slate-700">
+          <span class="text-xs font-semibold board-text-strong">
             {{ t('app.backgroundTasks') }}
           </span>
         </div>
@@ -15903,17 +15872,17 @@ const counterexampleTraceHelpText = computed(() => {
         >
           <div class="flex items-center justify-between gap-2">
             <div class="min-w-0">
-              <div class="truncate text-xs font-semibold text-slate-700">
+              <div class="truncate text-xs font-semibold board-text-strong">
                 {{ task.label }}
               </div>
-              <div class="truncate text-[11px] text-slate-500">
+              <div class="truncate text-[11px] board-text-muted">
                 {{ task.status }}
               </div>
             </div>
             <HintTooltip :content="miniTaskCancelLabel(task.kind)">
               <button
                 type="button"
-                class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-slate-500 hover:board-chip-danger hover:board-text-danger"
+                class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md board-text-muted hover:board-chip-danger hover:board-text-danger"
                 :aria-label="miniTaskCancelLabel(task.kind)"
                 @click="cancelMiniTask(task.kind, task.id)"
               >
@@ -15922,7 +15891,7 @@ const counterexampleTraceHelpText = computed(() => {
             </HintTooltip>
           </div>
           <div
-            class="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-200"
+            class="mt-2 h-1.5 overflow-hidden rounded-full board-bg-control"
             role="progressbar"
             :aria-label="`${task.label}: ${task.status}`"
             aria-valuemin="0"
@@ -15952,10 +15921,11 @@ const counterexampleTraceHelpText = computed(() => {
       :specifications="specifications"
       :running="isFuzzing"
       :progress="asyncFuzzingTask.progress"
-      :status="asyncFuzzingTask.status"
+      :status="formatWatchedTaskStatus(asyncFuzzingTask.statusKey, cancellingFuzzingTask)"
       :task-id="asyncFuzzingTask.taskId"
       :cancelling="cancellingFuzzingTask"
-      :error="fuzzingError"
+      :error="fuzzingErrorMessage"
+      :failure-details="fuzzingFailureDetails"
       :configuration-error="effectiveFuzzingConfigurationError"
       :workload="fuzzingWorkload"
       :workload-limit="fuzzingWorkloadLimit"
@@ -15968,7 +15938,7 @@ const counterexampleTraceHelpText = computed(() => {
       :bundled-environment-names="bundledBoardEnvironmentNames"
       :paper-domain-loading="paperDomainPreviewLoading"
       :paper-domain-error="paperDomainPreviewError"
-      :notice="fuzzingSettingsNotice"
+      :notice="fuzzingSettingsNoticeMessage"
       :preflight-blocked="fuzzingContentCommandUnsupported"
       :preflight-message="fuzzingContentCommandUnsupported ? t('app.fuzzContentCommandPreflightBlocked') : null"
       :frozen-task="fuzzingWatchedTask"
@@ -15984,24 +15954,22 @@ const counterexampleTraceHelpText = computed(() => {
       v-if="showVerificationPanel"
       :ref="setVerificationPanelRef"
       data-testid="verification-panel"
-      class="board-floating-panel board-run-panel board-surface-panel fixed top-20 z-30 w-72 max-w-[calc(100vw-2rem)] rounded-2xl shadow-2xl border overflow-hidden"
+      class="board-floating-panel board-run-panel board-surface-panel fixed top-20 z-30 max-w-[calc(100vw-2rem)] rounded-2xl shadow-2xl border overflow-hidden"
       role="region"
       aria-labelledby="verification-panel-title"
       tabindex="-1"
+      autofocus
       @keydown="handleVerificationPanelKeydown"
     >
-      <!-- Verification Header with gradient -->
       <div class="relative overflow-hidden">
         <div class="board-panel-banner absolute inset-0"></div>
-        <div class="absolute inset-0 bg-[url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNjAiIGhlaWdodD0iNjAiIHZpZXdCb3g9IjAgMCA2MCA2MCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48ZyBmaWxsPSJub25lIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiPjxwYXRoIGQ9Ik0zNiAxOGMtOS45NDEgMC0xOCA4LjA1OS0xOCAxOHM4LjA1OSAxOCAxOCAxOCAxOC04LjA1OSAxOC0xOC04LjA1OS0xOC0xOC0xOHptMCAzMmMtNy43MzIgMC0xNC02LjI2OC0xNC0xNHM2LjI2OC0xNCAxNC0xNCAxNCA2LjI2OCAxNCAxNC02LjI2OCAxNC0xNCAxNHoiIGZpbGw9IiNmZmYiIGZpbGwtb3BhY2l0eT0iLjA1Ii8+PC9nPjwvc3ZnPg==')] opacity-30"></div>
-        <div class="relative flex items-center justify-between p-4">
+        <div class="board-tool-header relative">
           <div class="flex items-center gap-3">
             <div class="board-section-icon board-section-icon--lg">
               <span class="material-symbols-outlined text-xl">verified_user</span>
             </div>
             <div>
-              <h3 id="verification-panel-title" class="text-white font-bold text-base">{{ t('app.verification') }}</h3>
-              <p class="board-text-success text-xs">{{ t('app.configureAndRunVerification') }}</p>
+              <h3 id="verification-panel-title" class="board-panel-title">{{ t('app.verification') }}</h3>
             </div>
           </div>
           <HintTooltip :content="t('app.close')">
@@ -16010,7 +15978,7 @@ const counterexampleTraceHelpText = computed(() => {
               @click="closeVerificationPanel"
               data-testid="close-verification-panel"
               :aria-label="t('app.close')"
-              class="board-panel-close text-white/70 hover:text-white hover:bg-white/15"
+              class="board-panel-close"
             >
               <span class="material-symbols-outlined" aria-hidden="true">close</span>
             </button>
@@ -16018,14 +15986,16 @@ const counterexampleTraceHelpText = computed(() => {
         </div>
       </div>
       <!-- Verification Options -->
-      <div class="p-3 space-y-3">
+      <div class="board-run-panel__body iot-scroll-region p-3 space-y-3">
+        <BackgroundTaskSummary v-if="runningVerificationTask" kind="verification" :task="runningVerificationTask" />
+        <template v-if="!isVerifying || !asyncVerificationActive">
         <section
           v-if="fuzzVerificationHandoff"
           data-testid="fuzz-verification-handoff"
-          class="rounded-lg board-surface-info px-3 py-2.5 text-[11px] leading-4 board-text-info"
+          class="rounded-lg board-surface-info px-3 py-2.5 text-xs leading-4 board-text-info"
           aria-labelledby="fuzz-verification-handoff-title"
         >
-          <h4 id="fuzz-verification-handoff-title" class="font-bold">
+          <h4 id="fuzz-verification-handoff-title" class="board-section-title board-text-info">
             {{ t('app.fuzzVerificationHandoffTitle', { run: fuzzVerificationHandoff.runId }) }}
           </h4>
           <p v-if="fuzzVerificationHandoff.specificationLabel" class="mt-1 break-words font-semibold">
@@ -16048,13 +16018,13 @@ const counterexampleTraceHelpText = computed(() => {
         </section>
 
         <!-- Attack Mode -->
-        <div class="board-card board-card--raised p-3 rounded-xl border border-slate-200/60">
+        <div class="board-card p-3 rounded-xl">
           <div class="flex items-center justify-between gap-3">
             <div class="flex min-w-0 items-center gap-3">
-            <div class="w-8 h-8 board-chip-danger rounded-lg flex items-center justify-center">
+            <div class="w-8 h-8 shrink-0 board-chip-danger rounded-lg flex items-center justify-center">
               <span class="material-symbols-outlined board-text-danger text-lg">warning</span>
             </div>
-            <label class="text-xs font-bold text-slate-700 uppercase tracking-wide">
+            <label class="board-form-label">
               {{ t('app.attackMode') }}
             </label>
             </div>
@@ -16064,7 +16034,6 @@ const counterexampleTraceHelpText = computed(() => {
               tone="adversarial"
               test-id="verification-attack-toggle"
               :disabled="isVerifying || (!verificationForm.isAttack && !hasModeledAttackEffect)"
-              :title="!hasModeledAttackEffect ? t('app.attackNoModeledEffect') : undefined"
               :describedby-id="!hasModeledAttackEffect ? 'verification-attack-unavailable' : undefined"
               @change="setVerificationAttackEnabled"
             />
@@ -16073,21 +16042,19 @@ const counterexampleTraceHelpText = computed(() => {
             v-if="!hasModeledAttackEffect"
             id="verification-attack-unavailable"
             data-testid="verification-attack-unavailable"
-            class="mt-2 text-[length:var(--iot-font-min)] leading-4 board-text-warning"
+            class="mt-2 text-xs leading-4 board-text-warning"
           >
             {{ t('app.attackNoModeledEffect') }}
           </p>
         </div>
 
-        <div v-if="verificationForm.isAttack && hasModeledAttackEffect" class="space-y-3 border-y board-border-subtle board-chip-danger px-3 py-3">
+        <div v-if="verificationForm.isAttack && hasModeledAttackEffect" class="space-y-3 rounded-lg board-surface-danger p-3">
           <div class="grid grid-cols-2 gap-2" role="group" :aria-label="t('app.attackSelectionMode')">
             <button
               type="button"
               data-testid="verification-attack-mode-exhaustive"
-              class="min-h-9 border px-2 py-1.5 text-xs font-semibold transition"
-              :class="verificationForm.attackMode === 'ANY_UP_TO_BUDGET'
-                ? 'border-[color:var(--danger)] bg-[color:var(--danger-fill)] text-white'
-                : 'board-border-subtle bg-white board-text-danger hover:board-chip-danger'"
+              class="board-run-mode board-run-mode--adversarial"
+              :aria-pressed="verificationForm.attackMode === 'ANY_UP_TO_BUDGET'"
               :disabled="isVerifying"
               @click="setAttackMode(verificationForm, 'ANY_UP_TO_BUDGET')"
             >
@@ -16096,10 +16063,8 @@ const counterexampleTraceHelpText = computed(() => {
             <button
               type="button"
               data-testid="verification-attack-mode-exact"
-              class="min-h-9 border px-2 py-1.5 text-xs font-semibold transition"
-              :class="verificationForm.attackMode === 'EXACT_POINTS'
-                ? 'border-[color:var(--danger)] bg-[color:var(--danger-fill)] text-white'
-                : 'board-border-subtle bg-white board-text-danger hover:board-chip-danger'"
+              class="board-run-mode board-run-mode--adversarial"
+              :aria-pressed="verificationForm.attackMode === 'EXACT_POINTS'"
               :disabled="isVerifying"
               @click="setAttackMode(verificationForm, 'EXACT_POINTS')"
             >
@@ -16107,18 +16072,19 @@ const counterexampleTraceHelpText = computed(() => {
             </button>
           </div>
 
-          <p class="text-[11px] leading-4 board-text-danger">
+          <p class="text-xs leading-4 board-text-danger">
             {{ verificationForm.attackMode === 'ANY_UP_TO_BUDGET'
               ? t('app.verificationAttackExhaustiveHint')
               : t('app.verificationAttackExactHint') }}
           </p>
 
-          <div v-if="verificationForm.attackMode === 'EXACT_POINTS'" class="space-y-1.5" data-testid="verification-attack-points">
+          <div v-if="verificationForm.attackMode === 'EXACT_POINTS'" class="space-y-1.5" data-testid="verification-attack-points"
+            role="group" :aria-label="t('app.attackModeExact')"
+            :aria-describedby="verificationAttackConfigurationError ? 'verification-attack-points-invalid' : undefined">
             <label
               v-for="point in boardAttackSurface.points"
               :key="point.key"
-              class="flex min-h-8 items-center gap-2 border board-border-subtle bg-white px-2 py-1.5 text-xs text-slate-700"
-              :class="!point.selectable ? 'opacity-55' : 'cursor-pointer'"
+              class="board-form-label board-attack-point"
             >
               <input
                 type="checkbox"
@@ -16131,7 +16097,7 @@ const counterexampleTraceHelpText = computed(() => {
                 {{ point.kind === 'DEVICE' ? 'memory' : 'conversion_path' }}
               </span>
               <span class="min-w-0 flex-1 break-words">{{ point.label }}</span>
-              <span class="shrink-0 text-[length:var(--iot-font-min)] font-semibold uppercase text-slate-500">
+              <span class="shrink-0 board-form-label">
                 {{ point.kind === 'DEVICE' ? t('app.device') : t('app.automationLink') }}
               </span>
             </label>
@@ -16140,7 +16106,7 @@ const counterexampleTraceHelpText = computed(() => {
           <!-- Attack budget (exhaustive verification only) -->
           <div v-if="verificationForm.attackMode === 'ANY_UP_TO_BUDGET'">
           <div class="mb-2 flex items-center justify-between gap-2">
-            <label for="verification-attack-budget" class="min-w-0 text-[length:var(--iot-font-min)] font-bold board-text-danger uppercase tracking-wide">
+            <label for="verification-attack-budget" class="board-form-label min-w-0">
               {{ t('app.attackBudgetLabel') }}:
               <span class="board-text-danger">{{ verificationForm.attackBudget }} / {{ attackBudgetMax }}</span>
             </label>
@@ -16161,32 +16127,33 @@ const counterexampleTraceHelpText = computed(() => {
             min="1"
             :max="attackBudgetMax"
             :aria-invalid="Boolean(verificationAttackConfigurationError)"
-            class="w-full h-2 bg-[color:var(--danger-border)] rounded-lg appearance-none cursor-pointer accent-[color:var(--danger)] disabled:cursor-not-allowed disabled:opacity-60"
+            :aria-describedby="verificationAttackConfigurationError ? 'verification-attack-budget-invalid' : undefined"
+            class="board-run-range board-run-range--adversarial w-full"
           />
           <div class="flex justify-between text-[length:var(--iot-font-min)] board-text-danger mt-1">
             <span>1</span>
             <span>{{ attackBudgetMax }}</span>
           </div>
-          <p v-if="attackBudgetIsCapped" class="mt-1 text-[length:var(--iot-font-min)] font-semibold leading-4 board-text-warning" data-testid="verification-attack-budget-cap">
+          <p v-if="attackBudgetIsCapped" class="mt-1 text-xs font-semibold leading-4 board-text-warning" data-testid="verification-attack-budget-cap">
             {{ t('app.attackBudgetCappedHint', { surface: attackSurfacePointCount, limit: attackBudgetMax }) }}
           </p>
-          <p v-if="verificationAttackConfigurationError" class="mt-1 text-[length:var(--iot-font-min)] font-semibold leading-4 board-text-danger" data-testid="verification-attack-budget-invalid">
+          <p v-if="verificationAttackConfigurationError" id="verification-attack-budget-invalid" class="mt-1 text-xs font-semibold leading-4 board-text-danger" data-testid="verification-attack-budget-invalid">
             {{ verificationAttackConfigurationError }}
           </p>
           </div>
-          <p v-else-if="verificationAttackConfigurationError" class="text-[length:var(--iot-font-min)] font-semibold leading-4 board-text-danger" data-testid="verification-attack-points-invalid">
+          <p v-else-if="verificationAttackConfigurationError" id="verification-attack-points-invalid" class="text-xs font-semibold leading-4 board-text-danger" data-testid="verification-attack-points-invalid">
             {{ verificationAttackConfigurationError }}
           </p>
         </div>
 
         <!-- Privacy Analysis -->
-        <div class="board-card board-card--raised p-3 rounded-xl border border-slate-200/60">
+        <div class="board-card p-3 rounded-xl">
           <div class="flex items-center justify-between gap-3">
             <div class="flex min-w-0 items-center gap-3">
-            <div class="w-8 h-8 board-chip-info rounded-lg flex items-center justify-center">
+            <div class="w-8 h-8 shrink-0 board-chip-info rounded-lg flex items-center justify-center">
               <span class="material-symbols-outlined board-text-info text-lg">security</span>
             </div>
-            <label class="text-xs font-bold text-slate-700 uppercase tracking-wide">
+            <label class="board-form-label">
               {{ t('app.privacyAnalysis') }}
             </label>
             <InfoTooltip
@@ -16207,64 +16174,59 @@ const counterexampleTraceHelpText = computed(() => {
               @change="value => verificationForm.enablePrivacy = value"
             />
           </div>
-          <p v-if="hasPrivacySpecification" id="verification-privacy-required" class="mt-2 text-[length:var(--iot-font-min)] font-semibold leading-4 board-text-info" data-testid="verification-privacy-required">
+          <p v-if="hasPrivacySpecification" id="verification-privacy-required" class="mt-2 text-xs font-semibold leading-4 board-text-info" data-testid="verification-privacy-required">
             {{ t('app.privacyModelRequiredStatus') }}
           </p>
         </div>
 
         <!-- Run Mode -->
-        <div class="board-card board-card--raised p-3 rounded-xl border border-slate-200/60">
+        <div class="board-card p-3 rounded-xl">
           <div class="flex items-center gap-3 mb-2">
-            <div class="w-8 h-8 board-chip-info rounded-lg flex items-center justify-center">
+            <div class="w-8 h-8 shrink-0 board-chip-info rounded-lg flex items-center justify-center">
               <span class="material-symbols-outlined board-text-info text-lg">schedule</span>
             </div>
-            <label class="text-xs font-bold text-slate-700 uppercase tracking-wide">
+            <label class="board-form-label">
               {{ t('app.runMode') }}
             </label>
           </div>
-          <div class="grid grid-cols-2 gap-1 rounded-lg bg-slate-100 p-1">
-            <HintTooltip :content="t('app.syncVerificationModeHint')">
-              <button
-                type="button"
-                :disabled="isVerifying"
-                @click="verificationForm.isAsync = false"
-                data-testid="verification-mode-sync"
-                :aria-pressed="!verificationForm.isAsync"
-                class="min-w-0 rounded-md px-2 py-1.5 text-[11px] font-bold transition-all disabled:cursor-not-allowed disabled:opacity-60"
-                :class="!verificationForm.isAsync ? 'bg-white board-text-success shadow-sm' : 'text-slate-500 hover:text-slate-700'"
-              >
-                {{ t('app.runNow') }}
-              </button>
-            </HintTooltip>
-            <HintTooltip :content="t('app.asyncVerificationModeHint')">
-              <button
-                type="button"
-                :disabled="isVerifying"
-                @click="verificationForm.isAsync = true"
-                data-testid="verification-mode-async"
-                :aria-pressed="verificationForm.isAsync"
-                class="min-w-0 rounded-md px-2 py-1.5 text-[11px] font-bold transition-all disabled:cursor-not-allowed disabled:opacity-60"
-                :class="verificationForm.isAsync ? 'bg-white board-text-info shadow-sm' : 'text-slate-500 hover:text-slate-700'"
-              >
-                {{ t('app.backgroundTask') }}
-              </button>
-            </HintTooltip>
+          <div class="grid grid-cols-2 gap-1 rounded-lg board-bg-control p-1">
+            <button
+              type="button"
+              :disabled="isVerifying"
+              @click="verificationForm.isAsync = false"
+              data-testid="verification-mode-sync"
+              :aria-pressed="!verificationForm.isAsync"
+              class="board-run-mode"
+            >
+              {{ t('app.waitForResult') }}
+            </button>
+            <button
+              type="button"
+              :disabled="isVerifying"
+              @click="verificationForm.isAsync = true"
+              data-testid="verification-mode-async"
+              :aria-pressed="verificationForm.isAsync"
+              class="board-run-mode"
+            >
+              {{ t('app.backgroundTask') }}
+            </button>
           </div>
-          <p class="mt-2 text-[11px] leading-snug text-slate-500">
-            {{ verificationForm.isAsync ? t('app.asyncVerificationModeHint') : t('app.syncVerificationModeHint') }}
+          <p v-if="verificationForm.isAsync" class="mt-2 text-xs leading-5 board-text-muted">
+            {{ t('app.asyncVerificationModeHint') }}
           </p>
         </div>
 
+        </template>
         <!-- Async Progress (visible when async verification is running) -->
         <div v-if="isVerifying && asyncVerificationActive" class="space-y-1">
           <div class="flex items-center justify-between text-xs">
-            <span class="board-text-success font-medium">{{ asyncVerificationTask.status }}</span>
+            <span class="board-text-success font-medium">{{ formatWatchedTaskStatus(asyncVerificationTask.statusKey, cancellingVerificationTask) }}</span>
             <div v-if="asyncVerificationTask.taskId" class="flex items-center gap-2">
-              <span class="board-text-success font-bold">{{ asyncVerificationTask.progress }}%</span>
+              <span class="board-text-success font-semibold">{{ asyncVerificationTask.progress }}%</span>
               <HintTooltip :content="t('app.cancelVerificationTask')">
                 <button
                   type="button"
-                  class="w-6 h-6 inline-flex items-center justify-center rounded-md border border-[color:var(--success-border)] board-text-success hover:bg-[color:var(--success-surface)] disabled:opacity-50 disabled:cursor-not-allowed"
+                  class="board-panel-icon-action"
                   :disabled="cancellingVerificationTask"
                   :aria-label="t('app.cancelVerificationTask')"
                   @click="cancelAsyncVerification"
@@ -16283,31 +16245,31 @@ const counterexampleTraceHelpText = computed(() => {
           </div>
         </div>
 
+      </div>
+      <div class="board-run-panel__footer">
         <!-- Run Verification Button -->
-        <HintTooltip :content="verificationRunBlockedReason || undefined">
-          <button
-            @click="runVerification"
-            data-testid="run-verification"
-            :disabled="isVerifying || Boolean(verificationRunBlockedReason)"
-            :aria-describedby="verificationRunBlockedReason ? 'verification-run-blocked-reason' : undefined"
-            class="board-panel-submit"
-          >
-            <template v-if="!isBoardDataReady && failedBoardDataKeys.length === 0">
-              <span class="material-symbols-outlined text-sm animate-spin">sync</span>
-              {{ t('app.loading') }}
-            </template>
-            <template v-else-if="isVerifying">
-              <span class="material-symbols-outlined text-sm animate-spin">sync</span>
-              {{ t('app.verifying') }}
-            </template>
-            <template v-else>
-              <span class="material-symbols-outlined text-sm">play_arrow</span>
-              {{ verificationForm.isAsync ? t('app.createVerificationTask') : t('app.runVerificationNow') }}
-            </template>
-          </button>
-        </HintTooltip>
+        <button
+          @click="runVerification"
+          data-testid="run-verification"
+          :disabled="isVerifying || Boolean(verificationRunBlockedReason)"
+          :aria-describedby="verificationRunBlockedDescriptionId"
+          class="board-panel-submit"
+        >
+          <template v-if="!isBoardDataReady && failedBoardDataKeys.length === 0">
+            <span class="material-symbols-outlined text-sm animate-spin">sync</span>
+            {{ t('app.loading') }}
+          </template>
+          <template v-else-if="isVerifying">
+            <span class="material-symbols-outlined text-sm animate-spin">sync</span>
+            {{ t('app.verifying') }}
+          </template>
+          <template v-else>
+            <span class="material-symbols-outlined text-sm">play_arrow</span>
+            {{ verificationForm.isAsync ? t('app.createVerificationTask') : t('app.runVerificationNow') }}
+          </template>
+        </button>
         <p
-          v-if="verificationRunBlockedReason"
+          v-if="verificationRunBlockedDescriptionId === 'verification-run-blocked-reason'"
           id="verification-run-blocked-reason"
           data-testid="verification-run-blocked-reason"
           class="text-xs leading-5 board-text-warning"
@@ -16327,18 +16289,18 @@ const counterexampleTraceHelpText = computed(() => {
       role="region"
       aria-labelledby="scenario-recommendation-panel-title"
       tabindex="-1"
+      autofocus
       @keydown="handleScenarioRecommendationPanelKeydown"
     >
       <div class="relative overflow-hidden">
         <div class="board-panel-banner absolute inset-0"></div>
-        <div class="relative flex items-center justify-between p-4">
+        <div class="board-tool-header relative">
           <div class="flex items-center gap-3">
             <div class="board-section-icon board-section-icon--lg">
               <span class="material-symbols-outlined text-xl">account_tree</span>
             </div>
             <div>
-              <h3 id="scenario-recommendation-panel-title" class="text-white font-bold text-base">{{ t('app.scenarioRecommendations') }}</h3>
-              <p class="text-white/70 text-xs">{{ t('app.aiPoweredScenarioSuggestions') }}</p>
+              <h3 id="scenario-recommendation-panel-title" class="board-panel-title">{{ t('app.scenarioRecommendations') }}</h3>
             </div>
           </div>
           <HintTooltip :content="t('app.close')">
@@ -16347,7 +16309,7 @@ const counterexampleTraceHelpText = computed(() => {
               @click="closeScenarioRecommendationPanel"
               data-testid="close-scenario-recommendations"
               :aria-label="t('app.close')"
-              class="board-panel-close text-white/70 hover:text-white hover:bg-white/15"
+              class="board-panel-close"
             >
               <span class="material-symbols-outlined" aria-hidden="true">close</span>
             </button>
@@ -16355,119 +16317,136 @@ const counterexampleTraceHelpText = computed(() => {
         </div>
       </div>
 
-      <div class="iot-scroll-region p-3 space-y-3 max-h-[560px]">
+      <div class="board-recommendation-panel__body iot-scroll-region p-3 space-y-3">
         <div class="board-card grid grid-cols-1 gap-2 rounded-lg border board-border-subtle p-2 sm:grid-cols-3">
           <fieldset class="min-w-0">
-            <legend class="text-xs font-semibold text-slate-700">{{ t('app.devicesTool') }}</legend>
+            <legend class="text-xs font-semibold board-text-strong">{{ t('app.devicesTool') }}</legend>
             <div class="mt-1 grid grid-cols-2 gap-1">
-              <label class="min-w-0 text-[length:var(--iot-font-min)] font-medium text-slate-500">
+              <label class="board-form-label min-w-0">
                 {{ t('app.scenarioMinimum') }}
                 <input
                   v-model.number="scenarioRecommendationFilters.minDevices"
                   :disabled="isRecommendingScenario"
                   data-testid="scenario-min-devices"
+                  :aria-invalid="scenarioRecommendationInput.invalidFields.includes('minDevices') || undefined"
+                  :aria-describedby="scenarioRecommendationInput.invalidFields.includes('minDevices') ? 'scenario-count-error' : undefined"
                   type="number"
                   min="1"
                   max="10"
-                  class="board-card mt-0.5 min-h-11 w-full rounded-md border border-slate-200 px-1.5 py-1.5 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-[color:var(--accent-border)] disabled:bg-slate-100"
+                  class="board-field mt-0.5"
                 />
               </label>
-              <label class="min-w-0 text-[length:var(--iot-font-min)] font-medium text-slate-500">
+              <label class="board-form-label min-w-0">
                 {{ t('app.scenarioMaximum') }}
                 <input
                   v-model.number="scenarioRecommendationFilters.maxDevices"
                   :disabled="isRecommendingScenario"
                   data-testid="scenario-max-devices"
+                  :aria-invalid="scenarioRecommendationInput.invalidFields.includes('maxDevices') || undefined"
+                  :aria-describedby="scenarioRecommendationInput.invalidFields.includes('maxDevices') ? 'scenario-count-error' : undefined"
                   type="number"
                   min="1"
                   max="10"
-                  class="board-card mt-0.5 min-h-11 w-full rounded-md border border-slate-200 px-1.5 py-1.5 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-[color:var(--accent-border)] disabled:bg-slate-100"
+                  class="board-field mt-0.5"
                 />
               </label>
             </div>
           </fieldset>
           <fieldset class="min-w-0">
-            <legend class="text-xs font-semibold text-slate-700">{{ t('app.rulesTool') }}</legend>
+            <legend class="text-xs font-semibold board-text-strong">{{ t('app.rulesTool') }}</legend>
             <div class="mt-1 grid grid-cols-2 gap-1">
-              <label class="min-w-0 text-[length:var(--iot-font-min)] font-medium text-slate-500">
+              <label class="board-form-label min-w-0">
                 {{ t('app.scenarioMinimum') }}
                 <input
                   v-model.number="scenarioRecommendationFilters.minRules"
                   :disabled="isRecommendingScenario"
                   data-testid="scenario-min-rules"
+                  :aria-invalid="scenarioRecommendationInput.invalidFields.includes('minRules') || undefined"
+                  :aria-describedby="scenarioRecommendationInput.invalidFields.includes('minRules') ? 'scenario-count-error' : undefined"
                   type="number"
                   min="1"
                   max="10"
-                  class="board-card mt-0.5 min-h-11 w-full rounded-md border border-slate-200 px-1.5 py-1.5 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-[color:var(--accent-border)] disabled:bg-slate-100"
+                  class="board-field mt-0.5"
                 />
               </label>
-              <label class="min-w-0 text-[length:var(--iot-font-min)] font-medium text-slate-500">
+              <label class="board-form-label min-w-0">
                 {{ t('app.scenarioMaximum') }}
                 <input
                   v-model.number="scenarioRecommendationFilters.maxRules"
                   :disabled="isRecommendingScenario"
                   data-testid="scenario-max-rules"
+                  :aria-invalid="scenarioRecommendationInput.invalidFields.includes('maxRules') || undefined"
+                  :aria-describedby="scenarioRecommendationInput.invalidFields.includes('maxRules') ? 'scenario-count-error' : undefined"
                   type="number"
                   min="1"
                   max="10"
-                  class="board-card mt-0.5 min-h-11 w-full rounded-md border border-slate-200 px-1.5 py-1.5 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-[color:var(--accent-border)] disabled:bg-slate-100"
+                  class="board-field mt-0.5"
                 />
               </label>
             </div>
           </fieldset>
           <fieldset class="min-w-0">
-            <legend class="text-xs font-semibold text-slate-700">{{ t('app.specificationsTool') }}</legend>
+            <legend class="text-xs font-semibold board-text-strong">{{ t('app.specificationsTool') }}</legend>
             <div class="mt-1 grid grid-cols-2 gap-1">
-              <label class="min-w-0 text-[length:var(--iot-font-min)] font-medium text-slate-500">
+              <label class="board-form-label min-w-0">
                 {{ t('app.scenarioMinimum') }}
                 <input
                   v-model.number="scenarioRecommendationFilters.minSpecs"
                   :disabled="isRecommendingScenario"
                   data-testid="scenario-min-specs"
+                  :aria-invalid="scenarioRecommendationInput.invalidFields.includes('minSpecs') || undefined"
+                  :aria-describedby="scenarioRecommendationInput.invalidFields.includes('minSpecs') ? 'scenario-count-error' : undefined"
                   type="number"
                   min="1"
                   max="10"
-                  class="board-card mt-0.5 min-h-11 w-full rounded-md border border-slate-200 px-1.5 py-1.5 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-[color:var(--accent-border)] disabled:bg-slate-100"
+                  class="board-field mt-0.5"
                 />
               </label>
-              <label class="min-w-0 text-[length:var(--iot-font-min)] font-medium text-slate-500">
+              <label class="board-form-label min-w-0">
                 {{ t('app.scenarioMaximum') }}
                 <input
                   v-model.number="scenarioRecommendationFilters.maxSpecs"
                   :disabled="isRecommendingScenario"
                   data-testid="scenario-max-specs"
+                  :aria-invalid="scenarioRecommendationInput.invalidFields.includes('maxSpecs') || undefined"
+                  :aria-describedby="scenarioRecommendationInput.invalidFields.includes('maxSpecs') ? 'scenario-count-error' : undefined"
                   type="number"
                   min="1"
                   max="10"
-                  class="board-card mt-0.5 min-h-11 w-full rounded-md border border-slate-200 px-1.5 py-1.5 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-[color:var(--accent-border)] disabled:bg-slate-100"
+                  class="board-field mt-0.5"
                 />
               </label>
             </div>
           </fieldset>
         </div>
 
-        <label class="board-card block rounded-lg border board-border-subtle p-2 text-xs font-medium text-slate-600">
-          {{ t('app.recommendationScenario') }}
+        <p v-if="scenarioRecommendationInput.error" id="scenario-count-error" data-testid="scenario-count-error"
+          role="status" class="text-xs board-text-danger">{{ scenarioRecommendationInput.error }}</p>
+
+        <div class="board-form-label board-card rounded-lg border board-border-subtle p-2 block">
+          <div class="flex items-center justify-between gap-3">
+            <label for="scenario-recommendation-requirement" class="board-form-label">{{ t('app.recommendationScenario') }}</label>
+            <InfoTooltip :text="t('app.scenarioRecommendationBasisHint')" :label="t('app.showHelpFor', { topic: t('app.recommendationScenario') })" test-id="scenario-recommendation-help" />
+          </div>
           <textarea
+            id="scenario-recommendation-requirement"
             v-model.trim="scenarioRecommendationFilters.userRequirement"
             :disabled="isRecommendingScenario"
             rows="3"
             :maxlength="AI_RECOMMENDATION_REQUIREMENT_MAX_LENGTH"
             :placeholder="t('app.scenarioRecommendationPlaceholder')"
-            class="board-card mt-1 w-full resize-none rounded-md border border-slate-200 px-2 py-1.5 text-xs leading-relaxed text-slate-700 focus:outline-none focus:ring-2 focus:ring-[color:var(--accent-border)] disabled:bg-slate-100"
+            class="board-field mt-1 resize-none leading-relaxed"
           ></textarea>
-          <span class="mt-1 block text-[length:var(--iot-font-min)] font-normal leading-snug text-slate-500">
-            {{ t('app.scenarioRecommendationBasisHint') }}
-          </span>
-        </label>
+        </div>
 
         <button
           type="button"
           data-testid="generate-scenario-recommendation"
+          :aria-describedby="scenarioRecommendationInput.error ? 'scenario-count-error' : undefined"
           @click="fetchScenarioRecommendation"
-          :disabled="isSceneReplacementInProgress || isRecommendationRunningForAnother('scenario')"
+          :disabled="isSceneReplacementInProgress || isRecommendationRunningForAnother('scenario') || (!isRecommendingScenario && Boolean(scenarioRecommendationInput.error))"
           :class="[
-            'flex min-h-11 w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-sm font-bold text-white shadow-sm transition-all active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60',
+            'board-panel-submit board-action-disarmed',
                 isRecommendingScenario ? 'bg-[color:var(--danger-fill)] hover:bg-[color:var(--danger-fill-hover)]' : 'bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)]'
           ]"
         >
@@ -16479,7 +16458,6 @@ const counterexampleTraceHelpText = computed(() => {
 
         <RecommendationProgressStatus
           v-if="isRecommendingScenario"
-          kind="scenario"
           :elapsed-seconds="recommendationProgressElapsed"
           :stage="recommendationProgressStage"
           :template-count="deviceTemplates.length"
@@ -16488,28 +16466,15 @@ const counterexampleTraceHelpText = computed(() => {
           :spec-count="specifications.length"
         />
 
-        <div
-          v-if="scenarioRecommendationMessage && !isRecommendingScenario"
-          class="rounded-lg board-surface-info px-3 py-2 text-xs font-medium board-text-info"
-        >
-          {{ scenarioRecommendationMessage }}
+        <div v-if="recommendationFailures.scenario" data-testid="scenario-recommendation-error"
+          role="alert" class="rounded-lg board-surface-danger px-3 py-2 text-xs leading-5 board-text-danger">
+          <p class="font-semibold">{{ recommendationFailures.scenario.message }}</p>
+          <FailureDetails v-bind="recommendationFailures.scenario" />
         </div>
-        <div
-          v-if="scenarioRecommendationResult && !isRecommendingScenario"
-          data-testid="scenario-candidate-accounting"
-          class="board-card rounded-lg border border-slate-200 px-3 py-2 text-xs leading-relaxed text-slate-600"
-        >
-          {{ t('app.recommendationCandidateSummary', {
-            raw: scenarioRecommendationResult.rawCandidateCount,
-            inspected: scenarioRecommendationResult.inspectedCount,
-            kept: scenarioRecommendationResult.validatedCount,
-            filtered: scenarioRecommendationResult.filteredCount,
-            truncated: scenarioRecommendationResult.truncatedCount
-          }) }}
-        </div>
+
         <div
           v-if="scenarioRecommendationResult?.filteredCount && scenarioRecommendationResult.filteredCount > 0 && !isRecommendingScenario"
-          class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-600"
+          class="rounded-lg border board-border-subtle board-bg-muted px-3 py-2 text-xs font-medium board-text-muted"
         >
           <p>{{ t('app.recommendationFilteredNotice', { count: scenarioRecommendationResult.filteredCount }) }}</p>
           <ul
@@ -16523,7 +16488,7 @@ const counterexampleTraceHelpText = computed(() => {
               {{ formatRecommendationFilteredItem(item) }}
             </li>
           </ul>
-          <p v-else class="mt-1 font-normal text-slate-500">
+          <p v-else class="mt-1 font-normal board-text-muted">
             {{ t('app.recommendationFilteredNoDetails') }}
           </p>
         </div>
@@ -16543,29 +16508,12 @@ const counterexampleTraceHelpText = computed(() => {
           </ul>
         </div>
 
-        <div v-if="isRecommendingScenario" class="flex flex-col items-center justify-center py-10">
-          <div class="relative">
-            <span class="material-symbols-outlined board-text-progress text-5xl animate-spin">sync</span>
-            <div class="absolute inset-0 bg-[color:var(--accent)] rounded-full animate-ping opacity-20"></div>
+        <div v-if="!isRecommendingScenario && scenarioRecommendationRequested && !recommendedScenarioScene && !recommendationFailures.scenario" class="flex flex-col items-center justify-center py-10">
+          <div class="w-16 h-16 board-bg-control rounded-full flex items-center justify-center mb-3">
+            <span class="material-symbols-outlined board-text-muted text-3xl">account_tree</span>
           </div>
-          <p class="text-slate-600 text-sm mt-4 font-medium">{{ t('app.designingScenario') }}</p>
-          <p class="text-slate-500 text-xs mt-1">{{ t('app.generatingCoupledScenario') }}</p>
-        </div>
-
-        <div v-else-if="!scenarioRecommendationRequested" class="flex flex-col items-center justify-center py-10">
-          <div class="w-16 h-16 board-chip-info rounded-full flex items-center justify-center mb-3">
-            <span class="material-symbols-outlined board-text-info text-3xl">tune</span>
-          </div>
-          <p class="text-slate-600 text-sm font-medium mt-2">{{ t('app.configureRecommendationParameters') }}</p>
-          <p class="text-slate-500 text-xs mt-1 text-center px-4">{{ t('app.clickGenerateScenario') }}</p>
-        </div>
-
-        <div v-else-if="!recommendedScenarioScene" class="flex flex-col items-center justify-center py-10">
-          <div class="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-3">
-            <span class="material-symbols-outlined text-slate-500 text-3xl">account_tree</span>
-          </div>
-          <p class="text-slate-600 text-sm font-medium mt-2">{{ t('app.noRecommendationsAvailable') }}</p>
-          <p class="text-slate-500 text-xs mt-1 text-center px-4">{{ t('app.recommendationEmptyGuidance') }}</p>
+          <p class="board-text-muted text-sm font-medium mt-2">{{ t('app.noRecommendationsAvailable') }}</p>
+          <p class="board-text-muted text-xs mt-1 text-center px-4">{{ t('app.recommendationEmptyGuidance') }}</p>
           <ScenarioObjectiveIssues
             v-if="scenarioRecommendationResult"
             :status="scenarioRecommendationResult.objectiveStatus"
@@ -16575,14 +16523,14 @@ const counterexampleTraceHelpText = computed(() => {
           />
         </div>
 
-        <div v-else class="space-y-3">
-          <div class="board-card board-card--raised rounded-xl border border-slate-200 p-3">
+        <div v-else-if="!isRecommendingScenario && scenarioRecommendationRequested && recommendedScenarioScene" class="space-y-3">
+          <div class="board-card board-card--raised rounded-xl border board-border-subtle p-3">
             <div class="flex items-start justify-between gap-3">
               <div class="min-w-0">
-                <h4 class="truncate text-sm font-bold text-slate-800">
+                <h4 class="board-section-title truncate">
                   {{ localizedRecommendationText(scenarioRecommendationResult?.scenarioName, t('app.scenarioRecommendations')) }}
                 </h4>
-                <p v-if="scenarioRecommendationResult?.rationale" class="mt-1 text-xs leading-relaxed text-slate-500">
+                <p v-if="scenarioRecommendationResult?.rationale" class="mt-1 text-xs leading-relaxed board-text-muted">
                   {{ localizedRecommendationText(scenarioRecommendationResult.rationale, t('app.recommendedBasedOnCurrentDevices')) }}
                 </p>
               </div>
@@ -16592,21 +16540,21 @@ const counterexampleTraceHelpText = computed(() => {
             </div>
 
             <div class="mt-3 grid grid-cols-4 gap-2 text-center">
-              <div class="rounded-lg bg-slate-50 px-2 py-2">
-                <div class="text-base font-bold text-slate-800">{{ recommendedScenarioScene.devices.length }}</div>
-                <div class="text-[length:var(--iot-font-min)] text-slate-500">{{ t('app.devicesTool') }}</div>
+              <div class="rounded-lg board-bg-muted px-2 py-2">
+                <div class="board-metric board-text-strong">{{ recommendedScenarioScene.devices.length }}</div>
+                <div class="text-xs board-text-muted">{{ t('app.devicesTool') }}</div>
               </div>
-              <div class="rounded-lg bg-slate-50 px-2 py-2">
-                <div class="text-base font-bold text-slate-800">{{ recommendedScenarioScene.environmentVariables.length }}</div>
-                <div class="text-[length:var(--iot-font-min)] text-slate-500">{{ t('app.environmentPool') }}</div>
+              <div class="rounded-lg board-bg-muted px-2 py-2">
+                <div class="board-metric board-text-strong">{{ recommendedScenarioScene.environmentVariables.length }}</div>
+                <div class="text-xs board-text-muted">{{ t('app.environmentPool') }}</div>
               </div>
-              <div class="rounded-lg bg-slate-50 px-2 py-2">
-                <div class="text-base font-bold text-slate-800">{{ recommendedScenarioScene.rules.length }}</div>
-                <div class="text-[length:var(--iot-font-min)] text-slate-500">{{ t('app.rulesTool') }}</div>
+              <div class="rounded-lg board-bg-muted px-2 py-2">
+                <div class="board-metric board-text-strong">{{ recommendedScenarioScene.rules.length }}</div>
+                <div class="text-xs board-text-muted">{{ t('app.rulesTool') }}</div>
               </div>
-              <div class="rounded-lg bg-slate-50 px-2 py-2">
-                <div class="text-base font-bold text-slate-800">{{ recommendedScenarioScene.specs.length }}</div>
-                <div class="text-[length:var(--iot-font-min)] text-slate-500">{{ t('app.specificationsTool') }}</div>
+              <div class="rounded-lg board-bg-muted px-2 py-2">
+                <div class="board-metric board-text-strong">{{ recommendedScenarioScene.specs.length }}</div>
+                <div class="text-xs board-text-muted">{{ t('app.specificationsTool') }}</div>
               </div>
             </div>
 
@@ -16618,14 +16566,15 @@ const counterexampleTraceHelpText = computed(() => {
               :format-issue="formatScenarioObjectiveIssue"
             />
 
+            <p data-testid="scenario-recommendations-unverified" class="mt-3 text-xs board-text-muted">{{ t('app.recommendationsNotVerified') }}</p>
             <div
               class="mt-3 flex items-start gap-2 rounded-lg border px-2.5 py-2 text-xs"
               :class="scenarioRecommendationResult?.verificationReady
-                ? 'board-border-subtle board-chip-success board-text-success'
+                ? 'board-surface-info board-text-info'
                 : 'board-surface-warning board-text-warning'"
             >
               <span class="material-symbols-outlined text-base" aria-hidden="true">
-                {{ scenarioRecommendationResult?.verificationReady ? 'verified' : 'info' }}
+                {{ scenarioRecommendationResult?.verificationReady ? 'rule' : 'info' }}
               </span>
               <div>
                 <div class="font-semibold">
@@ -16660,37 +16609,37 @@ const counterexampleTraceHelpText = computed(() => {
             </div>
           </div>
 
-          <details class="board-card rounded-xl border border-slate-200 p-3 text-xs">
+          <details class="board-card rounded-xl border board-border-subtle p-3 text-xs">
             <summary class="flex cursor-pointer items-center gap-1 font-semibold board-text-info">
               <span class="material-symbols-outlined text-sm">visibility</span>
               {{ t('app.viewScenarioDetails') }}
             </summary>
-            <div class="mt-3 space-y-3 text-slate-600">
+            <div class="mt-3 space-y-3 board-text-muted">
               <div>
-                <div class="mb-1 font-semibold text-slate-700">{{ t('app.deviceList') }}</div>
+                <div class="mb-1 font-semibold board-text-strong">{{ t('app.deviceList') }}</div>
                 <div class="space-y-1">
                   <div
                     v-for="device in recommendedScenarioScene.devices"
                     :key="device.id"
-                    class="rounded bg-slate-50 px-2 py-1.5"
+                    class="rounded board-bg-muted px-2 py-1.5"
                   >
-                    <div class="font-medium text-slate-700">{{ device.label }} · {{ device.templateName }}</div>
-                    <div v-if="scenarioDeviceHasStateMachine(device)" class="mt-0.5 text-[11px] text-slate-500">
+                    <div class="font-medium board-text-strong">{{ device.label }} · {{ device.templateName }}</div>
+                    <div v-if="scenarioDeviceHasStateMachine(device)" class="mt-0.5 text-xs board-text-muted">
                       {{ t('app.scenarioDeviceRuntime', {
                         state: formatScenarioDeviceModelToken(device, device.state),
                         trust: t(`app.${scenarioDeviceStateTrust(device)}`),
                         privacy: t(`app.${scenarioDeviceStatePrivacy(device)}`)
                       }) }}
                     </div>
-                    <div v-else class="mt-0.5 text-[11px] text-slate-500">
+                    <div v-else class="mt-0.5 text-xs board-text-muted">
                       {{ t('app.scenarioStatelessDeviceRuntime') }}
                     </div>
-                    <div v-if="device.variables?.length" class="mt-0.5 text-[11px] text-slate-500">
+                    <div v-if="device.variables?.length" class="mt-0.5 text-xs board-text-muted">
                       {{ t('app.scenarioLocalVariables', {
                         values: device.variables.map(variable => `${formatScenarioDeviceModelToken(device, variable.name)}=${formatScenarioDeviceModelToken(device, variable.value)} (${t(`app.${scenarioDeviceVariableTrust(device, variable)}`)})`).join(t('app.listSeparator'))
                       }) }}
                     </div>
-                    <div v-if="device.privacies?.length" class="mt-0.5 text-[11px] text-slate-500">
+                    <div v-if="device.privacies?.length" class="mt-0.5 text-xs board-text-muted">
                       {{ t('app.scenarioLocalSensitivities', {
                         values: device.privacies.map(item => `${formatScenarioDeviceModelToken(device, item.name)}=${t(`app.${item.privacy}`)}`).join(t('app.listSeparator'))
                       }) }}
@@ -16699,12 +16648,12 @@ const counterexampleTraceHelpText = computed(() => {
                 </div>
               </div>
               <div v-if="recommendedScenarioScene.environmentVariables.length">
-                <div class="mb-1 font-semibold text-slate-700">{{ t('app.environmentPool') }}</div>
+                <div class="mb-1 font-semibold board-text-strong">{{ t('app.environmentPool') }}</div>
                 <ul class="space-y-1">
                   <li
                     v-for="variable in recommendedScenarioScene.environmentVariables"
                     :key="variable.name"
-                    class="rounded bg-slate-50 px-2 py-1"
+                    class="rounded board-bg-muted px-2 py-1"
                   >
                     {{ t('app.scenarioEnvironmentRuntime', {
                       name: formatScenarioEnvironmentModelToken(variable.name, variable.name),
@@ -16718,18 +16667,18 @@ const counterexampleTraceHelpText = computed(() => {
                 </ul>
               </div>
               <div v-if="recommendedScenarioScene.rules.length">
-                <div class="mb-1 font-semibold text-slate-700">{{ t('app.globalRules') }}</div>
-                <div class="mb-2 flex items-start gap-1.5 rounded board-surface-warning px-2 py-1.5 text-[length:var(--iot-font-min)] leading-4 board-text-warning">
+                <div class="mb-1 font-semibold board-text-strong">{{ t('app.globalRules') }}</div>
+                <div class="mb-2 flex items-start gap-1.5 rounded board-surface-warning px-2 py-1.5 text-xs leading-4 board-text-warning">
                   <span class="material-symbols-outlined text-sm" aria-hidden="true">low_priority</span>
                   <span>{{ t('app.ruleExecutionOrderHint') }}</span>
                 </div>
                 <ul class="space-y-1">
-                  <li v-for="(rule, index) in recommendedScenarioScene.rules" :key="index" class="rounded bg-slate-50 px-2 py-1.5">
-                    <div class="flex items-center gap-1.5 font-medium text-slate-700">
-                      <span class="rounded board-chip-warning px-1 py-0.5 text-[length:var(--iot-font-min)] font-bold board-text-warning">#{{ index + 1 }}</span>
+                  <li v-for="(rule, index) in recommendedScenarioScene.rules" :key="index" class="rounded board-bg-muted px-2 py-1.5">
+                    <div class="flex items-center gap-1.5 font-medium board-text-strong">
+                      <span class="rounded board-chip-warning px-1 py-0.5 text-xs font-semibold board-text-warning">#{{ index + 1 }}</span>
                       <span>{{ rule.name || t('app.ruleNumber', { number: index + 1 }) }}</span>
                     </div>
-                    <div class="mt-0.5 text-[11px] text-slate-500">
+                    <div class="mt-0.5 text-xs board-text-muted">
                       {{ t('app.scenarioRuleSemantics', {
                         triggers: rule.sources.map(formatScenarioRuleSource).join(` ${t('app.and')} `),
                         action: formatScenarioRuleAction(rule)
@@ -16739,11 +16688,11 @@ const counterexampleTraceHelpText = computed(() => {
                 </ul>
               </div>
               <div v-if="recommendedScenarioScene.specs.length">
-                <div class="mb-1 font-semibold text-slate-700">{{ t('app.specificationsTool') }}</div>
+                <div class="mb-1 font-semibold board-text-strong">{{ t('app.specificationsTool') }}</div>
                 <ul class="space-y-1">
-                  <li v-for="(spec, index) in recommendedScenarioScene.specs" :key="spec.id" class="rounded bg-slate-50 px-2 py-1.5">
-                    <div class="font-medium text-slate-700">{{ getSpecResultDisplayTitle(spec, index) }}</div>
-                    <div class="mt-0.5 break-all font-mono text-[11px] text-slate-500">
+                  <li v-for="(spec, index) in recommendedScenarioScene.specs" :key="spec.id" class="rounded board-bg-muted px-2 py-1.5">
+                    <div class="font-medium board-text-strong">{{ getSpecResultDisplayTitle(spec, index) }}</div>
+                    <div class="mt-0.5 break-all font-mono text-xs board-text-muted">
                       {{ t('app.formulaPreview') }}: {{ formatScenarioSpecFormula(spec) }}
                     </div>
                   </li>
@@ -16756,7 +16705,7 @@ const counterexampleTraceHelpText = computed(() => {
             <button
               type="button"
               data-testid="export-recommended-scenario"
-              class="board-card flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-bold board-text-info transition hover:board-chip-info"
+              class="board-card flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold board-text-info transition hover:board-chip-info"
               @click="exportRecommendedScenario"
             >
               <span class="material-symbols-outlined text-base">download</span>
@@ -16765,7 +16714,7 @@ const counterexampleTraceHelpText = computed(() => {
             <button
               type="button"
               data-testid="apply-recommended-scenario"
-              class="flex items-center justify-center gap-2 rounded-lg bg-[color:var(--accent-fill)] px-3 py-2 text-sm font-bold text-white shadow-sm transition hover:bg-[color:var(--accent-fill-hover)]"
+              class="flex items-center justify-center gap-2 rounded-lg bg-[color:var(--accent-fill)] px-3 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-[color:var(--accent-fill-hover)]"
               :disabled="isSceneReplacementInProgress"
               @click="applyRecommendedScenario"
             >
@@ -16774,10 +16723,25 @@ const counterexampleTraceHelpText = computed(() => {
             </button>
           </div>
 
-          <p class="px-1 text-[length:var(--iot-font-min)] leading-relaxed text-slate-500">
+          <p class="px-1 text-xs leading-relaxed board-text-muted">
             {{ t('app.applyScenarioHint') }}
           </p>
         </div>
+        <details
+          v-if="scenarioRecommendationResult && !isRecommendingScenario"
+          data-testid="scenario-candidate-accounting"
+          class="board-card rounded-lg border board-border-subtle px-3 py-2 text-xs leading-relaxed board-text-muted"
+        >
+          <summary class="cursor-pointer py-2 font-semibold">{{ t('app.recommendationGenerationDetails') }}</summary>
+          <p v-if="scenarioRecommendationMessage" class="mt-1">{{ scenarioRecommendationMessage }}</p>
+          {{ t('app.recommendationCandidateSummary', {
+            raw: scenarioRecommendationResult.rawCandidateCount,
+            inspected: scenarioRecommendationResult.inspectedCount,
+            kept: scenarioRecommendationResult.validatedCount,
+            filtered: scenarioRecommendationResult.filteredCount,
+            truncated: scenarioRecommendationResult.truncatedCount
+          }) }}
+        </details>
       </div>
     </div>
 
@@ -16790,20 +16754,18 @@ const counterexampleTraceHelpText = computed(() => {
       role="region"
       aria-labelledby="rule-recommendation-panel-title"
       tabindex="-1"
+      autofocus
       @keydown="handleRuleRecommendationPanelKeydown"
     >
-      <!-- Recommendation Header with gradient -->
       <div class="relative overflow-hidden">
         <div class="board-panel-banner absolute inset-0"></div>
-        <div class="absolute inset-0 bg-[url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNjAiIGhlaWdodD0iNjAiIHZpZXdCb3g9IjAgMCA2MCA2MCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48ZyBmaWxsPSJub25lIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiPjxwYXRoIGQ9Ik0zNiAxOGMtOS45NDEgMC0xOCA4LjA1OS0xOCAxOHM4LjA1OSAxOCAxOCAxOCAxOC04LjA1OSAxOC0xOC04LjA1OS0xOC0xOC0xOHptMCAzMmMtNy43MzIgMC0xNC02LjI2OC0xNC0xNHM2LjI2OC0xNCAxNC0xNCAxNCA2LjI2OCAxNCAxNC02LjI2OCAxNC0xNCAxNHoiIGZpbGw9IiNmZmYiIGZpbGwtb3BhY2l0eT0iLjA1Ii8+PC9nPjwvc3ZnPg==')] opacity-30"></div>
-        <div class="relative flex items-center justify-between p-4">
+        <div class="board-tool-header relative">
           <div class="flex items-center gap-3">
             <div class="board-section-icon board-section-icon--lg">
               <span class="material-symbols-outlined text-xl">auto_awesome</span>
             </div>
             <div>
-              <h3 id="rule-recommendation-panel-title" class="text-white font-bold text-base">{{ t('app.ruleRecommendations') }}</h3>
-              <p class="text-white/70 text-xs">{{ t('app.aiPoweredAutomationSuggestions') }}</p>
+              <h3 id="rule-recommendation-panel-title" class="board-panel-title">{{ t('app.ruleRecommendations') }}</h3>
             </div>
           </div>
           <HintTooltip :content="t('app.close')">
@@ -16812,7 +16774,7 @@ const counterexampleTraceHelpText = computed(() => {
               @click="closeRecommendationPanel"
               data-testid="close-rule-recommendations"
               :aria-label="t('app.close')"
-              class="board-panel-close text-white/70 hover:text-white hover:bg-white/15"
+              class="board-panel-close"
             >
               <span class="material-symbols-outlined" aria-hidden="true">close</span>
             </button>
@@ -16821,9 +16783,9 @@ const counterexampleTraceHelpText = computed(() => {
       </div>
 
       <!-- Recommendation Content -->
-      <div class="iot-scroll-region p-3 space-y-3 max-h-[500px]">
-        <div class="rounded-lg border board-border-subtle bg-white p-2">
-          <label class="text-xs font-medium text-slate-600">
+      <div class="board-recommendation-panel__body iot-scroll-region p-3 space-y-3">
+        <div class="rounded-lg border board-border-subtle board-bg-elevated p-2">
+          <label class="board-form-label">
             {{ t('app.count') }}
             <input
               v-model.number="ruleRecommendationFilters.maxRecommendations"
@@ -16831,25 +16793,26 @@ const counterexampleTraceHelpText = computed(() => {
               type="number"
               min="1"
               max="10"
-              class="board-card mt-1 min-h-11 w-full rounded-md border border-slate-200 px-2 py-1.5 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-[color:var(--accent-border)] disabled:bg-slate-100"
+              class="board-field mt-1"
             />
           </label>
         </div>
 
-        <label class="block rounded-lg border board-border-subtle bg-white p-2 text-xs font-medium text-slate-600">
-          {{ t('app.recommendationScenario') }}
+        <div class="board-form-label rounded-lg border board-border-subtle board-bg-elevated p-2 block">
+          <div class="flex items-center justify-between gap-3">
+            <label for="rule-recommendation-requirement" class="board-form-label">{{ t('app.recommendationScenario') }}</label>
+            <InfoTooltip :text="t('app.recommendationBasisHint')" :label="t('app.showHelpFor', { topic: t('app.recommendationScenario') })" test-id="rule-recommendation-help" />
+          </div>
           <textarea
+            id="rule-recommendation-requirement"
             v-model.trim="ruleRecommendationFilters.userRequirement"
             :disabled="isRecommendingRules"
             rows="3"
             :maxlength="AI_RECOMMENDATION_REQUIREMENT_MAX_LENGTH"
             :placeholder="t('app.recommendationScenarioPlaceholder')"
-            class="board-card mt-1 w-full resize-none rounded-md border border-slate-200 px-2 py-1.5 text-xs leading-relaxed text-slate-700 focus:outline-none focus:ring-2 focus:ring-[color:var(--accent-border)] disabled:bg-slate-100"
+            class="board-field mt-1 resize-none leading-relaxed"
           ></textarea>
-          <span class="mt-1 block text-[length:var(--iot-font-min)] font-normal leading-snug text-slate-500">
-            {{ t('app.recommendationBasisHint') }}
-          </span>
-        </label>
+        </div>
 
         <button
           type="button"
@@ -16857,7 +16820,7 @@ const counterexampleTraceHelpText = computed(() => {
           @click="fetchRuleRecommendations"
           :disabled="isSceneReplacementInProgress || isRecommendationRunningForAnother('rule')"
           :class="[
-            'flex min-h-11 w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-sm font-bold text-white shadow-sm transition-all active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60',
+            'board-panel-submit board-action-disarmed',
             isRecommendingRules ? 'bg-[color:var(--danger-fill)] hover:bg-[color:var(--danger-fill-hover)]' : 'bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)]'
           ]"
         >
@@ -16869,7 +16832,6 @@ const counterexampleTraceHelpText = computed(() => {
 
         <RecommendationProgressStatus
           v-if="isRecommendingRules"
-          kind="rule"
           :elapsed-seconds="recommendationProgressElapsed"
           :stage="recommendationProgressStage"
           :template-count="deviceTemplates.length"
@@ -16878,28 +16840,17 @@ const counterexampleTraceHelpText = computed(() => {
           :spec-count="specifications.length"
         />
 
-        <div
-          v-if="ruleRecommendationMessage && !isRecommendingRules"
-          class="rounded-lg board-surface-warning px-3 py-2 text-xs font-medium board-text-warning"
-        >
+        <div v-if="recommendationFailures.rule" data-testid="rule-recommendation-error"
+          role="alert" class="rounded-lg board-surface-danger px-3 py-2 text-xs leading-5 board-text-danger">
+          <p class="font-semibold">{{ recommendationFailures.rule.message }}</p>
+          <FailureDetails v-bind="recommendationFailures.rule" />
+        </div>
+        <p v-if="ruleRecommendationMessage && !isRecommendingRules && ruleRecommendationIsAppliedConfirmation" class="text-xs board-text-muted">
           {{ ruleRecommendationMessage }}
-        </div>
-        <div
-          v-if="ruleRecommendationMessage && !isRecommendingRules && !ruleRecommendationIsAppliedConfirmation"
-          data-testid="rule-candidate-accounting"
-          class="board-card rounded-lg border border-slate-200 px-3 py-2 text-xs leading-relaxed text-slate-600"
-        >
-          {{ t('app.recommendationCandidateSummary', {
-            raw: ruleRecommendationRawCandidateCount,
-            inspected: ruleRecommendationInspectedCount,
-            kept: ruleRecommendations.length,
-            filtered: ruleRecommendationFilteredCount,
-            truncated: ruleRecommendationTruncatedCount
-          }) }}
-        </div>
+        </p>
         <div
           v-if="ruleRecommendationFilteredCount > 0 && !isRecommendingRules"
-          class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-600"
+          class="rounded-lg border board-border-subtle board-bg-muted px-3 py-2 text-xs font-medium board-text-muted"
         >
           <p>{{ t('app.recommendationFilteredNotice', { count: ruleRecommendationFilteredCount }) }}</p>
           <ul
@@ -16913,7 +16864,7 @@ const counterexampleTraceHelpText = computed(() => {
               {{ formatRecommendationFilteredItem(item) }}
             </li>
           </ul>
-          <p v-else class="mt-1 font-normal text-slate-500">
+          <p v-else class="mt-1 font-normal board-text-muted">
             {{ t('app.recommendationFilteredNoDetails') }}
           </p>
         </div>
@@ -16933,39 +16884,23 @@ const counterexampleTraceHelpText = computed(() => {
           </ul>
         </div>
 
-        <!-- Loading State -->
-        <div v-if="isRecommendingRules" class="flex flex-col items-center justify-center py-10">
-          <div class="relative">
-            <span class="material-symbols-outlined board-text-progress text-5xl animate-spin">sync</span>
-            <div class="absolute inset-0 bg-[color:var(--warning)] rounded-full animate-ping opacity-20"></div>
+        <div v-if="!isRecommendingRules && ruleRecommendationRequested && ruleRecommendations.length === 0 && !recommendationFailures.rule" class="flex flex-col items-center justify-center py-10">
+          <div class="w-16 h-16 board-bg-control rounded-full flex items-center justify-center mb-3">
+            <span class="material-symbols-outlined board-text-muted text-3xl">psychology</span>
           </div>
-          <p class="text-slate-600 text-sm mt-4 font-medium">{{ t('app.analyzingDevices') }}</p>
-          <p class="text-slate-500 text-xs mt-1">{{ t('app.generatingAutomationRules') }}</p>
+          <p class="board-text-muted text-sm font-medium mt-2">{{ t('app.noRecommendationsAvailable') }}</p>
+          <p class="board-text-muted text-xs mt-1 text-center px-4">{{ t('app.recommendationEmptyGuidance') }}</p>
         </div>
 
-        <!-- Setup State -->
-        <div v-else-if="!ruleRecommendationRequested" class="flex flex-col items-center justify-center py-10">
-          <div class="w-16 h-16 board-chip-warning rounded-full flex items-center justify-center mb-3">
-            <span class="material-symbols-outlined board-text-warning text-3xl">tune</span>
-          </div>
-          <p class="text-slate-600 text-sm font-medium mt-2">{{ t('app.configureRecommendationParameters') }}</p>
-          <p class="text-slate-500 text-xs mt-1 text-center px-4">{{ t('app.clickGenerateRecommendations') }}</p>
-        </div>
-
-        <!-- Empty State -->
-        <div v-else-if="ruleRecommendations.length === 0" class="flex flex-col items-center justify-center py-10">
-          <div class="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-3">
-            <span class="material-symbols-outlined text-slate-500 text-3xl">psychology</span>
-          </div>
-          <p class="text-slate-600 text-sm font-medium mt-2">{{ t('app.noRecommendationsAvailable') }}</p>
-          <p class="text-slate-500 text-xs mt-1 text-center px-4">{{ t('app.recommendationEmptyGuidance') }}</p>
-        </div>
+        <p v-if="!isRecommendingRules && ruleRecommendations.length" data-testid="rule-recommendations-unverified" class="text-xs board-text-muted">
+          {{ t('app.recommendationsNotVerified') }}
+        </p>
 
         <!-- Recommendations List -->
-        <div v-else class="space-y-3">
+        <div v-if="!isRecommendingRules && ruleRecommendations.length && !recommendationFailures.rule" class="space-y-3">
           <!-- Header with count -->
           <div class="flex items-center justify-between px-1">
-            <span class="text-xs font-medium text-slate-500">{{ t('app.recommendationsFound', { count: ruleRecommendations.length }) }}</span>
+            <span class="text-xs font-medium board-text-muted">{{ t('app.recommendationsFound', { count: ruleRecommendations.length }) }}</span>
             <button 
               @click="fetchRuleRecommendations"
               :disabled="isSceneReplacementInProgress"
@@ -16979,7 +16914,7 @@ const counterexampleTraceHelpText = computed(() => {
           <div 
             v-for="(rec, index) in ruleRecommendations" 
             :key="index"
-            class="board-card board-card--raised rounded-xl border border-slate-200 hover:transition-all overflow-hidden group"
+            class="board-card board-card--raised rounded-xl border board-border-subtle hover:transition-all overflow-hidden group"
           >
             <!-- Card Header -->
             <div class="p-3 pb-2">
@@ -16990,7 +16925,7 @@ const counterexampleTraceHelpText = computed(() => {
                     <span class="material-symbols-outlined">smart_toy</span>
                   </div>
                   <div class="min-w-0">
-                    <h4 class="text-sm font-bold text-slate-800 break-words">{{ rec.name }}</h4>
+                    <h4 class="board-section-title break-words">{{ rec.name }}</h4>
                   </div>
                 </div>
               </div>
@@ -16998,12 +16933,12 @@ const counterexampleTraceHelpText = computed(() => {
 
             <!-- Reason -->
             <div class="px-3 pb-2">
-              <!-- Same path as the device, specification and scenario cards: a model-authored reason is
-                   not contractually in the UI locale, so a reason that does not match it is replaced by
-                   the localized provenance line rather than shown as the block's only text. -->
-              <p class="text-xs leading-5 text-slate-700 break-words">
-                {{ localizedRecommendationText(rec.reason, t('app.aiGeneratedAutomationRule')) }}
-              </p>
+              <p class="board-copy break-words board-text-strong" data-testid="rule-recommendation-description">{{ presentedRuleRecommendations[index].description }}</p>
+              <p v-if="presentedRuleRecommendations[index].contentSource" class="mt-1 text-xs board-text-muted">{{ t('app.copyFrom') }} {{ presentedRuleRecommendations[index].contentSource }}</p>
+              <details v-if="localizedRecommendationText(rec.reason)" class="mt-2 text-xs board-text-muted">
+                <summary class="cursor-pointer py-2 font-semibold">{{ t('app.recommendationRationale') }}</summary>
+                <p class="break-words">{{ localizedRecommendationText(rec.reason) }}</p>
+              </details>
             </div>
 
             <!-- Details -->
@@ -17013,7 +16948,7 @@ const counterexampleTraceHelpText = computed(() => {
                   <span class="material-symbols-outlined text-sm">info</span>
                   {{ t('app.viewDetails') }}
                 </summary>
-                <div class="mt-2 space-y-2 rounded-lg bg-slate-50 p-2 text-slate-700">
+                <div class="mt-2 space-y-2 rounded-lg board-bg-muted p-2 board-text-strong">
                   <div v-if="rec.conditions && rec.conditions.length">
                     <div class="mb-1 font-semibold board-text-warning">{{ t('app.trigger') }}:</div>
                     <ul class="space-y-1">
@@ -17025,7 +16960,7 @@ const counterexampleTraceHelpText = computed(() => {
                           <span class="mx-1">{{ formatRelationForDisplay(cond.relation) }}</span>
                           <span class="board-card font-mono rounded px-1 py-0.5">{{ formatRecommendedRuleConditionValue(cond) }}</span>
                         </template>
-                        <span v-else class="ml-1 text-slate-500">{{ t('app.apiSignalFires') }}</span>
+                        <span v-else class="ml-1 board-text-muted">{{ t('app.apiSignalFires') }}</span>
                       </li>
                     </ul>
                   </div>
@@ -17035,7 +16970,7 @@ const counterexampleTraceHelpText = computed(() => {
                       <span class="board-card font-mono rounded px-1 py-0.5">
                         {{ formatRecommendedRuleCommandDevice(rec.command) }}.{{ formatRecommendedRuleCommandAction(rec.command) }}
                       </span>
-                      <span v-if="rec.command.contentDevice && rec.command.content" class="ml-2 text-slate-500">
+                      <span v-if="rec.command.contentDevice && rec.command.content" class="ml-2 board-text-muted">
                         ({{ t('app.copyFrom') }} {{ formatRecommendedRuleContentDevice(rec.command) }}<template v-if="rec.command.content">.{{ formatRecommendedRuleCommandContent(rec.command) }}<template v-if="rec.command.contentPrivacy"> ({{ t(`app.${rec.command.contentPrivacy}`) }})</template></template>)
                       </span>
                     </div>
@@ -17046,16 +16981,20 @@ const counterexampleTraceHelpText = computed(() => {
 
             <!-- Action Button -->
             <div class="px-3 pb-3">
+              <div v-if="recommendationApplyFailures.rule[index]" :data-testid="`rule-recommendation-apply-failure-${index}`" role="alert" class="mb-2 text-sm">
+                <p class="font-semibold board-text-danger">{{ recommendationApplyFailures.rule[index].message }}</p>
+                <FailureDetails v-bind="recommendationApplyFailures.rule[index]" />
+              </div>
               <button 
                 @click="applyRecommendation(rec, index)"
-                :disabled="isSceneReplacementInProgress || appliedRuleRecommendations.has(index) || applyingRuleRecommendations.has(index)"
+                :disabled="isSceneReplacementInProgress || appliedRuleRecommendations.has(index) || applyingRuleRecommendations.has(index) || recommendationApplyFailures.rule[index]?.outcomeUnknown"
                 :aria-busy="applyingRuleRecommendations.has(index)"
                 :class="[
                   'w-full py-2 px-4 text-white text-sm font-medium rounded-lg transition-colors flex items-center justify-center gap-2',
                   appliedRuleRecommendations.has(index)
                     ? 'bg-[color:var(--success-fill)] cursor-default'
                     : applyingRuleRecommendations.has(index)
-                      ? 'bg-slate-400 cursor-wait'
+                      ? 'bg-[color:var(--accent-fill-disabled)] cursor-wait'
                       : 'bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)]'
                 ]"
               >
@@ -17074,11 +17013,26 @@ const counterexampleTraceHelpText = computed(() => {
             </div>
           </div>
         </div>
+        <details
+          v-if="ruleRecommendationMessage && !isRecommendingRules && !ruleRecommendationIsAppliedConfirmation"
+          data-testid="rule-candidate-accounting"
+          class="board-card rounded-lg border board-border-subtle px-3 py-2 text-xs leading-relaxed board-text-muted"
+        >
+          <summary class="cursor-pointer py-2 font-semibold">{{ t('app.recommendationGenerationDetails') }}</summary>
+          <p class="mt-1">{{ ruleRecommendationMessage }}</p>
+          {{ t('app.recommendationCandidateSummary', {
+            raw: ruleRecommendationRawCandidateCount,
+            inspected: ruleRecommendationInspectedCount,
+            kept: ruleRecommendations.length,
+            filtered: ruleRecommendationFilteredCount,
+            truncated: ruleRecommendationTruncatedCount
+          }) }}
+        </details>
       </div>
     </div>
 
     <!-- Device Recommendation Panel -->
-    <div 
+    <div
       v-if="showDeviceRecommendationPanel"
       :ref="setDeviceRecommendationPanelRef"
       data-testid="device-recommendation-panel"
@@ -17086,20 +17040,18 @@ const counterexampleTraceHelpText = computed(() => {
       role="region"
       aria-labelledby="device-recommendation-panel-title"
       tabindex="-1"
+      autofocus
       @keydown="handleDeviceRecommendationPanelKeydown"
     >
-      <!-- Recommendation Header with gradient -->
       <div class="relative overflow-hidden">
         <div class="board-panel-banner absolute inset-0"></div>
-        <div class="absolute inset-0 bg-[url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNjAiIGhlaWdodD0iNjAiIHZpZXdCb3g9IjAgMCA2MCA2MCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48ZyBmaWxsPSJub25lIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiPjxwYXRoIGQ9Ik0zNiAxOGMtOS45NDEgMC0xOCA4LjA1OS0xOCAxOHM4LjA1OSAxOCAxOCAxOCAxOC04LjA1OSAxOC0xOC04LjA1OS0xOC0xOC0xOHptMCAzMmMtNy43MzIgMC0xNC02LjI2OC0xNC0xNHM2LjI2OC0xNCAxNC0xNCAxNCA2LjI2OCAxNCAxNC02LjI2OCAxNC0xNCAxNHoiIGZpbGw9IiNmZmYiIGZpbGwtb3BhY2l0eT0iLjA1Ii8+PC9nPjwvc3ZnPg==')] opacity-30"></div>
-        <div class="relative flex items-center justify-between p-4">
+        <div class="board-tool-header relative">
           <div class="flex items-center gap-3">
             <div class="board-section-icon board-section-icon--lg">
               <span class="material-symbols-outlined text-xl">devices</span>
             </div>
             <div>
-              <h3 id="device-recommendation-panel-title" class="text-white font-bold text-base">{{ t('app.deviceRecommendations') }}</h3>
-              <p class="text-white/70 text-xs">{{ t('app.aiPoweredDeviceSuggestions') }}</p>
+              <h3 id="device-recommendation-panel-title" class="board-panel-title">{{ t('app.deviceRecommendations') }}</h3>
             </div>
           </div>
           <HintTooltip :content="t('app.close')">
@@ -17108,7 +17060,7 @@ const counterexampleTraceHelpText = computed(() => {
               @click="closeDeviceRecommendationPanel"
               data-testid="close-device-recommendations"
               :aria-label="t('app.close')"
-              class="board-panel-close text-white/70 hover:text-white hover:bg-white/15"
+              class="board-panel-close"
             >
               <span class="material-symbols-outlined" aria-hidden="true">close</span>
             </button>
@@ -17117,9 +17069,9 @@ const counterexampleTraceHelpText = computed(() => {
       </div>
 
       <!-- Recommendation Content -->
-      <div class="iot-scroll-region p-3 space-y-3 max-h-[500px]">
-        <div class="rounded-lg border board-border-subtle bg-white p-2">
-          <label class="text-xs font-medium text-slate-600">
+      <div class="board-recommendation-panel__body iot-scroll-region p-3 space-y-3">
+        <div class="rounded-lg border board-border-subtle board-bg-elevated p-2">
+          <label class="board-form-label">
             {{ t('app.count') }}
             <input
               v-model.number="deviceRecommendationFilters.maxRecommendations"
@@ -17127,25 +17079,26 @@ const counterexampleTraceHelpText = computed(() => {
               type="number"
               min="1"
               max="10"
-              class="board-card mt-1 min-h-11 w-full rounded-md border border-slate-200 px-2 py-1.5 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-[color:var(--accent-border)] disabled:bg-slate-100"
+              class="board-field mt-1"
             />
           </label>
         </div>
 
-        <label class="block rounded-lg border board-border-subtle bg-white p-2 text-xs font-medium text-slate-600">
-          {{ t('app.recommendationScenario') }}
+        <div class="board-form-label rounded-lg border board-border-subtle board-bg-elevated p-2 block">
+          <div class="flex items-center justify-between gap-3">
+            <label for="device-recommendation-requirement" class="board-form-label">{{ t('app.recommendationScenario') }}</label>
+            <InfoTooltip :text="t('app.recommendationBasisHint')" :label="t('app.showHelpFor', { topic: t('app.recommendationScenario') })" test-id="device-recommendation-help" />
+          </div>
           <textarea
+            id="device-recommendation-requirement"
             v-model.trim="deviceRecommendationFilters.userRequirement"
             :disabled="isRecommendingDevices"
             rows="3"
             :maxlength="AI_RECOMMENDATION_REQUIREMENT_MAX_LENGTH"
             :placeholder="t('app.recommendationScenarioPlaceholder')"
-            class="board-card mt-1 w-full resize-none rounded-md border border-slate-200 px-2 py-1.5 text-xs leading-relaxed text-slate-700 focus:outline-none focus:ring-2 focus:ring-[color:var(--accent-border)] disabled:bg-slate-100"
+            class="board-field mt-1 resize-none leading-relaxed"
           ></textarea>
-          <span class="mt-1 block text-[length:var(--iot-font-min)] font-normal leading-snug text-slate-500">
-            {{ t('app.recommendationBasisHint') }}
-          </span>
-        </label>
+        </div>
 
         <button
           type="button"
@@ -17153,7 +17106,7 @@ const counterexampleTraceHelpText = computed(() => {
           @click="fetchDeviceRecommendations"
           :disabled="isSceneReplacementInProgress || isRecommendationRunningForAnother('device')"
           :class="[
-            'flex min-h-11 w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-sm font-bold text-white shadow-sm transition-all active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60',
+            'board-panel-submit board-action-disarmed',
             isRecommendingDevices ? 'bg-[color:var(--danger-fill)] hover:bg-[color:var(--danger-fill-hover)]' : 'bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)]'
           ]"
         >
@@ -17165,7 +17118,6 @@ const counterexampleTraceHelpText = computed(() => {
 
         <RecommendationProgressStatus
           v-if="isRecommendingDevices"
-          kind="device"
           :elapsed-seconds="recommendationProgressElapsed"
           :stage="recommendationProgressStage"
           :template-count="deviceTemplates.length"
@@ -17174,28 +17126,17 @@ const counterexampleTraceHelpText = computed(() => {
           :spec-count="specifications.length"
         />
 
-        <div
-          v-if="deviceRecommendationMessage && !isRecommendingDevices"
-          class="rounded-lg board-surface-info px-3 py-2 text-xs font-medium board-text-info"
-        >
+        <div v-if="recommendationFailures.device" data-testid="device-recommendation-error"
+          role="alert" class="rounded-lg board-surface-danger px-3 py-2 text-xs leading-5 board-text-danger">
+          <p class="font-semibold">{{ recommendationFailures.device.message }}</p>
+          <FailureDetails v-bind="recommendationFailures.device" />
+        </div>
+        <p v-if="deviceRecommendationMessage && !isRecommendingDevices && deviceRecommendationIsAppliedConfirmation" class="text-xs board-text-muted">
           {{ deviceRecommendationMessage }}
-        </div>
-        <div
-          v-if="deviceRecommendationMessage && !isRecommendingDevices && !deviceRecommendationIsAppliedConfirmation"
-          data-testid="device-candidate-accounting"
-          class="board-card rounded-lg border border-slate-200 px-3 py-2 text-xs leading-relaxed text-slate-600"
-        >
-          {{ t('app.recommendationCandidateSummary', {
-            raw: deviceRecommendationRawCandidateCount,
-            inspected: deviceRecommendationInspectedCount,
-            kept: deviceRecommendations.length,
-            filtered: deviceRecommendationFilteredCount,
-            truncated: deviceRecommendationTruncatedCount
-          }) }}
-        </div>
+        </p>
         <div
           v-if="deviceRecommendationFilteredCount > 0 && !isRecommendingDevices"
-          class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-600"
+          class="rounded-lg border board-border-subtle board-bg-muted px-3 py-2 text-xs font-medium board-text-muted"
         >
           <p>{{ t('app.recommendationFilteredNotice', { count: deviceRecommendationFilteredCount }) }}</p>
           <ul
@@ -17209,7 +17150,7 @@ const counterexampleTraceHelpText = computed(() => {
               {{ formatRecommendationFilteredItem(item) }}
             </li>
           </ul>
-          <p v-else class="mt-1 font-normal text-slate-500">
+          <p v-else class="mt-1 font-normal board-text-muted">
             {{ t('app.recommendationFilteredNoDetails') }}
           </p>
         </div>
@@ -17229,39 +17170,23 @@ const counterexampleTraceHelpText = computed(() => {
           </ul>
         </div>
 
-        <!-- Loading State -->
-        <div v-if="isRecommendingDevices" class="flex flex-col items-center justify-center py-10">
-          <div class="relative">
-            <span class="material-symbols-outlined board-text-progress text-5xl animate-spin">sync</span>
-            <div class="absolute inset-0 bg-[color:var(--accent)] rounded-full animate-ping opacity-20"></div>
+        <div v-if="!isRecommendingDevices && deviceRecommendationRequested && deviceRecommendations.length === 0 && !recommendationFailures.device" class="flex flex-col items-center justify-center py-10">
+          <div class="w-16 h-16 board-bg-control rounded-full flex items-center justify-center mb-3">
+            <span class="material-symbols-outlined board-text-muted text-3xl">devices</span>
           </div>
-          <p class="text-slate-600 text-sm mt-4 font-medium">{{ t('app.analyzingBoard') }}</p>
-          <p class="text-slate-500 text-xs mt-1">{{ t('app.findingCompatibleDevices') }}</p>
+          <p class="board-text-muted text-sm font-medium mt-2">{{ t('app.noRecommendationsAvailable') }}</p>
+          <p class="board-text-muted text-xs mt-1 text-center px-4">{{ t('app.recommendationEmptyGuidance') }}</p>
         </div>
 
-        <!-- Setup State -->
-        <div v-else-if="!deviceRecommendationRequested" class="flex flex-col items-center justify-center py-10">
-          <div class="w-16 h-16 board-chip-info rounded-full flex items-center justify-center mb-3">
-            <span class="material-symbols-outlined board-text-info text-3xl">tune</span>
-          </div>
-          <p class="text-slate-600 text-sm font-medium mt-2">{{ t('app.configureRecommendationParameters') }}</p>
-          <p class="text-slate-500 text-xs mt-1 text-center px-4">{{ t('app.clickGenerateRecommendations') }}</p>
-        </div>
-
-        <!-- Empty State -->
-        <div v-else-if="deviceRecommendations.length === 0" class="flex flex-col items-center justify-center py-10">
-          <div class="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-3">
-            <span class="material-symbols-outlined text-slate-500 text-3xl">devices</span>
-          </div>
-          <p class="text-slate-600 text-sm font-medium mt-2">{{ t('app.noRecommendationsAvailable') }}</p>
-          <p class="text-slate-500 text-xs mt-1 text-center px-4">{{ t('app.recommendationEmptyGuidance') }}</p>
-        </div>
+        <p v-if="!isRecommendingDevices && deviceRecommendations.length" data-testid="device-recommendations-unverified" class="text-xs board-text-muted">
+          {{ t('app.recommendationsNotVerified') }}
+        </p>
 
         <!-- Recommendations List -->
-        <div v-else class="space-y-3">
+        <div v-if="!isRecommendingDevices && deviceRecommendations.length && !recommendationFailures.device" class="space-y-3">
           <!-- Header with count -->
           <div class="flex items-center justify-between px-1">
-            <span class="text-xs font-medium text-slate-500">{{ t('app.devicesRecommended', { count: deviceRecommendations.length }) }}</span>
+            <span class="text-xs font-medium board-text-muted">{{ t('app.devicesRecommended', { count: deviceRecommendations.length }) }}</span>
             <button 
               @click="fetchDeviceRecommendations"
               :disabled="isSceneReplacementInProgress"
@@ -17275,7 +17200,7 @@ const counterexampleTraceHelpText = computed(() => {
           <div
             v-for="(rec, index) in deviceRecommendations"
             :key="index"
-            class="board-card board-card--raised rounded-xl border border-slate-200 hover:transition-all overflow-hidden group"
+            class="board-card board-card--raised rounded-xl border board-border-subtle hover:transition-all overflow-hidden group"
           >
             <!-- Card Header -->
             <div class="p-3 pb-2">
@@ -17286,11 +17211,11 @@ const counterexampleTraceHelpText = computed(() => {
                     <span class="material-symbols-outlined">device_hub</span>
                   </div>
                   <div class="min-w-0">
-                    <h4 class="text-sm font-bold text-slate-800 truncate" :title="rec.suggestedLabel || rec.templateName">
+                    <h4 class="board-section-title truncate" :title="rec.suggestedLabel || rec.templateName">
                       {{ rec.suggestedLabel || rec.templateName }}
                     </h4>
-                    <p class="text-[11px] font-medium board-text-info truncate" :title="rec.templateName">{{ rec.templateName }}</p>
-                    <p class="text-xs text-slate-500 break-words">{{ rec.description || t('app.noDescription') }}</p>
+                    <p class="text-xs font-medium board-text-info truncate" :title="rec.templateName">{{ rec.templateName }}</p>
+                    <p v-if="rec.description?.trim()" class="text-xs board-text-muted break-words">{{ rec.description }}</p>
                   </div>
                 </div>
               </div>
@@ -17299,32 +17224,32 @@ const counterexampleTraceHelpText = computed(() => {
             <!-- Reason -->
             <div class="px-3 pb-2">
               <div v-if="rec.intendedUse || rec.suggestedPlacement || rec.initialState || rec.currentStateTrust || rec.currentStatePrivacy" class="mb-2 flex flex-wrap gap-1">
-                <span v-if="rec.intendedUse" class="rounded-full board-chip-info px-2 py-1 text-[11px] font-medium board-text-info">
+                <span v-if="rec.intendedUse" class="rounded-full board-chip-info px-2 py-1 text-xs font-medium board-text-info">
                   {{ t('app.deviceRecommendationIntendedUse', { value: localizedRecommendationText(rec.intendedUse, t('app.recommendedBasedOnCurrentDevices')) }) }}
                 </span>
-                <span v-if="rec.suggestedPlacement" class="rounded-full bg-slate-50 px-2 py-1 text-[11px] font-medium text-slate-600">
+                <span v-if="rec.suggestedPlacement" class="rounded-full board-bg-muted px-2 py-1 text-xs font-medium board-text-muted">
                   {{ t('app.deviceRecommendationSuggestedPlacement', { value: localizedRecommendationText(rec.suggestedPlacement, t('app.recommendedBasedOnCurrentDevices')) }) }}
                 </span>
-                <span v-if="rec.initialState" class="rounded-full bg-slate-50 px-2 py-1 text-[11px] font-medium text-slate-600">
+                <span v-if="rec.initialState" class="rounded-full board-bg-muted px-2 py-1 text-xs font-medium board-text-muted">
                   {{ t('app.deviceRecommendationInitialState', { value: formatRecommendedDeviceModelToken(rec, rec.initialState) }) }}
                 </span>
-                <span v-if="rec.currentStateTrust" class="rounded-full board-chip-success px-2 py-1 text-[11px] font-medium board-text-success">
+                <span v-if="rec.currentStateTrust" class="rounded-full board-chip-success px-2 py-1 text-xs font-medium board-text-success">
                   {{ t('app.deviceRecommendationStateTrust', { value: t(`app.${rec.currentStateTrust}`) }) }}
                 </span>
-                <span v-if="rec.currentStatePrivacy" class="rounded-full board-chip-info px-2 py-1 text-[11px] font-medium board-text-info">
+                <span v-if="rec.currentStatePrivacy" class="rounded-full board-chip-info px-2 py-1 text-xs font-medium board-text-info">
                   {{ t('app.deviceRecommendationStatePrivacy', { value: t(`app.${rec.currentStatePrivacy}`) }) }}
                 </span>
               </div>
-              <p v-if="rec.intendedUse || rec.suggestedPlacement" class="mb-2 text-[11px] leading-relaxed text-slate-500">
+              <p v-if="rec.intendedUse || rec.suggestedPlacement" class="mb-2 text-xs leading-relaxed board-text-muted">
                 {{ t('app.deviceRecommendationContextAdvisory') }}
               </p>
               <p
                 v-if="recommendedDeviceEnvironmentAdditions(rec).length > 0"
-                class="mb-2 rounded-lg board-surface-info px-2 py-1.5 text-[11px] leading-relaxed board-text-info"
+                class="mb-2 rounded-lg board-surface-info px-2 py-1.5 text-xs leading-relaxed board-text-info"
               >
                 {{ t('app.deviceCreationEnvironmentAdditionsPreview', { names: formatRecommendedDeviceEnvironmentAdditions(rec) }) }}
               </p>
-              <div v-if="rec.initialVariables?.length || rec.initialPrivacies?.length" class="mb-2 space-y-1 text-[11px] text-slate-600">
+              <div v-if="rec.initialVariables?.length || rec.initialPrivacies?.length" class="mb-2 space-y-1 text-xs board-text-muted">
                 <div v-for="variable in rec.initialVariables || []" :key="`value-${variable.name}`" class="break-words">
                   {{ t('app.deviceRecommendationInitialVariable', {
                     name: formatRecommendedDeviceModelToken(rec, variable.name),
@@ -17339,21 +17264,25 @@ const counterexampleTraceHelpText = computed(() => {
                   }) }}
                 </div>
               </div>
-              <p class="text-xs text-slate-600 break-words">{{ localizedRecommendationText(rec.reason, t('app.recommendedBasedOnCurrentDevices')) }}</p>
+              <p class="text-xs board-text-muted break-words">{{ localizedRecommendationText(rec.reason, t('app.recommendedBasedOnCurrentDevices')) }}</p>
             </div>
 
             <!-- Action Button -->
             <div class="px-3 pb-3">
+              <div v-if="recommendationApplyFailures.device[index]" :data-testid="`device-recommendation-apply-failure-${index}`" role="alert" class="mb-2 text-sm">
+                <p class="font-semibold board-text-danger">{{ recommendationApplyFailures.device[index].message }}</p>
+                <FailureDetails v-bind="recommendationApplyFailures.device[index]" />
+              </div>
               <button 
                 @click="applyDeviceRecommendation(rec, index)"
-                :disabled="isSceneReplacementInProgress || appliedDeviceRecommendations.has(index) || applyingDeviceRecommendations.has(index)"
+                :disabled="isSceneReplacementInProgress || appliedDeviceRecommendations.has(index) || applyingDeviceRecommendations.has(index) || recommendationApplyFailures.device[index]?.outcomeUnknown"
                 :aria-busy="applyingDeviceRecommendations.has(index)"
                 :class="[
                   'w-full py-2 px-4 text-white text-sm font-medium rounded-lg transition-colors flex items-center justify-center gap-2',
                   appliedDeviceRecommendations.has(index)
                     ? 'bg-[color:var(--success-fill)] cursor-default'
                     : applyingDeviceRecommendations.has(index)
-                      ? 'bg-slate-400 cursor-wait'
+                      ? 'bg-[color:var(--accent-fill-disabled)] cursor-wait'
                       : 'bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)]'
                 ]"
               >
@@ -17372,6 +17301,21 @@ const counterexampleTraceHelpText = computed(() => {
             </div>
           </div>
         </div>
+        <details
+          v-if="deviceRecommendationMessage && !isRecommendingDevices && !deviceRecommendationIsAppliedConfirmation"
+          data-testid="device-candidate-accounting"
+          class="board-card rounded-lg border board-border-subtle px-3 py-2 text-xs leading-relaxed board-text-muted"
+        >
+          <summary class="cursor-pointer py-2 font-semibold">{{ t('app.recommendationGenerationDetails') }}</summary>
+          <p class="mt-1">{{ deviceRecommendationMessage }}</p>
+          {{ t('app.recommendationCandidateSummary', {
+            raw: deviceRecommendationRawCandidateCount,
+            inspected: deviceRecommendationInspectedCount,
+            kept: deviceRecommendations.length,
+            filtered: deviceRecommendationFilteredCount,
+            truncated: deviceRecommendationTruncatedCount
+          }) }}
+        </details>
       </div>
     </div>
 
@@ -17384,20 +17328,18 @@ const counterexampleTraceHelpText = computed(() => {
       role="region"
       aria-labelledby="spec-recommendation-panel-title"
       tabindex="-1"
+      autofocus
       @keydown="handleSpecRecommendationPanelKeydown"
     >
-      <!-- Recommendation Header with gradient -->
       <div class="relative overflow-hidden">
         <div class="board-panel-banner absolute inset-0"></div>
-        <div class="absolute inset-0 bg-[url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNjAiIGhlaWdodD0iNjAiIHZpZXdCb3g9IjAgMCA2MCA2MCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48ZyBmaWxsPSJub25lIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiPjxwYXRoIGQ9Ik0zNiAxOGMtOS45NDEgMC0xOCA4LjA1OS0xOCAxOHM4LjA1OSAxOCAxOCAxOCAxOC04LjA1OSAxOC0xOC04LjA1OS0xOC0xOC0xOHptMCAzMmMtNy43MzIgMC0xNC02LjI2OC0xNC0xNHM2LjI2OC0xNCAxNC0xNCAxNCA2LjI2OCAxNCAxNC02LjI2OCAxNC0xNCAxNHoiIGZpbGw9IiNmZmYiIGZpbGwtb3BhY2l0eT0iLjA1Ii8+PC9nPjwvc3ZnPg==')] opacity-30"></div>
-        <div class="relative flex items-center justify-between p-4">
+        <div class="board-tool-header relative">
           <div class="flex items-center gap-3">
             <div class="board-section-icon board-section-icon--lg">
               <span class="material-symbols-outlined text-xl">policy</span>
             </div>
             <div>
-              <h3 id="spec-recommendation-panel-title" class="text-white font-bold text-base">{{ t('app.specificationRecommendations') }}</h3>
-              <p class="text-white/70 text-xs">{{ t('app.aiPoweredSpecificationSuggestions') }}</p>
+              <h3 id="spec-recommendation-panel-title" class="board-panel-title">{{ t('app.specificationRecommendations') }}</h3>
             </div>
           </div>
           <HintTooltip :content="t('app.close')">
@@ -17406,7 +17348,7 @@ const counterexampleTraceHelpText = computed(() => {
               @click="closeSpecRecommendationPanel"
               data-testid="close-spec-recommendations"
               :aria-label="t('app.close')"
-              class="board-panel-close text-white/70 hover:text-white hover:bg-white/15"
+              class="board-panel-close"
             >
               <span class="material-symbols-outlined" aria-hidden="true">close</span>
             </button>
@@ -17415,9 +17357,9 @@ const counterexampleTraceHelpText = computed(() => {
       </div>
 
       <!-- Recommendation Content -->
-      <div class="iot-scroll-region p-3 space-y-3 max-h-[500px]">
-        <div class="rounded-lg border board-border-subtle bg-white p-2">
-          <label class="text-xs font-medium text-slate-600">
+      <div class="board-recommendation-panel__body iot-scroll-region p-3 space-y-3">
+        <div class="rounded-lg border board-border-subtle board-bg-elevated p-2">
+          <label class="board-form-label">
             {{ t('app.count') }}
             <input
               v-model.number="specRecommendationFilters.maxRecommendations"
@@ -17425,25 +17367,26 @@ const counterexampleTraceHelpText = computed(() => {
               type="number"
               min="1"
               max="10"
-              class="board-card mt-1 min-h-11 w-full rounded-md border border-slate-200 px-2 py-1.5 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-[color:var(--accent-border)] disabled:bg-slate-100"
+              class="board-field mt-1"
             />
           </label>
         </div>
 
-        <label class="block rounded-lg border board-border-subtle bg-white p-2 text-xs font-medium text-slate-600">
-          {{ t('app.recommendationScenario') }}
+        <div class="board-form-label rounded-lg border board-border-subtle board-bg-elevated p-2 block">
+          <div class="flex items-center justify-between gap-3">
+            <label for="spec-recommendation-requirement" class="board-form-label">{{ t('app.recommendationScenario') }}</label>
+            <InfoTooltip :text="t('app.recommendationBasisHint')" :label="t('app.showHelpFor', { topic: t('app.recommendationScenario') })" test-id="spec-recommendation-help" />
+          </div>
           <textarea
+            id="spec-recommendation-requirement"
             v-model.trim="specRecommendationFilters.userRequirement"
             :disabled="isRecommendingSpecs"
             rows="3"
             :maxlength="AI_RECOMMENDATION_REQUIREMENT_MAX_LENGTH"
             :placeholder="t('app.recommendationScenarioPlaceholder')"
-            class="board-card mt-1 w-full resize-none rounded-md border border-slate-200 px-2 py-1.5 text-xs leading-relaxed text-slate-700 focus:outline-none focus:ring-2 focus:ring-[color:var(--accent-border)] disabled:bg-slate-100"
+            class="board-field mt-1 resize-none leading-relaxed"
           ></textarea>
-          <span class="mt-1 block text-[length:var(--iot-font-min)] font-normal leading-snug text-slate-500">
-            {{ t('app.recommendationBasisHint') }}
-          </span>
-        </label>
+        </div>
 
         <button
           type="button"
@@ -17451,7 +17394,7 @@ const counterexampleTraceHelpText = computed(() => {
           @click="fetchSpecRecommendations"
           :disabled="isSceneReplacementInProgress || isRecommendationRunningForAnother('spec')"
           :class="[
-            'flex min-h-11 w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-sm font-bold text-white shadow-sm transition-all active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60',
+            'board-panel-submit board-action-disarmed',
             isRecommendingSpecs ? 'bg-[color:var(--danger-fill)] hover:bg-[color:var(--danger-fill-hover)]' : 'bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)]'
           ]"
         >
@@ -17463,7 +17406,6 @@ const counterexampleTraceHelpText = computed(() => {
 
         <RecommendationProgressStatus
           v-if="isRecommendingSpecs"
-          kind="spec"
           :elapsed-seconds="recommendationProgressElapsed"
           :stage="recommendationProgressStage"
           :template-count="deviceTemplates.length"
@@ -17472,25 +17414,14 @@ const counterexampleTraceHelpText = computed(() => {
           :spec-count="specifications.length"
         />
 
-        <div
-          v-if="specRecommendationMessage && !isRecommendingSpecs"
-          class="rounded-lg board-surface-danger px-3 py-2 text-xs font-medium board-text-danger"
-        >
+        <div v-if="recommendationFailures.spec" data-testid="spec-recommendation-error"
+          role="alert" class="rounded-lg board-surface-danger px-3 py-2 text-xs leading-5 board-text-danger">
+          <p class="font-semibold">{{ recommendationFailures.spec.message }}</p>
+          <FailureDetails v-bind="recommendationFailures.spec" />
+        </div>
+        <p v-if="specRecommendationMessage && !isRecommendingSpecs && specRecommendationIsAppliedConfirmation" class="text-xs board-text-muted">
           {{ specRecommendationMessage }}
-        </div>
-        <div
-          v-if="specRecommendationMessage && !isRecommendingSpecs && !specRecommendationIsAppliedConfirmation"
-          data-testid="spec-candidate-accounting"
-          class="board-card rounded-lg border border-slate-200 px-3 py-2 text-xs leading-relaxed text-slate-600"
-        >
-          {{ t('app.recommendationCandidateSummary', {
-            raw: specRecommendationRawCandidateCount,
-            inspected: specRecommendationInspectedCount,
-            kept: specRecommendations.length,
-            filtered: specRecommendationFilteredCount,
-            truncated: specRecommendationTruncatedCount
-          }) }}
-        </div>
+        </p>
         <!--
           The server-completed values, which this panel used to discard.
           Rule, device and scenario all show this notice; spec did not read the field at all. It is the panel that
@@ -17515,7 +17446,7 @@ const counterexampleTraceHelpText = computed(() => {
         </div>
         <div
           v-if="specRecommendationFilteredCount > 0 && !isRecommendingSpecs"
-          class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-600"
+          class="rounded-lg border board-border-subtle board-bg-muted px-3 py-2 text-xs font-medium board-text-muted"
         >
           <p>{{ t('app.recommendationFilteredNotice', { count: specRecommendationFilteredCount }) }}</p>
           <ul
@@ -17529,44 +17460,28 @@ const counterexampleTraceHelpText = computed(() => {
               {{ formatRecommendationFilteredItem(item) }}
             </li>
           </ul>
-          <p v-else class="mt-1 font-normal text-slate-500">
+          <p v-else class="mt-1 font-normal board-text-muted">
             {{ t('app.recommendationFilteredNoDetails') }}
           </p>
         </div>
 
-        <!-- Loading State -->
-        <div v-if="isRecommendingSpecs" class="flex flex-col items-center justify-center py-10">
-          <div class="relative">
-            <span class="material-symbols-outlined board-text-progress text-5xl animate-spin">sync</span>
-            <div class="absolute inset-0 bg-[color:var(--danger)] rounded-full animate-ping opacity-20"></div>
+        <div v-if="!isRecommendingSpecs && specRecommendationRequested && specRecommendations.length === 0 && !recommendationFailures.spec" class="flex flex-col items-center justify-center py-10">
+          <div class="w-16 h-16 board-bg-control rounded-full flex items-center justify-center mb-3">
+            <span class="material-symbols-outlined board-text-muted text-3xl">policy</span>
           </div>
-          <p class="text-slate-600 text-sm mt-4 font-medium">{{ t('app.analyzingSystem') }}</p>
-          <p class="text-slate-500 text-xs mt-1">{{ t('app.generatingFormalSpecifications') }}</p>
+          <p class="board-text-muted text-sm font-medium mt-2">{{ t('app.noRecommendationsAvailable') }}</p>
+          <p class="board-text-muted text-xs mt-1 text-center px-4">{{ t('app.recommendationEmptyGuidance') }}</p>
         </div>
 
-        <!-- Setup State -->
-        <div v-else-if="!specRecommendationRequested" class="flex flex-col items-center justify-center py-10">
-          <div class="w-16 h-16 board-chip-danger rounded-full flex items-center justify-center mb-3">
-            <span class="material-symbols-outlined board-text-danger text-3xl">tune</span>
-          </div>
-          <p class="text-slate-600 text-sm font-medium mt-2">{{ t('app.configureRecommendationParameters') }}</p>
-          <p class="text-slate-500 text-xs mt-1 text-center px-4">{{ t('app.clickGenerateRecommendations') }}</p>
-        </div>
-
-        <!-- Empty State -->
-        <div v-else-if="specRecommendations.length === 0" class="flex flex-col items-center justify-center py-10">
-          <div class="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-3">
-            <span class="material-symbols-outlined text-slate-500 text-3xl">policy</span>
-          </div>
-          <p class="text-slate-600 text-sm font-medium mt-2">{{ t('app.noRecommendationsAvailable') }}</p>
-          <p class="text-slate-500 text-xs mt-1 text-center px-4">{{ t('app.recommendationEmptyGuidance') }}</p>
-        </div>
+        <p v-if="!isRecommendingSpecs && specRecommendations.length" data-testid="spec-recommendations-unverified" class="text-xs board-text-muted">
+          {{ t('app.recommendationsNotVerified') }}
+        </p>
 
         <!-- Recommendations List -->
-        <div v-else class="space-y-3">
+        <div v-if="!isRecommendingSpecs && specRecommendations.length && !recommendationFailures.spec" class="space-y-3">
           <!-- Header with count -->
           <div class="flex items-center justify-between px-1">
-            <span class="text-xs font-medium text-slate-500">{{ t('app.specificationsRecommended', { count: specRecommendations.length }) }}</span>
+            <span class="text-xs font-medium board-text-muted">{{ t('app.specificationsRecommended', { count: specRecommendations.length }) }}</span>
             <button 
               @click="fetchSpecRecommendations"
               :disabled="isSceneReplacementInProgress"
@@ -17580,7 +17495,7 @@ const counterexampleTraceHelpText = computed(() => {
           <div 
             v-for="(rec, index) in specRecommendations" 
             :key="index"
-            class="board-card board-card--raised rounded-xl border border-slate-200 hover:transition-all overflow-hidden group"
+            class="board-card board-card--raised rounded-xl border board-border-subtle hover:transition-all overflow-hidden group"
           >
             <!-- Card Header -->
             <div class="p-3 pb-2">
@@ -17591,22 +17506,20 @@ const counterexampleTraceHelpText = computed(() => {
                     <span class="material-symbols-outlined">policy</span>
                   </div>
                   <div class="min-w-0">
-                    <h4 class="text-sm font-bold text-slate-800 truncate" :title="recommendedSpecTemplateLabel(rec.templateId)">
+                    <h4 class="board-section-title break-words">
                       {{ recommendedSpecTemplateLabel(rec.templateId) }}
                     </h4>
-                    <p class="text-xs text-slate-500 break-words">
-                      <span class="font-semibold">{{ t('app.recommendationRationale') }}:</span>
-                      {{ localizedRecommendationText(rec.rationale, t('app.recommendedBasedOnCurrentDevices')) }}
-                    </p>
                   </div>
                 </div>
               </div>
             </div>
 
             <div class="px-3 pb-2">
-              <p class="text-[11px] leading-4 text-slate-500">
-                {{ t('app.specRecommendationRationaleAdvisory') }}
-              </p>
+              <p class="board-copy break-words board-text-strong" data-testid="spec-recommendation-description">{{ presentedSpecRecommendations[index] }}</p>
+              <details v-if="localizedRecommendationText(rec.rationale)" class="mt-2 text-xs board-text-muted">
+                <summary class="cursor-pointer py-2 font-semibold">{{ t('app.recommendationRationale') }}</summary>
+                <p class="break-words">{{ localizedRecommendationText(rec.rationale) }}</p>
+              </details>
             </div>
 
             <!-- Details -->
@@ -17616,7 +17529,7 @@ const counterexampleTraceHelpText = computed(() => {
                   <span class="material-symbols-outlined text-sm">info</span>
                   {{ t('app.viewDetails') }}
                 </summary>
-                <div class="mt-2 space-y-2 rounded-lg bg-slate-50 p-2 text-slate-700">
+                <div class="mt-2 space-y-2 rounded-lg board-bg-muted p-2 board-text-strong">
                   <div v-if="rec.aConditions && rec.aConditions.length">
                     <div class="mb-1 font-semibold board-text-danger">{{ t('app.alwaysConditions') }}:</div>
                     <ul class="space-y-1">
@@ -17659,16 +17572,20 @@ const counterexampleTraceHelpText = computed(() => {
 
             <!-- Action Button -->
             <div class="px-3 pb-3">
+              <div v-if="recommendationApplyFailures.spec[index]" :data-testid="`spec-recommendation-apply-failure-${index}`" role="alert" class="mb-2 text-sm">
+                <p class="font-semibold board-text-danger">{{ recommendationApplyFailures.spec[index].message }}</p>
+                <FailureDetails v-bind="recommendationApplyFailures.spec[index]" />
+              </div>
               <button 
                 @click="applySpecRecommendation(rec, index)"
-                :disabled="isSceneReplacementInProgress || appliedSpecRecommendations.has(index) || applyingSpecRecommendations.has(index)"
+                :disabled="isSceneReplacementInProgress || appliedSpecRecommendations.has(index) || applyingSpecRecommendations.has(index) || recommendationApplyFailures.spec[index]?.outcomeUnknown"
                 :aria-busy="applyingSpecRecommendations.has(index)"
                 :class="[
                   'w-full py-2 px-4 text-white text-sm font-medium rounded-lg transition-colors flex items-center justify-center gap-2',
                   appliedSpecRecommendations.has(index)
                     ? 'bg-[color:var(--success-fill)] cursor-default'
                     : applyingSpecRecommendations.has(index)
-                      ? 'bg-slate-400 cursor-wait'
+                      ? 'bg-[color:var(--accent-fill-disabled)] cursor-wait'
                       : 'bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)]'
                 ]"
               >
@@ -17687,6 +17604,21 @@ const counterexampleTraceHelpText = computed(() => {
             </div>
           </div>
         </div>
+        <details
+          v-if="specRecommendationMessage && !isRecommendingSpecs && !specRecommendationIsAppliedConfirmation"
+          data-testid="spec-candidate-accounting"
+          class="board-card rounded-lg border board-border-subtle px-3 py-2 text-xs leading-relaxed board-text-muted"
+        >
+          <summary class="cursor-pointer py-2 font-semibold">{{ t('app.recommendationGenerationDetails') }}</summary>
+          <p class="mt-1">{{ specRecommendationMessage }}</p>
+          {{ t('app.recommendationCandidateSummary', {
+            raw: specRecommendationRawCandidateCount,
+            inspected: specRecommendationInspectedCount,
+            kept: specRecommendations.length,
+            filtered: specRecommendationFilteredCount,
+            truncated: specRecommendationTruncatedCount
+          }) }}
+        </details>
       </div>
     </div>
 
@@ -17695,27 +17627,22 @@ const counterexampleTraceHelpText = computed(() => {
       v-if="showSimulationPanel"
       :ref="setSimulationPanelRef"
       data-testid="simulation-panel"
-      class="board-floating-panel board-run-panel board-surface-panel fixed top-20 z-30 w-72 max-w-[calc(100vw-2rem)] rounded-2xl shadow-2xl border overflow-hidden"
+      class="board-floating-panel board-run-panel board-surface-panel fixed top-20 z-30 max-w-[calc(100vw-2rem)] rounded-2xl shadow-2xl border overflow-hidden"
       role="region"
       aria-labelledby="simulation-panel-title"
       tabindex="-1"
+      autofocus
       @keydown="handleSimulationPanelKeydown"
     >
-      <!-- Simulation Header with gradient -->
       <div class="relative overflow-hidden">
         <div class="board-panel-banner absolute inset-0"></div>
-        <div class="absolute inset-0 bg-[url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNjAiIGhlaWdodD0iNjAiIHZpZXdCb3g9IjAgMCA2MCA2MCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48ZyBmaWxsPSJub25lIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiPjxwYXRoIGQ9Ik0zNiAxOGMtOS45NDEgMC0xOCA4LjA1OS0xOCAxOHM4LjA1OSAxOCAxOCAxOCAxOC04LjA1OSAxOC0xOC04LjA1OS0xOC0xOC0xOHptMCAzMmMtNy43MzIgMC0xNC02LjI2OC0xNC0xNHM2LjI2OC0xNCAxNC0xNCAxNCA2LjI2OCAxNCAxNC02LjI2OCAxNC0xNCAxNHoiIGZpbGw9IiNmZmYiIGZpbGwtb3BhY2l0eT0iLjA1Ii8+PC9nPjwvc3ZnPg==')] opacity-30"></div>
-        <div class="relative flex items-center justify-between p-4">
+        <div class="board-tool-header relative">
           <div class="flex items-center gap-3">
             <div class="board-section-icon board-section-icon--lg">
               <span class="material-symbols-outlined text-xl">play_circle</span>
             </div>
             <div>
-              <span id="simulation-panel-title" class="text-sm font-bold text-white">{{ t('app.simulationTitle') }}</span>
-              <!-- The banner is an accent fill, so this needs fill ink, not `board-text-info` — the accent
-                   *text* colour on an accent ground measured **1.04:1** in light theme. Same fix as the
-                   Control Center's create-rule card; the other five panel subtitles already use white. -->
-              <p class="text-white/90 text-xs">{{ t('app.configureSimulation') }}</p>
+              <h3 id="simulation-panel-title" class="board-panel-title">{{ t('app.simulationTitle') }}</h3>
             </div>
           </div>
           <HintTooltip :content="t('app.close')">
@@ -17724,7 +17651,7 @@ const counterexampleTraceHelpText = computed(() => {
               @click="closeSimulationPanel"
               data-testid="close-simulation-panel"
               :aria-label="t('app.close')"
-              class="board-panel-close text-white/70 hover:text-white hover:bg-white/15"
+              class="board-panel-close"
             >
               <span class="material-symbols-outlined" aria-hidden="true">close</span>
             </button>
@@ -17732,13 +17659,18 @@ const counterexampleTraceHelpText = computed(() => {
         </div>
       </div>
       <!-- Simulation Content -->
-      <div class="p-3 space-y-3">
+      <div class="board-run-panel__body iot-scroll-region p-3 space-y-3">
+        <BackgroundTaskSummary v-if="runningSimulationTask" kind="simulation" :task="runningSimulationTask" />
+        <template v-if="!isSimulating || !asyncSimulationActive">
         <!-- Steps -->
-        <div class="board-card board-card--raised p-3 rounded-xl border border-slate-200/60">
+        <div class="board-card p-3 rounded-xl">
           <div class="mb-2 flex items-center justify-between gap-3">
-            <label for="simulation-steps-input" class="text-[length:var(--iot-font-min)] font-bold board-text-info uppercase tracking-wide">
-              {{ t('app.simulationSteps') }}
-            </label>
+            <div class="flex min-w-0 items-center gap-3">
+              <label for="simulation-steps-input" class="board-form-label">{{ t('app.simulationSteps') }}</label>
+              <InfoTooltip :text="t('app.simulationStepsHint')"
+                :label="t('app.showHelpFor', { topic: t('app.simulationSteps') })"
+                test-id="simulation-steps-help" />
+            </div>
             <input
               id="simulation-steps-input"
               v-model.number="simulationForm.steps"
@@ -17749,7 +17681,7 @@ const counterexampleTraceHelpText = computed(() => {
               :max="SIMULATION_STEPS_MAX"
               step="1"
               inputmode="numeric"
-              class="h-8 w-16 rounded-lg board-surface-info px-2 text-center text-sm font-bold board-text-info outline-none transition focus:border-[color:var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-border)] disabled:cursor-not-allowed disabled:opacity-60"
+              class="board-field w-20 text-center"
               @change="commitSimulationStepsInput"
               @blur="commitSimulationStepsInput"
               @keydown.enter.prevent="commitSimulationStepsInput"
@@ -17760,7 +17692,7 @@ const counterexampleTraceHelpText = computed(() => {
               <button
                 type="button"
                 data-testid="simulation-steps-decrease"
-                class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg board-surface-info board-text-info transition hover:board-chip-info disabled:cursor-not-allowed disabled:opacity-40"
+                class="board-panel-icon-action"
                 :disabled="isSimulating || normalizeSimulationStepsControlValue(simulationForm.steps) <= SIMULATION_STEPS_MIN"
                 :aria-label="t('app.decreaseSimulationSteps')"
                 @click="adjustSimulationSteps(-1)"
@@ -17771,18 +17703,19 @@ const counterexampleTraceHelpText = computed(() => {
             <input
               v-model.number="simulationForm.steps"
               data-testid="simulation-steps-range"
+              :aria-label="t('app.simulationSteps')"
               :disabled="isSimulating"
               type="range"
               :min="SIMULATION_STEPS_MIN"
               :max="SIMULATION_STEPS_MAX"
               step="1"
-              class="flex-1 h-2 bg-[color:var(--info-border)] rounded-lg appearance-none cursor-pointer accent-[color:var(--accent)] disabled:cursor-not-allowed disabled:opacity-60"
+              class="board-run-range flex-1"
             />
             <HintTooltip :content="t('app.increaseSimulationSteps')">
               <button
                 type="button"
                 data-testid="simulation-steps-increase"
-                class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg board-surface-info board-text-info transition hover:board-chip-info disabled:cursor-not-allowed disabled:opacity-40"
+                class="board-panel-icon-action"
                 :disabled="isSimulating || normalizeSimulationStepsControlValue(simulationForm.steps) >= SIMULATION_STEPS_MAX"
                 :aria-label="t('app.increaseSimulationSteps')"
                 @click="adjustSimulationSteps(1)"
@@ -17794,13 +17727,13 @@ const counterexampleTraceHelpText = computed(() => {
         </div>
 
         <!-- Attack Mode -->
-        <div class="board-card board-card--raised p-3 rounded-xl border border-slate-200/60">
+        <div class="board-card p-3 rounded-xl">
           <div class="flex items-center justify-between gap-3">
             <div class="flex items-center gap-3">
-              <div class="w-8 h-8 board-chip-danger rounded-lg flex items-center justify-center">
+              <div class="w-8 h-8 shrink-0 board-chip-danger rounded-lg flex items-center justify-center">
                 <span class="material-symbols-outlined board-text-danger text-lg">warning</span>
               </div>
-              <label class="text-xs font-bold text-slate-700 uppercase tracking-wide">
+              <label class="board-form-label">
                 {{ t('app.attackMode') }}
               </label>
             </div>
@@ -17810,7 +17743,6 @@ const counterexampleTraceHelpText = computed(() => {
               tone="adversarial"
               test-id="simulation-attack-toggle"
               :disabled="isSimulating || (!simulationForm.isAttack && !hasModeledAttackEffect)"
-              :title="!hasModeledAttackEffect ? t('app.attackNoModeledEffect') : undefined"
               :describedby-id="!hasModeledAttackEffect ? 'simulation-attack-unavailable' : undefined"
               @change="setSimulationAttackEnabled"
             />
@@ -17819,20 +17751,21 @@ const counterexampleTraceHelpText = computed(() => {
             v-if="!hasModeledAttackEffect"
             id="simulation-attack-unavailable"
             data-testid="simulation-attack-unavailable"
-            class="mt-2 text-[length:var(--iot-font-min)] leading-4 board-text-warning"
+            class="mt-2 text-xs leading-4 board-text-warning"
           >
             {{ t('app.attackNoModeledEffect') }}
           </p>
         </div>
 
-        <div v-if="simulationForm.isAttack && hasModeledAttackEffect" class="space-y-2 border-y board-border-subtle board-chip-danger px-3 py-3">
-          <p class="text-[11px] leading-4 board-text-danger">{{ t('app.simulationAttackExactHint') }}</p>
-          <div class="space-y-1.5" data-testid="simulation-attack-points">
+        <div v-if="simulationForm.isAttack && hasModeledAttackEffect" class="space-y-2 rounded-lg board-surface-danger p-3">
+          <p class="text-xs leading-4 board-text-danger">{{ t('app.simulationAttackExactHint') }}</p>
+          <div class="space-y-1.5" data-testid="simulation-attack-points"
+            role="group" :aria-label="t('app.attackModeExact')"
+            :aria-describedby="simulationAttackConfigurationError ? 'simulation-attack-points-invalid' : undefined">
             <label
               v-for="point in boardAttackSurface.points"
               :key="point.key"
-              class="flex min-h-8 items-center gap-2 border board-border-subtle bg-white px-2 py-1.5 text-xs text-slate-700"
-              :class="!point.selectable ? 'opacity-55' : 'cursor-pointer'"
+              class="board-form-label board-attack-point"
             >
               <input
                 type="checkbox"
@@ -17845,24 +17778,24 @@ const counterexampleTraceHelpText = computed(() => {
                 {{ point.kind === 'DEVICE' ? 'memory' : 'conversion_path' }}
               </span>
               <span class="min-w-0 flex-1 break-words">{{ point.label }}</span>
-              <span class="shrink-0 text-[length:var(--iot-font-min)] font-semibold uppercase text-slate-500">
+              <span class="shrink-0 board-form-label">
                 {{ point.kind === 'DEVICE' ? t('app.device') : t('app.automationLink') }}
               </span>
             </label>
           </div>
-          <p v-if="simulationAttackConfigurationError" class="text-[length:var(--iot-font-min)] font-semibold leading-4 board-text-danger" data-testid="simulation-attack-points-invalid">
+          <p v-if="simulationAttackConfigurationError" id="simulation-attack-points-invalid" class="text-xs font-semibold leading-4 board-text-danger" data-testid="simulation-attack-points-invalid">
             {{ simulationAttackConfigurationError }}
           </p>
         </div>
 
         <!-- Privacy Analysis -->
-        <div class="board-card board-card--raised p-3 rounded-xl border border-slate-200/60">
+        <div class="board-card p-3 rounded-xl">
           <div class="flex items-center justify-between gap-3">
             <div class="flex min-w-0 items-center gap-3">
               <div class="w-8 h-8 shrink-0 board-chip-info rounded-lg flex items-center justify-center">
                 <span class="material-symbols-outlined board-text-info text-lg">security</span>
               </div>
-              <label class="text-xs font-bold text-slate-700 uppercase tracking-wide">
+              <label class="board-form-label">
                 {{ t('app.privacyAnalysis') }}
               </label>
               <InfoTooltip
@@ -17885,74 +17818,64 @@ const counterexampleTraceHelpText = computed(() => {
         </div>
 
         <!-- Run Mode -->
-        <div class="board-card board-card--raised p-3 rounded-xl border border-slate-200/60">
+        <div class="board-card p-3 rounded-xl">
           <div class="flex items-center gap-3 mb-2">
-            <div class="w-8 h-8 board-chip-info rounded-lg flex items-center justify-center">
+            <div class="w-8 h-8 shrink-0 board-chip-info rounded-lg flex items-center justify-center">
               <span class="material-symbols-outlined board-text-info text-lg">schedule</span>
             </div>
-            <label class="text-xs font-bold text-slate-700 uppercase tracking-wide">
+            <label class="board-form-label">
               {{ t('app.runMode') }}
             </label>
           </div>
-          <div class="grid grid-cols-2 gap-1 rounded-lg bg-slate-100 p-1">
-            <HintTooltip :content="t('app.syncSimulationModeHint')">
-              <button
-                type="button"
-                :disabled="isSimulating"
-                @click="simulationForm.isAsync = false"
-                data-testid="simulation-mode-sync"
-                :aria-pressed="!simulationForm.isAsync"
-                class="min-w-0 rounded-md px-2 py-1.5 text-[11px] font-bold transition-all disabled:cursor-not-allowed disabled:opacity-60"
-                :class="!simulationForm.isAsync ? 'bg-white board-text-info shadow-sm' : 'text-slate-500 hover:text-slate-700'"
-              >
-                {{ t('app.previewNow') }}
-              </button>
-            </HintTooltip>
-            <HintTooltip :content="t('app.asyncSimulationModeHint')">
-              <button
-                type="button"
-                :disabled="isSimulating"
-                @click="simulationForm.isAsync = true"
-                data-testid="simulation-mode-async"
-                :aria-pressed="simulationForm.isAsync"
-                class="min-w-0 rounded-md px-2 py-1.5 text-[11px] font-bold transition-all disabled:cursor-not-allowed disabled:opacity-60"
-                :class="simulationForm.isAsync ? 'bg-white board-text-info shadow-sm' : 'text-slate-500 hover:text-slate-700'"
-              >
-                {{ t('app.saveInBackground') }}
-              </button>
-            </HintTooltip>
+          <div class="grid grid-cols-2 gap-1 rounded-lg board-bg-control p-1">
+            <button
+              type="button"
+              :disabled="isSimulating"
+              @click="simulationForm.isAsync = false"
+              data-testid="simulation-mode-sync"
+              :aria-pressed="!simulationForm.isAsync"
+              class="board-run-mode"
+            >
+              {{ t('app.waitForResult') }}
+            </button>
+            <button
+              type="button"
+              :disabled="isSimulating"
+              @click="simulationForm.isAsync = true"
+              data-testid="simulation-mode-async"
+              :aria-pressed="simulationForm.isAsync"
+              class="board-run-mode"
+            >
+              {{ t('app.backgroundTask') }}
+            </button>
           </div>
-          <p class="mt-2 text-[11px] leading-snug text-slate-500">
-            {{ simulationForm.isAsync ? t('app.asyncSimulationModeHint') : t('app.syncSimulationModeHint') }}
+          <p v-if="simulationForm.isAsync" class="mt-2 text-xs leading-5 board-text-muted">
+            {{ t('app.asyncSimulationModeHint') }}
           </p>
         </div>
 
         <!-- Save History -->
-        <div class="board-card board-card--raised p-3 rounded-xl border border-slate-200/60">
+        <div v-if="!simulationForm.isAsync" class="board-card p-3 rounded-xl">
           <div class="flex items-center justify-between">
             <div class="flex items-center gap-3">
-              <div class="w-8 h-8 board-chip-info rounded-lg flex items-center justify-center">
+              <div class="w-8 h-8 shrink-0 board-chip-info rounded-lg flex items-center justify-center">
                 <span class="material-symbols-outlined board-text-info text-lg">history</span>
               </div>
-              <label class="text-xs font-bold text-slate-700 uppercase tracking-wide">
+              <label class="board-form-label">
                 {{ t('app.saveToHistory') }}
               </label>
             </div>
             <ToggleSwitch
-              :checked="simulationForm.isAsync || simulationForm.saveToHistory"
+              :checked="simulationForm.saveToHistory"
               :label="t('app.saveToHistory')"
               test-id="simulation-save-history"
-              :disabled="simulationForm.isAsync || isSimulating"
-              :title="simulationForm.isAsync ? t('app.asyncSimulationsSavedAutomatically') : t('app.saveSyncSimulationToHistory')"
-              describedby-id="simulation-save-history-hint"
+              :disabled="isSimulating"
               @change="value => simulationForm.saveToHistory = value"
             />
           </div>
-          <p id="simulation-save-history-hint" class="mt-2 pl-11 text-[11px] leading-snug text-slate-500">
-            {{ simulationForm.isAsync ? t('app.asyncSimulationsSavedAutomatically') : t('app.saveSyncSimulationToHistory') }}
-          </p>
         </div>
 
+        </template>
         <!-- Async Progress (visible when async simulation is running) -->
         <div v-if="isSimulating && asyncSimulationActive" class="space-y-1">
           <div class="flex items-center justify-between text-xs">
@@ -17962,7 +17885,7 @@ const counterexampleTraceHelpText = computed(() => {
               <HintTooltip :content="t('app.cancelSimulationTask')">
                 <button
                   type="button"
-                  class="w-6 h-6 inline-flex items-center justify-center rounded-md board-text-info hover:board-chip-info disabled:opacity-50 disabled:cursor-not-allowed"
+                  class="board-panel-icon-action"
                   :disabled="cancellingSimulationTask"
                   :aria-label="t('app.cancelSimulationTask')"
                   @click="cancelAsyncSimulation"
@@ -17979,34 +17902,34 @@ const counterexampleTraceHelpText = computed(() => {
               :style="{ width: asyncSimulationTask.taskId ? `${asyncSimulationTask.progress}%` : '35%' }"
             ></div>
           </div>
-          <div class="text-xs board-text-info text-center">{{ asyncSimulationTask.status }}</div>
+          <div class="text-xs board-text-info text-center">{{ formatWatchedTaskStatus(asyncSimulationTask.statusKey, cancellingSimulationTask) }}</div>
         </div>
 
+      </div>
+      <div class="board-run-panel__footer">
         <!-- Simulate Button -->
-        <HintTooltip :content="simulationRunBlockedReason || undefined">
-          <button
-            @click="runSimulation"
-            data-testid="run-simulation"
-            :disabled="isSimulating || Boolean(simulationRunBlockedReason)"
-            :aria-describedby="simulationRunBlockedReason ? 'simulation-run-blocked-reason' : undefined"
-            class="board-panel-submit"
-          >
-            <template v-if="!isBoardDataReady && failedBoardDataKeys.length === 0">
-              <span class="material-symbols-outlined text-sm animate-spin">sync</span>
-              {{ t('app.loading') }}
-            </template>
-            <template v-else-if="isSimulating">
-              <span class="material-symbols-outlined text-sm animate-spin">sync</span>
-              {{ simulationForm.isAsync ? t('app.runningAsync') : t('app.running') }}
-            </template>
-            <template v-else>
-              <span class="material-symbols-outlined text-sm">play_arrow</span>
-              {{ simulationForm.isAsync ? t('app.createSimulationTask') : t('app.runSimulationNow') }}
-            </template>
-          </button>
-        </HintTooltip>
+        <button
+          @click="runSimulation"
+          data-testid="run-simulation"
+          :disabled="isSimulating || Boolean(simulationRunBlockedReason)"
+          :aria-describedby="simulationRunBlockedDescriptionId"
+          class="board-panel-submit"
+        >
+          <template v-if="!isBoardDataReady && failedBoardDataKeys.length === 0">
+            <span class="material-symbols-outlined text-sm animate-spin">sync</span>
+            {{ t('app.loading') }}
+          </template>
+          <template v-else-if="isSimulating">
+            <span class="material-symbols-outlined text-sm animate-spin">sync</span>
+            {{ simulationForm.isAsync ? t('app.runningAsync') : t('app.running') }}
+          </template>
+          <template v-else>
+            <span class="material-symbols-outlined text-sm">play_arrow</span>
+            {{ simulationForm.isAsync ? t('app.createSimulationTask') : t('app.runSimulationNow') }}
+          </template>
+        </button>
         <p
-          v-if="simulationRunBlockedReason"
+          v-if="simulationRunBlockedDescriptionId === 'simulation-run-blocked-reason'"
           id="simulation-run-blocked-reason"
           data-testid="simulation-run-blocked-reason"
           class="text-xs leading-5 board-text-warning"
@@ -18027,7 +17950,6 @@ const counterexampleTraceHelpText = computed(() => {
         ref="deviceDialogRef"
         :visible="dialogVisible"
         :device-name="dialogMeta.deviceName"
-        :description="dialogMeta.description"
         :label="dialogMeta.label"
         :node-id="dialogMeta.nodeId"
         :manifest="dialogMeta.manifest"
@@ -18095,14 +18017,6 @@ const counterexampleTraceHelpText = computed(() => {
     </div>
 
 
-    <RuleBuilderDialog
-        v-if="ruleBuilderVisible"
-        v-model="ruleBuilderVisible"
-        :nodes="nodes"
-        :device-templates="deviceTemplates"
-        @save-rule="handleAddRule"
-    />
-
     <!-- Custom Rename Dialog -->
     <Teleport to="body">
       <div
@@ -18129,13 +18043,20 @@ const counterexampleTraceHelpText = computed(() => {
             </div>
           </div>
           <div class="iot-dialog__body">
+            <label for="rename-device-name" class="board-form-label mb-2 block">{{ t('app.deviceName') }}</label>
             <input
+              id="rename-device-name"
+              data-testid="rename-device-name"
               v-model="renameDialogData.newName"
               @keyup.enter="confirmRename"
               :disabled="renameDialogSubmitting"
-              class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900 transition-colors focus:border-[color:var(--accent)] focus:ring-2 focus:ring-[color:var(--accent-border)] dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+              :aria-invalid="renameNameConflict ? 'true' : undefined"
+              :aria-describedby="renameNameBlockedReason ? 'rename-device-name-hint' : undefined"
+              class="board-field"
               :placeholder="t('app.enterDeviceName')"
             />
+            <p v-if="renameNameBlockedReason" id="rename-device-name-hint" data-testid="rename-device-name-hint"
+              role="status" class="mt-2 text-xs" :class="renameNameConflict ? 'board-text-danger' : 'board-text-muted'">{{ renameNameBlockedReason }}</p>
           </div>
           <div class="iot-dialog__footer">
             <button
@@ -18147,7 +18068,8 @@ const counterexampleTraceHelpText = computed(() => {
             </button>
             <button
               @click="confirmRename"
-              :disabled="renameDialogSubmitting || !renameDialogData.newName.trim() || renameDialogData.newName.trim() === renameDialogData.originalLabel"
+              :disabled="renameDialogSubmitting || Boolean(renameNameBlockedReason)"
+              :aria-describedby="renameNameBlockedReason ? 'rename-device-name-hint' : undefined"
               :aria-busy="renameDialogSubmitting"
               class="iot-dialog-btn iot-dialog-btn--primary"
             >
@@ -18201,7 +18123,7 @@ const counterexampleTraceHelpText = computed(() => {
               role="status"
               aria-live="polite"
             >
-              <span class="h-4 w-4 shrink-0 animate-spin rounded-full border-2 board-border-progress border-t-blue-700 dark:board-border-progress dark:border-t-blue-200" aria-hidden="true"></span>
+              <span class="h-4 w-4 shrink-0 animate-spin rounded-full border-2 board-border-progress border-t-[color:var(--accent)]" aria-hidden="true"></span>
               {{ t('app.deviceDeletionPreviewLoading') }}
             </div>
 
@@ -18274,281 +18196,35 @@ const counterexampleTraceHelpText = computed(() => {
     :visible="showFuzzingResultDialog"
     :run="fuzzingResult"
     :loading="fuzzingResultLoading"
-    :error="fuzzingError"
+    :error="fuzzingErrorMessage"
     :action-locked="historyActionLocked"
-    :board-drifted="fuzzingResultBoardDrifted"
+    :board-comparison="fuzzingBoardComparison"
+    @ready="closeHistoryPanel(false)"
     @close="dismissFuzzingResult"
-    @replay="selectAndPlayFuzzingFinding($event, fuzzingResult?.id)"
+    @replay="openFuzzingFinding"
     @verify="openFormalVerificationForFuzzFinding"
     @verify-current-board="openFormalVerificationForCurrentBoard"
     @reuse-settings="reuseFuzzingSettings"
   />
 
-  <!-- Simulation Run Details Dialog -->
-  <div
-    v-if="simulationResult || simulationError"
-    data-testid="simulation-result-dialog"
-    class="iot-dialog-overlay"
-    @click="dismissSimulationResultDialog"
-    @keydown="handleSimulationResultDialogKeydown"
-  >
-    <div
-      :ref="setSimulationResultDialogRef"
-      class="iot-dialog iot-dialog--lg board-result-dialog-surface"
-      :class="simulationResult ? 'iot-dialog--info' : 'iot-dialog--danger'"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="simulation-result-dialog-title"
-      tabindex="-1"
-      @click.stop
-    >
+  <div v-if="simulationError" data-testid="simulation-result-dialog" class="iot-dialog-overlay"
+    @click="dismissSimulationResultDialog()" @keydown="handleSimulationResultDialogKeydown">
+    <div :ref="setSimulationResultDialogRef" class="iot-dialog iot-dialog--md iot-dialog--danger"
+      role="dialog" aria-modal="true" aria-labelledby="simulation-result-dialog-title" tabindex="-1" @click.stop>
       <header class="iot-dialog__header">
-          <div class="iot-dialog__icon">
-              <span class="material-symbols-outlined" aria-hidden="true">monitoring</span>
-          </div>
-            <div class="iot-dialog__heading">
-              <h3 id="simulation-result-dialog-title" class="iot-dialog__title">{{ t('app.simulationRunDetails') }}</h3>
-              <p v-if="simulationResult" class="iot-dialog__subtitle">
-                {{ t('app.simulationStateStepSummary', {
-                  states: getSimulationStateCount(simulationResult),
-                  steps: getSimulationActualStepCount(simulationResult),
-                  requested: getSimulationRequestedStepCount(simulationResult)
-                }) }}
-              </p>
-              <p v-else class="iot-dialog__subtitle board-text-danger">{{ t('app.simulationFailed') }}</p>
-            </div>
-          <button
-            type="button"
-            data-testid="close-simulation-result"
-            class="iot-dialog__close"
-            :aria-label="t('app.close')"
-            @click="dismissSimulationResultDialog"
-          >
-            <span class="material-symbols-outlined text-xl" aria-hidden="true">close</span>
-          </button>
+        <div class="iot-dialog__icon"><span class="material-symbols-outlined" aria-hidden="true">error</span></div>
+        <div class="iot-dialog__heading"><h3 id="simulation-result-dialog-title" class="iot-dialog__title">{{ runFailureTitle('simulation', simulationError) }}</h3></div>
+        <button type="button" data-testid="close-simulation-result" class="iot-dialog__close" :aria-label="t('app.close')" @click="dismissSimulationResultDialog()">
+          <span class="material-symbols-outlined" aria-hidden="true">close</span>
+        </button>
       </header>
-
-      <div v-if="simulationError" class="iot-dialog__body iot-scroll-region">
-        <div class="board-surface-danger rounded-lg p-4">
-          <div class="flex items-start gap-2 board-text-danger">
-            <span class="material-symbols-outlined" aria-hidden="true">error</span>
-            <span class="text-sm font-medium leading-6">{{ simulationError }}</span>
-          </div>
+      <div class="iot-dialog__body iot-scroll-region">
+        <div class="board-run-notice board-surface-danger">
+          <p v-if="runFailureDiagnostics.simulation?.message !== runFailureTitle('simulation', simulationError)">{{ runFailureDiagnostics.simulation?.message }}</p>
+          <FailureDetails v-if="runFailureDiagnostics.simulation" v-bind="runFailureDiagnostics.simulation" />
         </div>
       </div>
-
-      <div v-else-if="simulationResult" class="iot-dialog__body iot-scroll-region space-y-4">
-        <div
-          v-if="simulationResultStale"
-          data-testid="simulation-result-stale-banner"
-          role="status"
-          class="flex items-start gap-2 rounded-lg board-surface-warning px-4 py-3 text-sm leading-5 board-text-warning"
-        >
-          <span class="material-symbols-outlined text-base" aria-hidden="true">history</span>
-          <span>{{ t('app.simulationResultStaleRerun') }}</span>
-        </div>
-        <div
-          v-if="!isSimulationModelComplete(simulationResult)"
-          class="rounded-lg board-surface-warning px-4 py-3 text-sm board-text-warning"
-        >
-          <p>{{ t('app.simulationIncompleteModelDetail', { rules: getSimulationDisabledRuleCount(simulationResult) }) }}</p>
-          <ul v-if="getGenerationIssues(simulationResult).length > 0" class="mt-3 space-y-2">
-            <li
-              v-for="(issue, index) in getGenerationIssues(simulationResult)"
-              :key="`${issue.issueType}-${issue.itemLabel}-${index}`"
-              class="border-l-2 board-border-subtle pl-3"
-            >
-              <div class="text-xs font-bold board-text-warning">{{ issue.itemLabel }}</div>
-              <div class="mt-0.5 text-xs leading-5 board-text-warning">{{ t(generationIssueReasonKey(issue)) }}</div>
-            </li>
-          </ul>
-          <p v-else class="mt-2 text-xs board-text-warning">
-            {{ t('app.generationIssueDetailsUnavailable') }}
-          </p>
-        </div>
-
-        <div
-          v-if="isSimulationHorizonShorterThanRequested(simulationResult)"
-          class="rounded-lg board-surface-warning px-4 py-3 text-sm board-text-warning"
-          data-testid="simulation-short-horizon-warning"
-        >
-          {{ t('app.simulationStoppedBeforeRequestedSteps', {
-            actual: getSimulationActualStepCount(simulationResult),
-            requested: getSimulationRequestedStepCount(simulationResult)
-          }) }}
-        </div>
-
-        <div
-          v-if="!isSimulationModelSemanticsConsistent(simulationResult)"
-          class="rounded-lg board-surface-warning px-4 py-3 text-sm board-text-warning"
-        >
-          {{ t('app.modelSemanticsUnavailable') }}
-        </div>
-
-        <section aria-labelledby="simulation-run-summary-title">
-          <div class="flex items-center justify-between gap-3">
-            <h4 id="simulation-run-summary-title" class="text-sm font-bold text-slate-800">{{ t('app.runSummary') }}</h4>
-            <div class="flex flex-wrap justify-end gap-1.5">
-              <span v-if="simulationResult.isAttack" class="rounded-full board-chip-warning px-2 py-1 text-[11px] font-semibold board-text-warning">
-                {{ attackSelectionSummary(simulationResult.modelSemantics, simulationResult.attackBudget) }}
-              </span>
-              <span v-else class="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-semibold text-slate-600">
-                {{ t('app.traceVisualization.noAttackModelShort') }}
-              </span>
-              <span v-if="simulationResult.enablePrivacy" class="rounded-full board-chip-info px-2 py-1 text-[11px] font-semibold board-text-info">
-                {{ t('app.traceVisualization.privacyPropagationEnabled') }}
-              </span>
-              <span v-else class="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-semibold text-slate-600">
-                {{ t('app.traceVisualization.privacyPropagationNotModeled') }}
-              </span>
-            </div>
-          </div>
-          <div class="mt-3 grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-slate-200 bg-slate-200 sm:grid-cols-4">
-            <div class="board-card p-3">
-              <div class="text-[length:var(--iot-font-min)] font-bold uppercase text-slate-500">{{ t('app.modelStates') }}</div>
-              <div class="mt-1 text-xl font-bold text-slate-900">{{ getSimulationStateCount(simulationResult) }}</div>
-            </div>
-            <div class="board-card p-3">
-              <div class="text-[length:var(--iot-font-min)] font-bold uppercase text-slate-500">{{ t('app.actualSimulationSteps') }}</div>
-              <div class="mt-1 text-xl font-bold text-slate-900">{{ getSimulationActualStepCount(simulationResult) }}</div>
-            </div>
-            <div class="board-card p-3">
-              <div class="text-[length:var(--iot-font-min)] font-bold uppercase text-slate-500">{{ t('app.requestedSimulationSteps') }}</div>
-              <div class="mt-1 text-xl font-bold text-slate-900">{{ getSimulationRequestedStepCount(simulationResult) }}</div>
-            </div>
-            <div class="board-card p-3">
-              <div class="text-[length:var(--iot-font-min)] font-bold uppercase text-slate-500">{{ t('app.modelCoverage') }}</div>
-              <div class="mt-1 text-sm font-bold" :class="isSimulationModelComplete(simulationResult) ? 'board-text-success' : 'board-text-warning'">
-                {{ isSimulationModelComplete(simulationResult) ? t('app.completeModel') : t('app.incompleteModel') }}
-              </div>
-            </div>
-          </div>
-          <p class="mt-3 text-xs leading-5 text-slate-600">{{ t('app.simulationTimelineIsPrimaryView') }}</p>
-        </section>
-
-        <!--
-          The executed model, as a named scene-level artifact — the simulation counterpart of the
-          verification dialog's section, kept structurally identical so the two dialogs teach one
-          shape. It was a footer `--secondary` button here too.
-        -->
-        <section
-          v-if="simulationResult.modelSnapshot"
-          aria-labelledby="simulation-run-artifact-title"
-          data-testid="simulation-run-artifact"
-        >
-          <h4 id="simulation-run-artifact-title" class="mb-2 text-sm font-bold text-slate-800">
-            {{ t('app.runArtifact') }}
-          </h4>
-          <div class="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 p-4">
-            <div class="min-w-0 flex-1">
-              <p class="text-xs font-semibold text-slate-700">{{ t('app.smvModelArtifactTitle') }}</p>
-              <p class="mt-0.5 text-xs leading-5 text-slate-500">
-                {{ t('app.smvModelArtifactScope', {
-                  devices: simulationResult.modelSnapshot.deviceCount,
-                  rules: simulationResult.modelSnapshot.ruleCount,
-                  specs: simulationResult.modelSnapshot.specificationCount
-                }) }}
-              </p>
-              <p
-                v-if="!simulationRunSmvAvailable"
-                class="mt-1 text-xs leading-5 board-text-warning"
-                data-testid="simulation-result-smv-unavailable"
-              >
-                {{ t(simulationSmvUnavailableReason) }}
-              </p>
-            </div>
-            <button
-              type="button"
-              class="iot-dialog-btn iot-dialog-btn--primary shrink-0"
-              data-testid="simulation-result-download-smv"
-              :disabled="!simulationRunSmvAvailable"
-              @click="downloadCurrentSimulationRunSmv()"
-            >
-              <span class="material-symbols-outlined" aria-hidden="true">download</span>
-              {{ t('app.downloadSmvModel') }}
-            </button>
-          </div>
-        </section>
-
-        <details class="group border-t border-slate-200 pt-3" data-testid="simulation-state-snapshots">
-          <summary class="flex cursor-pointer list-none items-center justify-between text-sm font-bold text-slate-700 hover:text-slate-900">
-            <span class="inline-flex items-center gap-2">
-              <span class="material-symbols-outlined text-lg text-slate-500" aria-hidden="true">table_rows</span>
-              {{ t('app.simulationStates') }} ({{ getSimulationStateCount(simulationResult) }})
-            </span>
-            <span class="material-symbols-outlined transition-transform group-open:rotate-180" aria-hidden="true">expand_more</span>
-          </summary>
-          <div class="iot-scroll-region mt-3 max-h-64 rounded-lg border border-slate-200">
-            <table class="w-full text-xs">
-              <thead class="sticky top-0 bg-slate-50">
-                <tr>
-                  <th class="border-b p-2 text-left font-bold text-slate-600">{{ t('app.stateNumber') }}</th>
-                  <th class="border-b p-2 text-left font-bold text-slate-600">{{ t('app.devicesColumn') }}</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="(state, idx) in simulationResult.states" :key="idx" class="border-b border-slate-100 last:border-b-0">
-                  <td class="p-2 align-top font-mono board-text-info">{{ state.stateIndex }}</td>
-                  <td class="p-2">
-                    <div class="flex flex-wrap gap-1">
-                      <span
-                        v-for="(device, dIdx) in state.devices"
-                        :key="dIdx"
-                        class="inline-flex items-center gap-1 rounded bg-slate-100 px-2 py-0.5 text-slate-700"
-                      >
-                        <span class="font-medium">{{ device.deviceLabel || t('app.unknownModelItem') }}</span>
-                        <span class="text-slate-500">:</span>
-                        <span class="board-text-info">{{ device.state ? formatPlaybackDeviceModelToken(device, device.state) : t('app.notAvailableShort') }}</span>
-                      </span>
-                    </div>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </details>
-
-        <details class="group border-t border-slate-200 pt-3" data-testid="simulation-execution-logs">
-          <summary class="flex cursor-pointer list-none items-center justify-between text-sm font-bold text-slate-700 hover:text-slate-900">
-            <span class="inline-flex items-center gap-2">
-              <span class="material-symbols-outlined text-lg text-slate-500" aria-hidden="true">terminal</span>
-              {{ t('app.executionLogs') }}
-            </span>
-            <span class="material-symbols-outlined transition-transform group-open:rotate-180" aria-hidden="true">expand_more</span>
-          </summary>
-          <p class="mt-2 text-xs leading-5 text-slate-500">{{ t('app.executionLogsDiagnosticHint') }}</p>
-          <div class="iot-scroll-region mt-2 max-h-48 rounded-lg bg-slate-950 p-3">
-            <pre class="whitespace-pre-wrap font-mono text-xs leading-5 board-text-success">{{ simulationResult.logs?.join('\n') || t('app.noLogsAvailableShort') }}</pre>
-          </div>
-        </details>
-
-      </div>
-
-      <footer class="iot-dialog__footer">
-        <button
-          type="button"
-          class="iot-dialog-btn iot-dialog-btn--ghost"
-          @click="dismissSimulationResultDialog"
-        >
-          {{ t('app.close') }}
-        </button>
-        <!--
-          The timeline is the point of a simulation run, and this dialog is where the run lands. The
-          button was dropped while `handleSimulationTimelineAction` stayed behind unused, leaving the
-          state-by-state playback reachable only by reopening the run from history.
-        -->
-        <button
-          v-if="simulationResult && simulationResult.states && simulationResult.states.length > 0"
-          type="button"
-          :disabled="traceAnimationState.visible"
-          class="iot-dialog-btn iot-dialog-btn--primary"
-          data-testid="simulation-result-view-timeline"
-          @click="handleSimulationTimelineAction"
-        >
-          <span class="material-symbols-outlined" aria-hidden="true">play_circle</span>
-          {{ simulationAnimationState.visible ? t('app.returnToTimeline') : t('app.viewTimeline') }}
-        </button>
-      </footer>
+      <footer class="iot-dialog__footer"><button type="button" class="iot-dialog-btn iot-dialog-btn--ghost" @click="dismissSimulationResultDialog()">{{ t('app.close') }}</button></footer>
     </div>
   </div>
 
@@ -18562,12 +18238,13 @@ const counterexampleTraceHelpText = computed(() => {
   >
     <div
       :ref="setVerificationResultDialogRef"
-      class="iot-dialog iot-dialog--md board-result-dialog-surface"
+      class="iot-dialog iot-dialog--md"
       :class="verificationResultStatus.dialogToneClass"
       role="dialog"
       aria-modal="true"
       aria-labelledby="verification-result-dialog-title"
       tabindex="-1"
+      autofocus
       @click.stop
     >
       <!-- Header. The verdict is carried by the dialog's tone (the icon tile and the consequence rules read
@@ -18580,8 +18257,8 @@ const counterexampleTraceHelpText = computed(() => {
           </span>
         </div>
         <div class="iot-dialog__heading">
-          <h3 id="verification-result-dialog-title" class="iot-dialog__title">{{ t('app.verificationResult') }}</h3>
-          <p class="iot-dialog__subtitle">{{ verificationResultStatus.detail }}</p>
+          <h3 id="verification-result-dialog-title" class="iot-dialog__title">{{ verificationError ? verificationResultStatus.title : t('app.verificationResult') }}</h3>
+          <p v-if="verificationResultStatus.detail" class="iot-dialog__subtitle">{{ verificationResultStatus.detail }}</p>
         </div>
         <HintTooltip :content="t('app.close')">
           <button
@@ -18605,11 +18282,9 @@ const counterexampleTraceHelpText = computed(() => {
           0.667px from the role's own border token. An edgeless tint reads as a background wash rather
           than a bounded error notice.
         -->
-        <div v-if="verificationError" class="mb-4 p-4 board-surface-danger rounded-xl">
-          <div class="flex items-center gap-2 board-text-danger">
-            <span class="material-symbols-outlined">error</span>
-            <span class="font-medium">{{ verificationError }}</span>
-          </div>
+        <div v-if="verificationError" class="mb-4 board-run-notice board-surface-danger">
+          <p v-if="runFailureDiagnostics.verification?.message !== verificationResultStatus.title" class="font-medium board-text-danger">{{ runFailureDiagnostics.verification?.message }}</p>
+          <FailureDetails v-if="runFailureDiagnostics.verification" v-bind="runFailureDiagnostics.verification" />
         </div>
 
         <div v-else-if="verificationResult" class="space-y-4">
@@ -18618,10 +18293,22 @@ const counterexampleTraceHelpText = computed(() => {
             v-if="verificationResultStale"
             data-testid="verification-result-stale-banner"
             role="status"
-            class="flex items-start gap-2 rounded-xl board-surface-warning p-4 text-sm leading-5 board-text-warning"
+            class="board-run-notice flex items-start gap-2 board-surface-warning board-text-warning"
           >
             <span class="material-symbols-outlined text-base" aria-hidden="true">history</span>
-            <span>{{ t('app.verificationResultStaleReverify') }}</span>
+            <div class="min-w-0">
+              <p v-if="verificationFixApplied" data-testid="verification-fix-applied" class="mb-1 font-semibold">{{ t('app.fixAppliedWithSignedEvidence') }}</p>
+              <p>{{ t('app.verificationResultStaleReverify') }}</p>
+            </div>
+          </div>
+          <div
+            v-else-if="verificationFixBlockedReason"
+            data-testid="verification-result-comparison-banner"
+            role="status"
+            class="board-run-notice flex items-start gap-2 board-surface-warning board-text-warning"
+          >
+            <span class="material-symbols-outlined text-base" aria-hidden="true">info</span>
+            <span>{{ verificationFixBlockedReason }}</span>
           </div>
 
           <!--
@@ -18632,21 +18319,182 @@ const counterexampleTraceHelpText = computed(() => {
           -->
           <section aria-labelledby="verification-summary-title">
             <h4 id="verification-summary-title" class="sr-only">{{ t('app.verificationSummary') }}</h4>
-            <div class="grid grid-cols-3 gap-px overflow-hidden rounded-lg border border-slate-200 bg-slate-200">
+            <div class="verification-summary grid grid-cols-3 gap-px overflow-hidden rounded-lg border board-border-subtle board-bg-control">
               <div class="board-card p-4">
-                <div class="text-[length:var(--iot-font-min)] font-bold uppercase text-slate-500">{{ t('app.satisfied') }}</div>
-                <div class="mt-1 text-2xl font-bold board-text-success">{{ verificationSpecResultSummary.satisfied }}</div>
+                <div class="board-form-label">{{ t('app.satisfied') }}</div>
+                <div class="mt-1 text-2xl font-semibold board-text-success">{{ verificationSpecResultSummary.satisfied }}</div>
               </div>
               <div class="board-card p-4">
-                <div class="text-[length:var(--iot-font-min)] font-bold uppercase text-slate-500">{{ t('app.violated') }}</div>
-                <div class="mt-1 text-2xl font-bold board-text-danger">{{ verificationSpecResultSummary.violated }}</div>
+                <div class="board-form-label">{{ t('app.violated') }}</div>
+                <div class="mt-1 text-2xl font-semibold board-text-danger">{{ verificationSpecResultSummary.violated }}</div>
               </div>
               <div class="board-card p-4">
-                <div class="text-[length:var(--iot-font-min)] font-bold uppercase text-slate-500">{{ t('app.inconclusive') }}</div>
-                <div class="mt-1 text-2xl font-bold board-text-warning">{{ verificationSpecResultSummary.inconclusive }}</div>
+                <div class="board-form-label">{{ t('app.inconclusive') }}</div>
+                <div class="mt-1 text-2xl font-semibold board-text-warning">{{ verificationSpecResultSummary.inconclusive }}</div>
               </div>
             </div>
           </section>
+
+
+          <!--
+            Counterexamples, promoted above the per-specification verdicts: this is the evidence the
+            reader acts on, and the verdict list is the reference behind it.
+
+            One list, not two. This section and a second, near-identical one below the run context both
+            rendered `verificationResult.traces`, so every violation appeared twice with two different
+            replay handlers — and the promoted copy passed the *array index* to
+            `selectAndPlayVerificationTrace`, which takes a trace id, so its "view" button fetched
+            trace 0, 1, 2… The surviving list keeps `selectAndPlayTrace(index)`, which indexes
+            `verificationResult.traces` directly, and the `data-testid`s the E2E flow addresses.
+          -->
+          <!--
+            Outside the counterexample section, not inside it. That section is
+            `v-if="traces?.length"`, so with no parseable counterexample it does not render at all — and
+            that is precisely the case where the summary grid's violation count needs accounting for.
+            A notice placed inside would vanish exactly when it is needed.
+          -->
+          <p
+            v-if="verificationEvidenceShortfall > 0"
+            class="board-run-notice board-surface-warning board-text-warning"
+            data-testid="verification-evidence-shortfall"
+          >
+            {{ t('app.someViolationsHaveNoReplayableCounterexample') }}
+          </p>
+
+          <section v-if="verificationResult?.traces?.length" aria-labelledby="violations-title">
+            <h4 id="violations-title" class="board-section-title mb-2">
+              {{ getVerificationOutcome(verificationResult) === 'VIOLATED'
+                ? t('app.violationsTitle')
+                : t('app.inconclusiveEvidenceTitle') }} ({{ verificationResult.traces.length }})
+            </h4>
+            <p
+              v-if="getVerificationOutcome(verificationResult) === 'INCONCLUSIVE'"
+              class="board-run-notice mb-2 board-surface-warning board-text-warning"
+            >
+              {{ t('app.inconclusiveEvidenceSummary', { counterexamples: verificationResult.traces.length }) }}
+            </p>
+            <div class="space-y-2">
+              <div v-for="(trace, i) in verificationResult.traces" :key="i" class="border board-border-subtle rounded-lg p-3">
+                <div class="verification-trace__header">
+                  <div
+                    class="text-xs font-semibold"
+                    :class="getVerificationOutcome(verificationResult) === 'VIOLATED'
+                      ? 'board-text-danger'
+                      : 'board-text-warning'"
+                  >{{ t('app.violationNumber', { index: Number(i) + 1 }) }}</div>
+                  <div class="verification-trace__actions">
+                    <button
+                      v-if="canFixVerificationResultTrace(trace)"
+                      type="button"
+                      data-testid="verification-trace-fix"
+                      class="iot-dialog-btn iot-dialog-btn--ghost"
+                      :disabled="simulationAnimationState.visible"
+                      @click="openFixForVerificationResultTrace(trace)"
+                    >
+                      <!-- aria-hidden, or the ligature text joins the accessible name: this button
+                           announced as "build Fix Rules" and its sibling as "play_arrow View", which
+                           is what a name-based query (or a screen reader) actually receives. -->
+                      <span class="material-symbols-outlined text-xs" aria-hidden="true">build</span>
+                      {{ t('app.fixRules') }}
+                    </button>
+                    <button
+                      type="button"
+                      @click="selectAndPlayTrace(Number(i))"
+                      :disabled="simulationAnimationState.visible"
+                      data-testid="verification-trace-replay"
+                      class="iot-dialog-btn iot-dialog-btn--primary"
+                    >
+                      <span class="material-symbols-outlined text-xs" aria-hidden="true">play_arrow</span>
+                      {{ t('app.replay') }}
+                      <span v-if="simulationAnimationState.visible" class="text-xs">({{ t('app.active') }})</span>
+                    </button>
+                  </div>
+                </div>
+                <!-- Why Fix is withheld. Without this the button simply vanished, which reads as a bug. -->
+                <p
+                  v-if="!canFixVerificationResultTrace(trace) && !verificationResultStale"
+                  data-testid="verification-trace-fix-unavailable"
+                  class="board-run-notice mb-2 board-surface-warning board-text-warning"
+                >
+                  {{ !hasPersistedVerificationTrace(verificationResult, trace)
+                    ? t(verificationResult.historyPersistence.status === 'OUTCOME_UNKNOWN'
+                      ? 'app.verificationTracePersistenceUnknownFixUnavailable'
+                      : 'app.verificationTraceNotPersistedFixUnavailable')
+                    : verificationFixBlockedReason }}
+                </p>
+                <div class="text-xs board-text-muted">
+                  <span class="font-medium">{{ getTraceSpecDisplayTitle(trace) }}</span>
+                  <span class="board-text-muted"> · {{ t('app.statesCount', { count: trace.states?.length || 0 }) }}</span>
+                </div>
+                <details v-if="trace.violatedSpecId" class="verification-result-disclosure mt-1 text-xs board-text-muted">
+                  <summary class="cursor-pointer font-semibold">{{ t('app.technicalDetails') }}</summary>
+                  <div class="mt-1 grid gap-1 sm:grid-cols-[9rem_minmax(0,1fr)]">
+                    <span class="font-medium">{{ t('app.specificationTechnicalId') }}</span>
+                    <code class="break-all rounded board-bg-muted px-2 py-1 text-xs board-text-strong">{{ trace.violatedSpecId }}</code>
+                  </div>
+                </details>
+              </div>
+            </div>
+          </section>
+
+          <details
+            v-if="verificationSpecResultSummary.total > 0"
+            class="verification-result-disclosure group border-t board-border-subtle pt-3"
+            open
+            data-testid="spec-results-section"
+          >
+            <summary class="flex cursor-pointer list-none items-center justify-between text-sm font-semibold board-text-strong hover:board-text-strong">
+              <span class="inline-flex items-center gap-2">
+                <span class="material-symbols-outlined text-lg board-text-muted" aria-hidden="true">rule</span>
+                {{ t('app.specResults') }} ({{ verificationSpecResultSummary.total }})
+              </span>
+              <span class="material-symbols-outlined transition-transform group-open:rotate-180" aria-hidden="true">expand_more</span>
+            </summary>
+            <div class="iot-scroll-region mt-3 space-y-2 max-h-72 pr-1" data-testid="spec-results-list">
+              <article
+                v-for="(result, index) in verificationSpecResultSummary.results"
+                :key="`${result.specId}-${index}`"
+                :data-spec-id="result.specId"
+                class="board-card rounded-lg border p-3"
+                :class="result.presentation.borderClass"
+              >
+                <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <span class="font-semibold board-text-muted">{{ t('app.specificationNumber', { number: Number(index) + 1 }) }}</span>
+                  <span class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-semibold" :class="result.presentation.badgeClass">
+                    <span class="material-symbols-outlined text-sm" aria-hidden="true">{{ result.presentation.icon }}</span>
+                    {{ result.presentation.label }}
+                  </span>
+                </div>
+                <h4 class="board-copy my-2 break-words" data-testid="spec-result-description">
+                  {{ result.description || result.displayTitle }}
+                </h4>
+                <p v-if="!result.description" class="mb-2 text-xs board-text-muted" data-testid="spec-result-snapshot-unavailable">{{ t('app.specificationSnapshotUnavailable') }}</p>
+                <details class="spec-formula-disclosure" data-testid="spec-result-formula-details">
+                  <summary class="text-xs font-medium board-text-muted">
+                    <span class="material-symbols-outlined spec-formula-disclosure__chevron" aria-hidden="true">chevron_right</span>
+                    <span>{{ t('app.formulaPreview') }}</span>
+                    <span class="rounded board-card board-card--muted px-1.5 py-0.5 font-mono" data-testid="spec-result-formula-kind">{{ result.formulaKind }}</span>
+                  </summary>
+                  <p class="mt-2 whitespace-pre-wrap break-all rounded board-card board-card--muted p-2 font-mono text-xs leading-relaxed board-text-muted" data-testid="spec-result-formula">{{ result.formula }}</p>
+                </details>
+                <div v-if="result.variableSourceLabels.length" class="mt-2 flex flex-wrap gap-1">
+                  <span v-for="entry in result.variableSourceLabels" :key="entry.key"
+                    class="rounded border px-1.5 py-0.5 text-xs font-semibold"
+                    :class="entry.unresolved ? 'board-chip-danger board-text-danger border-[color:var(--danger-border)]' : 'board-border-subtle board-bg-control board-text-muted'"
+                    data-testid="spec-result-variable-source">{{ entry.label }}</span>
+                </div>
+                <details v-if="result.specId || result.expression" class="verification-result-disclosure mt-2 text-xs board-text-muted">
+                  <summary class="cursor-pointer font-semibold">{{ t('app.technicalDetails') }}</summary>
+                  <div class="mt-1 grid gap-1 sm:grid-cols-[9rem_minmax(0,1fr)]">
+                    <span class="font-medium">{{ t('app.actualCheckedExpression') }}</span>
+                    <code class="break-all rounded board-bg-muted px-2 py-1 board-text-strong">{{ result.expression }}</code>
+                    <span class="font-medium">{{ t('app.specificationTechnicalId') }}</span>
+                    <code class="break-all rounded board-bg-muted px-2 py-1 board-text-strong">{{ result.specId }}</code>
+                  </div>
+                </details>
+              </article>
+            </div>
+          </details>
 
           <!--
             The checked model, as a named scene-level artifact.
@@ -18667,21 +18515,18 @@ const counterexampleTraceHelpText = computed(() => {
             aria-labelledby="verification-run-artifact-title"
             data-testid="verification-run-artifact"
           >
-            <h4 id="verification-run-artifact-title" class="mb-2 text-sm font-bold text-slate-700">
+            <h4 id="verification-run-artifact-title" class="board-section-title mb-2">
               {{ t('app.runArtifact') }}
             </h4>
-            <div class="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 p-4">
-              <div class="min-w-0 flex-1">
-                <p class="text-xs font-semibold text-slate-700">{{ t('app.smvModelArtifactTitle') }}</p>
-                <p class="mt-0.5 text-xs leading-5 text-slate-500">
+            <div class="flex flex-wrap items-center justify-between gap-3 rounded-lg border board-border-subtle board-bg-muted p-4">
+              <div class="verification-run-artifact__copy">
+                <p class="text-xs font-semibold board-text-strong">{{ t('app.smvModelArtifactTitle') }}</p>
+                <p class="mt-0.5 text-xs leading-5 board-text-muted">
                   {{ t('app.smvModelArtifactScope', {
                     devices: verificationResult.modelSnapshot.deviceCount,
                     rules: verificationResult.modelSnapshot.ruleCount,
                     specs: verificationResult.modelSnapshot.specificationCount
                   }) }}
-                  <!-- Verification only: this is what makes the artifact run-level rather than
-                       per-counterexample, and a simulation has no counterexamples to say it about. -->
-                  {{ t('app.smvModelArtifactSharedByCounterexamples') }}
                 </p>
                 <p
                   v-if="!verificationRunSmvAvailable"
@@ -18704,203 +18549,20 @@ const counterexampleTraceHelpText = computed(() => {
             </div>
           </section>
 
-          <!--
-            Counterexamples, promoted above the per-specification verdicts: this is the evidence the
-            reader acts on, and the verdict list is the reference behind it.
-
-            One list, not two. This section and a second, near-identical one below the run context both
-            rendered `verificationResult.traces`, so every violation appeared twice with two different
-            replay handlers — and the promoted copy passed the *array index* to
-            `selectAndPlayVerificationTrace`, which takes a trace id, so its "view" button fetched
-            trace 0, 1, 2… The surviving list keeps `selectAndPlayTrace(index)`, which indexes
-            `verificationResult.traces` directly, and the `data-testid`s the E2E flow addresses.
-          -->
-          <!--
-            Outside the counterexample section, not inside it. That section is
-            `v-if="traces?.length"`, so with no parseable counterexample it does not render at all — and
-            that is precisely the case where the summary grid's violation count needs accounting for.
-            A notice placed inside would vanish exactly when it is needed.
-          -->
-          <p
-            v-if="verificationEvidenceShortfall > 0"
-            class="rounded-md board-surface-warning px-3 py-2 text-xs leading-5 board-text-warning"
-            data-testid="verification-evidence-shortfall"
-          >
-            {{ t('app.someViolationsHaveNoReplayableCounterexample') }}
-          </p>
-
-          <section v-if="verificationResult?.traces?.length" aria-labelledby="violations-title">
-            <h4 id="violations-title" class="text-sm font-bold text-slate-700 mb-2">
-              {{ getVerificationOutcome(verificationResult) === 'VIOLATED'
-                ? t('app.violationsTitle')
-                : t('app.inconclusiveEvidenceTitle') }} ({{ verificationResult.traces.length }})
-            </h4>
-            <p
-              v-if="getVerificationOutcome(verificationResult) === 'INCONCLUSIVE'"
-              class="mb-2 rounded-md board-surface-warning px-3 py-2 text-xs leading-5 board-text-warning"
-            >
-              {{ t('app.inconclusiveEvidenceSummary', { counterexamples: verificationResult.traces.length }) }}
-            </p>
-            <div class="space-y-2">
-              <div v-for="(trace, i) in verificationResult.traces" :key="i" class="border border-slate-200 rounded-lg p-3">
-                <div class="flex items-center justify-between mb-1">
-                  <div
-                    class="text-xs font-bold"
-                    :class="getVerificationOutcome(verificationResult) === 'VIOLATED'
-                      ? 'board-text-danger'
-                      : 'board-text-warning'"
-                  >{{ t('app.violationNumber', { index: Number(i) + 1 }) }}</div>
-                  <div class="flex gap-1">
-                    <button
-                      v-if="canFixVerificationResultTrace(trace)"
-                      type="button"
-                      data-testid="verification-trace-fix"
-                      class="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-white transition-colors"
-                      :class="simulationAnimationState.visible
-                        ? 'bg-slate-300 cursor-not-allowed'
-                        : 'bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)]'"
-                      :disabled="simulationAnimationState.visible"
-                      @click="openFixForVerificationResultTrace(trace)"
-                    >
-                      <!-- aria-hidden, or the ligature text joins the accessible name: this button
-                           announced as "build Fix Rules" and its sibling as "play_arrow View", which
-                           is what a name-based query (or a screen reader) actually receives. -->
-                      <span class="material-symbols-outlined text-xs" aria-hidden="true">build</span>
-                      {{ t('app.fixRules') }}
-                    </button>
-                    <button
-                      type="button"
-                      @click="selectAndPlayTrace(Number(i))"
-                      :disabled="simulationAnimationState.visible"
-                      :class="[
-                        'px-2 py-1 rounded-lg text-xs font-medium transition-colors flex items-center gap-1',
-                        simulationAnimationState.visible
-                          ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
-                          : 'bg-[color:var(--danger-fill)] hover:bg-[color:var(--danger-fill-hover)] text-white'
-                      ]"
-                    >
-                      <span class="material-symbols-outlined text-xs" aria-hidden="true">play_arrow</span>
-                      {{ t('app.view') }}
-                      <span v-if="simulationAnimationState.visible" class="text-[length:var(--iot-font-min)]">({{ t('app.active') }})</span>
-                    </button>
-                  </div>
-                </div>
-                <!-- Why Fix is withheld. Without this the button simply vanished, which reads as a bug. -->
-                <p
-                  v-if="!canFixVerificationResultTrace(trace)"
-                  data-testid="verification-trace-fix-unavailable"
-                  class="mb-2 rounded-md board-surface-warning px-2 py-1.5 text-xs leading-5 board-text-warning"
-                >
-                  {{ verificationResultStale
-                    ? t('app.verificationResultStaleReverify')
-                    : t(verificationResult.historyPersistence.status === 'OUTCOME_UNKNOWN'
-                      ? 'app.verificationTracePersistenceUnknownFixUnavailable'
-                      : 'app.verificationTraceNotPersistedFixUnavailable') }}
-                </p>
-                <div class="text-xs text-slate-600">
-                  <span class="font-medium">{{ getTraceSpecDisplayTitle(trace) }}</span>
-                  <span class="text-slate-500"> · {{ t('app.statesCount', { count: trace.states?.length || 0 }) }}</span>
-                </div>
-                <details v-if="trace.violatedSpecId" class="mt-1 text-[11px] text-slate-500">
-                  <summary class="cursor-pointer font-semibold">{{ t('app.technicalDetails') }}</summary>
-                  <div class="mt-1 grid gap-1 sm:grid-cols-[9rem_minmax(0,1fr)]">
-                    <span class="font-medium">{{ t('app.specificationTechnicalId') }}</span>
-                    <code class="break-all rounded bg-slate-50 px-2 py-1 text-[11px] text-slate-700">{{ trace.violatedSpecId }}</code>
-                  </div>
-                </details>
-              </div>
-            </div>
-          </section>
-
-          <!--
-            Per-specification verdicts, collapsible. Also previously rendered twice — once here and once
-            as an always-open `app.specResults` card below the run context, whose header restated the
-            satisfied/violated/inconclusive counts that the summary grid at the top already shows. The
-            copy that survived is this one (collapsed detail, one heading), carrying the fields the other
-            had and this lacked: the variable-source chips that distinguish two specs sharing a template
-            label, the labelled formula block, and the per-row technical disclosure.
-          -->
-          <details
-            v-if="verificationSpecResultSummary.total > 0"
-            class="group border-t border-slate-200 pt-3"
-            open
-            data-testid="spec-results-section"
-          >
-            <summary class="flex cursor-pointer list-none items-center justify-between text-sm font-bold text-slate-700 hover:text-slate-900">
-              <span class="inline-flex items-center gap-2">
-                <span class="material-symbols-outlined text-lg text-slate-500" aria-hidden="true">rule</span>
-                {{ t('app.specResults') }} ({{ verificationSpecResultSummary.total }})
-              </span>
-              <span class="material-symbols-outlined transition-transform group-open:rotate-180" aria-hidden="true">expand_more</span>
-            </summary>
-            <div class="iot-scroll-region mt-3 space-y-2 max-h-72 pr-1" data-testid="spec-results-list">
-              <div
-                v-for="(result, index) in verificationSpecResultSummary.results"
-                :key="`${result.specId}-${index}`"
-                class="board-card rounded-lg border px-3 py-2"
-                :class="result.presentation.borderClass"
-              >
-                <div class="flex items-start justify-between gap-3">
-                  <div class="min-w-0 flex-1">
-                    <div class="flex flex-wrap items-center gap-2">
-                      <span class="text-xs font-semibold text-slate-500">#{{ Number(index) + 1 }}</span>
-                      <span class="text-xs font-semibold text-slate-700">{{ result.displayTitle }}</span>
-                      <span class="rounded bg-slate-100 px-1.5 py-0.5 text-[length:var(--iot-font-min)] font-bold text-slate-600">{{ result.formulaKind }}</span>
-                      <!-- Names the reading this verdict is about. Two specs asking different questions of
-                           one key share a template label, so without this they read as identical rows with
-                           opposite verdicts. -->
-                      <span
-                        v-for="label in result.variableSourceLabels"
-                        :key="label"
-                        class="rounded bg-slate-100 px-1.5 py-0.5 text-[length:var(--iot-font-min)] font-semibold text-slate-600"
-                        data-testid="spec-result-variable-source"
-                      >{{ label }}</span>
-                    </div>
-                    <div class="mt-2 rounded-md bg-slate-50 px-2 py-1.5">
-                      <!-- slate-500, not slate-400: this labels the formula below it, and slate-400 measured
-                           2.51:1 on the slate-50 card. slate-500 is 4.76 on white and reads as the same
-                           de-emphasised caption step. -->
-                      <p class="mb-1 text-[length:var(--iot-font-min)] font-bold uppercase tracking-wide text-slate-500">{{ t('app.formulaPreview') }}</p>
-                      <p class="max-w-full font-mono text-xs leading-5 text-slate-600 break-all">
-                        {{ result.formulaPreview }}
-                      </p>
-                    </div>
-                    <details v-if="result.specId || result.expression" class="mt-2 text-[11px] text-slate-500">
-                      <summary class="cursor-pointer font-semibold">{{ t('app.technicalDetails') }}</summary>
-                      <div class="mt-1 grid gap-1 sm:grid-cols-[9rem_minmax(0,1fr)]">
-                        <span class="font-medium">{{ t('app.actualCheckedExpression') }}</span>
-                        <code class="break-all rounded bg-slate-50 px-2 py-1 text-[11px] text-slate-700">{{ result.expression }}</code>
-                        <span class="font-medium">{{ t('app.specificationTechnicalId') }}</span>
-                        <code class="break-all rounded bg-slate-50 px-2 py-1 text-[11px] text-slate-700">{{ result.specId }}</code>
-                      </div>
-                    </details>
-                  </div>
-                  <span
-                    class="inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-semibold"
-                    :class="result.presentation.badgeClass"
-                  >
-                    <span class="material-symbols-outlined text-sm">{{ result.presentation.icon }}</span>
-                    {{ result.presentation.label }}
-                  </span>
-                </div>
-              </div>
-            </div>
-          </details>
-
           <!-- Run Context (Collapsible, merged) -->
-          <details class="group border-t border-slate-200 pt-3" data-testid="run-context-section">
-            <summary class="flex cursor-pointer list-none items-center justify-between text-sm font-bold text-slate-700 hover:text-slate-900">
+          <details class="verification-result-disclosure group border-t board-border-subtle pt-3" data-testid="run-context-section">
+            <summary class="flex cursor-pointer list-none items-center justify-between text-sm font-semibold board-text-strong hover:board-text-strong">
               <span class="inline-flex items-center gap-2">
-                <span class="material-symbols-outlined text-lg text-slate-500" aria-hidden="true">inventory_2</span>
+                <span class="material-symbols-outlined text-lg board-text-muted" aria-hidden="true">inventory_2</span>
                 {{ t('app.runContext') }}
               </span>
               <span class="material-symbols-outlined transition-transform group-open:rotate-180" aria-hidden="true">expand_more</span>
             </summary>
             <div class="mt-3 space-y-3">
               <!-- Model Snapshot -->
-              <div class="bg-slate-50 border border-slate-200 rounded-lg p-3">
-                <h5 class="text-xs font-bold text-slate-700 mb-2">{{ t('app.modelRunSnapshotTitle') }}</h5>
-                <p class="text-xs text-slate-600 mb-2">
+              <div class="board-bg-muted border board-border-subtle rounded-lg p-3">
+                <h5 class="board-section-title mb-2">{{ t('app.modelRunSnapshotTitle') }}</h5>
+                <p class="text-xs board-text-muted mb-2">
                   {{ t('app.modelRunSnapshotSummary', {
                     time: formatRunTimestamp(verificationResult.modelSnapshot.capturedAt),
                     devices: verificationResult.modelSnapshot.deviceCount,
@@ -18916,7 +18578,7 @@ const counterexampleTraceHelpText = computed(() => {
                     ? 'board-border-subtle board-chip-success board-text-success'
                     : verificationBoardComparison === 'CHANGED'
                       ? 'board-surface-warning board-text-warning'
-                      : 'border-slate-200 bg-slate-50 text-slate-700'"
+                      : 'board-border-subtle board-bg-muted board-text-strong'"
                   data-testid="verification-board-comparison"
                 >
                   {{ verificationBoardComparison === 'UNCHANGED'
@@ -18924,21 +18586,22 @@ const counterexampleTraceHelpText = computed(() => {
                     : verificationBoardComparison === 'CHANGED'
                       ? t('app.runBoardInputChanged')
                       : verificationBoardComparison === 'UNAVAILABLE'
-                        ? t('app.runBoardComparisonUnavailable')
+                        ? t(loadingCurrentBoardModelFingerprints
+                          ? 'app.runBoardComparisonLoading' : 'app.runBoardComparisonUnavailable')
                         : t('app.runBoardNotCompared') }}
                 </div>
               </div>
 
               <!-- Model Assumptions -->
-              <div class="bg-slate-50 border border-slate-200 rounded-lg p-3">
-                <h5 class="text-xs font-bold text-slate-700 mb-2">{{ t('app.modelAssumptions') }}</h5>
+              <div class="board-bg-muted border board-border-subtle rounded-lg p-3">
+                <h5 class="board-section-title mb-2">{{ t('app.modelAssumptions') }}</h5>
                 <div
                   v-if="!verificationModelSemanticsConsistent"
                   class="mb-2 rounded board-surface-warning px-2 py-1.5 text-xs font-semibold board-text-warning"
                 >
                   {{ t('app.modelSemanticsUnavailable') }}
                 </div>
-                <div class="space-y-2 text-xs leading-5 text-slate-600">
+                <div class="space-y-2 text-xs leading-5 board-text-muted">
                   <div v-if="verificationModelSemanticsConsistent" class="flex items-start gap-2">
                     <span class="material-symbols-outlined text-base board-text-info">landscape</span>
                     <span>{{ t('app.environmentEvolutionIncluded') }}</span>
@@ -18952,15 +18615,15 @@ const counterexampleTraceHelpText = computed(() => {
                     <span>{{ t('app.labelPropagationScopeSummary') }}</span>
                   </div>
                   <div v-if="verificationModelSemanticsConsistent" class="flex items-start gap-2">
-                    <span class="material-symbols-outlined text-base" :class="verificationResult.isAttack ? 'board-text-danger' : 'text-slate-500'">security</span>
+                    <span class="material-symbols-outlined text-base" :class="verificationResult.isAttack ? 'board-text-danger' : 'board-text-muted'">security</span>
                     <span>
                       {{ verificationResult.isAttack
-                        ? attackSelectionSummary(verificationResult.modelSemantics, verificationResult.attackBudget, true)
+                        ? attackSelectionSummary(verificationResult.modelSemantics, verificationResult.attackBudget, 'verification')
                         : t('app.verificationNoAttackCoverage') }}
                     </span>
                   </div>
                   <div v-if="verificationModelSemanticsConsistent" class="flex items-start gap-2">
-                    <span class="material-symbols-outlined text-base" :class="verificationResult.enablePrivacy ? 'board-text-info' : 'text-slate-500'">shield_lock</span>
+                    <span class="material-symbols-outlined text-base" :class="verificationResult.enablePrivacy ? 'board-text-info' : 'board-text-muted'">shield_lock</span>
                     <span>
                       {{ verificationResult.enablePrivacy
                         ? t('app.privacyPropagationIncluded')
@@ -18992,17 +18655,14 @@ const counterexampleTraceHelpText = computed(() => {
               -->
               <details
                 v-if="verificationResult.nusmvOutput"
-                class="bg-slate-50 border border-slate-200 rounded-lg p-3"
+                class="verification-result-disclosure board-bg-muted border board-border-subtle rounded-lg p-3"
                 data-testid="verification-nusmv-output"
               >
-                <summary class="cursor-pointer text-xs font-bold text-slate-700 hover:text-slate-900">
+                <summary class="cursor-pointer text-xs font-semibold board-text-strong hover:board-text-strong">
                   {{ t('app.showNusmvDiagnosticOutput') }}
                 </summary>
-                <div class="iot-scroll-region mt-2 max-h-44 rounded-lg bg-slate-900 p-3">
-                  <!-- slate-300 on the slate-900 terminal block, not slate-500: this ground is dark in
-                       *both* themes (it is a console, deliberately), so the ink has to be light.
-                       slate-500 measured 3.74 here — dark-on-dark. slate-300 is 12.0. -->
-                  <pre class="whitespace-pre-wrap font-mono text-xs leading-5 text-slate-300">{{ verificationResult.nusmvOutput }}</pre>
+                <div class="iot-scroll-region mt-2 max-h-44 rounded-lg board-bg-muted p-3">
+                  <pre class="whitespace-pre-wrap font-mono text-xs leading-5 board-text-strong">{{ verificationResult.nusmvOutput }}</pre>
                 </div>
               </details>
             </div>
@@ -19012,7 +18672,7 @@ const counterexampleTraceHelpText = computed(() => {
             <div class="flex items-start gap-3">
               <span class="material-symbols-outlined board-text-warning">report</span>
               <div>
-                <div class="text-sm font-bold">{{ t('app.generationWarnings') }}</div>
+                <div class="text-sm font-semibold">{{ t('app.generationWarnings') }}</div>
                 <p class="text-sm mt-1">
                   {{ t('app.disabledRulesSkippedSpecs', { rules: verificationGenerationWarningCounts.disabledRuleCount, specs: verificationGenerationWarningCounts.skippedSpecCount }) }}
                 </p>
@@ -19022,7 +18682,7 @@ const counterexampleTraceHelpText = computed(() => {
                     :key="`${issue.issueType}-${issue.itemLabel}-${index}`"
                     class="border-l-2 board-border-subtle pl-3"
                   >
-                    <div class="text-xs font-bold board-text-warning">{{ issue.itemLabel }}</div>
+                    <div class="text-xs font-semibold board-text-warning">{{ issue.itemLabel }}</div>
                     <div class="mt-0.5 text-xs leading-5 board-text-warning">{{ t(generationIssueReasonKey(issue)) }}</div>
                   </li>
                 </ul>
@@ -19033,29 +18693,23 @@ const counterexampleTraceHelpText = computed(() => {
             </div>
           </div>
 
-          <div v-if="verificationCheckLogs.length > 0" class="p-4 rounded-xl bg-slate-50 border border-slate-200">
-            <h4 class="text-sm font-bold text-slate-700 mb-2">{{ t('app.checkLogs') }}</h4>
-            <!--
-              A transcript, not seven independent facts.
-
-              Each line used to be a `board-card` with its own border, so the engine log rendered as 7 boxed
-              cards inside an already-bordered section. Measured on the result dialog: 15 bordered boxes
-              competing as units, **7 of them individual log lines** — one sequential list wearing seven frames.
-
-              Lines are ordered and cumulative; the reader follows them top to bottom, so what they need is
-              rhythm and a monospace column, not per-line containment. Borders removed and vertical padding
-              tightened; the enclosing section already scopes the group.
-            -->
-            <ol class="iot-scroll-region max-h-44 space-y-0.5">
+          <details
+            v-if="verificationCheckLogs.length > 0"
+            :open="getVerificationOutcome(verificationResult) === 'INCONCLUSIVE' || !verificationResult.modelComplete"
+            data-testid="verification-check-logs"
+            class="p-4 rounded-xl board-bg-muted border board-border-subtle"
+          >
+            <summary class="board-section-title cursor-pointer">{{ t('app.executionLogs') }}</summary>
+            <ol class="iot-scroll-region mt-2 max-h-44 space-y-0.5">
               <li
                 v-for="(log, index) in verificationCheckLogs"
                 :key="index"
-                class="font-mono text-xs leading-5 text-slate-700 break-words"
+                class="font-mono text-xs leading-5 board-text-strong break-words"
               >
                 {{ log }}
               </li>
             </ol>
-          </div>
+          </details>
         </div>
 
       </div>
@@ -19068,715 +18722,118 @@ const counterexampleTraceHelpText = computed(() => {
         >
           {{ t('app.close') }}
         </button>
-      </footer>
-    </div>
-  </div>
-
-  <!-- Trace Details Dialog -->
-  <div
-    v-if="showTraceDetailsDialog && traceDetailsView"
-    data-testid="trace-details-dialog"
-    class="iot-dialog-overlay"
-    @click="dismissTraceDetailsDialog"
-    @keydown="handleTraceDetailsDialogKeydown"
-  >
-    <div
-      :ref="setTraceDetailsDialogRef"
-      class="iot-dialog iot-dialog--md board-result-dialog-surface"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="trace-details-dialog-title"
-      tabindex="-1"
-      @click.stop
-    >
-      <header class="iot-dialog__header">
-        <div class="iot-dialog__icon">
-          <span class="material-symbols-outlined" aria-hidden="true">error</span>
-        </div>
-        <div class="iot-dialog__heading">
-          <h3 id="trace-details-dialog-title" class="iot-dialog__title">{{ t('app.counterexampleDetails') }}</h3>
-          <p class="iot-dialog__subtitle">
-            {{ traceDetailsView.states?.length || 0 }}{{ t('app.states') }} ·
-            {{ traceDetailsView.modelComplete ? t('app.completeModel') : t('app.incompleteModel') }}
-          </p>
-        </div>
-
         <button
+          v-if="verificationResultStale"
           type="button"
-          class="iot-dialog__close"
-          :aria-label="t('app.close')"
-          @click="dismissTraceDetailsDialog"
-        >
-          <span class="material-symbols-outlined" aria-hidden="true">close</span>
-        </button>
-      </header>
-
-      <!--
-        Two kinds of fact, named as such.
-
-        Everything here used to read as one flat list of "counterexample properties", but only the
-        violated specification and the state count are about *this* counterexample. The attack and
-        privacy chips, and model completeness, describe the run — identical across every
-        counterexample it produced — and a reader comparing two counterexamples had no way to know
-        which differences were possible. The frozen per-trace copy stays (a counterexample must
-        survive its run being deleted); what changes is that it is labelled as run context, with the
-        scene-level artifact and the full verdict list one click away in the footer.
-      -->
-      <div class="iot-dialog__body iot-scroll-region space-y-4">
-        <section aria-labelledby="trace-evidence-title" data-testid="counterexample-evidence">
-          <h4 id="trace-evidence-title" class="mb-2 text-sm font-bold text-slate-700">
-            {{ t('app.counterexampleEvidenceHeading') }}
-          </h4>
-          <div class="rounded-lg border border-slate-200 p-4 bg-white">
-            <p class="text-[length:var(--iot-font-min)] font-bold uppercase tracking-wide text-slate-500">
-              {{ t('app.violatedSpecification') }}
-            </p>
-            <div class="mt-1 text-base font-semibold text-slate-900">
-              {{ traceDetailsView.violatedSpec?.templateLabel || traceDetailsView.violatedSpec?.formula || t('app.unknownSpecification') }}
-            </div>
-            <p class="mt-3 text-xs text-slate-600">
-              <span class="font-medium">{{ t('app.statesInTrace') }}:</span>
-              {{ t('app.statesCount', { count: traceDetailsView.states?.length || 0 }) }}
-            </p>
-          </div>
-        </section>
-
-        <section aria-labelledby="trace-run-context-title" data-testid="counterexample-run-context">
-          <h4 id="trace-run-context-title" class="mb-2 text-sm font-bold text-slate-700">
-            {{ t('app.counterexampleRunContextHeading') }}
-          </h4>
-          <div class="rounded-lg border border-slate-200 bg-slate-50 p-4">
-            <div class="flex flex-wrap gap-1.5">
-              <span v-if="traceDetailsView.isAttack" class="rounded-full board-chip-warning px-2 py-1 text-[11px] font-semibold board-text-warning">
-                {{ attackSelectionSummary(traceDetailsView.modelSemantics, traceDetailsView.attackBudget) }}
-              </span>
-              <span v-else class="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-semibold text-slate-600">
-                {{ t('app.traceVisualization.noAttackModelShort') }}
-              </span>
-              <span v-if="traceDetailsView.enablePrivacy" class="rounded-full board-chip-info px-2 py-1 text-[11px] font-semibold board-text-info">
-                {{ t('app.traceVisualization.privacyPropagationEnabled') }}
-              </span>
-              <span v-else class="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-semibold text-slate-600">
-                {{ t('app.traceVisualization.privacyPropagationNotModeled') }}
-              </span>
-              <span
-                class="rounded-full px-2 py-1 text-[11px] font-semibold"
-                :class="traceDetailsView.modelComplete
-                  ? 'board-chip-success board-text-success'
-                  : 'board-chip-warning board-text-warning'"
-              >
-                {{ traceDetailsView.modelComplete ? t('app.completeModel') : t('app.incompleteModel') }}
-              </span>
-            </div>
-          </div>
-
-          <!--
-            Model omissions belong to the run, so they sit inside the run-context section rather than
-            floating between it and the technical details. Both blocks below describe what the generator
-            left out of the model this counterexample came from — identical for every counterexample of
-            the run — and being outside the section is why they escaped the run-vs-evidence split.
-          -->
-          <div
-            v-if="!traceDetailsView.modelComplete"
-            class="mt-3 rounded-lg board-surface-warning px-4 py-3 text-sm board-text-warning"
-          >
-            <div class="font-bold mb-1">{{ t('app.incompleteModelWarning') }}</div>
-            <div class="text-xs">
-              {{ t('app.incompleteModelHint', {
-                rules: traceDetailsView.disabledRuleCount || 0,
-                specs: traceDetailsView.skippedSpecCount || 0
-              }) }}
-            </div>
-          </div>
-
-          <div
-            v-if="traceDetailsView.generationIssues && traceDetailsView.generationIssues.length > 0"
-            class="mt-3 rounded-lg board-surface-warning px-4 py-3 text-sm board-text-warning"
-            data-testid="counterexample-generation-issues"
-          >
-            <div class="font-bold mb-1">{{ t('app.generationWarnings') }}</div>
-            <!--
-              `issue` is a ModelGenerationIssue object, not a string. This rendered `{{ issue }}`, so
-              every entry showed `[object Object]` — the one such site in the codebase; the other five
-              renderers of this same array all destructure it and localize the reason code. The itemLabel
-              names what was left out and the reasonCode says why, which is the whole content of the
-              warning.
-            -->
-            <ul class="space-y-1.5 text-xs">
-              <li
-                v-for="(issue, idx) in traceDetailsView.generationIssues"
-                :key="`${issue.issueType}-${issue.itemLabel}-${idx}`"
-                class="border-l-2 board-border-subtle pl-3"
-              >
-                <div class="font-bold">{{ issue.itemLabel }}</div>
-                <div class="mt-0.5 leading-5">{{ t(generationIssueReasonKey(issue)) }}</div>
-              </li>
-            </ul>
-          </div>
-        </section>
-
-        <!-- Technical Details (collapsible) -->
-        <details class="group border-t border-slate-200 pt-3">
-          <summary class="flex cursor-pointer list-none items-center justify-between text-sm font-bold text-slate-700 hover:text-slate-900">
-            <span class="inline-flex items-center gap-2">
-              <span class="material-symbols-outlined text-lg text-slate-500" aria-hidden="true">code</span>
-              {{ t('app.technicalDetails') }}
-            </span>
-            <span class="material-symbols-outlined transition-transform group-open:rotate-180" aria-hidden="true">expand_more</span>
-          </summary>
-
-          <div class="mt-3 space-y-3">
-            <!-- Checked Expression -->
-            <div>
-              <h5 class="text-xs font-bold uppercase text-slate-500 mb-1">{{ t('app.checkedExpression') }}</h5>
-              <pre class="rounded-lg bg-slate-950 p-3 text-xs font-mono text-slate-300 whitespace-pre-wrap">{{ traceDetailsView.checkedExpression || t('app.notAvailable') }}</pre>
-            </div>
-
-            <!-- Metadata -->
-            <div v-if="traceDetailsView.createdAt || traceDetailsView.id || traceDetailsView.verificationTaskId">
-              <h5 class="text-xs font-bold uppercase text-slate-500 mb-1">{{ t('app.metadata') }}</h5>
-              <div class="text-xs text-slate-600 space-y-0.5">
-                <div v-if="traceDetailsView.createdAt"><span class="font-medium">{{ t('app.traceCreatedAt') }}:</span> {{ formatRunTimestamp(traceDetailsView.createdAt) }}</div>
-                <div v-if="traceDetailsView.id"><span class="font-medium">{{ t('app.traceId') }}:</span> {{ traceDetailsView.id }}</div>
-                <div v-if="traceDetailsView.verificationTaskId"><span class="font-medium">{{ t('app.verificationTaskId') }}:</span> {{ traceDetailsView.verificationTaskId }}</div>
-              </div>
-            </div>
-          </div>
-        </details>
-      </div>
-
-      <footer class="iot-dialog__footer">
-        <button
-          type="button"
-          class="iot-dialog-btn iot-dialog-btn--ghost"
-          @click="dismissTraceDetailsDialog"
-        >
-          {{ t('app.close') }}
-        </button>
-        <!--
-          Escalation to the owning run, where the scene-level facts and the model download now live.
-          This replaced a "Download SMV model" button: the model is one per run, so offering it here
-          implied one per counterexample. Navigating by `verificationTaskId` rather than restoring a
-          retained result, so it works for a trace opened straight from history with no run loaded.
-        -->
-        <!--
-          `--primary`, and not the `--secondary` this first carried: that variant **does not exist** in
-          `dialog.css` (only primary/danger/ghost/quiet do), so it computed to a bare `iot-dialog-btn` —
-          transparent fill *and* transparent border, measured. The one control carrying the
-          EVIDENCE→RUN level transition had no visible boundary at all. Primary rather than ghost because
-          it sits last in the footer, which this codebase reserves for the surface's forward action, and
-          Close beside it is already the ghost.
-        -->
-        <button
-          v-if="traceDetailsView.verificationTaskId"
-          type="button"
+          data-testid="verification-result-reverify"
           class="iot-dialog-btn iot-dialog-btn--primary"
-          data-testid="counterexample-open-owning-run"
-          @click="openOwningVerificationRun(traceDetailsView.verificationTaskId)"
+          @click="reopenVerificationSettingsFromResult"
         >
           <span class="material-symbols-outlined" aria-hidden="true">fact_check</span>
-          {{ t('app.counterexampleOwningRun') }}
+          {{ t('app.configureCurrentBoardVerification') }}
         </button>
       </footer>
     </div>
   </div>
 
-  <!-- Trace Animation Control Bar (Bottom) -->
-  <div 
+  <PlaybackTerminal
     v-if="traceAnimationState.visible && currentTrace"
-    class="board-timeline-host board-timeline-host--trace"
-    data-testid="trace-timeline-host"
+    v-show="playbackPanelOpen"
+    v-model:tab="playbackTerminalTab"
+    :kind="activeFuzzingFinding ? 'fuzzing' : 'counterexample'"
+    :selected-state-index="traceAnimationState.selectedStateIndex"
+    :total-states="totalStates"
+    :playing="traceAnimationState.isPlaying"
+    :panel-open="playbackPanelOpen"
+    :state-label="getTraceStateAriaLabel"
+    :violation-steps="counterexampleViolationSteps"
+    :violation-label="traceStateViolationLabel"
+    :locate-label="counterexampleViolationStep === undefined ? t('app.traceVisualization.jumpToViolationLoop') : t('app.traceVisualization.jumpToViolation')"
     :style="boardShellStyle"
-    :data-playback-change-popover="String(showPlaybackChangePopover)"
-    role="region"
-    :aria-label="t('app.traceVisualization.stateSequence')"
+    @seek="goToState"
+    @toggle-play="toggleTraceAnimation"
+    @scrub-start="stopTraceAnimation"
+    @locate-violation="goToState(counterexampleViolationSteps[0])"
+    @hide-panel="hidePlaybackPanel"
+    @keydown="handlePlaybackKeydown"
   >
-    <div
-      class="board-timeline board-timeline--trace iot-scroll-region"
-      data-testid="trace-timeline"
-      :data-selected-state-index="traceAnimationState.selectedStateIndex"
-    >
-      
-      <!--
-        The standalone "Violated Specification" card that used to sit here is gone: **102px** of the
-        overlay, measured, restating a fact the header below now carries.
-
-        I introduced that duplication earlier in this pass — four reviews said the replay never named the
-        specification, so I added it to the timeline header, without noticing this card said the same thing
-        102px above. Two statements of one fact is the duplicated-ownership problem in its plainest form,
-        and here it also cost the most contested vertical space on the screen: the overlay holds 663px of
-        content in a 382px window, so every block it keeps pushes another behind a scroll.
-
-        Nothing unique was lost. Its raw checked expression moved into the header's `<details>`, where a
-        technical detail belongs. Its close button was already duplicated — `trace-timeline-close` sits in
-        the transport row below — so the overlay had **two** close controls, and removing the card left the
-        one that lives with the other transport actions.
-      -->
-
-      <!-- Timeline -->
-      <div class="mb-3">
-        <div class="flex items-center justify-between mb-3">
-          <div class="flex items-center gap-2 flex-wrap">
-            <!--
-              Title on one line, the specification it concerns on the next.
-
-              These were siblings in a `flex items-center` row, so the spec name competed with the title
-              for the same horizontal space and truncated early. Stacked, the title reads as the label and
-              the spec as its subject — and the pair now absorbs the 102px card that used to state the same
-              thing above, including its raw-expression disclosure.
-            -->
-            <div class="min-w-0">
-              <div class="flex items-center gap-1">
-                <div class="text-sm font-bold text-slate-700">
-                  {{ activeFuzzingFinding
-                    ? t('app.fuzzFindingReplay')
-                    : t('app.traceVisualization.counterexampleTracePlayback') }}
-                </div>
-                <InfoTooltip
-                  :text="counterexampleTraceHelpText"
-                  :label="t('app.showHelpFor', {
-                    topic: activeFuzzingFinding
-                      ? t('app.fuzzFindingReplay')
-                      : t('app.traceVisualization.counterexampleTracePlayback')
-                  })"
-                  placement="right"
-                  tone="danger"
-                  test-id="counterexample-trace-help"
-                />
-              </div>
-              <!-- What this trace is evidence *of*. Four reviews of the replay surface — both themes,
-                   twice each — could see where the violation was marked but not which specification it
-                   violated: "只能知道'哪里标了违规'，不能确认'为什么违规'". Read from the trace's own
-                   snapshot, so there is no second source of truth. -->
-              <p
-                v-if="currentTrace"
-                class="mt-0.5 truncate board-text-danger"
-                :style="{ fontSize: 'var(--iot-font-min)' }"
-                :title="getTraceSpecDisplayTitle(currentTrace)"
-                data-testid="trace-timeline-violated-spec"
-              >{{ getTraceSpecDisplayTitle(currentTrace) }}</p>
-              <!-- The raw checked expression, moved here from the deleted card. A technical detail belongs
-                   behind a disclosure, not in a always-open block occupying the screen's scarcest space. -->
-              <details
-                v-if="currentTrace?.checkedExpression"
-                class="mt-1 board-text-muted"
-                :style="{ fontSize: 'var(--iot-font-min)' }"
-              >
-                <summary class="cursor-pointer font-semibold">{{ t('app.technicalDetails') }}</summary>
-                <div class="mt-1 font-bold uppercase board-text-muted">{{ t('app.actualCheckedExpression') }}</div>
-                <code class="board-card iot-scroll-region mt-1 block max-h-20 break-all rounded px-2 py-1 text-slate-700">
-                  {{ currentTrace.checkedExpression }}
-                </code>
-              </details>
-            </div>
-            <span class="px-2 py-0.5 board-chip-danger board-text-danger text-xs rounded-full" aria-live="polite">
-              {{ traceAnimationState.selectedStateIndex + 1 }} / {{ totalStates }}
-            </span>
-            <!--
-              The replay-scope notice, as a hint rather than a paragraph.
-
-              It used to be an unconditional ~50-word block inside `trace-step-values`, so it was filed under
-              "state details" while describing the whole session, and it was re-read on every step. Measured: it
-              was the largest part of that block's 137.5px body, and `trace-step-values` was 48% of the overlay's
-              remaining content. A fact the user needs once does not earn permanent height on a surface whose
-              subject is the canvas behind it.
-            -->
-            <InfoTooltip
-              :text="t('app.traceVisualization.playbackSnapshotReadOnly')"
-              :label="t('app.traceVisualization.playbackSnapshotReadOnly')"
-              test-id="trace-timeline-snapshot-notice"
-            />
-            <!--
-              The header's violation chip, for a counterexample as much as for an exploration finding.
-
-              It used to test `activeFuzzingFinding.firstViolationStep` directly, so it appeared only for a
-              fuzz finding: stepping a verification counterexample onto its violating state, this chip — the
-              one at the top of the playback header, beside the state counter — stayed silent while the rail
-              beneath it marked that very step and the canvas outlined the devices. Reading
-              `traceStateViolationLabel` gives one owner for "does this step carry a violation word", so the
-              header cannot disagree with the rail again, and a liveness cycle says "cycle" here too instead
-              of naming a single state that is not the fault.
-            -->
-            <span
-              v-if="traceStateViolationLabel(traceAnimationState.selectedStateIndex)"
-              class="inline-flex items-center gap-1 rounded-full board-chip-danger px-2 py-0.5 text-xs font-bold board-text-danger"
-              data-testid="trace-timeline-violation-chip"
-            >
-              <span class="material-symbols-outlined text-[12px]" aria-hidden="true">warning</span>
-              {{ traceStateViolationLabel(traceAnimationState.selectedStateIndex) }}
-            </span>
-            <span
-              v-if="!activeFuzzingFinding && traceModelSemanticsConsistent && !activeTraceContext.isAttack"
-              class="px-2 py-0.5 bg-slate-100 text-slate-600 text-xs rounded-full"
-            >
-              {{ t('app.traceVisualization.noAttackModelShort') }}
-            </span>
-            <span
-              v-if="!activeFuzzingFinding && !traceModelSemanticsConsistent"
-              data-testid="trace-model-semantics-warning"
-              class="px-2 py-0.5 board-chip-warning board-text-warning text-xs font-semibold rounded-full"
-            >
-              {{ t('app.traceVisualization.modelSemanticsUnavailableShort') }}
-            </span>
-            <!-- Verification Info (from the viewed trace's own context, not the live form) -->
-            <span v-if="!activeFuzzingFinding && activeTraceContext.isAttack" class="px-2 py-0.5 bg-[color:var(--danger-fill)] text-white text-xs rounded-full flex items-center gap-1">
-              <span class="material-symbols-outlined text-[length:var(--iot-font-min)]">warning</span>
-              {{ t('app.traceVisualization.attack') }}
-            </span>
-            <span v-if="!activeFuzzingFinding && activeTraceContext.isAttack" class="px-2 py-0.5 board-chip-warning board-text-warning text-xs rounded-full">
-              {{ attackSelectionSummary(currentTrace?.modelSemantics, activeTraceContext.attackBudget) }}
-            </span>
-            <span v-if="currentTraceCompromisedPointCount !== null" class="px-2 py-0.5 board-chip-danger board-text-danger text-xs rounded-full">
-              {{ t('app.traceVisualization.runtimeCompromisedPoints') }}: {{ currentTraceCompromisedPointCount }}
-            </span>
-            <span v-if="!activeFuzzingFinding && activeTraceContext.enablePrivacy && traceModelSemanticsConsistent" class="px-2 py-0.5 board-chip-info board-text-info text-xs rounded-full">
-              {{ t('app.traceVisualization.privacyPropagationEnabled') }}
-            </span>
-            <span v-if="!activeFuzzingFinding && !activeTraceContext.enablePrivacy && traceModelSemanticsConsistent" class="px-2 py-0.5 bg-slate-100 text-slate-600 text-xs rounded-full">
-              {{ t('app.traceVisualization.privacyPropagationNotModeled') }}
-            </span>
-          </div>
-          <div class="flex items-center gap-2">
-            <button
-              type="button"
-              @click="toggleTraceAnimation"
-              data-testid="trace-timeline-play"
-              :disabled="totalStates <= 1"
-              class="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-1 disabled:cursor-not-allowed"
-              :aria-label="traceAnimationState.isPlaying ? t('app.traceVisualization.pause') : t('app.traceVisualization.play')"
-              :class="traceAnimationState.isPlaying
-                ? 'bg-[color:var(--accent-fill)] text-white'
-                : totalStates <= 1
-                  ? 'board-chip-neutral'
-                  : 'board-chip-neutral hover:board-control-hover hover:board-text-strong'"
-            >
-              <span class="material-symbols-outlined text-sm" aria-hidden="true">{{ traceAnimationState.isPlaying ? 'pause' : 'play_arrow' }}</span>
-              {{ traceAnimationState.isPlaying ? t('app.traceVisualization.pause') : t('app.traceVisualization.play') }}
-            </button>
-            <!-- Gated on the popover's own absence, not on `playbackChangesDismissedKey !== null`.
-
-                 The dismissed key is `kind:stepIndex`, so dismissing at one step and scrubbing to another
-                 brings the popover straight back — while the key stays non-null. The proxy condition then
-                 left this button offering to restore a panel already on screen, and beside it rather than
-                 in place of it. The simulation bar reads `showPlaybackChangePopover` (through its
-                 `changePanelVisible` prop) and was always right; this is the same condition. -->
-            <HintTooltip v-if="!showPlaybackChangePopover" :content="t('app.showStepChanges')">
-              <button
-                type="button"
-                data-testid="trace-timeline-restore-changes"
-                class="board-card inline-flex h-8 items-center gap-1 rounded-lg border board-border-subtle px-2 text-xs font-semibold board-text-strong transition-colors hover:board-control-hover"
-                :aria-label="t('app.showStepChanges')"
-                @click="resetPlaybackChanges"
-              >
-                <span class="material-symbols-outlined text-base" aria-hidden="true">difference</span>
-                <span class="hidden sm:inline">{{ t('app.stepChanges') }}</span>
-              </button>
-            </HintTooltip>
-            <HintTooltip v-if="!activeFuzzingFinding && currentTrace.verificationTaskId" :content="t('app.viewCounterexampleDetails')">
-              <button
-                type="button"
-                @click="openVerificationTraceDetails()"
-                data-testid="trace-timeline-run-details"
-                class="board-card inline-flex h-8 items-center gap-1 rounded-lg border board-border-subtle px-2 text-xs font-semibold board-text-strong transition-colors hover:board-control-hover"
-                :aria-label="t('app.viewCounterexampleDetails')"
-              >
-                <span class="material-symbols-outlined text-base" aria-hidden="true">description</span>
-                <span class="hidden sm:inline">{{ t('app.runDetails') }}</span>
-              </button>
-            </HintTooltip>
-            <HintTooltip :content="t('app.close')">
-              <button
-                type="button"
-                @click="closeTraceAnimation"
-                data-testid="trace-timeline-close"
-                class="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium board-text-muted transition-colors hover:board-control-hover hover:board-text-strong"
-                :aria-label="t('app.close')"
-              >
-                <span class="material-symbols-outlined text-base" aria-hidden="true">close</span>
-                <span>{{ t('app.close') }}</span>
-              </button>
-            </HintTooltip>
-          </div>
-        </div>
-
-        <div
-          v-if="!activeFuzzingFinding && currentTrace.modelComplete === false"
-          class="mb-3 rounded-lg board-surface-warning px-3 py-2 text-[11px] font-medium leading-4 board-text-warning"
-          data-testid="trace-timeline-incomplete-warning"
-        >
-          {{ t('app.traceVisualization.verificationModelIncompletePlayback', {
-            rules: currentTrace.disabledRuleCount || 0,
-            specs: currentTrace.skippedSpecCount || 0
-          }) }}
-        </div>
-
-        <div
-          v-if="activeFuzzingFinding"
-          class="mb-3 rounded-lg board-surface-info px-3 py-2 text-[11px] font-medium leading-4 board-text-info"
-          data-testid="fuzzing-playback-notice"
-        >
-          {{ t('app.fuzzFindingReplayHint') }}
-        </div>
-
-        <!--
-          Step controls and the rail are different modalities, so they coexist: buttons move +/-1, the
-          number input jumps exactly, the rail below shows position and scrubs. The range slider that used
-          to sit between them was a second full-width x-axis over the same index as the rail -- that pair
-          is what read as two timelines for one sequence, so the slider is gone and the rail took over the
-          drag it uniquely provided (`scrubTraceStateFromPointer`).
-
-          The rail is the one that cannot be replaced, because only it can show where the violation sits
-          relative to where you are.
-        -->
-        <section class="border-b border-slate-200 pb-2" :aria-label="t('app.traceVisualization.stateSequence')">
-          <div class="flex flex-wrap items-center gap-2">
-            <div class="flex items-center gap-1">
-              <button
-                type="button"
-                class="board-card inline-flex h-8 w-8 items-center justify-center rounded-lg border board-border-subtle board-text-strong transition-colors hover:board-control-hover disabled:cursor-not-allowed disabled:text-slate-300"
-                :disabled="traceAnimationState.selectedStateIndex <= 0"
-                :aria-label="t('app.traceVisualization.previousState')"
-                @click="selectPreviousTraceState"
-              >
-                <span class="material-symbols-outlined text-lg" aria-hidden="true">chevron_left</span>
-              </button>
-              <label class="board-card flex h-8 items-center gap-1 rounded-lg border border-slate-200 px-2 text-xs font-semibold text-slate-600">
-                <span>{{ t('app.traceVisualization.stateLabel') }}</span>
-                <input
-                  v-model.number="selectedTraceStateNumber"
-                  data-testid="trace-timeline-step-input"
-                  type="number"
-                  :min="1"
-                  :max="Math.max(totalStates, 1)"
-                  :disabled="totalStates <= 0"
-                  class="w-10 bg-transparent text-center font-bold text-slate-800 outline-none"
-                  :aria-label="t('app.traceVisualization.jumpToState')"
-                >
-                <span class="text-slate-500">/ {{ totalStates }}</span>
-              </label>
-              <button
-                type="button"
-                class="board-card inline-flex h-8 w-8 items-center justify-center rounded-lg border board-border-subtle board-text-strong transition-colors hover:board-control-hover disabled:cursor-not-allowed disabled:text-slate-300"
-                :disabled="traceAnimationState.selectedStateIndex >= totalStates - 1"
-                :aria-label="t('app.traceVisualization.nextState')"
-                @click="selectNextTraceState"
-              >
-                <span class="material-symbols-outlined text-lg" aria-hidden="true">chevron_right</span>
-              </button>
-            </div>
-            <span class="text-[length:var(--iot-font-min)] font-semibold text-slate-500">
-              {{ traceAnimationState.selectedStateIndex === 0
-                ? t('app.traceVisualization.initialModelState')
-                : t('app.traceVisualization.transitionNumber', { index: traceAnimationState.selectedStateIndex }) }}
-            </span>
-          </div>
-
-        <div class="iot-scroll-region-x mt-1 py-1">
-          <div
-            class="relative h-14 touch-none"
-            data-testid="trace-timeline-track"
-            role="group"
-            :aria-label="t('app.traceVisualization.jumpToState')"
-            :style="{ width: (currentTrace?.states?.length || 0) > 15 ? 'max-content' : '100%', minWidth: (currentTrace?.states?.length || 0) > 15 ? `${Math.max((currentTrace?.states?.length || 0) * 38, 500)}px` : '100%' }"
-            @pointerdown="scrubTraceStateFromPointer"
-          >
-            <!-- Progress line background -->
-            <div class="absolute top-1/2 left-2 right-2 h-3 bg-slate-200 rounded -translate-y-1/2"></div>
-            <!-- Red progress bar - from start to current node -->
-            <div
-              v-if="traceAnimationState.selectedStateIndex > 0 && totalStates > 1"
-              class="absolute top-1/2 h-3 bg-[color:var(--danger)] rounded transition-all duration-300 -translate-y-1/2"
-              :style="{
-                left: '8px',
-                width: `calc((100% - 16px) * ${traceAnimationState.selectedStateIndex / (totalStates - 1)})`
-              }"
-            ></div>
-
-            <!-- State nodes -->
-            <div class="absolute top-1/2 left-2 right-2 flex justify-between items-center -translate-y-1/2">
-              <!-- The `v-for` belongs on the wrapper: `index` comes from the loop, so a tooltip hoisted above it
-                   would reference a variable that is not in scope there. -->
-              <HintTooltip
-                v-for="(_, index) in currentTrace.states || []"
-                :key="index"
-                :content="getTraceStateAriaLabel(Number(index))"
-              >
-                <button
-                  type="button"
-                  @click="goToState(Number(index))"
-                  @keydown="traceRail.handleStateKeydown($event, Number(index))"
-                  :tabindex="Number(index) === traceAnimationState.selectedStateIndex ? 0 : -1"
-                  :aria-label="getTraceStateAriaLabel(Number(index))"
-                  :aria-current="Number(index) === traceAnimationState.selectedStateIndex ? 'step' : undefined"
-                  :data-testid="`trace-timeline-state-${Number(index)}`"
-                  class="w-7 h-7 rounded-full border-3 transition-all flex items-center justify-center relative z-10 flex-shrink-0 focus:outline-none focus:ring-2 focus:ring-[color:var(--accent)] focus:ring-offset-2"
-                  :class="[
-                    Number(index) === traceAnimationState.selectedStateIndex
-                      ? 'bg-[color:var(--danger)] border-[color:var(--danger)] scale-125 shadow-lg'
-                      : Number(index) < traceAnimationState.selectedStateIndex
-                        ? 'board-chip-danger board-border-subtle'
-                        : 'bg-white border-slate-300 hover:border-[color:var(--accent)]',
-                    traceStateViolationLabel(Number(index))
-                      ? 'ring-2 ring-[color:var(--danger)] ring-offset-2'
-                      : ''
-                  ]"
-                >
-                  <!-- The violation marker, now shown for a verification counterexample and not only for an
-                       exploration finding. It is labelled rather than left as a bare glyph: reviews of both
-                       themes could see that *something* marked the last state but not that it was the
-                       violation, and one read the selection cursor as the verdict. The label is the point —
-                       this is the step where the specification fails. A liveness cycle labels every step it
-                       spans, because there the cycle is the fault and no single step is. -->
-                  <span
-                    v-if="traceStateViolationMarker(Number(index))"
-                    class="board-chip-danger board-text-danger absolute -top-5 whitespace-nowrap rounded px-1 py-px font-black"
-                    :style="{ fontSize: 'var(--iot-font-min)' }"
-                  >{{ traceStateViolationMarker(Number(index)) }}</span>
-                  <!--
-                    The rail shows *shape*, not numbers.
-
-                    Every marker used to print its step number at `text-[6px]`, with `text-[8px]` for the
-                    selected one — against the product's own `--iot-font-min` floor of 11px, which commit
-                    606cf5c established precisely because a review found interface text too small to read.
-                    A 28px marker cannot hold a legible two-digit number: 27 of them were noise, and the
-                    measurement confirmed the rendered sizes as 6px and 8px.
-
-                    Nothing is lost by removing them, because the number was never the rail's job. "Which
-                    step am I on" is answered by the `n / total` badge and the scrub slider; each marker
-                    carries its own number in `aria-label` for assistive technology and in `title` for
-                    hover. What only the rail can show is the sequence's shape — how far along you are, and
-                    where the violation sits — and that reads better without 27 illegible digits competing
-                    with the fill and the violation ring.
-                  -->
-                  <span
-                    v-if="Number(index) === traceAnimationState.selectedStateIndex"
-                    class="h-1.5 w-1.5 rounded-full bg-white"
-                    aria-hidden="true"
-                  ></span>
-                </button>
-              </HintTooltip>
-            </div>
-          </div>
-        </div>
-      </section>
-
-        <!--
-          The cause of the selected state, as one row rather than a disclosure around a card.
-          `trace-step-values` keeps its name: it shares no prefix with the `trace-timeline-state-{i}`
-          step buttons, which is why it was renamed here in the first place.
-
-          It was a `<details open>` wrapping a bordered card. Both wrappers were chrome around a single
-          line of chips -- a summary row, a border, a background and two paddings -- on the surface where
-          vertical space is scarcest, and a disclosure that is open by default and holds one line is a
-          click that changes nothing. What earns the height is the content: which automation produced this
-          state. That stays unconditionally visible, so nothing moved behind an interaction.
-
-          DEVICE values are deliberately absent; the canvas nodes are their authority and render them more
-          richly (previous value, changed tint, trust and privacy pills). Environment values are NOT covered
-          by that authority — a canvas node shows what its device reported, never the shared pool value — so
-          the pool is rendered here instead.
-        -->
-        <!--
-          The cause of the selected state stays unconditionally visible; the value tables below do not.
-
-          Matching SimulationTimeline's split: triggered rules (the cause) are chrome-free and always
-          visible, while environment values and compromised links keep their disclosure. Device values
-          are deliberately absent here — the canvas nodes are their authority.
-        -->
-        <section class="mb-2 border-b border-slate-200 pb-2" data-testid="trace-step-values">
-          <div class="text-[length:var(--iot-font-min)] font-bold uppercase text-slate-500">
-            {{ traceAnimationState.selectedStateIndex === 0
-              ? t('app.traceVisualization.initialModelState')
-              : t('app.traceVisualization.rulesAppliedToReachState') }}
-          </div>
-          <div
-            v-if="traceAnimationState.selectedStateIndex > 0 && currentTraceTriggeredRules.length > 0"
-            class="mt-1.5 flex flex-wrap gap-1.5"
-            data-testid="trace-timeline-triggered-rules"
-          >
-            <span
-              v-for="(rule, index) in currentTraceTriggeredRules"
-              :key="rule.ruleId || `${rule.ruleLabel}-${index}`"
-              class="inline-flex max-w-full items-center gap-1 rounded-full border px-2 py-0.5 text-[length:var(--iot-font-min)] font-semibold"
-              :class="traceTriggeredRuleExistsOnBoard(rule)
-                ? 'board-border-subtle board-chip-success board-text-success'
-                : 'board-surface-warning board-text-warning'"
-              :title="traceTriggeredRuleExistsOnBoard(rule) ? undefined : t('app.traceVisualization.historicalRuleNotOnCurrentBoard')"
-            >
-              <span class="max-w-[14rem] truncate">{{ traceTriggeredRuleLabel(rule, Number(index)) }}</span>
-              <span v-if="!traceTriggeredRuleExistsOnBoard(rule)" class="material-symbols-outlined text-[12px]" aria-hidden="true">history</span>
-            </span>
-          </div>
-          <p v-else-if="traceAnimationState.selectedStateIndex > 0" class="mt-1 text-[11px] text-slate-500">
-            {{ t('app.traceVisualization.noRulesApplied') }}
-          </p>
+    <template #help>
+      <InfoTooltip :text="t('app.playbackNavigationHint')" :label="t('app.showHelpFor', { topic: activeFuzzingFinding ? t('app.fuzzFindingReplay') : t('app.traceVisualization.counterexampleTracePlayback') })" tone="neutral" test-id="counterexample-trace-help" />
+    </template>
+    <template v-if="activeFuzzingFinding || currentTrace.modelComplete === false || !traceModelSemanticsConsistent" #context>
+      <p v-if="activeFuzzingFinding" class="playback-terminal__notice board-note" data-testid="fuzzing-playback-notice">{{ t('app.fuzzFindingReplayHint') }}</p>
+      <p v-if="!activeFuzzingFinding && currentTrace.modelComplete === false" class="playback-terminal__notice board-surface-warning" data-testid="trace-timeline-incomplete-warning">{{ t('app.traceVisualization.verificationModelIncompletePlayback', { rules: currentTrace.disabledRuleCount || 0, specs: currentTrace.skippedSpecCount || 0 }) }}</p>
+      <p v-if="!activeFuzzingFinding && !traceModelSemanticsConsistent" class="playback-terminal__notice board-surface-warning" data-testid="trace-model-semantics-warning">{{ t('app.modelSemanticsUnavailable') }}</p>
+    </template>
+    <template #run>
+      <div class="playback-run" data-testid="counterexample-run-info">
+        <section class="playback-run__section" data-testid="counterexample-evidence">
+          <h3>{{ t('app.violatedSpecification') }}</h3>
+          <p class="playback-run__requirement" data-testid="trace-timeline-violated-spec">{{ getTraceSpecDisplayTitle(currentTrace) }}</p>
+          <span v-if="traceStateViolationLabel(traceAnimationState.selectedStateIndex)" class="playback-terminal__badge board-chip-danger board-text-danger" data-testid="trace-timeline-violation-chip">{{ traceStateViolationLabel(traceAnimationState.selectedStateIndex) }}</span>
+          <details v-if="!activeFuzzingFinding" data-testid="counterexample-checked-expression">
+            <summary>{{ t('app.checkedExpression') }}</summary>
+            <pre>{{ currentTrace.checkedExpression || t('app.notAvailable') }}</pre>
+          </details>
         </section>
-
-        <details class="group mb-2 pt-2" data-testid="trace-step-environment-details">
-          <summary class="flex cursor-pointer list-none items-center justify-between gap-3 rounded-lg px-1 py-1 text-[11px] font-semibold board-text-muted hover:board-control-hover hover:board-text-strong">
-            <span class="inline-flex items-center gap-1.5">
-              <span class="material-symbols-outlined text-base" aria-hidden="true">tune</span>
-              {{ t('app.traceVisualization.stateDetails') }}
-            </span>
-            <span class="material-symbols-outlined text-base transition-transform group-open:rotate-180" aria-hidden="true">expand_more</span>
-          </summary>
-          <div class="mt-1.5 border-t border-slate-200">
-            <section
-              v-if="currentTraceCompromisedAutomationLinks.length > 0"
-              class="board-surface-danger border-b px-2 py-2"
-              data-testid="trace-timeline-compromised-links"
-            >
-              <div class="text-[length:var(--iot-font-min)] font-bold uppercase board-text-danger">
-                {{ t('app.traceVisualization.compromisedAutomationLinks') }}
-              </div>
-              <div class="mt-1.5 flex flex-wrap gap-1.5">
-                <span
-                  v-for="(rule, index) in currentTraceCompromisedAutomationLinks"
-                  :key="rule.ruleId || `${rule.ruleLabel}-${index}`"
-                  class="inline-flex max-w-full items-center gap-1 rounded-full border board-border-subtle bg-white px-2 py-1 text-[length:var(--iot-font-min)] font-semibold board-text-danger"
-                  :title="traceTriggeredRuleExistsOnBoard(rule) ? t('app.traceVisualization.compromisedAutomationLinkHint') : t('app.traceVisualization.historicalRuleNotOnCurrentBoard')"
-                >
-                  <span class="material-symbols-outlined text-[12px]" aria-hidden="true">link_off</span>
-                  <span class="max-w-[14rem] truncate">{{ traceTriggeredRuleLabel(rule, Number(index)) }}</span>
-                  <span v-if="!traceTriggeredRuleExistsOnBoard(rule)" class="material-symbols-outlined text-[12px]" aria-hidden="true">history</span>
-                </span>
-              </div>
-            </section>
-
-            <!--
-              The shared pool's own values, as absolutes. The canvas nodes render each device's *reported*
-              reading, and the change popover lists only environment values that CHANGED — so in the case this
-              whole distinction exists for (the home holds 20, a compromised sensor reports 40) the pool value
-              is stable, produces no change row, and appeared nowhere. The counterexample could not show the
-              divergence it was proving. Absolute, always, beside the reported readings.
-            -->
-            <section
-              v-if="activePlaybackEnvironmentVariables.length > 0"
-              class="border-b border-slate-200 py-2"
-              data-testid="trace-step-environment-values"
-            >
-              <div class="mb-1.5 inline-flex items-center gap-1 text-[length:var(--iot-font-min)] font-bold uppercase text-slate-500">
-                <span class="material-symbols-outlined text-[13px]" aria-hidden="true">public</span>
-                {{ t('app.environmentPool') }}
-              </div>
-              <div class="flex flex-wrap gap-1.5">
-                <span
-                  v-for="variable in activePlaybackEnvironmentVariables"
-                  :key="variable.name"
-                  class="rounded border border-[color:var(--board-border)] bg-slate-50 px-1.5 py-0.5 font-mono text-[11px] text-[color:var(--board-text)] dark:bg-slate-800"
-                >{{ variable.name }} = {{ formatPlaybackEnvironmentModelToken(variable.name, variable.value) }}</span>
-              </div>
-            </section>
+        <section v-if="!activeFuzzingFinding" class="playback-run__section" data-testid="counterexample-run-context">
+          <h3>{{ t('app.runScopeAndSnapshot') }}</h3>
+          <dl class="playback-run__facts">
+            <div><dt>{{ t('app.modelCoverage') }}</dt><dd>{{ currentTrace.modelComplete ? t('app.completeModel') : t('app.incompleteModel') }}</dd></div>
+            <div><dt>{{ t('app.traceVisualization.attackScenario') }}</dt><dd>{{ !traceModelSemanticsConsistent ? t('app.modelSemanticsUnavailable') : currentTrace.isAttack ? attackSelectionSummary(currentTrace.modelSemantics, currentTrace.attackBudget, 'verification') : t('app.traceVisualization.noAttackModelShort') }}</dd></div>
+            <div><dt>{{ t('app.privacy') }}</dt><dd>{{ !traceModelSemanticsConsistent ? t('app.modelSemanticsUnavailable') : currentTrace.enablePrivacy ? t('app.traceVisualization.privacyPropagationEnabled') : t('app.traceVisualization.privacyPropagationNotModeled') }}</dd></div>
+            <div><dt>{{ t('app.smvModelArtifactTitle') }}</dt><dd>{{ t('app.smvModelArtifactScope', { devices: currentTrace.modelSnapshot.deviceCount, rules: currentTrace.modelSnapshot.ruleCount, specs: currentTrace.modelSnapshot.specificationCount }) }}</dd></div>
+            <div v-if="currentTrace.createdAt"><dt>{{ t('app.traceCreatedAt') }}</dt><dd>{{ formatRunTimestamp(currentTrace.createdAt) }}</dd></div>
+          </dl>
+          <ul v-if="currentTrace.generationIssues.length" class="playback-run__issues board-text-warning" data-testid="counterexample-generation-issues">
+            <li v-for="(issue, idx) in currentTrace.generationIssues" :key="`${issue.issueType}-${idx}`"><strong>{{ issue.itemLabel }}</strong><span>{{ t(generationIssueReasonKey(issue)) }}</span></li>
+          </ul>
+          <p v-else-if="!currentTrace.modelComplete" class="playback-terminal__notice board-surface-warning">{{ t('app.generationIssueDetailsUnavailable') }}</p>
+          <div class="playback-terminal__run-actions">
+            <button v-if="currentTrace.verificationTaskId" type="button" data-testid="counterexample-open-owning-run" @click="openOwningVerificationRun(currentTrace.verificationTaskId)">
+              <span class="material-symbols-outlined" aria-hidden="true">fact_check</span>{{ t('app.counterexampleOwningRun') }}
+            </button>
           </div>
-        </details>
+        </section>
       </div>
-    </div>
-  </div>
+    </template>
+    <template #details>
+      <PlaybackStateDetails
+        :devices="activePlaybackDevices"
+        :environment-variables="activePlaybackEnvironmentVariables"
+        :compromised-automation-links="currentTraceCompromisedAutomationLinks"
+        :current-device-ids="nodes.map(node => node.id)"
+        :current-rule-ids="rules.map(rule => String(rule.id))"
+        :format-device-token="formatPlaybackDeviceModelToken"
+        :format-environment-token="formatPlaybackEnvironmentModelToken"
+      />
+    </template>
+    <template #changes>
+      <PlaybackChangesPanel
+        v-if="activePlaybackKind"
+        :changes="activePlaybackChanges"
+        :environment-changes="activePlaybackEnvironmentChanges"
+        :triggered-rules="activePlaybackTriggeredRules"
+        :current-rule-ids="currentBoardRuleIds"
+        :animated-edge-count="activePlaybackAnimatedEdgeCount"
+        :state-number="activePlaybackStateIndex + 1"
+        :total-states="activePlaybackStates.length"
+        :kind="activePlaybackKind"
+        :input-events="activeFuzzingStepInputEvents"
+        :bundled-device-ids="bundledPlaybackDeviceIds"
+        :bundled-environment-names="bundledPlaybackEnvironmentNames"
+        :violation-state-number="activeViolationStateNumber"
+        :is-loop-back-state="activePlaybackIsLoopBackState"
+        :loop-range="activePlaybackLoopRange"
+        :is-liveness-violation="activePlaybackIsLivenessViolation"
+      />
+    </template>
+  </PlaybackTerminal>
 
   <!-- Simulation Timeline 组件
 
        `v-if` stays on `simulationAnimationState.visible` alone. That flag is the single authority for "the
-       simulation replay bar is up" — 33 sites read it, including the board edit lock (`isAnimationLocked`),
+       simulation replay is active" — 33 sites read it, including the board edit lock (`isAnimationLocked`),
        the playback-kind resolution behind `run=`, the keyboard handlers and the panel disabling — so adding
        `&& lastSimulationResult` here would make the *rendered* surface a second, subtly different notion of
        the same thing: the lock could be held with nothing on screen to explain why.
@@ -19784,7 +18841,9 @@ const counterexampleTraceHelpText = computed(() => {
        The required `modelSemantics` is narrowed at the prop instead, by `simulationPlaybackSemantics`. -->
   <SimulationTimeline
     v-if="simulationAnimationState.visible"
+    v-show="playbackPanelOpen"
     :visible="simulationAnimationState.visible"
+    :panel-open="playbackPanelOpen"
     :states="savedSimulationStates"
     :actual-steps="lastSimulationResult?.steps"
     :requested-steps="lastSimulationResult?.requestedSteps"
@@ -19800,13 +18859,70 @@ const counterexampleTraceHelpText = computed(() => {
     :current-device-ids="currentBoardDeviceIds"
     :format-device-model-token="formatPlaybackDeviceModelToken"
     :format-environment-model-token="formatPlaybackEnvironmentModelToken"
-    :change-panel-visible="showPlaybackChangePopover"
+    v-model:tab="playbackTerminalTab"
     :style="boardShellStyle"
-    @update:visible="handleSimulationTimelineClose"
     @highlight-state="handleHighlightTrace"
-    @open-run-details="openSimulationRunDetails"
-    @restore-change-panel="resetPlaybackChanges"
-  />
+    @hide-panel="hidePlaybackPanel"
+    @keydown="handlePlaybackKeydown"
+  >
+    <template #run>
+      <div v-if="lastSimulationResult" class="playback-run" data-testid="simulation-run-info">
+        <section class="playback-run__section">
+          <h3>{{ t('app.runSummary') }}</h3>
+          <dl class="playback-run__facts">
+            <div><dt>{{ t('app.actualSimulationSteps') }}</dt><dd>{{ getSimulationActualStepCount(lastSimulationResult) }} / {{ getSimulationRequestedStepCount(lastSimulationResult) }} {{ t('app.requestedSimulationSteps') }}</dd></div>
+            <div><dt>{{ t('app.modelCoverage') }}</dt><dd>{{ isSimulationModelComplete(lastSimulationResult) ? t('app.completeModel') : t('app.incompleteModel') }}</dd></div>
+            <div><dt>{{ t('app.traceVisualization.attackScenario') }}</dt><dd>{{ !isSimulationModelSemanticsConsistent(lastSimulationResult) ? t('app.modelSemanticsUnavailable') : lastSimulationResult.isAttack ? attackSelectionSummary(lastSimulationResult.modelSemantics, lastSimulationResult.attackBudget, 'simulation') : t('app.traceVisualization.noAttackModelShort') }}</dd></div>
+            <div><dt>{{ t('app.privacy') }}</dt><dd>{{ !isSimulationModelSemanticsConsistent(lastSimulationResult) ? t('app.modelSemanticsUnavailable') : lastSimulationResult.enablePrivacy ? t('app.traceVisualization.privacyPropagationEnabled') : t('app.traceVisualization.privacyPropagationNotModeled') }}</dd></div>
+          </dl>
+          <ul v-if="getGenerationIssues(lastSimulationResult).length" class="playback-run__issues board-text-warning" data-testid="simulation-generation-issues">
+            <li v-for="(issue, idx) in getGenerationIssues(lastSimulationResult)" :key="`${issue.issueType}-${idx}`"><strong>{{ issue.itemLabel }}</strong><span>{{ t(generationIssueReasonKey(issue)) }}</span></li>
+          </ul>
+          <p v-else-if="!isSimulationModelComplete(lastSimulationResult)" class="playback-terminal__notice board-surface-warning">{{ t('app.generationIssueDetailsUnavailable') }}</p>
+        </section>
+        <section class="playback-run__section" data-testid="simulation-run-artifact">
+          <h3>{{ t('app.simulationSmvModelArtifactTitle') }}</h3>
+          <p>{{ t('app.simulationSmvModelArtifactScope', { devices: lastSimulationResult.modelSnapshot.deviceCount, rules: lastSimulationResult.modelSnapshot.ruleCount }) }}</p>
+          <p v-if="!simulationRunSmvAvailable" class="board-text-warning" data-testid="simulation-result-smv-unavailable">{{ t(simulationSmvUnavailableReason) }}</p>
+          <div class="playback-terminal__run-actions">
+            <button type="button" class="playback-run__download" data-testid="simulation-result-download-smv" :disabled="!simulationRunSmvAvailable" @click="downloadCurrentSimulationRunSmv()">
+              <span class="material-symbols-outlined" aria-hidden="true">download</span>{{ t('app.downloadSmvModel') }}
+            </button>
+          </div>
+        </section>
+        <section class="playback-run__section playback-run__diagnostics">
+          <details data-testid="simulation-execution-logs">
+            <summary>{{ t('app.executionLogs') }}</summary>
+            <pre>{{ lastSimulationResult.logs.join('\n') || t('app.noLogsAvailableShort') }}</pre>
+          </details>
+          <details data-testid="simulation-nusmv-output">
+            <summary>{{ t('app.showNusmvDiagnosticOutput') }}</summary>
+            <pre>{{ lastSimulationResult.nusmvOutput || t('app.noLogsAvailableShort') }}</pre>
+          </details>
+        </section>
+      </div>
+    </template>
+    <template #changes>
+      <PlaybackChangesPanel
+        v-if="activePlaybackKind"
+        :changes="activePlaybackChanges"
+        :environment-changes="activePlaybackEnvironmentChanges"
+        :triggered-rules="activePlaybackTriggeredRules"
+        :current-rule-ids="currentBoardRuleIds"
+        :animated-edge-count="activePlaybackAnimatedEdgeCount"
+        :state-number="activePlaybackStateIndex + 1"
+        :total-states="activePlaybackStates.length"
+        :kind="activePlaybackKind"
+        :input-events="activeFuzzingStepInputEvents"
+        :bundled-device-ids="bundledPlaybackDeviceIds"
+        :bundled-environment-names="bundledPlaybackEnvironmentNames"
+        :violation-state-number="activeViolationStateNumber"
+        :is-loop-back-state="activePlaybackIsLoopBackState"
+        :loop-range="activePlaybackLoopRange"
+        :is-liveness-violation="activePlaybackIsLivenessViolation"
+      />
+    </template>
+  </SimulationTimeline>
 
   <!-- Keep the request owner mounted so hidden admission-unknown searches remain cancellable. -->
   <FixResultDialog

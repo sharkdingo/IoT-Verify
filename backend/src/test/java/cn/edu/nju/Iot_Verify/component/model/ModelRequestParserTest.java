@@ -7,6 +7,9 @@ import jakarta.validation.Validation;
 import jakarta.validation.ConstraintViolationException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -69,6 +72,58 @@ class ModelRequestParserTest {
                 BadRequestException.class, () -> parser.parseSimulation(body));
 
         assertThat(exception.getMessage()).contains("privacyEnabled");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"devices", "rules", "specs", "environmentVariables", "playbackNodes"})
+    void verificationRejectsEveryServerOwnedSceneFieldEvenWhenNull(String field) {
+        var body = objectMapper.createObjectNode();
+        body.putObject("attackScenario").put("mode", "NONE");
+        body.putNull(field);
+
+        BadRequestException exception = assertThrows(
+                BadRequestException.class, () -> parser.parseVerification(body));
+
+        assertThat(exception.getMessage()).contains("Field '" + field + "' is not accepted");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"devices", "rules", "specs", "environmentVariables", "playbackNodes"})
+    void simulationRejectsEveryServerOwnedSceneFieldEvenWhenNull(String field) {
+        var body = objectMapper.createObjectNode();
+        body.putObject("attackScenario").put("mode", "NONE");
+        body.putNull(field);
+
+        BadRequestException exception = assertThrows(
+                BadRequestException.class, () -> parser.parseSimulation(body));
+
+        assertThat(exception.getMessage()).contains("Field '" + field + "' is not accepted");
+    }
+
+    @ParameterizedTest
+    @CsvSource({"attack,true", "attack,null", "attackBudget,1", "attackBudget,null"})
+    void verificationRejectsIgnoredDerivedAttackFields(String field, String value) throws Exception {
+        var body = objectMapper.createObjectNode();
+        body.putObject("attackScenario").put("mode", "NONE");
+        body.set(field, objectMapper.readTree(value));
+
+        BadRequestException exception = assertThrows(
+                BadRequestException.class, () -> parser.parseVerification(body));
+
+        assertThat(exception.getMessage()).contains(field);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"attack,true", "attack,null", "attackBudget,1", "attackBudget,null"})
+    void simulationRejectsIgnoredDerivedAttackFields(String field, String value) throws Exception {
+        var body = objectMapper.createObjectNode();
+        body.putObject("attackScenario").put("mode", "NONE");
+        body.set(field, objectMapper.readTree(value));
+
+        BadRequestException exception = assertThrows(
+                BadRequestException.class, () -> parser.parseSimulation(body));
+
+        assertThat(exception.getMessage()).contains(field);
     }
 
     @Test

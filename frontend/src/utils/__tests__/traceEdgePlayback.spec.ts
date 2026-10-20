@@ -5,6 +5,7 @@ import {
   getTraceValueForEdge,
   buildTraceEdgePlaybackStates,
   buildTraceDevicePlaybackIndex,
+  findTraceVariableAtOrBefore,
   isEdgeConditionSatisfied,
   type TracePlaybackLike
 } from '../traceEdgePlayback'
@@ -32,6 +33,37 @@ const apiEdge = (overrides: Partial<DeviceEdge> = {}): DeviceEdge => ({
 })
 
 describe('trace device playback index', () => {
+  it('preserves sparse variable lookup, alias order, unobserved readings and first device matches', () => {
+    const history = [
+      { devices: [{ deviceId: 'SENSOR_1', variables: [
+        { name: 'air-temperature', value: '10', modelTokenSource: 'BUNDLED' },
+        { name: 'battery', value: '90' },
+        { name: ' 1 sensor ', value: 'spaced' }
+      ] }] },
+      { devices: [{ deviceId: 'sensor_1', variables: [
+        { name: 'air_temperature', value: '20', modelTokenSource: 'CUSTOM' },
+        { name: 'air-temperature', value: 'duplicate alias' },
+        { name: 'battery', value: '', observed: false },
+        { name: '1 sensor', value: 'first raw candidate' }
+      ] }, { deviceId: 'sensor_1', variables: [{ name: 'duplicate-device-only', value: 'ignored' }] }] },
+      { devices: [{ deviceId: 'sensor_1', variables: [{ name: '_1_sensor_', value: 'newest alias' }] }] },
+      {}
+    ]
+    const names = ['air-temperature', 'AIR_TEMPERATURE', 'battery', ' 1 sensor ', 'duplicate-device-only', 'missing']
+    for (const selected of [undefined, -1, 0, 1, 2, 3, 20]) {
+      const indexed = buildTraceDevicePlaybackIndex(history, selected)
+      for (const name of names) {
+        expect(indexed.getCurrentVariable('sensor-1', name)).toBe(
+          findTraceVariableAtOrBefore({ states: history }, 'sensor-1', name, selected || 0))
+        expect(indexed.getPreviousVariable('sensor-1', name)).toBe(
+          selected !== undefined && selected > 0
+            ? findTraceVariableAtOrBefore({ states: history }, 'sensor-1', name, selected - 1)
+            : null)
+      }
+    }
+    expect(buildTraceDevicePlaybackIndex(undefined, 0).getCurrentVariable('sensor-1', 'battery')).toBeNull()
+  })
+
   const early = { deviceId: 'LIGHT_1', state: 'off', compromised: true }
   const later = { deviceId: 'light_1', state: 'on', compromised: false }
   const future = { deviceId: 'future_1', state: 'off', compromised: true }

@@ -133,6 +133,12 @@ public interface BoardStorageService {
      */
     BoardBatchDto saveBoardBatch(Long userId, BoardBatchDto batch);
 
+    /**
+     * Consumes confirmed application state inside the same scene replacement transaction.
+     * A completion failure rolls back both the scene and its undo-history boundary.
+     */
+    BoardBatchDto saveBoardBatch(Long userId, BoardBatchDto batch, Runnable afterReplacement);
+
     BoardLayoutDto getLayout(Long userId);
     BoardLayoutDto saveLayout(Long userId, BoardLayoutDto layout);
 

@@ -2,8 +2,6 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
-import { buildLocalSceneFingerprint } from '@/utils/modelRequest'
-
 /**
  * Moving or resizing a node must not invalidate a displayed verification verdict.
  *
@@ -48,43 +46,4 @@ describe('node layout mutations and verification staleness', () => {
     expect(commit).not.toContain("operation === 'updated'")
   })
 
-  it('keeps the reason true: moving a node does not change the model fingerprint', () => {
-    const templates = [
-      {
-        name: 'Door',
-        manifest: {
-          Name: 'Door',
-          Modes: ['LockState'],
-          InitState: 'locked',
-          WorkingStates: [{ Name: 'locked' }, { Name: 'unlocked' }],
-          InternalVariables: [],
-          APIs: []
-        }
-      }
-    ] as any
-
-    const nodeAt = (x: number, y: number) => ({
-      id: 'device-1',
-      templateName: 'Door',
-      label: 'Front Door',
-      state: 'locked',
-      position: { x, y },
-      width: 176,
-      height: 128
-    })
-
-    const fingerprintAt = (x: number, y: number) =>
-      buildLocalSceneFingerprint({
-        nodes: [nodeAt(x, y)] as any,
-        deviceTemplates: templates,
-        environmentVariables: [],
-        rules: []
-      })
-
-    const before = fingerprintAt(40, 40)
-    // Guard against an empty scan: the fingerprint must actually describe the device.
-    expect(before.devices).toHaveLength(1)
-
-    expect(fingerprintAt(900, 720)).toEqual(before)
-  })
 })

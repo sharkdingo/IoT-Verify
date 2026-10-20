@@ -1,6 +1,7 @@
 package cn.edu.nju.Iot_Verify.dto.trace;
 
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
+import cn.edu.nju.Iot_Verify.dto.model.ModelTokenSource;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -8,6 +9,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.LocalDateTime;
+import java.util.Map;
 
 /** Lightweight counterexample evidence for run-history lists. */
 @Data
@@ -20,6 +22,7 @@ public class TraceSummaryDto {
     private Long verificationTaskId;
     private String violatedSpecId;
     private SpecificationDto violatedSpec;
+    private Map<String, ModelTokenSource> modelTokenSourcesByDeviceId;
     private Integer stateCount;
     private LocalDateTime createdAt;
 

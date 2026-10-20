@@ -95,11 +95,52 @@ const openWorkspace = async (page: Page, auth: AuthUser, theme: 'light' | 'dark'
   await expect(page.getByTestId('board-root')).toBeVisible({ timeout: 30_000 })
 }
 
+for (const { name, theme, viewport } of [
+  { name: 'desktop light', theme: 'light' as const, viewport: { width: 1280, height: 800 } },
+  { name: 'desktop dark', theme: 'dark' as const, viewport: { width: 1280, height: 800 } },
+  { name: 'narrow dark', theme: 'dark' as const, viewport: { width: 390, height: 760 } }
+]) {
+  test(`excludes collapsed assistant history from keyboard and reading order (${name})`, async ({ page, request }) => {
+    const auth = await createAuthenticatedUser(request)
+    const session = await unwrap<{ id: string }>(await request.post(`${apiBaseURL}/api/chat/sessions`, {
+      headers: { Authorization: `Bearer ${auth.token}` }
+    }))
+    await page.setViewportSize(viewport)
+    await openWorkspace(page, auth, theme)
+    await page.getByTestId('open-ai-assistant').click()
+    const panel = page.getByTestId('chat-panel')
+    const toggle = page.getByTestId('chat-sidebar-toggle')
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    await expect(toggle).toBeFocused()
+    await expect(panel.getByRole('button', { name: '新对话', exact: true })).toHaveCount(0)
+    await page.keyboard.press('Tab')
+    expect(await page.evaluate(() => !!document.activeElement?.closest('.sidebar'))).toBe(false)
+
+    await toggle.click()
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    await expect(panel.getByRole('button', { name: '新对话', exact: true })).toBeVisible()
+    const history = page.waitForResponse(response => response.request().method() === 'GET'
+      && new URL(response.url()).pathname === `/api/chat/sessions/${session.id}/messages`)
+    await page.getByTestId(`chat-session-${session.id}`).click()
+    expect((await history).ok()).toBe(true)
+    await expect(page.getByTestId('chat-input')).toBeEnabled()
+    if (await toggle.getAttribute('aria-expanded') === 'true') await toggle.click()
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    await expect(toggle).toBeFocused()
+    await expect(panel.getByRole('button', { name: '新对话', exact: true })).toHaveCount(0)
+    await page.getByTestId('chat-close').click()
+    await expect(panel).toBeHidden()
+    await page.getByTestId('open-ai-assistant').click()
+    await expect(toggle).toBeFocused()
+  })
+}
+
 const installPersistedPartialChatMock = async (
   page: Page,
   sessionId: string,
   assistantContent: string,
-  beforeResponse?: () => Promise<void>
+  beforeResponse?: () => Promise<void>,
+  errorMessage?: string
 ) => {
   let messages: PersistedChatMessage[] = []
 
@@ -150,7 +191,7 @@ const installPersistedPartialChatMock = async (
     ]
     const frames = [
       ...executionTrace.map(progress => ({ progress })),
-      { content: assistantContent },
+      errorMessage ? { error: errorMessage } : { content: assistantContent },
       { terminal: { turnId: request.turnId, executionStatus: 'PARTIAL' } }
     ]
     await route.fulfill({
@@ -158,6 +199,167 @@ const installPersistedPartialChatMock = async (
       contentType: 'text/event-stream; charset=UTF-8',
       body: `${frames.map(frame => `data: ${JSON.stringify(frame)}`).join('\n\n')}\n\n`
     })
+  })
+}
+
+test('reopens the assistant after a provider error and failed Board synchronization', async ({ page, request }) => {
+  const auth = await createAuthenticatedUser(request)
+  const session = await unwrap<{ id: string }>(await request.post(`${apiBaseURL}/api/chat/sessions`, {
+    headers: { Authorization: `Bearer ${auth.token}` }
+  }))
+  let snapshotUnavailable = false
+  await page.route('**/api/board/snapshot', async route => {
+    if (!snapshotUnavailable) return route.continue()
+    await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({
+      code: 503, message: 'Snapshot unavailable'
+    }) })
+  })
+  const failure = 'AI 服务暂时不可用，请稍后重试。'
+  await installPersistedPartialChatMock(page, session.id, failure,
+    async () => { snapshotUnavailable = true }, failure)
+  await openWorkspace(page, auth)
+  await page.getByTestId('open-ai-assistant').click()
+  await page.getByTestId('chat-sidebar-toggle').click()
+  await page.getByTestId(`chat-session-${session.id}`).click()
+  await page.getByTestId('chat-input').fill('请整理设备触发链路')
+  await page.getByTestId('chat-send').click()
+  await expect(page.getByTestId('chat-reconciliation-retry')).toBeVisible()
+  await expect(page.getByTestId('chat-input')).toBeDisabled()
+  await page.getByTestId('chat-close').click()
+  await expect(page.getByTestId('open-ai-assistant')).toBeEnabled()
+  await page.getByTestId('open-ai-assistant').click()
+  await expect(page.getByTestId('chat-panel')).toBeVisible()
+  await expect(page.getByTestId('chat-reconciliation-retry')).toBeVisible()
+  snapshotUnavailable = false
+  await page.getByTestId('chat-reconciliation-retry').click()
+  await expect(page.getByTestId('chat-reconciliation-required')).toHaveCount(0)
+  await expect(page.getByTestId('chat-input')).toBeEnabled()
+  await expect(page.getByTestId('chat-panel').getByText(failure, { exact: true })).toBeVisible()
+})
+
+for (const { width, height, theme } of [
+  { width: 1440, height: 900, theme: 'light' },
+  { width: 320, height: 360, theme: 'dark' }
+] as const) {
+  test(`keeps assistant render recovery above the canvas (${width}, ${theme})`, async ({ page, request }) => {
+    const auth = await createAuthenticatedUser(request)
+    await page.setViewportSize({ width, height })
+    await openWorkspace(page, auth, theme)
+    await page.getByTestId('open-ai-assistant').click()
+    await expect(page.getByTestId('chat-input')).toBeVisible()
+    // Fail Vue's next v-model write; trace snapshots must still be able to read the textarea.
+    await page.getByTestId('chat-input').evaluate(element => {
+      const value = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!
+      Object.defineProperty(element, 'value', {
+        configurable: true,
+        get() { return value.get!.call(element) },
+        set() {
+          Reflect.deleteProperty(element, 'value')
+          throw new Error('assistant render failure probe')
+        }
+      })
+    })
+    await page.getByTestId('chat-panel').locator('button.task-card').first().click()
+    const recovery = page.getByTestId('assistant-recovery-panel')
+    await expect(recovery).toBeVisible()
+    const bounds = await recovery.boundingBox()
+    expect(bounds!.x).toBeGreaterThanOrEqual(0)
+    expect(bounds!.y).toBeGreaterThanOrEqual(0)
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width)
+    expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(height)
+    await expect(page.getByTestId('assistant-recovery-retry')).toBeFocused()
+    await expect(recovery.getByTestId('failure-technical-details')).not.toHaveAttribute('open')
+    await page.keyboard.press('Escape')
+    await expect(recovery).toBeHidden()
+    await expect(page.getByTestId('open-ai-assistant')).toBeFocused()
+    await page.getByTestId('open-ai-assistant').click()
+    await expect(recovery).toBeVisible()
+    await page.getByTestId('assistant-recovery-retry').click()
+    await expect(recovery).toHaveCount(0)
+    await expect(page.getByTestId('chat-panel')).toBeVisible()
+    await expect(page.getByTestId('chat-input')).toBeEnabled()
+    await expect(page.getByTestId('chat-reconciliation-required')).toHaveCount(0)
+  })
+}
+
+for (const { width, theme } of [{ width: 1440, theme: 'light' }, { width: 320, theme: 'dark' }] as const) {
+  test(`keeps assistant controls legible during a pending reply at ${width}px in ${theme}`, async ({ page, request }) => {
+    await page.setViewportSize({ width, height: 900 })
+    const auth = await createAuthenticatedUser(request)
+    const session = await unwrap<{ id: string }>(await request.post(`${apiBaseURL}/api/chat/sessions`, {
+      headers: { Authorization: `Bearer ${auth.token}` }
+    }))
+    let releaseReply!: () => void
+    const replyPending = new Promise<void>(resolve => { releaseReply = resolve })
+    await installPersistedPartialChatMock(page, session.id, 'Reply received.', () => replyPending)
+    await openWorkspace(page, auth, theme)
+    await page.getByTestId('open-ai-assistant').click()
+    const panel = page.getByTestId('chat-panel')
+    await page.getByTestId('chat-sidebar-toggle').click()
+    const sessionRow = page.getByTestId(`chat-session-${session.id}`)
+    const deleteButton = sessionRow.locator('..').locator('.delete-btn-wrapper')
+    await expect(deleteButton).toHaveCSS('opacity', '1')
+    await expect.poll(() => deleteButton.evaluate(element => element.getBoundingClientRect().width)).toBeGreaterThanOrEqual(44)
+    await sessionRow.click()
+    const sidebarScrim = page.getByTestId('chat-sidebar-scrim')
+    if (await sidebarScrim.isVisible()) await sidebarScrim.click()
+    const task = panel.locator('.task-card').first()
+    await page.getByTestId('chat-close').press('Tab')
+    const resize = page.getByTestId('chat-resize-handle')
+    if (await resize.isVisible()) await resize.press('Tab')
+    await expect(task).toBeFocused()
+    await expect(task).toHaveCSS('outline-width', '2px')
+    await expect(task).toHaveCSS('outline-style', 'solid')
+    const input = page.getByTestId('chat-input')
+    await task.click()
+    await expect(input).toBeFocused()
+    await expect(input).not.toHaveValue('')
+    await expect.poll(() => input.evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44)
+    await input.fill('show status')
+    if (await resize.isVisible()) {
+      const handleBounds = await resize.boundingBox()
+      const sendBounds = await page.getByTestId('chat-send').boundingBox()
+      expect(handleBounds).not.toBeNull()
+      expect(sendBounds).not.toBeNull()
+      const overlapWidth = Math.max(0, Math.min(handleBounds!.x + handleBounds!.width, sendBounds!.x + sendBounds!.width) - Math.max(handleBounds!.x, sendBounds!.x))
+      const overlapHeight = Math.max(0, Math.min(handleBounds!.y + handleBounds!.height, sendBounds!.y + sendBounds!.height) - Math.max(handleBounds!.y, sendBounds!.y))
+      expect(overlapWidth * overlapHeight, 'the resize target must not cover Send').toBe(0)
+      expect(await page.getByTestId('chat-send').evaluate(element => {
+        const bounds = element.getBoundingClientRect()
+        const hit = document.elementFromPoint(bounds.right - 5, bounds.bottom - 5)
+        return hit === element || element.contains(hit)
+      }), 'Send owns its bottom-right corner').toBe(true)
+    }
+    await input.press('Tab')
+    const voice = panel.locator('.tool-icon')
+    await expect(voice).toBeFocused()
+    await expect(voice).toHaveCSS('outline-width', '2px')
+    await expect.poll(() => voice.evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44)
+    try {
+      await page.getByTestId('chat-send').click()
+      await expect(input).toBeDisabled()
+      await expect(input).toBeHidden()
+      await expect(voice).toBeDisabled()
+      await expect(voice).toBeHidden()
+      const status = page.getByTestId('chat-response-status')
+      await expect(status).toBeVisible()
+      expect(await status.evaluate(element => element.closest('.messages-viewport') === null)).toBe(true)
+      const stop = page.getByTestId('chat-stop')
+      await expect(stop).toBeEnabled()
+      await expect.poll(() => stop.evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44)
+    } finally {
+      releaseReply()
+    }
+    await expect(input).toBeEnabled()
+    await expect(input).toBeVisible()
+    await expect(voice).toBeEnabled()
+    await expect(voice).toBeVisible()
+    await expect(page.getByTestId('chat-response-status')).toBeHidden()
+    const copyAction = panel.locator('.msg-actions .action-btn-small').first()
+    await expect(copyAction).toBeVisible()
+    await expect(copyAction.locator('..')).toHaveCSS('opacity', '1')
+    await expect.poll(() => copyAction.evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44)
+    expect(await panel.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
   })
 }
 
@@ -184,6 +386,76 @@ test('reopening the assistant exposes existing history without creating or sendi
   await expect(page.getByTestId('chat-panel')).toBeVisible()
   await page.getByTestId('chat-sidebar-toggle').click()
   await expect(page.getByTestId(`chat-session-${session.id}`)).toBeVisible()
+})
+
+for (const action of ['CONFIRM', 'CANCEL'] as const) {
+  test(`protected ${action.toLowerCase()} submits the displayed action identity`, async ({ page, request }, testInfo) => {
+    const auth = await createAuthenticatedUser(request)
+    const session = await unwrap<{ id: string }>(await request.post(`${apiBaseURL}/api/chat/sessions`, {
+      headers: { Authorization: `Bearer ${auth.token}` }
+    }))
+    const confirmationId = `pending-${action}-${auth.userId}`
+    let settled = false
+    await installPersistedPartialChatMock(page, session.id, 'Decision recorded.', async () => { settled = true })
+    await page.route(`**/api/chat/sessions/${session.id}/confirmation`, route => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ code: 200, data: {
+        sessionId: session.id,
+        actions: settled ? [] : [{
+          kind: 'DESTRUCTIVE', confirmationId, toolName: 'delete_device', target: 'Kitchen sensor'
+        }]
+      } })
+    }))
+    await page.route(`**/api/chat/sessions/${session.id}/seen`, route => route.fulfill({
+      status: 200, contentType: 'application/json', body: JSON.stringify({ code: 200, data: null })
+    }))
+    await openWorkspace(page, auth)
+    await page.getByTestId('open-ai-assistant').click()
+    await page.getByTestId('chat-sidebar-toggle').click()
+    await page.getByTestId(`chat-session-${session.id}`).click()
+    const decision = page.getByTestId('chat-protected-confirmation')
+    await expect(decision.locator('strong')).toHaveText('请确认：删除设备')
+    await expect(decision.getByTestId('chat-confirmation-target')).toHaveText('Kitchen sensor')
+    await page.screenshot({ path: testInfo.outputPath(`assistant-${action.toLowerCase()}-preview.png`) })
+    const submitted = page.waitForRequest('**/api/chat/completions')
+    await decision.getByRole('button', { name: action === 'CONFIRM' ? '确定' : '取消', exact: true }).click()
+    expect((await submitted).postDataJSON().confirmation).toEqual({
+      kind: 'DESTRUCTIVE', action, confirmationId
+    })
+    expect((await submitted).postDataJSON().content).toBe(action === 'CONFIRM'
+      ? '已确认删除设备：Kitchen sensor' : '已取消删除设备：Kitchen sensor')
+    await expect(decision).toHaveCount(0)
+    await expect(page.getByTestId('chat-input')).toBeEnabled()
+  })
+}
+
+test('first assistant mount reconciles a session that completed after the hidden baseline', async ({ page, request }) => {
+  const auth = await createAuthenticatedUser(request)
+  const sessionId = `handoff-${auth.userId}`
+  let active = true
+  let snapshotReads = 0
+  page.on('request', incoming => {
+    if (new URL(incoming.url()).pathname === '/api/board/snapshot') snapshotReads += 1
+  })
+  await page.route('**/api/chat/sessions', route => route.fulfill({
+    status: 200, contentType: 'application/json', body: JSON.stringify({ code: 200, data: [{
+      id: sessionId, userId: auth.userId, title: 'Background change',
+      createdAt: '2026-10-07T00:00:00Z', updatedAt: '2026-10-07T00:01:00Z',
+      active, latestTerminalMessageId: active ? null : 42,
+      latestExecutionStatus: active ? null : 'COMPLETED', hasUnreadUpdate: !active
+    }] })
+  }))
+  const hydrated = page.waitForResponse(response => new URL(response.url()).pathname === '/api/board/snapshot')
+  await openWorkspace(page, auth)
+  await hydrated
+  await expect(page.getByTestId('ai-assistant-running')).toHaveText('1')
+  const beforeMount = snapshotReads
+  active = false
+  await page.getByTestId('open-ai-assistant').click()
+  await expect(page.getByTestId('chat-panel')).toBeVisible()
+  await expect.poll(() => snapshotReads).toBeGreaterThan(beforeMount)
+  await expect(page.getByTestId('ai-assistant-running')).toHaveCount(0)
 })
 
 test('closing the browser page preserves an unread terminal result until its history is rendered', async ({
@@ -236,7 +508,7 @@ test('closing the browser page preserves an unread terminal result until its his
       await route.fulfill({
         status: 200,
         contentType: 'application/json; charset=UTF-8',
-        body: result({ sessionId, kinds: [] })
+        body: result({ sessionId, actions: [] })
       })
       return
     }
@@ -613,17 +885,17 @@ test('renders assistant code blocks on a readable dark surface', async ({ page, 
       const [red, green, blue, alpha] = context.getImageData(0, 0, 1, 1).data
       return `rgba(${red}, ${green}, ${blue}, ${alpha / 255})`
     }
-    const bodyStyle = getComputedStyle(element)
+    const codeSurface = element.querySelector<HTMLElement>('pre.shiki')
     const header = element.querySelector<HTMLElement>('.code-header')
     const language = element.querySelector<HTMLElement>('.lang-label')
     const copy = element.querySelector<HTMLElement>('.copy-btn')
-    if (!header || !language || !copy) throw new Error('Code block controls are missing')
+    if (!codeSurface || !header || !language || !copy) throw new Error('Code block surface or controls are missing')
     const headerStyle = getComputedStyle(header)
     const codeColors = [...element.querySelectorAll<HTMLElement>('.code-content code span')]
       .filter(token => token.textContent?.trim())
       .map(token => toSrgb(getComputedStyle(token).color))
     return {
-      bodyBackground: toSrgb(bodyStyle.backgroundColor),
+      bodyBackground: toSrgb(getComputedStyle(codeSurface).backgroundColor),
       headerBackground: toSrgb(headerStyle.backgroundColor),
       headerColors: [
         toSrgb(getComputedStyle(language).color),
@@ -657,7 +929,7 @@ test('a rule_list refresh command makes the workspace re-read undo availability'
   await page.getByTestId('scene-import-file').setInputFiles(path.resolve(
     process.cwd(), '..', 'docs', 'examples', 'default-climate-conflict-scene.json'))
   // Scene replacement clears the journal, so this is a clean baseline.
-  await page.getByRole('dialog').getByRole('button', { name: /Replace in full|全量替换/ }).click()
+  await page.getByRole('dialog').getByRole('button', { name: /Replace scene|替换场景/ }).click()
   await expect(page.getByTestId('board-undo')).toBeDisabled({ timeout: 60_000 })
   await expect.poll(async () => (await unwrap<any[]>(await request.get(rulesUrl, { headers }))).length,
     { timeout: 60_000 }).toBeGreaterThan(0)
@@ -788,7 +1060,7 @@ test('a rule_list refresh command makes the workspace re-read undo availability'
       await route.fulfill({
         status: 200,
         contentType: 'application/json; charset=UTF-8',
-        body: result({ sessionId, kinds: [] })
+        body: result({ sessionId, actions: [] })
       })
       return
     }

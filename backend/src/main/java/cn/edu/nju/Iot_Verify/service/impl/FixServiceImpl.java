@@ -39,6 +39,9 @@ import cn.edu.nju.Iot_Verify.exception.SmvGenerationException;
 import cn.edu.nju.Iot_Verify.exception.ValidationException;
 import cn.edu.nju.Iot_Verify.po.TracePo;
 import cn.edu.nju.Iot_Verify.repository.TraceRepository;
+import cn.edu.nju.Iot_Verify.repository.VerificationTaskRepository;
+import cn.edu.nju.Iot_Verify.repository.projection.VerificationTraceContextProjection;
+import cn.edu.nju.Iot_Verify.po.VerificationTaskPo;
 import cn.edu.nju.Iot_Verify.service.BoardStorageService;
 import cn.edu.nju.Iot_Verify.service.FormalOperationAdmission;
 import cn.edu.nju.Iot_Verify.service.FixService;
@@ -74,6 +77,7 @@ public class FixServiceImpl implements FixService {
     private static final Set<String> SUPPORTED_FIX_STRATEGIES = Set.copyOf(DEFAULT_FIX_STRATEGIES);
 
     private final TraceRepository traceRepository;
+    private final VerificationTaskRepository verificationTaskRepository;
     private final TraceMapper traceMapper;
     private final SmvGenerator smvGenerator;
     private final RuleFixer ruleFixer;
@@ -96,7 +100,7 @@ public class FixServiceImpl implements FixService {
         boolean modelComplete = sourceModelComplete(ctx.trace);
         String summary = faultRules.isEmpty()
                 ? "No automation rule that fired in the counterexample can influence the violated property. "
-                    + "The violation depends on device or environment evolution."
+                    + "Automatic repair also searches idle rules that can prevent the violation."
                 : faultRules.size() + " automation rule(s) fired in the counterexample and can influence the "
                     + "violated property. This narrows review but does not prove that every listed rule "
                     + "independently caused the violation.";
@@ -165,7 +169,8 @@ public class FixServiceImpl implements FixService {
                 req.isEnablePrivacy(),
                 strategies,
                 fixConfig.getMaxAttempts(),
-                preferredRanges
+                preferredRanges,
+                () -> progress.accept(InteractiveOperationStage.COMPARING_VERIFIED_OPTIONS)
         );
 
         progress.accept(InteractiveOperationStage.FINALIZING);
@@ -538,7 +543,7 @@ public class FixServiceImpl implements FixService {
                                 .filter(a -> !"keep".equals(a.getAction())).count();
                 return "Applied " + cCount + " condition change(s)" + evidence;
             case "remove":
-                return "Permanently removed " + (before - after) + " automation rule(s)" + evidence;
+                return "Removed " + (before - after) + " automation rule(s)" + evidence;
             default:
                 return "Fix applied" + evidence;
         }
@@ -862,19 +867,20 @@ public class FixServiceImpl implements FixService {
             boolean enablePrivacy,
             List<String> strategies,
             int maxAttempts,
-            Map<String, PreferredRange> preferredRanges) {
+            Map<String, PreferredRange> preferredRanges,
+            Runnable onVerifiedRepair) {
         AttackScenarioDto scenario = Objects.requireNonNull(
                 attackScenario, "attackScenario is required");
         FixResultDto result = ruleFixer.fix(
                 traceId, violatedSpecId, states, rules, devices, environmentVariables, specs,
-                deviceSmvMap, userId, scenario, enablePrivacy, strategies, maxAttempts, preferredRanges);
+                deviceSmvMap, userId, scenario, enablePrivacy, strategies, maxAttempts, preferredRanges,
+                onVerifiedRepair);
         attachModelTokenSources(result, rules, deviceSmvMap);
         return result;
     }
 
     private FrozenTemplateSnapshots readFrozenTemplateSnapshots(
-            TracePo trace, List<DeviceVerificationDto> devices) {
-        String json = trace.getTemplateSnapshotsJson();
+            TracePo trace, String json, List<DeviceVerificationDto> devices) {
         JsonNode shape = JsonUtils.readPersistedJsonRequired(
                 "verification trace", trace.getId(), "templateSnapshotsJson", json,
                 () -> JsonUtils.fromJson(json, JsonNode.class));
@@ -952,12 +958,14 @@ public class FixServiceImpl implements FixService {
     private VerificationContext loadContext(Long userId, Long traceId) {
         TracePo po = traceRepository.findByIdAndUserId(traceId, userId)
                 .orElseThrow(() -> new ResourceNotFoundException("Trace", traceId));
-        TraceDto trace = traceMapper.toDto(po);
-
-        String requestJson = po.getRequestJson();
-        VerificationRequestDto request = JsonUtils.readPersistedJsonRequired(
-                "verification trace", po.getId(), "requestJson", requestJson,
-                () -> JsonUtils.fromJson(requestJson, VerificationRequestDto.class));
+        Long runId = po.getVerificationTaskId();
+        VerificationTraceContextProjection run = runId == null ? null
+                : verificationTaskRepository.findTraceContextsByUserIdAndIdInAndStatus(
+                        userId, List.of(runId), VerificationTaskPo.TaskStatus.COMPLETED)
+                .stream().findFirst().orElse(null);
+        TraceMapper.PersistedContext persisted = traceMapper.readContext(po, run);
+        TraceDto trace = persisted.trace();
+        VerificationRequestDto request = persisted.request();
         if (request == null || request.getDevices() == null || request.getDevices().isEmpty()) {
             throw invalidTraceContext(po, "requestJson", "verification request has no devices");
         }
@@ -968,7 +976,7 @@ public class FixServiceImpl implements FixService {
             throw invalidTraceContext(po, "requestJson", e.getMessage());
         }
 
-        FrozenTemplateSnapshots templateSnapshots = readFrozenTemplateSnapshots(po, request.getDevices());
+        FrozenTemplateSnapshots templateSnapshots = readFrozenTemplateSnapshots(po, persisted.templateSnapshotsJson(), request.getDevices());
 
         log.debug("Loaded verification context for trace {}", traceId);
 

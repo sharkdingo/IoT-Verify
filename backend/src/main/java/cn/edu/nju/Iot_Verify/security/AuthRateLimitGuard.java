@@ -71,6 +71,11 @@ public class AuthRateLimitGuard {
                 registerPhoneLimit, registerSourceLimit, Duration.ofHours(1));
     }
 
+    public void checkAccountChange(Long userId, HttpServletRequest request) {
+        check("account_change", String.valueOf(userId), sourceAddress(request),
+                loginAccountLimit, loginSourceLimit, Duration.ofMinutes(1));
+    }
+
     private void check(String operation,
                        String identity,
                        String source,

@@ -1,10 +1,10 @@
 # Additional Default-Template Scenarios
 
-These scenes exercise default templates beyond the night-watch acceptance demo. Each
+These scenes exercise care, security, and comfort rules beyond the night-watch acceptance demo. Each
 file is a standard version 5 `iot-verify.board-scene` document that can be imported from
-the Board without creating or editing a custom template.
+the Board with its bundled and scene-specific template snapshots.
 
-Verified against code and real NuSMV on 2026-08-13. Sources:
+Verified against code and real NuSMV on 2026-10-12. Sources:
 `scripts/generate-default-template-scenes.mjs`, the bundled manifests under
 `backend/src/main/resources/deviceTemplate/`, and
 `AcceptanceDemoScenarioNusmvTest`.
@@ -25,6 +25,7 @@ NuSMV. `Baseline` and `attack` show satisfied/violated specification counts.
 | [Climate conflict](../examples/default-climate-conflict-scene.json) | `2 / 2 / 2 / 4` | `2 / 2` | `1 / 3` | Remove the first hot-room heating rule; then `4 / 0` |
 | [RFID access](../examples/default-rfid-access-scene.json) | `3 / 0 / 2 / 5` | `5 / 0` | `2 / 3` | No baseline violation to repair |
 | [Away-mode unlock](../examples/default-away-mode-unlock-scene.json) | `5 / 3 / 3 / 6` | `4 / 2` | `1 / 5` | Remove the convenience-unlock rule; one removal clears both violations, then `6 / 0` — but see the section below for which of those greens carry information |
+| [Elderly care](../examples/elderly-care-comprehensive-scene.json) | `14 / 8 / 12 / 12` | `11 / 1` | Not covered by this baseline regression | Remove the lamp-to-camera photo rule while preserving night lighting, emergency response, and ventilation; then `12 / 0` |
 
 Every baseline and attack run emits all requested properties with zero disabled rules
 and zero skipped specifications. Simulation produces an animatable trajectory for each
@@ -84,8 +85,7 @@ modeled attack-space result, not a statement that a physical badge will be compr
 ## Away-mode unlock
 
 Default templates: `Alarm`, `Door`, `Light`, and `Motion Detector`, plus one scene-defined
-custom type, `Occupancy Sensor`. This is the only bundled scene that declares its own device
-type, so it also demonstrates that a scene file is a self-contained import including new types.
+custom type, `Occupancy Sensor`. It demonstrates that a scene file is a self-contained import including new types.
 
 This is the presentation scene; the presenter walkthrough is
 [away-mode-unlock-demo.md](away-mode-unlock-demo.md). Its defect is a convenience automation
@@ -114,7 +114,7 @@ Repair is where this scene is most instructive, and it is not the flattering res
 adjustment reports `SKIPPED_NO_PARAMETERIZABLE_VALUES` (the scene is entirely enum-valued) and
 condition adjustment reports `NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE` — adding "only unlock when someone is
 home" genuinely does not repair the property, because occupancy evolves freely and no rule
-re-locks the door after the resident leaves. Permanent removal of the convenience-unlock rule
+re-locks the door after the resident leaves. Removing the convenience-unlock rule
 is the only verified repair, and forward verification confirms `6 / 0`. A tool that declines
 two strategies with stated reasons is more credible than one that always produces a guard.
 
@@ -136,6 +136,33 @@ and the counterexample carries `door_1.trust_LockState_unlocked = untrusted`. Th
 privacy property stays satisfied, so the attack is not indiscriminate. This is a modeled
 attack-space result, not a claim that a physical sensor will be compromised.
 
+## Elderly care
+
+The care apartment combines night-time bed-exit lighting, a vital-signs emergency chain,
+ventilation, and a lamp-to-camera-to-hub photo chain. Bed occupancy can change while a
+command travels through that photo chain; the resident can be back in bed when the camera
+starts taking a picture. That privacy violation is intentional and remains discoverable.
+
+Lighting is an immediate response: night-time bed exit must turn the lamp on in the next
+step. Requiring it to be on in the trigger state would fail the initial snapshot before
+any automation can execute. The motion-based energy-saving rule has lower priority and
+cannot override bed-exit lighting.
+
+`Care Ventilation Window` is a separate scene-defined type. The bundled `Window` senses
+contact and changes its position; it declares no CO2 effect. The care window retains those
+operations and explicitly lowers the scene's normalized `carbonDioxide` value by `2` per
+open-window step against the shared `[-1, 1]` disturbance. This is a declared modeling
+assumption, not a measured physical ventilation rate. The bundled `Air Purifier` also
+declares a CO2 rate of `-1`, but the `+1` disturbance can exactly cancel that effect;
+its modeled effect alone cannot guarantee a decrease. The eventual fresh-air requirement
+remains a guarantee over all modeled paths rather than a possibility check.
+
+Removing the lamp-to-camera rule resolves privacy without removing required lighting.
+Condition repair can also restrict when photography occurs; inspect the proposed trigger
+changes before applying them. Forward verification protects every requirement already
+satisfied, including night lighting and fresh air. The emergency chain and hub's idle
+response remain separate checks. This baseline does not certify the attacked scene.
+
 ## Reproduce
 
 Regenerate the scene JSON after a bundled template changes:
@@ -144,8 +171,7 @@ Regenerate the scene JSON after a bundled template changes:
 node scripts/generate-default-template-scenes.mjs
 ```
 
-Run the real-NuSMV regression for the original acceptance scene and the three scenes it
-covers (fire evacuation, climate conflict, RFID access):
+Run the real-NuSMV regression for the acceptance, default-template, and care scenes:
 
 ```bash
 cd backend
@@ -170,5 +196,5 @@ mvn -DforkCount=0 -Dtest=AwayModeUnlockSceneNusmvTest test
 
 For a UI check, import a file, review the explicit full-replacement preview, run
 synchronous simulation and play the timeline, then run baseline and budget-one attack
-verification. Apply only the two removals named above; do not treat attack findings as
+verification. Review the proposed changes before applying; do not treat attack findings as
 ordinary baseline repair requests.

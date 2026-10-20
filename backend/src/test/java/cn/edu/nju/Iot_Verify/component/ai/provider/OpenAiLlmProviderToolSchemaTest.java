@@ -9,13 +9,16 @@ import cn.edu.nju.Iot_Verify.util.FunctionParameterSchema;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.openai.core.JsonValue;
 import com.openai.client.OpenAIClient;
+import com.openai.client.OpenAIClientAsync;
+import com.openai.core.http.AsyncStreamResponse;
 import com.openai.models.FunctionParameters;
 import com.openai.models.chat.completions.ChatCompletion;
+import com.openai.models.chat.completions.ChatCompletionChunk;
 import com.openai.models.chat.completions.ChatCompletionCreateParams;
 import com.openai.models.chat.completions.ChatCompletionMessage;
 import com.openai.models.chat.completions.ChatCompletionTool;
-import com.openai.services.blocking.ChatService;
-import com.openai.services.blocking.chat.ChatCompletionService;
+import com.openai.services.async.ChatServiceAsync;
+import com.openai.services.async.chat.ChatCompletionServiceAsync;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -23,6 +26,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -77,7 +81,7 @@ class OpenAiLlmProviderToolSchemaTest {
                 "object", Map.of(), List.of());
         openRoot.additionalProperties = true;
 
-        ChatCompletionService completions = mock(ChatCompletionService.class);
+        ChatCompletionServiceAsync completions = mock(ChatCompletionServiceAsync.class);
         OpenAiLlmProvider provider = providerWith(completions);
         provider.chat(LlmChatRequest.builder()
                 .messages(List.of(LlmMessage.user("use a tool")))
@@ -88,7 +92,7 @@ class OpenAiLlmProviderToolSchemaTest {
 
         ArgumentCaptor<ChatCompletionCreateParams> captor = ArgumentCaptor.forClass(
                 ChatCompletionCreateParams.class);
-        verify(completions).create(captor.capture());
+        verify(completions).createStreaming(captor.capture());
         List<ChatCompletionTool> tools = captor.getValue().tools().orElseThrow();
 
         FunctionParameters closedParameters = tools.get(0).asFunction().function()
@@ -120,25 +124,32 @@ class OpenAiLlmProviderToolSchemaTest {
                 .get("additionalProperties").convert(Boolean.class));
     }
 
-    private OpenAiLlmProvider providerWith(ChatCompletionService completions) {
-        ChatCompletion completion = mock(ChatCompletion.class);
-        when(completion.choices()).thenReturn(List.of());
-        return providerWith(completions, completion);
-    }
-
-    private OpenAiLlmProvider providerWith(ChatCompletionService completions,
-                                           ChatCompletion completion) {
+    @SuppressWarnings("unchecked")
+    private OpenAiLlmProvider providerWith(ChatCompletionServiceAsync completions) {
         OpenAIClient client = mock(OpenAIClient.class);
-        ChatService chatService = mock(ChatService.class);
-        when(client.chat()).thenReturn(chatService);
+        OpenAIClientAsync asyncClient = mock(OpenAIClientAsync.class);
+        ChatServiceAsync chatService = mock(ChatServiceAsync.class);
+        when(client.async()).thenReturn(asyncClient);
+        when(asyncClient.chat()).thenReturn(chatService);
         when(chatService.completions()).thenReturn(completions);
-        if (completion != null) {
-            when(completions.create(any(ChatCompletionCreateParams.class))).thenReturn(completion);
-        }
+        AsyncStreamResponse<ChatCompletionChunk> response = mock(AsyncStreamResponse.class);
+        when(completions.createStreaming(any(ChatCompletionCreateParams.class))).thenReturn(response);
+        org.mockito.Mockito.doAnswer(invocation -> {
+            AsyncStreamResponse.Handler<ChatCompletionChunk> handler = invocation.getArgument(0);
+            handler.onNext(ChatCompletionChunk.builder().id("plan").created(0L).model("mock-model")
+                    .addChoice(ChatCompletionChunk.Choice.builder().index(0L)
+                            .delta(ChatCompletionChunk.Choice.Delta.builder().content("").build())
+                            .finishReason(ChatCompletionChunk.Choice.FinishReason.STOP).build())
+                    .build());
+            return response;
+        }).when(response).subscribe(any(AsyncStreamResponse.Handler.class));
+        when(response.onCompleteFuture()).thenReturn(CompletableFuture.completedFuture(null));
 
         LlmConfig config = new LlmConfig();
         config.setModel("mock-model");
         OpenAiLlmProvider provider = new OpenAiLlmProvider(config);
+        when(client.withOptions(any())).thenReturn(client);
+        ReflectionTestUtils.setField(provider, "transport", new okhttp3.OkHttpClient());
         ReflectionTestUtils.setField(provider, "client", client);
         return provider;
     }

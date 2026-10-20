@@ -290,6 +290,21 @@ test('local composite actions declare a supported runtime', () => {
   }
 });
 
+test('Maven jobs require real MySQL integration coverage', () => {
+  for (const [file, job] of [['fast-ci.yml', 'backend'], ['full-ci.yml', 'build']]) {
+    const text = readFileSync(join(WORKFLOW_DIR, file), 'utf8');
+    const body = text.split(new RegExp(`^  ${job}:\\s*$`, 'm'))[1]
+      ?.split(/^  [\w-]+:\s*$/m)[0];
+    assert.ok(body, `${file}: missing ${job} job`);
+    assert.match(body, /services:\s+mysql:\s+image: mysql:/, `${file}: Maven needs real MySQL`);
+    assert.match(body, /MYSQL_DATABASE: iot_verify_undo_it\b/, `${file}: use a dedicated test database`);
+    assert.match(body, /DB_USERNAME: iot_verify\b/, `${file}: give tests the service credentials`);
+    assert.match(body, /DB_PASSWORD: iot_verify_ci\b/, `${file}: give tests the service credentials`);
+    assert.match(body, /mvn -B package -Diot\.verify\.mysql\.required=true\b/,
+      `${file}: an unavailable MySQL must fail instead of skipping integration tests`);
+  }
+});
+
 test('every workflow script is committed executable', () => {
   // A script without the git execute bit fails in CI with exit code 126 -- "Permission denied" -- long
   // after setup succeeded, which reads like a broken runner rather than a missing file mode. It cost a

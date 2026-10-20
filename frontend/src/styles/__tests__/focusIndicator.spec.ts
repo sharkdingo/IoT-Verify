@@ -47,14 +47,8 @@ describe('focus indicator', () => {
     // One meaning, one colour. A literal is how three separate blues accumulated — each locally plausible, none
     // checked against its own ground, and all three under 3:1 where they landed.
     //
-    // Scoped to the themed surfaces, because a literal is not automatically wrong. `Landing.vue` draws its auth
-    // panel on a dark hero image in **both** themes, so its pale ring measures 12.34:1 and a theme-aware token
-    // would be the mistake there. My first version flagged it anyway; a rule that cannot tell a considered
-    // literal from an accumulated one produces churn and teaches people to ignore it.
     const offenders: string[] = []
     for (const { name, text } of sources()) {
-      // The board and its components follow the theme; the public hero does not.
-      if (/views\/Landing\.vue$/.test(name)) continue
       const scanned = withoutComments(text)
       scanned.split('\n').forEach((line, index) => {
         if (!/outline:/.test(line)) return
@@ -79,7 +73,10 @@ describe('focus indicator', () => {
 
     // And hover must no longer suppress it: `outline: none` in the shared hover/focus rule was the original
     // defect, so its return would silently remove the indicator again.
-    const shared = control.slice(control.indexOf('.template-card:hover,'))
+    const board = readFileSync(join(__dirname, '../board.css'), 'utf8')
+    const hoverAt = board.indexOf('.iot-board .board-inventory-card:hover,')
+    expect(hoverAt).toBeGreaterThan(-1)
+    const shared = board.slice(hoverAt)
     const sharedRule = shared.slice(0, shared.indexOf('}'))
     expect(sharedRule, 'the shared hover/focus rule must not suppress the outline')
       .not.toMatch(/outline:\s*none/)

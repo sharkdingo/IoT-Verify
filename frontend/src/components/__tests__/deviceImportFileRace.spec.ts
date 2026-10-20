@@ -1,59 +1,98 @@
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+// @vitest-environment jsdom
+import { flushPromises, mount } from '@vue/test-utils'
+import { describe, expect, it, vi } from 'vitest'
+import { i18n } from '@/assets/i18n'
+import ControlCenter from '../ControlCenter.vue'
 
-/**
- * Choosing an import file must invalidate the preview before the file is read, not after.
- *
- * `setImportTextImmediately` closes the 300ms debounce window for a file selection, but it can only run
- * once `await file.text()` resolves — and reading a file is asynchronous. In that gap the preview, the
- * parsed counts and the create button all still describe the PREVIOUS content, and the button is still
- * enabled from it, so a click there imports the payload the user just replaced.
- *
- * Measured from the CI artifact for `board-full-flow.spec.ts` "imports devices from pasted JSON and
- * selected CSV with precise preview validation", which failed on two consecutive nightly runs: at failure
- * the textarea was rendering its own placeholder (so its text was empty) while the create button read
- * "Create 2 device(s)" and was enabled, and the board had gained `import_phone_1` and `import_alarm_1` —
- * the JSON payload imported a second time — with neither CSV device present. Both payloads contain two
- * devices, so neither `toBeEnabled()` nor the button label could distinguish them. It reproduces in CI,
- * where a slower filesystem widens the gap, and not locally.
- *
- * Source-text assertions rather than a mounted component: what matters is the ORDER of two statements
- * around an await, which a render cannot observe without stubbing `File.text` to control the timing — and
- * a stub is precisely the thing whose timing the bug depends on.
- *
- * Comments are stripped before anything is located. The handler's own comment quotes `await file.text()`
- * while explaining the race, which is earlier in the file than the statement being pinned — so a search
- * over the raw text reads the prose as the code and reports the fix missing when it is present.
- */
+vi.mock('element-plus', () => ({
+  ElMessage: { success: vi.fn(), warning: vi.fn(), error: vi.fn() },
+  ElTooltip: { name: 'ElTooltip', template: '<slot />' }
+}))
+
 describe('device import file selection race', () => {
-  const source = readFileSync(join(process.cwd(), 'src/components/ControlCenter.vue'), 'utf8')
+  const deviceTemplates = [
+    { name: 'Mobile Phone', manifest: { Name: 'Mobile Phone' } },
+    { name: 'Alarm', manifest: { Name: 'Alarm' } }
+  ]
+  const previousPayload = JSON.stringify([{ templateName: 'Mobile Phone', label: 'previous_phone' }])
+  const filePayload = JSON.stringify([{ templateName: 'Alarm', label: 'fresh_file_alarm' }])
 
-  const handler = (() => {
-    const at = source.indexOf('const handleDeviceImportFile')
-    expect(at, 'the file handler should exist').toBeGreaterThan(-1)
-    const end = source.indexOf('\n}', at)
-    expect(end, 'the handler should be a block').toBeGreaterThan(at)
-    return source
-      .slice(at, end + 2)
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .replace(/\/\/[^\n]*/g, '')
-  })()
+  it('clears the stale preview while the file read is pending', async () => {
+    const wrapper = mount(ControlCenter, {
+      attachTo: document.body,
+      props: { activeSection: 'devices', deviceTemplates },
+      global: { plugins: [i18n] }
+    })
+    vi.useFakeTimers()
+    let finishRead!: (source: string) => void
+    try {
+      await wrapper.get('[data-testid="device-create-mode-import"]').trigger('click')
+      const initial = wrapper.get<HTMLInputElement>('[data-testid="device-import-file"]')
+      Object.defineProperty(initial.element, 'files', { configurable: true,
+        value: [{ name: 'previous.json', size: 64, arrayBuffer: () => Promise.resolve(new TextEncoder().encode(previousPayload).buffer) }] })
+      await initial.trigger('change')
+      await flushPromises()
+      const create = wrapper.get('[data-testid="device-import-create"]')
+      expect(create.attributes('disabled')).toBeUndefined()
+      expect(wrapper.get('[data-testid="device-import-preview"]').text()).toContain('previous_phone')
 
-  it('clears the stale preview before the first await', () => {
-    const clearAt = handler.indexOf("setImportTextImmediately('')")
-    expect(clearAt, 'the handler must invalidate the previous preview').toBeGreaterThan(-1)
-
-    const firstAwait = handler.indexOf('await ')
-    expect(firstAwait, 'the handler should await the file read').toBeGreaterThan(-1)
-
-    expect(clearAt).toBeLessThan(firstAwait)
+      const pendingRead = new Promise<string>(resolve => { finishRead = resolve })
+      const input = wrapper.get<HTMLInputElement>('[data-testid="device-import-file"]')
+      // jsdom has no File.arrayBuffer(); control its completion to observe the waiting window.
+      Object.defineProperty(input.element, 'files', { configurable: true,
+        value: [{ size: 64, arrayBuffer: () => pendingRead.then(text => new TextEncoder().encode(text).buffer) }] })
+      await input.trigger('change')
+      expect(wrapper.find('[data-testid="device-import-text"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="device-import-preview"]').exists()).toBe(false)
+      expect(create.attributes('disabled')).toBeDefined()
+      await create.trigger('click')
+      expect(wrapper.emitted('create-devices')).toBeUndefined()
+    } finally {
+      wrapper.unmount()
+      finishRead?.(filePayload)
+      await flushPromises()
+      vi.useRealTimers()
+    }
   })
 
-  it('still installs the file contents in one tick once read', () => {
-    // The original fix must survive: the contents replace text and parsed view together, so the
-    // debounce cannot leave the button describing content the user has already replaced.
-    expect(handler, 'the file contents go in immediately, not through the debounce')
-      .toMatch(/setImportTextImmediately\(await file\.text\(\)\)/)
+  it('still installs the file contents in one tick once read', async () => {
+    const wrapper = mount(ControlCenter, {
+      attachTo: document.body,
+      props: { activeSection: 'devices', deviceTemplates },
+      global: { plugins: [i18n] }
+    })
+    vi.useFakeTimers()
+    try {
+      await wrapper.get('[data-testid="device-create-mode-import"]').trigger('click')
+      const initial = wrapper.get<HTMLInputElement>('[data-testid="device-import-file"]')
+      Object.defineProperty(initial.element, 'files', { configurable: true,
+        value: [{ name: 'previous.json', size: 64, arrayBuffer: () => Promise.resolve(new TextEncoder().encode(previousPayload).buffer) }] })
+      await initial.trigger('change')
+      await flushPromises()
+      expect(wrapper.get('[data-testid="device-import-create"]').attributes('disabled')).toBeUndefined()
+
+      const input = wrapper.get<HTMLInputElement>('[data-testid="device-import-file"]')
+      Object.defineProperty(input.element, 'files', { configurable: true,
+        value: [{ size: 64, arrayBuffer: () => Promise.resolve(new TextEncoder().encode(filePayload).buffer) }] })
+      await input.trigger('change')
+      await flushPromises()
+      // Do not advance the keystroke debounce after choosing a file.
+      expect(wrapper.find('[data-testid="device-import-text"]').exists()).toBe(false)
+      const preview = wrapper.get('[data-testid="device-import-preview"]')
+      expect(preview.text()).toContain('fresh_file_alarm')
+      expect(preview.text()).not.toContain('previous_phone')
+      expect(preview.get('strong').text()).toBe('1/1')
+      const create = wrapper.get('[data-testid="device-import-create"]')
+      expect(create.attributes('disabled')).toBeUndefined()
+      await create.trigger('click')
+      const submission = wrapper.emitted('create-devices')![0]![0] as any
+      expect(submission.items).toHaveLength(1)
+      expect(submission.items[0]).toMatchObject({ template: { name: 'Alarm' }, customName: 'fresh_file_alarm' })
+      submission.complete(false)
+      await flushPromises()
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
   })
 })

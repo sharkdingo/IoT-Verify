@@ -10,7 +10,7 @@ import cn.edu.nju.Iot_Verify.component.fuzz.FuzzInputEventKind;
 import cn.edu.nju.Iot_Verify.component.fuzz.FuzzInputEventSource;
 import cn.edu.nju.Iot_Verify.component.fuzz.FuzzLimitationContract;
 import cn.edu.nju.Iot_Verify.component.fuzz.FuzzModelInputSnapshotCodec;
-import cn.edu.nju.Iot_Verify.component.fuzz.FuzzModelFingerprint;
+import cn.edu.nju.Iot_Verify.util.ModelFingerprint;
 import cn.edu.nju.Iot_Verify.component.fuzz.FuzzPaperDomainPreviewer;
 import cn.edu.nju.Iot_Verify.component.fuzz.FuzzProgressListener;
 import cn.edu.nju.Iot_Verify.component.fuzz.FuzzSpecEligibility;
@@ -110,6 +110,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -157,7 +158,7 @@ class FuzzServiceImplTest {
                 boardDataConverter,
                 fuzzEngine,
                 fuzzPaperDomainPreviewer,
-                new FuzzModelFingerprint(new ObjectMapper().findAndRegisterModules()),
+                new ModelFingerprint(new ObjectMapper().findAndRegisterModules()),
                 fuzzMapper,
                 fuzzTaskExecutor,
                 admissionConfig,
@@ -168,6 +169,7 @@ class FuzzServiceImplTest {
 
     @Test
     void fullRunOrdersLoadedFindingsWithoutDatabaseSortingLongTextPayloads() {
+        runReadTransactionsInline();
         LocalDateTime firstTime = LocalDateTime.of(2026, 7, 30, 10, 0);
         FuzzTaskPo run = FuzzTaskPo.builder()
                 .id(41L)
@@ -625,7 +627,7 @@ class FuzzServiceImplTest {
             savedTasks.put(task.getId(), task);
             return task;
         });
-        when(taskRepository.findByIdAndUserId(anyLong(), eq(7L))).thenAnswer(invocation ->
+        when(taskRepository.findByIdAndUserIdForUpdate(anyLong(), eq(7L))).thenAnswer(invocation ->
                 Optional.ofNullable(savedTasks.get(invocation.getArgument(0, Long.class))));
         when(taskRepository.cancelTaskIfStillActive(
                 eq(41L), eq(FuzzTaskPo.TaskStatus.CANCELLED), any(), anyList()))
@@ -816,7 +818,7 @@ class FuzzServiceImplTest {
         when(taskRepository.findStatusById(anyLong())).thenAnswer(invocation ->
                 Optional.ofNullable(savedTasks.get(invocation.getArgument(0, Long.class)))
                         .map(FuzzTaskPo::getStatus));
-        when(taskRepository.findByIdAndUserId(anyLong(), eq(7L))).thenAnswer(invocation ->
+        when(taskRepository.findByIdAndUserIdForUpdate(anyLong(), eq(7L))).thenAnswer(invocation ->
                 Optional.ofNullable(savedTasks.get(invocation.getArgument(0, Long.class))));
         when(taskRepository.updateProgressIfActive(anyLong(), anyInt(), any(TaskProgressStage.class),
                 anyString(), any(LocalDateTime.class))).thenReturn(1);
@@ -1263,6 +1265,7 @@ class FuzzServiceImplTest {
 
     @Test
     void getRuns_keepsHistoryListAvailableWhenOneRunHasInvalidPersistedData() {
+        runReadTransactionsInline();
         LocalDateTime createdAt = LocalDateTime.of(2026, 7, 14, 10, 0);
         FuzzTaskSummaryProjection run = mock(FuzzTaskSummaryProjection.class);
         when(run.getId()).thenReturn(51L);
@@ -1275,7 +1278,7 @@ class FuzzServiceImplTest {
                 7L, FuzzTaskPo.TaskStatus.COMPLETED, PageRequest.of(0, 25))).thenReturn(List.of(run));
         when(findingRepository.findSummariesByUserIdAndFuzzTaskIdIn(
                 7L, List.of(51L))).thenReturn(List.of(finding));
-        when(fuzzMapper.toRunSummaryDtoFromTaskProjection(eq(run), anyList()))
+        when(fuzzMapper.toRunSummaryDtoFromTaskProjection(eq(run), anyList(), isNull()))
                 .thenThrow(new PersistedDataIntegrityException(
                         "FuzzFinding", 61L, "statesJson", "state list is empty"));
 
@@ -1297,6 +1300,7 @@ class FuzzServiceImplTest {
 
     @Test
     void getRuns_doesNotMislabelProgrammingErrorsAsPersistedDataDamage() {
+        runReadTransactionsInline();
         FuzzTaskSummaryProjection run = mock(FuzzTaskSummaryProjection.class);
         when(run.getId()).thenReturn(52L);
         when(taskRepository.findSummaryByUserIdAndStatusOrderByCreatedAtDescIdDesc(
@@ -1304,7 +1308,7 @@ class FuzzServiceImplTest {
                 .thenReturn(List.of(run));
         when(findingRepository.findSummariesByUserIdAndFuzzTaskIdIn(
                 7L, List.of(52L))).thenReturn(List.of());
-        when(fuzzMapper.toRunSummaryDtoFromTaskProjection(run, List.of()))
+        when(fuzzMapper.toRunSummaryDtoFromTaskProjection(run, List.of(), null))
                 .thenThrow(new IllegalStateException("mapper bug"));
 
         assertThrows(IllegalStateException.class, () -> service.getRuns(7L, 0, 25));
@@ -2102,6 +2106,16 @@ class FuzzServiceImplTest {
             callback.accept(transactionStatus);
             return null;
         }).when(transactionTemplate).executeWithoutResult(any());
+    }
+
+    private void runReadTransactionsInline() {
+        var manager = mock(org.springframework.transaction.PlatformTransactionManager.class);
+        when(manager.getTransaction(any())).thenAnswer(invocation -> {
+            org.springframework.transaction.TransactionDefinition definition = invocation.getArgument(0);
+            assertTrue(definition.isReadOnly());
+            return new org.springframework.transaction.support.SimpleTransactionStatus();
+        });
+        when(transactionTemplate.getTransactionManager()).thenReturn(manager);
     }
 
     @SuppressWarnings({"rawtypes", "unchecked"})

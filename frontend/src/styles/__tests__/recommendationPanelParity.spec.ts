@@ -52,21 +52,26 @@ const PANELS = [
 const generateButtonClasses = (panel: string): string => {
   const at = BOARD.indexOf(`data-testid="${panel}"`)
   expect(at, `the ${panel} panel should have a generate button`).toBeGreaterThan(-1)
-  /*
-   * Search past the opening tag, not up to the first `>`.
-   *
-   * A `:class="[ … ]"` array spans several lines and its expressions contain `>` inside comparisons, so slicing
-   * to the first `>` cut the window before the line that carries the colours — the scenario panel then reported
-   * "running state should set a colour: expected 0 to be greater than 0", which reads like a missing colour
-   * rather than a truncated search. A fixed forward span reaches the whole element without needing to parse it.
-   */
-  const window = BOARD.slice(at, at + 1400)
-  const line = window.split(/\r?\n/).find(row => row.includes('isRecommending'))
+  // Disabled and label expressions also use the running flag; inspect only the class attribute.
+  const button = BOARD.slice(at, BOARD.indexOf('</button>', at))
+  const classes = button.match(/:class="([^"]*)"/)?.[1]
+  expect(classes, `the ${panel} button should have conditional classes`).toBeTruthy()
+  const line = classes!.split(/\r?\n/).find(row => row.includes('isRecommending'))
   expect(line, `the ${panel} button should switch on its running flag`).toBeTruthy()
   return line!
 }
 
 describe('recommendation panels agree on their run affordance', () => {
+  it('gives every disabled Generate button the shared disarmed treatment', () => {
+    for (const panel of PANELS) {
+      const at = BOARD.indexOf(`data-testid="${panel}"`)
+      expect(at, panel).toBeGreaterThan(-1)
+      const button = BOARD.slice(at, BOARD.indexOf('</button>', at))
+      expect(button, panel).toContain('board-action-disarmed')
+      expect(button, panel).not.toContain('disabled:opacity-')
+    }
+  })
+
   it('gives every Generate button a visible change between idle and running', () => {
     for (const panel of PANELS) {
       const line = generateButtonClasses(panel)

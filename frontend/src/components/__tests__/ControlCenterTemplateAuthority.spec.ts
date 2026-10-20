@@ -35,6 +35,7 @@ vi.mock('@/api/board', async () => {
 })
 
 vi.mock('@/utils/feedback', () => ({
+  dismissCompletionNotifications: vi.fn(),
   notifySuccess: messageMocks.success,
   notifyBlocked: messageMocks.warning,
   notifyInfo: messageMocks.info,
@@ -105,6 +106,105 @@ afterEach(() => {
 })
 
 describe('ControlCenter template authority recovery', () => {
+  it('focuses template details, switches its focus return target, and closes with Escape', async () => {
+    const wrapper = mountTemplates()
+    try {
+      await wrapper.setProps({ deviceTemplates: [template, { ...template, id: 10, name: 'OtherSwitch',
+        manifest: { ...manifest, Name: 'OtherSwitch' } }] })
+      for (const [name, id] of [['CustomSwitch', 9], ['OtherSwitch', 10]] as const) {
+        const opener = wrapper.get(`button[aria-label="${i18n.global.t('app.viewTemplateDetails')}: ${name}"]`)
+        ;(opener.element as HTMLElement).focus()
+        await opener.trigger('click')
+        await flushPromises()
+        expect(document.activeElement).toBe(document.querySelector(`[data-testid="template-preview-${id}"]`))
+      }
+      const preview = document.querySelector('[data-testid="template-preview-10"]')!
+      preview.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+      await flushPromises()
+      expect(document.querySelector('[data-testid="template-preview-10"]')).toBeNull()
+      expect(document.activeElement).toBe(wrapper.get(`button[aria-label="${i18n.global.t('app.viewTemplateDetails')}: OtherSwitch"]`).element)
+    } finally { wrapper.unmount() }
+  })
+
+  it('closes template details when switching editors without taking focus from the new tab', async () => {
+    const wrapper = mountTemplates()
+    try {
+      await wrapper.get(`button[aria-label="${i18n.global.t('app.viewTemplateDetails')}: CustomSwitch"]`).trigger('click')
+      const devices = wrapper.get('#control-tab-devices')
+      ;(devices.element as HTMLElement).focus()
+      await wrapper.setProps({ activeSection: 'devices' })
+      await flushPromises()
+      expect(document.querySelector('[data-testid="template-preview-9"]')).toBeNull()
+      expect(document.activeElement).toBe(devices.element)
+    } finally { wrapper.unmount() }
+  })
+
+  it('offers a keyboard-operable template importer and makes loading no claim about preparing defaults', async () => {
+    const wrapper = mountTemplates()
+    try {
+      const input = wrapper.get<HTMLInputElement>('[data-testid="template-import-file"]').element
+      const chooser = vi.spyOn(input, 'click').mockImplementation(() => {})
+      const action = wrapper.get('[data-testid="template-import-open"]')
+      expect(action.element.tagName).toBe('BUTTON')
+      await action.trigger('click')
+      expect(chooser).toHaveBeenCalledOnce()
+      await wrapper.setProps({ readOnly: true })
+      expect(action.attributes('disabled')).toBeDefined()
+      await wrapper.setProps({ templatesLoading: true })
+      expect(wrapper.text()).toContain(i18n.global.t('app.loadingDeviceTemplates'))
+      expect(wrapper.text()).not.toMatch(/preparing.*default/i)
+    } finally { wrapper.unmount() }
+  })
+
+  it('names the template action and shows blockers without an irrelevant deletion consequence', async () => {
+    const label = 'Referenced device with a long and distinctive name'
+    boardApiMocks.previewDeviceTemplateDeletion.mockResolvedValue({ ...deletionPreview,
+      canDelete: false, blockers: [{ itemId: 'device-1', itemLabel: label }] })
+    const wrapper = mountTemplates()
+    try {
+      expect(wrapper.get('.template-card__action--danger').attributes('aria-label')).toContain('CustomSwitch')
+      await wrapper.get('.template-card__action--danger').trigger('click')
+      await flushPromises()
+      const dialog = wrapper.get('[data-testid="template-delete-dialog"]')
+      expect(dialog.get('h3').text()).toBe(i18n.global.t('app.deleteTemplate'))
+      expect(dialog.find('.iot-dialog__consequence').exists()).toBe(false)
+      expect(dialog.get('li').text()).toContain(label)
+      expect(dialog.get('li span:last-child').classes()).not.toContain('truncate')
+      expect(dialog.get('[data-testid="template-delete-confirm"]').attributes('disabled')).toBeDefined()
+    } finally { wrapper.unmount() }
+  })
+
+  it('hides empty template descriptions and follows the current catalog when an author removes one', async () => {
+    const wrapper = mountTemplates()
+    try {
+      await wrapper.get(`button[aria-label="${i18n.global.t('app.viewTemplateDetails')}: CustomSwitch"]`).trigger('click')
+      const preview = () => document.querySelector('[data-testid="template-preview-9"]')!
+      expect(preview().textContent).toContain('Custom switch template')
+      await wrapper.setProps({ deviceTemplates: [{ ...template, manifest: { ...manifest, Description: ' ' } }] })
+      expect(preview().querySelector('.template-preview__description')).toBeNull()
+      expect(preview().textContent).not.toContain('Custom switch template')
+      expect(preview().textContent).not.toContain(i18n.global.t('app.noDescription'))
+    } finally { wrapper.unmount() }
+  })
+
+  it.each(['en', 'zh-CN'] as const)('shows every item in each template detail section in %s', async locale => {
+    i18n.global.locale.value = locale
+    const names = Array.from({ length: 7 }, (_, index) => `Long custom entry ${index + 1}`)
+    const entries = names.map(Name => ({ Name }))
+    const wrapper = mountTemplates()
+    try {
+      await wrapper.setProps({ deviceTemplates: [{ ...template, manifest: { ...manifest,
+        Modes: names, WorkingStates: entries, InternalVariables: entries, APIs: entries
+      } }] })
+      await wrapper.get(`button[aria-label="${i18n.global.t('app.viewTemplateDetails')}: CustomSwitch"]`).trigger('click')
+      const preview = document.querySelector('[data-testid="template-preview-9"]')!
+      for (const section of ['modes', 'states', 'variables', 'apis']) {
+        const chips = preview.querySelectorAll(`[data-testid="template-preview-section-${section}"] .template-preview__chip`)
+        expect(Array.from(chips).map(chip => chip.textContent?.trim()), section).toEqual(names)
+      }
+    } finally { wrapper.unmount() }
+  })
+
   it.each([
     ['reset', 'confirmed'],
     ['reset', 'reconciled'],
@@ -183,12 +283,12 @@ describe('ControlCenter template authority recovery', () => {
 
     await wrapper.get('[data-testid="reset-default-templates"]').trigger('click')
     await flushPromises()
-    expect(wrapper.get('.template-reset-dialog').text()).toContain('3 undo/redo history')
+    expect(wrapper.get('.template-reset-dialog').text()).toContain('3 undo/redo entries')
     await wrapper.get('[data-testid="default-template-reset-cancel"]').trigger('click')
 
     await wrapper.get('.template-card__action--danger').trigger('click')
     await flushPromises()
-    expect(wrapper.get('[data-testid="template-delete-dialog"]').text()).toContain('2 undo/redo history')
+    expect(wrapper.get('[data-testid="template-delete-dialog"]').text()).toContain('2 undo/redo entries')
     wrapper.unmount()
   })
 

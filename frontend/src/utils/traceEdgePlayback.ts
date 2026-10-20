@@ -4,7 +4,7 @@ import { normalizeNuSmvDeviceName } from './modelRequest'
 export type TraceVariableLike = {
   name: string
   value?: unknown
-  trust?: string
+  trust?: string | null
   /** See `TraceVariable.observed` in `@/types/verify`. Missing means observed. */
   observed?: boolean
 }
@@ -12,9 +12,9 @@ export type TraceVariableLike = {
 export type TraceTrustPrivacyLike = {
   name: string
   propertyScope?: 'state' | 'variable' | 'content'
-  mode?: string
+  mode?: string | null
   trust?: boolean | null
-  privacy?: string
+  privacy?: string | null
 }
 
 export type TraceDeviceLike = {
@@ -46,7 +46,7 @@ export const toTraceDeviceId = (nodeId: string): string =>
 export const traceDeviceMatchesId = (device: { deviceId?: string | null }, nodeId: string): boolean =>
   !!device.deviceId && device.deviceId.toLowerCase() === toTraceDeviceId(nodeId)
 
-/** Index sparse device snapshots once, preserving the latest record and sticky compromise evidence. */
+/** Index sparse snapshots and readings once, preserving first matches and sticky compromise evidence. */
 export const buildTraceDevicePlaybackIndex = <T extends TraceDeviceLike>(
   states: Array<{ devices?: T[] }> | undefined,
   selectedIndex: number | undefined
@@ -54,7 +54,26 @@ export const buildTraceDevicePlaybackIndex = <T extends TraceDeviceLike>(
   const current = new Map<string, T>()
   const previous = new Map<string, T>()
   const compromised = new Set<string>()
-  if (!states?.length) return { current, previous, compromised }
+  type Variable = NonNullable<T['variables']>[number]
+  type Reading = { variable: Variable; order: number }
+  const currentVariables = new Map<string, Map<string, Reading>>()
+  const previousVariables = new Map<string, Map<string, Reading>>()
+  let readingOrder = 0
+  const findVariable = (index: Map<string, Map<string, Reading>>, nodeId: string, name: string) => {
+    const readings = index.get(toTraceDeviceId(nodeId))
+    let match: Reading | undefined
+    for (const candidate of traceDeviceNameCandidates(name)) {
+      const reading = readings?.get(candidate)
+      if (reading && (!match || reading.order < match.order)) match = reading
+    }
+    return match?.variable ?? null
+  }
+  const result = {
+    current, previous, compromised,
+    getCurrentVariable: (nodeId: string, name: string) => findVariable(currentVariables, nodeId, name),
+    getPreviousVariable: (nodeId: string, name: string) => findVariable(previousVariables, nodeId, name)
+  }
+  if (!states?.length) return result
   const endIndex = Math.min(Math.max(selectedIndex || 0, 0), states.length - 1)
   const previousIndex = selectedIndex !== undefined && selectedIndex > 0
     ? Math.min(selectedIndex - 1, states.length - 1) : -1
@@ -68,9 +87,22 @@ export const buildTraceDevicePlaybackIndex = <T extends TraceDeviceLike>(
       if (!current.has(id)) current.set(id, device)
       if (index <= previousIndex && !previous.has(id)) previous.set(id, device)
       if (selectedIndex !== undefined && selectedIndex >= 0 && device.compromised === true) compromised.add(id)
+      let currentReadings = currentVariables.get(id)
+      if (!currentReadings) currentVariables.set(id, currentReadings = new Map())
+      let previousReadings = previousVariables.get(id)
+      if (!previousReadings) previousVariables.set(id, previousReadings = new Map())
+      for (const variable of device.variables || []) {
+        const reading = { variable: variable as Variable, order: readingOrder++ }
+        // Alias matches must select the newest state and then its first variable,
+        // even when the raw and sanitized names address different records.
+        for (const key of [variable.name.toLowerCase(), normalizeTraceVariableName(variable.name)]) {
+          if (!currentReadings.has(key)) currentReadings.set(key, reading)
+          if (index <= previousIndex && !previousReadings.has(key)) previousReadings.set(key, reading)
+        }
+      }
     }
   }
-  return { current, previous, compromised }
+  return result
 }
 
 export const normalizeTraceComparable = (value: unknown) =>
@@ -122,17 +154,6 @@ const splitTraceComparableParts = (value: string) =>
     .map(item => item.trim())
     .filter(Boolean)
 
-/*
- * Several helpers below are module-private rather than exported, and that is a demotion, not a deletion.
- *
- * A sweep for "exports with no importer" flagged them, but each is used *inside* this file — `traceValueEquals`
- * five times, `compareTraceValue` twice. So they were never dead code; only the `export` keyword was surplus, and
- * an export with no reader invites the next person to build a second caller on a helper that was never meant to be
- * part of the surface. The distinction matters: deleting them would have removed live logic.
- *
- * `getTraceEdgeEvaluationIndex` in this same file *was* genuinely dead and is gone — the note at its old position
- * records why it was not a missing extraction.
- */
 const traceValueEquals = (actualText: string, expectedText: string): boolean => {
   const actualLower = actualText.toLowerCase()
   const expectedLower = expectedText.toLowerCase()
@@ -295,14 +316,6 @@ export const isEdgeConditionSatisfied = (
   }
   return compareTraceValue(actual, edge.relation || '=', edge.value)
 }
-
-/*
- * `getTraceEdgeEvaluationIndex` used to sit here, exported and never called.
- *
- * It is not a missing extraction: `CanvasBoard`'s two "previous state" sites return **null** at index 0, while
- * this returned 0 — a different rule, so folding them together would have changed behaviour rather than removed
- * duplication. Deleted as dead code.
- */
 
 type FrozenRuleIdentity = {
   ruleIndex: number

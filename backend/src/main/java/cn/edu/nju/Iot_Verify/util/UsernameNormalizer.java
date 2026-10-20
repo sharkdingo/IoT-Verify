@@ -1,6 +1,7 @@
 package cn.edu.nju.Iot_Verify.util;
 
 import cn.edu.nju.Iot_Verify.dto.RequestLimits;
+import cn.edu.nju.Iot_Verify.exception.BadRequestException;
 
 import java.text.Normalizer;
 
@@ -35,6 +36,18 @@ public final class UsernameNormalizer {
             end -= Character.charCount(codePoint);
         }
         return normalized.substring(start, end);
+    }
+
+    public static String normalizeAndValidate(String value) {
+        String normalized = normalize(value);
+        if (!isValid(normalized)) {
+            throw new BadRequestException(
+                    "Username must be 3-20 Unicode characters after trimming and must not contain control or format characters.");
+        }
+        if (isPhoneNumber(normalized)) {
+            throw new BadRequestException("Username cannot use the phone-number format.");
+        }
+        return normalized;
     }
 
     public static boolean isValid(String value) {

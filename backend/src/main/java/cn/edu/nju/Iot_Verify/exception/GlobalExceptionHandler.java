@@ -35,6 +35,17 @@ import cn.edu.nju.Iot_Verify.util.JsonPointerPath;
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
+    @ExceptionHandler(AccountChangeException.class)
+    public ResponseEntity<Result<Map<String, Object>>> handleAccountChangeException(AccountChangeException e) {
+        Result<Map<String, Object>> result = Result.error(e.getCode(), e.getMessage());
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("reasonCode", e.getReasonCode());
+        details.put("errors", Map.of(e.getField(), e.getMessage()));
+        if (e.getCurrentProfile() != null) details.put("currentProfile", e.getCurrentProfile());
+        result.setData(details);
+        return json(e.getCode()).body(result);
+    }
+
     @ExceptionHandler(AuthRateLimitException.class)
     public ResponseEntity<Result<Map<String, Object>>> handleAuthRateLimitException(
             AuthRateLimitException e) {
@@ -87,10 +98,12 @@ public class GlobalExceptionHandler {
     }
 
     @ExceptionHandler(BadRequestException.class)
-    public ResponseEntity<Result<Void>> handleBadRequestException(BadRequestException e) {
+    public ResponseEntity<Result<Map<String, Object>>> handleBadRequestException(BadRequestException e) {
         log.warn("Bad request: {}", e.getMessage());
+        Result<Map<String, Object>> result = Result.badRequest(e.getMessage());
+        if (!e.getErrors().isEmpty()) result.setData(Map.of("errors", e.getErrors()));
         return json(HttpStatus.BAD_REQUEST)
-                .body(Result.badRequest(e.getMessage()));
+                .body(result);
     }
 
     @ExceptionHandler(UnauthorizedException.class)
@@ -150,10 +163,26 @@ public class GlobalExceptionHandler {
     }
 
     @ExceptionHandler(ConflictException.class)
-    public ResponseEntity<Result<Void>> handleConflictException(ConflictException e) {
+    public ResponseEntity<Result<Map<String, Object>>> handleConflictException(ConflictException e) {
         log.warn("Conflict response [{}]", e.getCode());
-        return json(HttpStatus.CONFLICT)
-                .body(Result.conflict(e.getMessage()));
+        Result<Map<String, Object>> result = Result.conflict(e.getMessage());
+        if (e.getReasonCode() != null) {
+            result.setData(Map.of("reasonCode", e.getReasonCode(),
+                    "errors", Map.of(e.getField(), e.getMessage())));
+        }
+        return json(HttpStatus.CONFLICT).body(result);
+    }
+
+    @ExceptionHandler(BoardContentConflictException.class)
+    public ResponseEntity<Result<Map<String, Object>>> handleBoardContentConflictException(
+            BoardContentConflictException e) {
+        Result<Map<String, Object>> result = Result.conflict(e.getMessage());
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("reasonCode", e.getReasonCode());
+        details.put("errors", e.getErrors());
+        if (e.getTemplateName() != null) details.put("templateName", e.getTemplateName());
+        result.setData(details);
+        return json(HttpStatus.CONFLICT).body(result);
     }
 
     @ExceptionHandler(FuzzTaskQuotaExceededException.class)

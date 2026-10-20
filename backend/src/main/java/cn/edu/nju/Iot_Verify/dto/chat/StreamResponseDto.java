@@ -90,6 +90,8 @@ public class StreamResponseDto {
         private Integer unconfirmedSteps;
         @ToString.Exclude
         private String detail;
+        @ToString.Exclude
+        private ClaimReviewDto claimReview;
 
         public ProgressDto(String stage,
                            String toolName,
@@ -107,6 +109,26 @@ public class StreamResponseDto {
             this.failedSteps = failedSteps;
             this.unconfirmedSteps = unconfirmedSteps;
             this.detail = detail;
+        }
+    }
+
+    public enum ClaimReviewReason {
+        MISSING_TOOL_EVIDENCE, MISSING_BOARD_SNAPSHOT, MISSING_OPERATION_RECEIPT
+    }
+
+    @Data
+    @NoArgsConstructor
+    public static class ClaimReviewDto {
+        private ClaimReviewReason reasonCode;
+        @ToString.Exclude
+        private String originalText;
+        @ToString.Exclude
+        private String matchedText;
+
+        public ClaimReviewDto(ClaimReviewReason reasonCode, String originalText, String matchedText) {
+            this.reasonCode = reasonCode;
+            this.originalText = originalText;
+            this.matchedText = matchedText;
         }
     }
 

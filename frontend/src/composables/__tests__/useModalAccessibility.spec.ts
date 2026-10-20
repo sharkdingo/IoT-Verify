@@ -59,10 +59,80 @@ const mountPanel = (
 }
 
 describe('useModalAccessibility', () => {
+  it('can restore a labelled surface with a negative tab index without adding it to the Tab order', async () => {
+    const parent = document.createElement('section')
+    parent.tabIndex = -1
+    parent.setAttribute('role', 'dialog')
+    document.body.append(parent)
+    const { opener, wrapper } = mountPanel(true, undefined, () => [
+      h('button', { tabindex: -1, 'data-testid': 'not-tabbable' }, 'Programmatic only'),
+      h('button', { 'data-testid': 'tabbable' }, 'Action')
+    ], parent)
+    await nextTick()
+    expect(document.activeElement).toBe(wrapper.get('[data-testid="tabbable"]').element)
+    opener.remove()
+    wrapper.get('section').element.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await nextTick()
+    expect(document.activeElement).toBe(parent)
+  })
+
+  it('captures the opener before its source is removed and supplies it to the fallback', async () => {
+    const opener = document.createElement('button')
+    document.body.append(opener)
+    opener.focus()
+    const open = ref(false)
+    const fallback = vi.fn(() => null)
+    const Panel = defineComponent({
+      setup() {
+        const { setDialogRef, handleModalKeydown } = useModalAccessibility(open,
+          () => { open.value = false }, fallback)
+        return () => open.value ? h('section', { ref: setDialogRef, tabindex: -1,
+          autofocus: true, onKeydown: handleModalKeydown }) : null
+      }
+    })
+    const wrapper = mount(Panel, { attachTo: document.body })
+    mountedWrappers.push(wrapper)
+    open.value = true
+    opener.remove()
+    await nextTick()
+    wrapper.get('section').element.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await nextTick()
+    expect(fallback).toHaveBeenCalledWith(opener)
+  })
+
+  it('honors an available autofocus control without changing the tab order', async () => {
+    const { wrapper } = mountPanel(true, undefined, () => [
+      h('button', { 'data-testid': 'first' }, 'Other action'),
+      h('button', { disabled: true, autofocus: true }, 'Unavailable'),
+      h('button', { autofocus: true, 'data-testid': 'cancel' }, 'Cancel')
+    ])
+    await nextTick()
+    expect(document.activeElement).toBe(wrapper.get('[data-testid="cancel"]').element)
+    const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+    wrapper.get('section').element.dispatchEvent(tab)
+    expect(tab.defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(wrapper.get('[data-testid="first"]').element)
+  })
+
+  it('keeps reverse Tab inside a modal when its container initially has focus', async () => {
+    const { wrapper } = mountPanel(true)
+    wrapper.get('section').element.setAttribute('autofocus', '')
+    await nextTick()
+    expect(document.activeElement).toBe(wrapper.get('section').element)
+
+    const tab = new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true })
+    wrapper.get('section').element.dispatchEvent(tab)
+    expect(tab.defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(wrapper.get('[data-testid="last"]').element)
+  })
+
   it('focuses and restores a non-modal panel without trapping Tab', async () => {
     const { opener, wrapper } = mountPanel(false)
+    wrapper.get('section').element.setAttribute('autofocus', '')
     await nextTick()
-    expect(document.activeElement).toBe(wrapper.get('[data-testid="first"]').element)
+    expect(document.activeElement).toBe(wrapper.get('section').element)
 
     ;(wrapper.get('[data-testid="last"]').element as HTMLElement).focus()
     const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
@@ -74,6 +144,13 @@ describe('useModalAccessibility', () => {
     await nextTick()
     expect(wrapper.find('section').exists()).toBe(false)
     expect(document.activeElement).toBe(opener)
+  })
+
+  it('honors autofocus on a result container without focusing its close hint', async () => {
+    const { wrapper } = mountPanel(true)
+    wrapper.get('section').element.setAttribute('autofocus', '')
+    await nextTick()
+    expect(document.activeElement).toBe(wrapper.get('section').element)
   })
 
   it('keeps the existing modal focus trap enabled by default behavior', async () => {
@@ -146,6 +223,39 @@ describe('useModalAccessibility', () => {
     wrapper.get('section').element.dispatchEvent(escape)
     await nextTick()
 
+    expect(document.activeElement).toBe(fallback)
+  })
+
+  it.each([false, true])('retries a fallback after rendering without stealing a new focus target: %s', async focusMoved => {
+    const fallback = document.createElement('button')
+    fallback.hidden = true
+    document.body.append(fallback)
+    const { opener, wrapper } = mountPanel(true, undefined, undefined, fallback)
+    await nextTick()
+    opener.disabled = true
+    wrapper.get('section').element.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await nextTick()
+
+    fallback.hidden = false
+    const nextContext = document.createElement('button')
+    document.body.append(nextContext)
+    if (focusMoved) nextContext.focus()
+    await nextTick()
+    expect(document.activeElement).toBe(focusMoved ? nextContext : fallback)
+  })
+
+  it('restores focus after conditional unmount when the opener becomes available next frame', async () => {
+    const fallback = document.createElement('button')
+    fallback.hidden = true
+    document.body.append(fallback)
+    const { opener, wrapper } = mountPanel(true, undefined, undefined, fallback)
+    await nextTick()
+    opener.disabled = true
+    void nextTick(() => { fallback.hidden = false })
+    wrapper.unmount()
+    mountedWrappers.splice(mountedWrappers.indexOf(wrapper), 1)
+    await nextTick()
     expect(document.activeElement).toBe(fallback)
   })
 

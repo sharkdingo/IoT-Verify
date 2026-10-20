@@ -373,15 +373,15 @@ describe('chat stream lifecycle semantics', () => {
     )
   })
 
-  it('loads server-authoritative pending protected-action kinds', async () => {
+  it('loads the identity and target of each pending protected action', async () => {
     vi.mocked(http.get).mockResolvedValue({
-      data: { data: { sessionId: 'session-1', kinds: ['DESTRUCTIVE'] } }
+      data: { data: { sessionId: 'session-1', actions: [{ kind: 'DESTRUCTIVE', confirmationId: 'preview-1', toolName: 'delete_device', target: 'light-1' }] } }
     })
     const controller = new AbortController()
 
     await expect(getPendingConfirmation('session-1', controller.signal)).resolves.toEqual({
       sessionId: 'session-1',
-      kinds: ['DESTRUCTIVE']
+      actions: [{ kind: 'DESTRUCTIVE', confirmationId: 'preview-1', toolName: 'delete_device', target: 'light-1' }]
     })
     expect(http.get).toHaveBeenCalledWith(
       '/chat/sessions/session-1/confirmation',
@@ -390,17 +390,30 @@ describe('chat stream lifecycle semantics', () => {
   })
 
   it.each([
-    ['FUTURE_KIND'],
+    null,
+    'DESTRUCTIVE',
     [null],
-    'DESTRUCTIVE'
-  ])('rejects malformed pending protected-action kinds: %j', async kinds => {
+    [{ kind: 'FUTURE_KIND', confirmationId: 'p', toolName: 'delete_device', target: 'X' }],
+    [{ kind: 'DESTRUCTIVE', toolName: 'delete_device', target: 'X' }],
+    [{ kind: 'DESTRUCTIVE', confirmationId: '', toolName: 'delete_device', target: 'X' }],
+    [{ kind: 'DESTRUCTIVE', confirmationId: 'p', toolName: '', target: 'X' }],
+    [{ kind: 'DESTRUCTIVE', confirmationId: 'p', toolName: 'delete_device', target: '' }],
+    [
+      { kind: 'DESTRUCTIVE', confirmationId: 'p', toolName: 'delete_device', target: 'X' },
+      { kind: 'DESTRUCTIVE', confirmationId: 'q', toolName: 'delete_device', target: 'Y' }
+    ]
+  ])('rejects malformed pending protected actions: %j', async actions => {
     vi.mocked(http.get).mockResolvedValue({
-      data: { data: { sessionId: 'session-1', kinds } }
+      data: { data: { sessionId: 'session-1', actions } }
     })
-
     await expect(getPendingConfirmation('session-1')).rejects.toThrow(
       'Chat pending-confirmation response is incomplete'
     )
+  })
+
+  it('rejects the old kinds-only confirmation shape', async () => {
+    vi.mocked(http.get).mockResolvedValue({ data: { data: { sessionId: 'session-1', kinds: ['DESTRUCTIVE'] } } })
+    await expect(getPendingConfirmation('session-1')).rejects.toThrow('Chat pending-confirmation response is incomplete')
   })
 
   it('sends the client turn id with an explicit stop request', async () => {
@@ -463,7 +476,7 @@ describe('chat stream lifecycle semantics', () => {
       { onMessage: vi.fn() },
       undefined,
       'turn-2',
-      { action: 'CONFIRM', kind: 'DESTRUCTIVE' }
+      { action: 'CONFIRM', kind: 'DESTRUCTIVE', confirmationId: 'preview-1' }
     )).rejects.toMatchObject({ kind: 'MISSING_BODY' })
 
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
@@ -471,7 +484,7 @@ describe('chat stream lifecycle semantics', () => {
       content: 'I confirmed with the button',
       turnId: 'turn-2',
       locale: 'zh-CN',
-      confirmation: { action: 'CONFIRM', kind: 'DESTRUCTIVE' }
+      confirmation: { action: 'CONFIRM', kind: 'DESTRUCTIVE', confirmationId: 'preview-1' }
     })
   })
 
@@ -627,6 +640,46 @@ describe('chat stream lifecycle semantics', () => {
 
     expect(onProgress).not.toHaveBeenCalled()
     expect(onError).toHaveBeenCalledWith(expect.objectContaining({ kind: 'INVALID_FRAME' }))
+  })
+
+  it('preserves exact reply-check diagnostics through streaming and saved history', async () => {
+    const progress = {
+      stage: 'CLAIM_REVIEW', outcome: 'REPLACED',
+      claimReview: {
+        reasonCode: 'MISSING_OPERATION_RECEIPT',
+        originalText: ' 我已经删除所有设备。\n',
+        matchedText: '我已经删除所有设备'
+      }
+    }
+    const onProgress = vi.fn()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(chunkedStreamResponse(
+      `data: ${JSON.stringify({ progress })}\n\n${terminalFrame()}`
+    )))
+    await sendStreamChat('session-1', '检查', { onMessage: vi.fn(), onProgress }, undefined, 'turn-1')
+    expect(onProgress).toHaveBeenCalledWith(progress)
+    vi.mocked(http.get).mockResolvedValue({ data: { code: 200, data: {
+      messages: [{ id: 1, sessionId: 'session-1', turnId: 'turn-1', role: 'assistant', content: '请查看执行详情。',
+        createdAt: '2026-10-14T00:00:00', executionStatus: 'PARTIAL', executionTrace: [progress] }],
+      nextBeforeId: null, hasMore: false
+    } } })
+    const history = await getSessionHistory('session-1')
+    expect(history.messages[0]?.executionTrace).toEqual([progress])
+  })
+
+  it.each([
+    { reasonCode: 'UNKNOWN', originalText: '我已修改画布。', matchedText: '我已修改画布' },
+    { reasonCode: 'MISSING_OPERATION_RECEIPT', originalText: '我已修改画布。', matchedText: '不存在的片段' },
+    { reasonCode: 'MISSING_OPERATION_RECEIPT', originalText: '', matchedText: '我已修改画布' },
+    { reasonCode: 'MISSING_OPERATION_RECEIPT', originalText: '我已修改画布。' },
+    null
+  ])('rejects incomplete or contradictory reply-check diagnostics: %j', async claimReview => {
+    const onProgress = vi.fn()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(successfulStreamResponse(
+      `data: ${JSON.stringify({ progress: { stage: 'CLAIM_REVIEW', outcome: 'REPLACED', claimReview } })}\n\n`
+    )))
+    await expect(sendStreamChat('session-1', '检查', { onMessage: vi.fn(), onProgress }))
+      .rejects.toMatchObject({ kind: 'INVALID_FRAME' })
+    expect(onProgress).not.toHaveBeenCalled()
   })
 
   it('requires an outcome that matches each progress stage', async () => {
@@ -835,6 +888,39 @@ describe('chat stream lifecycle semantics', () => {
 
     expect(onMessage).toHaveBeenCalledWith('partial reply')
     expect(onFinish).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])('reports incomplete EOF only to the current request owner: %s', async remainsCurrent => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(successfulStreamResponse(
+      'data: {"content":"partial reply"}\n\n'
+    )))
+    const controller = new AbortController()
+    const onFinish = vi.fn()
+    const onError = vi.fn()
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    let current = true
+
+    try {
+      await expect(sendStreamChat(
+        'session-1',
+        'hello',
+        {
+          isCurrentRequest: () => current,
+          onMessage: () => { current = remainsCurrent },
+          onError,
+          onFinish
+        },
+        controller,
+        'turn-1'
+      )).rejects.toMatchObject({ kind: 'INCOMPLETE_STREAM' })
+
+      expect(controller.signal.aborted).toBe(false)
+      expect(onFinish).not.toHaveBeenCalled()
+      expect(onError).toHaveBeenCalledTimes(remainsCurrent ? 1 : 0)
+      expect(consoleError).toHaveBeenCalledTimes(remainsCurrent ? 1 : 0)
+    } finally {
+      consoleError.mockRestore()
+    }
   })
 
   it('reads a persisted failed terminal before reporting the server error', async () => {

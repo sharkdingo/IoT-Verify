@@ -1,0 +1,206 @@
+.header-preference {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  gap: var(--iot-space-xs);
+  min-height: var(--iot-target-min);
+  border: 1px solid transparent;
+  border-radius: var(--iot-radius-action);
+  background: transparent;
+  padding: 0 var(--iot-space-md);
+  color: var(--text);
+  box-shadow: none;
+  cursor: pointer;
+  transition: background-color var(--iot-motion-fast) ease, border-color var(--iot-motion-fast) ease;
+}
+
+.header-preference:hover {
+  background: var(--surface-control-hover);
+  border-color: var(--border);
+}
+
+.header-preference:active {
+  background: var(--surface-control);
+  border-color: var(--border-strong);
+}
+
+.header-preference:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
+}
+
+.header-preference .material-symbols-outlined {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.theme-toggle {
+  min-width: 128px;
+}
+
+.theme-toggle__label {
+  min-width: 42px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.theme-toggle--compact {
+  width: var(--iot-target-min);
+  min-width: var(--iot-target-min);
+  padding: 0;
+}
+
+.theme-toggle--compact .theme-toggle__label {
+  position: absolute;
+  width: 1px;
+  min-width: 0;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.language-toggle {
+  min-width: 96px;
+}
+
+/* Keep the complete language pair visible; its intrinsic width exceeds an icon-only target. */
+.language-toggle--compact {
+  min-width: 88px;
+  padding-inline: var(--iot-space-sm);
+}
+
+.language-toggle__label {
+  display: inline-flex;
+  align-items: baseline;
+  flex-shrink: 0;
+  gap: var(--iot-space-2xs);
+  white-space: nowrap;
+}
+
+.language-toggle__side {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.language-toggle__side--active {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.header-preference:hover .language-toggle__side {
+  color: var(--text);
+}
+
+.language-toggle__divider {
+  color: var(--text-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .header-preference {
+    transition: none;
+  }
+}
+
+/* The shared picker is teleported, so both headers use the same surface and placement boundary. */
+.appearance-panel--popover {
+  --appearance-width: min(18rem, calc(100vw - var(--iot-space-lg) * 2));
+  position: fixed;
+  width: var(--appearance-width);
+  max-height: calc(100dvh - var(--iot-space-lg) * 2);
+  left: clamp(var(--iot-space-lg), calc(var(--appearance-anchor-right) - var(--appearance-width)), calc(100vw - var(--appearance-width) - var(--iot-space-lg)));
+  top: clamp(var(--iot-space-lg), calc(var(--appearance-anchor-bottom) + var(--iot-space-xs)), calc(100dvh - var(--appearance-height) - var(--iot-space-lg)));
+  z-index: var(--z-preferences);
+  max-width: calc(100vw - var(--iot-space-lg) * 2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--iot-radius-card);
+  background: var(--surface-elevated);
+  padding: var(--iot-space-md);
+  box-shadow: var(--shadow-floating);
+  color: var(--text);
+  font-family: var(--iot-font-body);
+}
+
+.appearance-panel {
+  display: grid;
+  gap: var(--iot-space-lg);
+}
+
+.appearance-panel__group {
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.appearance-panel legend {
+  margin-bottom: var(--iot-space-sm);
+}
+
+.appearance-panel__modes,
+.appearance-panel__palettes {
+  display: grid;
+  gap: var(--iot-space-2xs);
+}
+
+.appearance-panel__modes {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.appearance-panel__palettes {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.appearance-panel button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--iot-space-xs);
+  min-width: 0;
+  min-height: var(--iot-target-min);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--iot-radius-action);
+  background: var(--surface-control);
+  padding: var(--iot-space-sm);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.appearance-panel__modes button {
+  flex-direction: column;
+}
+
+.appearance-panel__palettes button {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) 18px;
+}
+
+.appearance-panel button[aria-pressed='true'] {
+  border-color: var(--accent-border);
+  background: var(--accent-surface);
+  color: var(--accent-strong);
+}
+
+.appearance-panel button:hover {
+  background: var(--surface-control-hover);
+  color: var(--text);
+}
+
+.appearance-panel button:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
+}
+
+.appearance-panel .material-symbols-outlined {
+  font-size: 18px;
+}
+
+.appearance-panel__copper {
+  color: var(--palette-copper-swatch);
+}
+
+.appearance-panel__check--hidden {
+  visibility: hidden;
+}

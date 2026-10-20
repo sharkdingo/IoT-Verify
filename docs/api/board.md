@@ -5,22 +5,33 @@ layout), device templates, and AI-backed recommendation endpoints.
 
 `GET /api/board/snapshot` returns `BoardSemanticSnapshotDto` with `nodes`,
 `environmentVariables`, `rules`, `specifications`, and `deviceTemplates` captured under one
-user/database lock and transaction. The frontend uses it for initial Board hydration so an
+user-row lock and transaction. Standalone captures share read ownership, so concurrent captures
+can overlap while Board writes still require exclusive ownership. Calls joining an existing
+transaction retain the exclusive capture path because their caller may write afterwards.
+The frontend uses it for initial Board hydration so an
 unloaded collection is never presented as an authoritative zero count. Layout remains separate
 because it does not affect formal-model semantics.
+All scalar and JSON columns are fetched before releasing the capture lock. DTO/JSON decoding runs
+after that capture; standalone reads have already released their transaction and connection, while
+calls inside an enclosing transaction retain its ownership. Later edits cannot change the captured rows.
 The `Result<T>` envelope, auth, and error codes are defined in
 [overview.md](overview.md).
 
 All endpoints are authenticated and scoped to the current user (`@CurrentUser`).
-Verified against code on 2026-08-13. Source:
-`service/impl/BoardStorageServiceImpl.java`, `controller/BoardStorageController.java`,
-`dto/device/`, `dto/board/`, `dto/rule/`, `dto/spec/`.
+Verified against code on 2026-10-21. Source:
+`service/impl/BoardStorageServiceImpl.java`, `service/recommendation/`,
+`controller/BoardStorageController.java`, `dto/device/`, `dto/board/`, `dto/rule/`,
+`dto/spec/`, `dto/recommendation/`, `component/board/PortableSceneDiagnostics.java`,
+`component/template/DeviceTemplateSchemaValidator.java`.
 
 **Mutation semantics matter:** ordinary device, rule, and specification operations are
 targeted commands. A client sends only the item it intends to create/update/delete; an
 omitted item is not deleted. Each mutation is serialized under the user's board write
 lock and returns both the affected item(s) and the authoritative post-mutation snapshot,
 so a stale client can replace its local collection without issuing a hidden full-list save.
+Device and specification collections retain existing primary keys during reconciliation;
+only removed records are deleted. Environment Pool reconciliation writes only changed or
+missing variables, so reading an already materialized, unchanged pool writes no rows.
 
 Two endpoints replace the whole scene, and both require an authoritative
 `GET /api/board/replacement-preview` plus explicit user confirmation first.
@@ -31,36 +42,68 @@ directly and is what scene clear uses, having no portable file behind it. All fo
 collections and the
 exact template-snapshot dependency set are required complete desired collections; omitted
 or `null` collections are rejected rather than interpreted as hidden partial preservation.
+The submitted Environment Pool is checked against the incoming scene's device domains and
+replaces the previous values and labels. Saving the incoming nodes does not first project
+the old pool into those domains: a shared name may have different allowed values or bounds
+in the two scenes. Ordinary targeted device edits still reconcile the existing pool.
 The replacement commits or rolls back as one transaction. Its preview also reports the
 current `editHistoryEntryCount`; the opaque token binds both the complete scene and the
 exact undo/redo journal. A successful replacement discards that journal because its
 recorded inverses no longer describe the replacement scene. If only the journal changes
 after confirmation, the request still returns `409` and writes nothing.
 
+Rejected portable imports report authored file coordinates in `data.errors`, including collection
+indexes: for example `rules[1].toId`, `rules[0].sources[1].fromApi`, and
+`templates[0].manifest.WorkingStates[0].Trust`. Clients preserve the file's collection order when
+sending an import; sorting for canonical exports or semantic comparison must not change those
+coordinates. Missing strings/collections and unknown or wrongly
+typed fields retain `400`; semantic validation retains `422`. Errors produced after conversion are
+mapped back from internal `nodes`/`conditions`/`command` fields to portable
+`devices`/`sources`/`toId`/`toApi`. A condition-wide constraint names the source object rather than an
+internal validator method. `POST /api/board/batch` still reports its own internal request fields.
+The chat `apply_scenario` tool uses the same portable coordinates in its `errors` result.
+
+Content conflicts retain `409` and include `data.reasonCode` plus `data.errors`:
+`DUPLICATE_RULE` identifies the duplicate rule and advises changing its trigger/action or removing
+it; `DUPLICATE_SPECIFICATION` identifies a repeated specification identity or semantics;
+`SCENE_TEMPLATE_MISMATCH` identifies the mismatched manifest and also returns `data.templateName`.
+Clients select the conflict presentation from this code, keeping unrecognised conflicts generic and
+preserving their details. Template schema rejections report up to five detailed manifest fields;
+the message states when further schema errors remain. A template request body with an invalid
+field type likewise reports the authored field in `data.errors`. These diagnosed rejections do not replace
+the scene; transport/server failures still require reconciliation before retrying.
+
 ---
 
 ## Canvas storage
 
+The five targeted device commands require exactly one `nodeId` query value. Missing or
+repeated values return `400` before the command runs. Pass the raw id to the query
+serializer; the server uses the decoded value exactly, including literal commas, valid
+URL delimiters, and internal whitespace. Device identity validation is defined in
+[Device identity authority](../architecture/device-identity.md#rules).
+
 | Method | Path | Body / Response | Notes |
 | :--- | :--- | :--- | :--- |
+| GET | `/api/board/model-fingerprints` | → `BoardModelFingerprintsDto` | Canonical current-model identities for verification/exploration and simulation, captured under one Board lock |
 | GET | `/api/board/nodes` | → `DeviceNodeDto[]` | List device instances |
 | POST | `/api/board/nodes` | `DeviceBatchCreateRequestDto` → `DeviceMutationResultDto` | Atomically append one or more device instances; every `templateName` must exist. Optional environment patches commit with the devices. Reversible as one user action regardless of batch size; the result carries `canUndo`/`canRedo` |
-| PUT | `/api/board/nodes/{nodeId}/layout` | `DeviceLayoutDto` → `DeviceUpdateResultDto` | Replace only the complete canvas layout subresource (`position`, `width`, `height`); device identity and modeled runtime are preserved. A real change is one reversible edit and returns `canUndo`/`canRedo`; an unchanged command writes no history and omits both fields |
-| PUT | `/api/board/nodes/{nodeId}/runtime` | `DeviceRuntimeUpdateDto` → `DeviceUpdateResultDto` | Replace only the complete device-local modeled runtime subresource; identity, type, display name, and canvas layout are preserved. Same changed/unchanged undo contract as layout |
-| PATCH | `/api/board/nodes/{nodeId}/label` | `{ label, expectedLabel }` → `DeviceMutationResultDto` | Rename one instance and update specification display labels atomically as one reversible edit; stable references remain `nodeId`. `expectedLabel` must equal the label originally edited or stale submission returns `409` without writing. The new label must differ from the current label |
-| GET | `/api/board/nodes/{nodeId}/deletion-preview` | → `DeviceDeletionResultDto` | Read-only authoritative preview of the device, every referencing rule/spec, and each Environment Pool item that would be removed |
-| POST | `/api/board/nodes/{nodeId}/delete` | `DeviceDeleteRequestDto` → `DeviceDeletionResultDto` | Delete one instance plus every previewed consequence atomically. The opaque `impactToken` from the latest preview must still match the complete server-calculated impact or the server returns `409` before writing. Reversible as one compound edit containing the device, cascaded records with their positions, and exact Environment Pool state; the result carries `canUndo`/`canRedo` |
+| PUT | `/api/board/nodes/layout?nodeId={nodeId}` | `DeviceLayoutDto` → `DeviceUpdateResultDto` | Replace only the complete canvas layout subresource (`position`, `width`, `height`); device identity and modeled runtime are preserved. A real change is one reversible edit and returns `canUndo`/`canRedo`; an unchanged command writes no history and omits both fields |
+| PUT | `/api/board/nodes/runtime?nodeId={nodeId}` | `DeviceRuntimeUpdateDto` → `DeviceUpdateResultDto` | Replace only the complete device-local modeled runtime subresource; identity, type, display name, and canvas layout are preserved. Same changed/unchanged undo contract as layout |
+| PATCH | `/api/board/nodes/label?nodeId={nodeId}` | `{ label, expectedLabel }` → `DeviceMutationResultDto` | Rename one instance and update specification display labels atomically as one reversible edit; stable references remain `nodeId`. `expectedLabel` must equal the label originally edited or stale submission returns `409` without writing. The new label must differ from the current label |
+| GET | `/api/board/nodes/deletion-preview?nodeId={nodeId}` | → `DeviceDeletionResultDto` | Read-only authoritative preview of the device, every referencing rule/spec, and each Environment Pool item that would be removed |
+| POST | `/api/board/nodes/delete?nodeId={nodeId}` | `DeviceDeleteRequestDto` → `DeviceDeletionResultDto` | Delete one instance plus every previewed consequence atomically. The opaque `impactToken` from the latest preview must still match the complete server-calculated impact or the server returns `409` before writing. Reversible as one compound edit containing the device, cascaded records with their positions, and exact Environment Pool state; the result carries `canUndo`/`canRedo` |
 | GET | `/api/board/environment` | → `BoardEnvironmentVariableDto[]` | Board-level environment pool; self-heals from current nodes/templates |
 | POST | `/api/board/environment` | `EnvironmentVariableUpdateRequestDto[]` → `EnvironmentMutationResultDto` | Atomically apply at most 200 name-keyed compare-and-set field patches; every item carries a complete `expected` baseline and a non-empty `desired` patch. All changed items form one reversible Environment Pool edit; a semantic no-op writes no history |
 | GET | `/api/board/rules` | → `RuleDto[]` | List rules in effective execution order |
 | POST | `/api/board/rules` | `RuleDto` → `CollectionMutationResultDto<RuleDto>` | Create exactly one validated rule; request `id` is ignored and the server assigns identity. Reversible: the result carries `canUndo`/`canRedo`, and the journal entry records the execution position so a redo re-creates the rule where it was |
 | PUT | `/api/board/rules/order` | `{ expectedRuleIds: Long[], ruleIds: Long[] }` → `CollectionMutationResultDto<RuleDto>` | Compare-and-set replacement of execution order only. Both lists accept at most 100 positive ids and must contain every current rule id exactly once. `expectedRuleIds` must match the current order element-for-element; stale, duplicate, partial, or unchanged input is rejected without writing (`400` for unchanged order). Reversible: one button press is one edit, recorded as a `RULE_ORDER` journal entry holding the previous ordering, so the result carries `canUndo`/`canRedo` |
-| DELETE | `/api/board/rules/{ruleId}` | `RuleDto` (the confirmed current snapshot) → `CollectionMutationResultDto<RuleDto>` | Delete only when the id and authored rule semantics still match; a stale snapshot returns `409` without writing, and a missing rule returns `404`. Reversible: the result carries `canUndo`/`canRedo`. Undo restores the rule under its original id **and at its recorded execution position** (`entity_order` on the journal entry), clamped when neighbours were deleted meanwhile; surviving rules are renumbered contiguously so the deletion gap cannot leave two rules sharing an order. A journal entry with no recorded position (written before that column existed) is rejected with `409` rather than appended, because appending would restore the rule to a different board |
+| DELETE | `/api/board/rules/{ruleId}` | `RuleDto` (the confirmed current snapshot) → `CollectionMutationResultDto<RuleDto>` | Delete only when the id and authored rule semantics still match; a stale snapshot returns `409` without writing, and a missing rule returns `404`. Reversible: the result carries `canUndo`/`canRedo`. Undo restores the original id at the recorded index in the ordered rule list (`entity_order`), even when persisted execution numbers have gaps. Surviving rules are renumbered contiguously. Missing or impossible recorded positions return `409` without writing |
 | GET | `/api/board/specs` | → `SpecificationDto[]` | List specs in stable authored order |
-| POST | `/api/board/specs` | `SpecificationDto` → `CollectionMutationResultDto<SpecificationDto>` | Create exactly one validated specification. Reversible: the result carries `canUndo`/`canRedo`, and the journal entry records the list position so a redo re-creates it where it was |
-| DELETE | `/api/board/specs/{specId}` | `SpecificationDto` (the confirmed current snapshot) → `CollectionMutationResultDto<SpecificationDto>` | Delete only when the id and authored specification semantics still match; a stale snapshot returns `409` without writing, and a missing specification returns `404`. Reversible: the result carries `canUndo`/`canRedo`, and undo restores the specification at its recorded list position (same `entity_order` mechanism as rules), clamped when neighbours were deleted meanwhile |
+| POST | `/api/board/specs` | `SpecificationDto` → `CollectionMutationResultDto<SpecificationDto>` | Create exactly one validated specification. An existing `id` returns `409` without overwriting the original or recording history. Reversible: the result carries `canUndo`/`canRedo`, and the journal entry records the list position so a redo re-creates it where it was |
+| DELETE | `/api/board/specs/{specId}` | `SpecificationDto` (the confirmed current snapshot) → `CollectionMutationResultDto<SpecificationDto>` | Delete only when the id and authored specification semantics still match; a stale snapshot returns `409` without writing, and a missing specification returns `404`. Reversible: the result carries `canUndo`/`canRedo`, and undo restores the specification at its recorded list position (same `entity_order` mechanism as rules). Missing or impossible recorded positions return `409` without writing |
 | GET | `/api/board/edits/availability` | → `BoardUndoResultDto` (`applied: false`, `AVAILABILITY_ONLY`, all four semantic collections empty) | Current undo/redo availability from the per-user edit journal, with no side effects. Read `canUndo`/`canRedo` only — the empty collections are not an authoritative board state. Read on board load so the affordance survives reload, a second tab, and another device |
-| POST | `/api/board/edits/undo` | → `BoardUndoResultDto` | Reverse the newest reversible edit: device create/update/rename/delete, Environment Pool update, rule/spec create/delete, rule reorder, or automatic-fix rule-set update. Returns authoritative nodes, Environment Pool, rules, specs, and remaining availability. Device deletion restores the complete cascade under the original rule ids and collection positions. `applied: false` with `NOTHING_TO_APPLY` when there is no history — a normal, idempotent outcome. `409` when any affected state changed after the edit was recorded, leaving the board untouched. History is capped at the 50 most recent edits per account; confirmed scene replacement/clear is a history boundary. Ordinal allocation is fenced by a unique `(user_id, sequence)` constraint, so a concurrent write fails rather than producing two entries that share a position |
+| POST | `/api/board/edits/undo` | → `BoardUndoResultDto` | Reverse the newest reversible edit: device create/update/rename/delete, Environment Pool update, rule/spec create/delete, rule reorder, or an assistant rule edit / automatic-fix rule-set update. Returns authoritative nodes, Environment Pool, rules, specs, and remaining availability. Device deletion restores the complete cascade under the original rule ids and collection positions. `applied: false` with `NOTHING_TO_APPLY` when there is no history — a normal, idempotent outcome. `409` when any affected state changed after the edit was recorded, leaving the board untouched. History is capped at the 50 most recent edits per account; confirmed scene replacement/clear is a history boundary. Ordinal allocation is fenced by a unique `(user_id, sequence)` constraint, so a concurrent write fails rather than producing two entries that share a position |
 | POST | `/api/board/edits/redo` | → `BoardUndoResultDto` | Re-apply the oldest undone edit. Same conflict and idempotency rules. A new edit discards the abandoned redo branch |
 | GET | `/api/board/edits/clear-preview` | → `BoardEditHistoryClearPreviewDto` | Return the current entry count, availability, and opaque impact token that must be shown/bound to an explicit history-clear confirmation |
 | POST | `/api/board/edits/clear` | `BoardEditHistoryClearRequestDto` → `BoardUndoResultDto` (`applied: false`, `HISTORY_CLEARED`, empty collections, both availability flags false) | Explicitly discard unusable undo/redo history without changing any Board collection. The SHA-256 `impactToken` from the preview is required; if any entry is added, undone, redone, changed, or removed before submit, stale confirmation returns `409` and preserves all history |
@@ -69,6 +112,33 @@ after confirmation, the request still returns `409` and writes nothing.
 | POST | `/api/board/batch` | `BoardBatchDto` → `BoardBatchDto` | **Explicit atomic full-scene replacement** of complete `nodes` + `environmentVariables` + `rules` + `specs` plus exact `templateSnapshots`; requires the still-current preview `impactToken`. Used directly for scene clear; portable files go through `/api/board/scene` |
 | GET | `/api/board/layout` | → `BoardLayoutDto` | Panel/canvas layout |
 | POST | `/api/board/layout` | `BoardLayoutDto` → `BoardLayoutDto` | |
+
+### Current model fingerprints
+
+`BoardModelFingerprintsDto` contains two required 64-character lowercase SHA-256 strings:
+
+| Field | Meaning |
+| :--- | :--- |
+| `verification` | Current modeled devices/runtime, environment, ordered rules, structured specifications, and referenced template manifests; also used for exploration history |
+| `simulation` | The same canonical input with an empty specification collection, because simulation does not consume specifications |
+
+`ModelFingerprint` owns canonical serialization for both task capture and current-Board reads.
+It sorts object/map keys and environment entries; device and rule order remain meaningful
+because simultaneous writes use ordered priority. Canvas geometry, panel layout, display names,
+descriptions, icons, formula previews, rule display strings, and creation timestamps do not enter
+the identity. Referenced template content does; unused template-library entries do not.
+Presentation-field exclusions apply to manifest properties, never to template-name map keys:
+a template named `icon` or `description` retains its identity and semantic content in the hash.
+Run configuration such as attack/privacy settings, requested simulation steps, and search budgets
+is recorded separately and is not a claim about the current Board's content.
+
+Compare a run's frozen `modelSnapshot.modelFingerprint` with the appropriate current value,
+including after reload and undo. Matching item counts never establish a model match. Missing
+historical comparison evidence and a failed current read are different unknown states; neither
+may be presented as matching or changed. The endpoint reads one captured model for both values,
+so a concurrent edit cannot mix two Board revisions in its response.
+Both hashes reuse one canonical model tree, replacing only its specification collection for the
+simulation identity. This does not mutate the captured snapshot or change canonical hash values.
 
 The persisted Board has hard totals of 100 devices, 100 rules, 100 specifications, and
 200 derived Environment Pool variables. Targeted creation locks the user row and checks
@@ -96,6 +166,10 @@ Initial layout hydration never overwrites zoom, pan, or panel changes made while
 request was in flight. If an early interaction occurred on a wide viewport, the client
 persists the resulting current layout after hydration, then clears the one-shot protection
 flags so later narrow/wide viewport restoration still works.
+Restoring the saved layout alone does not write it back. If the layout read fails, the client
+keeps its state unknown, pauses automatic layout saves, and shows a persistent retry action;
+it never treats the failure as a missing layout or replaces the saved layout with defaults.
+Retry uses the same early-interaction protection as initial hydration.
 
 ### `DeviceNodeDto`
 
@@ -282,8 +356,10 @@ local state. A REST delete must include the complete item snapshot that the user
 fields while holding the board write lock. It rejects a changed snapshot with `409` and
 performs no write, so a second tab cannot silently delete a newer edit. The returned
 `affectedItem` is the exact deleted snapshot and `currentItems` is authoritative.
+New rules receive a server-managed `createdAt` at the database's microsecond precision;
+the creation response, edit journal, reload, and redo preserve the same complete rule metadata.
 Every committed reversible mutation, including device create/update/rename/delete, Environment Pool
-update, rule/spec create/delete, rule reorder, and automatic-fix apply, returns
+update, rule/spec create/delete, rule reorder, assistant rule edit, and automatic-fix apply, returns
 `canUndo: true` and `canRedo: false`: the newly recorded entry is reversible and it discards any
 abandoned redo branch. Clients reject missing or contradictory values instead of guessing.
 
@@ -298,6 +374,8 @@ key, before/after payload shape, and recorded position form one supported, non-n
 Rule/specification snapshot ids must match the journal key, and reorder snapshots must contain the
 same unique positive ids in different orders. A malformed entry returns `409` without changing the
 board or consuming the entry.
+Specification ids must also be unique within a scene replacement; duplicate ids return
+`409` before any collection or journal changes, regardless of whether their semantics differ.
 
 Board node mutations validate more than shape. Device ids must be unique and must not
 collide after NuSMV normalization (`AC 1` and `ac_1` are the same model id). For every
@@ -347,7 +425,8 @@ one per device is rejected rather than merged — see
 the rule and the single attack-modelling exception. `GET /api/board/environment` is intentionally
 self-healing: it reads current nodes/templates, inserts missing required variables with
 the default value above, preserves existing values, and prunes variables no current
-device can read or affect. `POST /api/board/environment` accepts only names required by
+device can read or affect. An unchanged derived pool performs no persistence writes.
+`POST /api/board/environment` accepts only names required by
 the current board. The public request is an `EnvironmentVariableUpdateRequestDto[]`:
 each item contains a complete `expected` `{ value, trust, privacy }` baseline and a
 non-empty `desired` field patch. All three expected fields are required;
@@ -439,7 +518,13 @@ new unsupported behavior field cannot produce a successful but lossy import. The
 response-only `createdTemplates` field and template-catalog fields such as snapshot `id`
 or `defaultTemplate` are also rejected in requests.
 
-Portable scene scalar types are strict before the batch request is built. Fields defined
+Portable scene fields and scalar types are strict before the batch request is built on
+both frontend and backend. Unknown fields are rejected before conversion; an API event
+condition carrying comparison fields is rejected instead of losing them, and a state
+source must explicitly name `fromApi="state"` rather than having another attribute
+rewritten to it. REST scene import and confirmed AI scene application share this admission
+path. Shape/type errors return `400`; domain-invalid conditions return `422` before writing.
+Fields defined
 as strings remain JSON strings: the frontend does not coerce numbers or booleans into
 device ids, labels, runtime values, rule/specification operands, or template names.
 Export likewise rejects an incomplete current semantic item instead of dropping an
@@ -466,12 +551,13 @@ same domain as targeted canvas writes and AI scene drafts: coordinates are finit
 value is therefore a valid import value; no narrower file-import range may crop or reject
 a valid saved canvas.
 
-The browser rejects portable scene files larger than 64 MiB before reading or exporting
-them, rejects targeted device-list imports larger than 4 MiB, and rejects device-template
-imports larger than 512 KiB. The backend uses the matching dedicated 64 MiB boundary only
-for authenticated `POST /api/board/batch`; every other JSON request retains the 4 MiB
-pre-binding limit. This lets a valid scene carry its referenced self-contained template
-snapshots and embedded icons without widening unrelated endpoints.
+The browser enforces separate file-size limits for portable scenes, targeted device-list
+imports, and device-template imports. Authenticated `POST /api/board/scene` and
+`POST /api/board/batch` both use the dedicated scene request-body boundary; other JSON
+requests keep the ordinary pre-binding limit. Limits are owned by the
+[configuration reference](../getting-started/configuration.md#server). This lets a valid
+scene carry its referenced self-contained template snapshots and embedded icons without
+widening unrelated endpoints.
 
 Rule and specification array order is persisted explicitly. The database-only
 `rules.execution_order` and `specification.list_order` columns are written from the
@@ -510,7 +596,7 @@ the display `label` can remain unchanged.
 Across manual creation, standalone AI recommendation apply, and assistant `add_device`,
 an explicitly chosen display name has exact semantics: a case-insensitive conflict causes
 no write and the user must confirm a different available name. Automatic suffixing is
-limited to system-generated names and the JSON import preview, where every deterministic
+limited to system-generated names and the device-import preview, where every deterministic
 rename is shown before the atomic append/replacement is confirmed.
 
 Manual creation, AI recommendation apply, and standard scene import converge on the same
@@ -541,6 +627,55 @@ from `BoardEnvironmentVariableDto`. NuSMV generation initializes one shared
 `a_<name>` variable from that pool and mirrors it only into devices that declare the shared value as
 readable model state. This controls model references, not user or API authorization.
 
+### Device-list input formats
+
+JSON and CSV are separate sub-options under **Import**. Each has its own draft, file filter,
+paste prompt, format help and downloadable starter file. Selecting a format never imports data
+or auto-detects the other format. Switching formats invalidates pending file reads and restores
+the selected draft and its validation immediately.
+
+Each format offers mutually exclusive **Choose a file** and **Paste content** input methods.
+Only the selected method supplies the preview and append command. File and pasted drafts are retained
+separately per format; switching methods restores that draft immediately and invalidates pending file
+reads. File input shows the selected filename and a Remove file command, while pasted input exposes
+the text editor. Removing a file clears only that format's file draft, including its preview.
+
+Device-list JSON files use UTF-8, with or without a BOM. CSV files offer an explicit file-encoding
+choice: UTF-8 (default, optional BOM), or GB18030 (including GBK input). Decoding is strict: invalid
+bytes, a mismatched UTF-8 BOM, and unsupported UTF-16 BOM files are rejected before a preview can
+produce importable devices. Encoding is never guessed and invalid bytes are not replaced with
+apparently valid name characters. Changing the CSV encoding invalidates pending reads and applies
+only when a file is selected again; it does not reinterpret an existing draft or pasted Unicode text.
+
+Both formats support the same initial device configuration and use the same runtime validator,
+shared-environment merge, preview and atomic append request. JSON accepts device-entry objects
+with the fields documented above. CSV uses these headers:
+
+| Header | Equivalent JSON field |
+| :--- | :--- |
+| `templateName`, `label` (first two columns, required) | Template name and device label |
+| `state` | `state` |
+| `currentStateTrust`, `currentStatePrivacy` | Initial state labels |
+| `variable:<name>` | `variables[].value`, identified by `name` |
+| `trust:<name>` | `variables[].trust`, with a value supplied for that variable |
+| `privacy:<name>` | `privacies[].privacy`, identified by `name` |
+
+Optional blank CSV cells omit the corresponding override and use template defaults. A two-column,
+name-only list may omit its header. Unknown and duplicate columns, extra populated cells and invalid
+CSV quoting are rejected. Quoted commas, escaped double quotes and multiline cells are supported;
+LF, CRLF and CR record/cell newlines retain accurate physical row locations. A numeric `0` is an
+explicit value, not an omitted cell. Required template/name cells cannot be blank.
+The CSV adapter expands entries into the JSON device shape before common validation; neither format
+silently ignores invalid runtime fields. The bundled JSON and CSV starter files describe equivalent
+devices and initial values.
+
+Preview errors retain the device name when it can be parsed. Problem rows and planned renames
+show a JSON entry number or a CSV physical line number (including the header). Shared-value,
+source-label and sensitivity-label conflicts are listed together with both locations. A single
+blocking notice makes the all-or-nothing append explicit; no valid subset is submitted while
+any row or shared-environment conflict remains. Duplicate-name copy describes the planned
+rename, which is committed only after the user imports the batch.
+
 ### Rule-derived canvas connections
 
 There is no persisted `/api/board/edges` endpoint. The Board UI derives visible rule
@@ -552,9 +687,9 @@ display shape, not a backend DTO.
 
 The Java DTO classes are shared with [verification.md](verification.md), but device
 reference **values** are boundary-specific. Board storage endpoints persist raw
-`DeviceNode.id` values. Verification/simulation endpoints consume model `varName`
-values after `frontend/src/utils/modelRequest.ts` or backend `BoardDataConverter`
-normalizes those ids.
+`DeviceNode.id` values. Verification/simulation services normalize those ids through
+`BoardDataConverter` in the server-captured scene; their REST endpoints accept only
+[run parameters](verification.md#post-apiverify--synchronous).
 
 The authoritative specification write shape is `{ id, templateId, aConditions,
 ifConditions, thenConditions }`. Each condition write contains only `deviceId`,
@@ -599,6 +734,13 @@ Rule sources are current-step guards: IF evaluates the source value/signal curre
 visible on the board and in traces, while THEN writes the target device's next state.
 This is the shared semantic contract used by saved boards, AI recommendations,
 NuSMV generation, simulation, verification, history replay, and fix suggestions.
+Storage, model admission, and recommendations use the same manifest predicates for
+enum values, integer bounds, state tuples, API signal capability, and observable
+variable declarations. Specification source scope follows the
+[shared-value contract](../architecture/shared-value-semantics.md#two-questions-and-which-one-a-specification-asks).
+Their boundary
+errors and policies remain separate: recommendation reachability filtering does not
+prevent users from saving structurally valid contradictory conditions.
 
 Rule array order is also model behavior. If several enabled rules command the same
 device mode in one model step, the first matching rule in the saved order wins. An API
@@ -618,6 +760,9 @@ The database-only `rules.execution_order` column stores this behavior but is not
 portable identifier or an authored DTO field. Standard scene files carry the same
 semantics solely through `rules[]` array order, so export/import remains lossless without
 exposing a storage index.
+Reorder and its undo update only changed order columns on the existing rule rows;
+they preserve authored rule JSON, identity, and creation time. The order write and
+its journal entry still commit in the same transaction.
 
 Board saves perform lightweight template-semantic validation before persistence. Rules
 are rejected with `422 ValidationException` when a source variable/mode/state/API key is
@@ -649,6 +794,12 @@ An applied undo always reports `canRedo=true`, and an applied redo always report
 `canUndo=true`, because the operation just made its inverse available. `NOTHING_TO_APPLY`
 reports the requested direction as unavailable.
 
+Restoring a rule preserves its original id and server-recorded `createdAt`, including
+device deletion cascades and automatic-fix rule-set history. That time comes from the
+saved journal snapshot; ordinary rule writes cannot choose it. A journal snapshot
+missing the required creation time is unreadable restoration data and returns `409`
+without writing or consuming the edit.
+
 Undo/redo validates that a journal entry describes a real transition for its recorded operation.
 An unreadable, malformed, or no-op entry returns `409 Conflict`, leaves the board unchanged, and is
 not consumed, so availability does not claim that an unverified edit was applied. Recorded rule,
@@ -667,47 +818,21 @@ inspector: PanelLayout } }`.
 
 `PanelLayout` is `{ collapsed: Boolean, width: Double, activeSection: String }`.
 `panels.control.activeSection` is one of `devices`, `templates`, `rules`, `specs`;
-`panels.inspector.activeSection` is one of `devices`, `rules`, `specs`. The board
+`panels.inspector.activeSection` is one of `devices`, `rules`, `specs`, `environment`. The board
 stores panel collapsed state, width, active section, and canvas pan/zoom in this one
-layout document. Panel widths are normalized to `240..520`, and `canvasZoom` is
-normalized to `0.4..2.0`. There is no separate active-tabs endpoint.
+layout document. Panel widths are normalized to `240..520`, and `canvasZoom`
+must be finite and positive, with an upper bound of `2.0`; non-positive or non-finite
+values normalize to `1.0`. Overview fitting may use a zoom below the ordinary manual
+zoom floor, and saving/reloading preserves it. There is no separate active-tabs endpoint.
 
-### Schema cleanup note
+### Current schema
 
-The project currently uses Hibernate `ddl-auto: update`, without Flyway/Liquibase.
-Removing entities or fields from Java code will not drop old MySQL schema objects.
-The deliberate compatibility exception is the specification identity guard: after
-Hibernate initializes the schema and before the application becomes ready,
-`SpecificationPrimaryKeyMigration` accepts either the legacy primary key `(id)` or the
-current user-scoped key `(id, user_id)`. It atomically upgrades the legacy MySQL key,
-preserves existing rows, is a no-op after migration, and refuses startup for any unknown
-primary-key shape rather than serving with ambiguous cross-user ownership.
-After deploying code that removes persisted edges, old floating/dock layout fields, or
-pre-authority internal variable canvas nodes, clean an existing database manually if you
-want the physical schema/data to match:
-
-```sql
-DROP TABLE IF EXISTS device_edge;
-
-ALTER TABLE board_layout
-  DROP COLUMN input_x,
-  DROP COLUMN input_y,
-  DROP COLUMN status_x,
-  DROP COLUMN status_y,
-  DROP COLUMN input_is_docked,
-  DROP COLUMN input_dock_side,
-  DROP COLUMN input_last_pos_x,
-  DROP COLUMN input_last_pos_y,
-  DROP COLUMN status_is_docked,
-  DROP COLUMN status_dock_side,
-  DROP COLUMN status_last_pos_x,
-  DROP COLUMN status_last_pos_y;
-```
-
-Do not delete current devices by a `template_name` prefix. `variable_` is no longer a
-reserved template-name prefix; a custom template such as `variable_sensor` is an ordinary
-device template. If an old database contains historical pseudo variable rows, identify
-them from a pre-migration backup or explicit legacy metadata before deleting them.
+Development databases use the current entity schema; obsolete schemas are rebuilt
+instead of migrated. Specification identity is `(id, user_id)`, edit-journal sequence
+numbers are unique per user, and trace state counts are required on every new write.
+After Hibernate creates the scalar-id columns, `DatabaseSchemaConstraints` establishes
+and verifies the ownership foreign keys, cascading deletion, and username collation.
+Startup performs no historical primary-key upgrade, trace backfill, or orphan cleanup.
 
 ---
 
@@ -981,10 +1106,14 @@ the canonical schema when imported.
 
 ## Recommendation, duplicate check, and AI similarity check
 
-These delegate to AI tools (see [ai-tools.md](ai-tools.md)). They return
-typed recommendation DTOs inside `Result<T>`; an AI-tool error is translated to the
-matching HTTP status by `throwIfToolError`, and malformed success output fails closed
-instead of crossing the controller as an untyped map.
+REST controllers pass the authenticated user and typed request directly to the
+recommendation application services in `service/recommendation/`. The
+[chat tools](ai-tools.md) call those same implementations after parsing their tool
+arguments. Provider output is normalized and validated at the shared application
+boundary, including candidate semantics, audit counts, and scenario analysis;
+both entry points receive the same typed result. Typed failures retain the HTTP
+semantics defined in [overview.md](overview.md). JSON is serialized at the provider
+and transport boundaries.
 
 Every standalone recommendation request requires an opaque `requestId` in the shared format defined in
 [overview.md](overview.md#client-supplied-requestid). The same rule applies wherever it appears:
@@ -995,11 +1124,11 @@ request bodies, query parameters, status paths, and cancellation paths.
 | POST | `/api/board/rules/recommend` | JSON body `StandaloneRecommendationRequestDto`: required `requestId`, `maxRecommendations` (default 5; integer `1..10`), `language` (default `en`), and optional `userRequirement` | Returns `RecommendationResponseDto<RuleRecommendationDto>` |
 | POST | `/api/board/specs/recommend` | JSON body `StandaloneRecommendationRequestDto`: required `requestId`, `maxRecommendations` (default 5; integer `1..10`), `language` (default `en`), and optional `userRequirement` | Returns `RecommendationResponseDto<SpecificationRecommendationDto>` |
 | POST | `/api/board/devices/recommend` | Required `requestId` query parameter plus typed `DeviceRecommendationRequestDto`: `{ maxRecommendations, language, userRequirement }` | Returns `RecommendationResponseDto<DeviceRecommendationDto>` |
-| POST | `/api/board/scenario/recommend` | Required `requestId` query parameter plus typed `ScenarioRecommendationRequestDto`: required integer `minDevices`, `minRules`, `minSpecs`, `maxDevices`, `maxRules`, and `maxSpecs` in `1..10` (each minimum no greater than its maximum), plus optional `language` and `userRequirement` | Returns `ScenarioRecommendationResponseDto`, including `scenarioName`, a deterministic post-validation `rationale`, echoed `objectiveTargets`, objective completeness, validation counters, structural readiness, semantic warnings, and a typed `PortableSceneDto` using the canonical `iot-verify.board-scene` import/export shape. |
+| POST | `/api/board/scenario/recommend` | Required `requestId` query parameter plus typed `ScenarioRecommendationRequestDto`: required integer `minDevices`, `minRules`, `minSpecs`, `maxDevices`, `maxRules`, and `maxSpecs` in `1..10` (each minimum no greater than its maximum), plus optional `language`, `userRequirement`, and `templateNames` | Returns `ScenarioRecommendationResponseDto`, including `scenarioName`, a deterministic post-validation `rationale`, echoed `objectiveTargets`, objective completeness, validation counters, structural readiness, semantic warnings, and a typed `PortableSceneDto` using the canonical `iot-verify.board-scene` import/export shape. The optional template scope follows the [scene recommendation contract](ai-tools.md#rules). |
 | GET | `/api/board/recommendations/{requestId}` | Reads the authenticated user's matching active or just-finished request | Returns `InteractiveOperationStatusDto`; terminal status is retained briefly for the final polling tick, while unknown requests return 404 |
 | DELETE | `/api/board/recommendations/{requestId}` | Cancels the authenticated user's matching in-flight request | Returns `boolean`; `true` means the durable stop signal was accepted for the matching local or remote execution. The callable may still be unwinding, so status remains authoritative until `FINISHED` |
-| POST | `/api/board/rules/check-duplicate` | body: typed `RuleDto`; every condition includes `targetType`; rule API-signal conditions omit `relation`/`value` | Deterministic duplicate-rule check used by `RuleBuilderDialog` before saving. It does not call the external LLM and returns a typed `DuplicateRuleCheckResultDto`: required `isDuplicate`, `requiresReview`, `similarity` (`0..1`), `matchType`, stable `reasonCode`, technical `reason`/`message`, plus nullable readable `matchedRule`. Clients localize the ordinary explanation from `reasonCode`. |
-| POST | `/api/board/rules/check-similarity` | body: typed `RuleDto`; every condition includes `targetType`; rule API-signal conditions omit `relation`/`value` | Explicit AI semantic similarity check available from `RuleBuilderDialog` and the Board rule-recommendation apply flow. It may call the configured LLM and returns a typed `RuleSimilarityResultDto`: required `isSimilar`, `isDuplicate`, authoritative `requiresReview`, `similarity` (`0..1`), stable `reasonCode`, technical `reason`/`message`, plus nullable readable `matchedRule`. Internal candidate references and LLM prose are not ordinary UI concepts. |
+| POST | `/api/board/rules/check-duplicate` | body: typed `RuleDto`; every condition includes `targetType`; rule API-signal conditions omit `relation`/`value` | Deterministic duplicate-rule check used by `RuleBuilder` before saving. It does not call the external LLM and returns a typed `DuplicateRuleCheckResultDto`: required `isDuplicate`, `requiresReview`, `similarity` (`0..1`), `matchType`, stable `reasonCode`, technical `reason`/`message`, plus nullable readable `matchedRule`. Clients localize the ordinary explanation from `reasonCode`. |
+| POST | `/api/board/rules/check-similarity` | body: typed `RuleDto`; every condition includes `targetType`; rule API-signal conditions omit `relation`/`value` | Explicit AI semantic similarity check available from `RuleBuilder` and the Board rule-recommendation apply flow. It may call the configured LLM and returns a typed `RuleSimilarityResultDto`: required `isSimilar`, `isDuplicate`, authoritative `requiresReview`, `similarity` (`0..1`), stable `reasonCode`, technical `reason`/`message`, plus nullable readable `matchedRule`. Internal candidate references and LLM prose are not ordinary UI concepts. |
 
 Duplicate-check `reasonCode` is one of `NO_EXISTING_RULES`, `EXACT_MATCH`,
 `TRIGGER_SET_CONTAINS_OTHER`, `SAME_TRIGGER_SHAPE_DIFFERENT_VALUES`,
@@ -1041,13 +1170,13 @@ conflict freedom.
 > Board before application. Partial comparison fields, `FALSE`, and non-equality
 > relations are filtered with `invalidApiEventSyntax`; the backend no longer silently
 > erases a comparison that may change the event meaning.
-> The controller maps the tool output into these DTOs and rechecks every accounting
-> identity before returning HTTP 200. Missing audit fields, unexplained filtered or
+> The recommendation application services parse model output into these DTOs and check
+> every accounting identity before returning a result to REST or chat callers. Missing audit fields, unexplained filtered or
 > adjusted entries, unknown kept-candidate fields, and malformed portable-scene fields
 > return HTTP 502 rather than crossing the REST boundary as an untyped success map.
 > The standalone scenario endpoint likewise returns only its typed REST fields. Chat-only
-> `draftStored` and `previousDraftRetained` metadata is added only when the same tool runs
-> inside an authenticated chat session; it never leaks into `/scenario/recommend` success
+> `draftStored` and `previousDraftRetained` metadata is added only when the service runs
+> for an authenticated chat session; it never leaks into `/scenario/recommend` success
 > responses.
 > Standalone recommendation DTOs omit genuinely absent optional values instead of
 > serializing them as explicit `null`. Rule API conditions therefore remain relation/value-
@@ -1068,6 +1197,12 @@ conflict freedom.
 > name or specification rationale is an itemized filtered candidate, and the REST boundary
 > rejects a kept candidate missing either field rather than returning a misleading HTTP 200.
 >
+> Specification model output may omit condition groups unused by its chosen template.
+> After validating the template shape and every condition, the application service returns
+> these inactive groups as empty arrays. A present group must be an array: explicit `null`
+> or scalar/object groups, missing required groups, and non-empty inactive groups are
+> filtered as individual candidates without discarding other valid recommendations.
+>
 > Device recommendations are instance-level. Each kept item contains `templateName`, an
 > effective `suggestedLabel`, and may contain advisory `intendedUse`/`suggestedPlacement`;
 > these two context fields are neither persisted device properties nor formal-model inputs. For a stateful or locally
@@ -1083,8 +1218,8 @@ conflict freedom.
 > preview and later create request use the same initial model. Omitted trust/privacy
 > fields stay absent so the active template remains authoritative. Display labels are unique
 > across the whole board ignoring case, even across different templates. Multiple
-> recommendations may use the same template when they represent different labels or
-> advisory contexts. Applying a recommendation writes the effective device type, label,
+> recommendations follow the [instance-capability constraints](ai-tools.md).
+> Applying a recommendation writes the effective device type, label,
 > layout, and runtime values only. It may also initialize currently missing shared
 > Environment Pool items required by the template; the Board previews their names and
 > presents the authoritative `environmentChanges` returned by the create transaction.
@@ -1118,15 +1253,15 @@ conflict freedom.
 > precisely because an adjustment is not obliged to add an item.
 > The response carries authoritative `objectiveTargets` (`{ minDevices, minRules,
 > minSpecs }`), `objectiveStatus=COMPLETE|PARTIAL`, and ordered `objectiveIssues[]`
-> (`{ code, message }`). The controller requires the echoed targets to match the submitted
-> minimums, and both the controller and frontend recompute status from the canonical scene.
+> (`{ code, message }`). The application service requires the echoed targets to match the
+> submitted minimums, and both the service and frontend recompute status from the canonical scene.
 > A missing item kind produces `NO_DEVICES`, `NO_AUTOMATION_RULES`, or `NO_SPECIFICATIONS`;
 > a positive count below its explicit minimum produces `INSUFFICIENT_DEVICES`,
 > `INSUFFICIENT_AUTOMATION_RULES`, or `INSUFFICIENT_SPECIFICATIONS`. `COMPLETE` means only
 > that all three explicit count targets were reached; it is not a claim that the rest of the
 > user's prose was satisfied or that formal verification passed.
 > The response also carries authoritative `verificationReady` and ordered
-> `readinessIssues[]` (`{ code, message }`). The REST controller and frontend recompute
+> `readinessIssues[]` (`{ code, message }`). The application service and frontend recompute
 > readiness from the canonical returned scene and reject a mismatch; currently
 > `NO_DEVICES` and `NO_SPECIFICATIONS` are the deterministic issue codes. A draft that
 > lacks specifications remains reviewable/applicable but is not presented as ready for

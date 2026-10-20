@@ -162,7 +162,7 @@ class NodeToolsErrorTest {
                 .thenReturn(DeviceDeletionResultDto.builder()
                         .deletedDevice(node)
                         .build());
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", impactToken);
 
         String result = tool.execute("{\"id\":\"ac_1\",\"confirmed\":true,\"impactToken\":\""
                 + impactToken + "\"}");
@@ -245,12 +245,14 @@ class NodeToolsErrorTest {
         String previewResult = tool.execute("{\"id\":\"light_1\",\"confirmed\":false}");
         JsonNode previewJson = objectMapper.readTree(previewResult);
         assertTrue(previewJson.path("requiresUserConfirmation").asBoolean());
+        assertEquals("KitchenLight", destructiveActionGuard.pendingContext(1L, "node-test-session")
+                .orElseThrow().displayTarget());
         verify(boardStorageService, org.mockito.Mockito.never())
                 .deleteNodeCascade(1L, "light_1", "preview-token");
         assertEquals("illuminance",
                 previewJson.path("environmentChanges").path(0).path("name").asText());
 
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", previewJson.path("impactToken").asText());
         String result = tool.execute("{\"id\":\"light_1\",\"confirmed\":true,\"impactToken\":\""
                 + previewJson.path("impactToken").asText() + "\"}");
         JsonNode json = objectMapper.readTree(result);

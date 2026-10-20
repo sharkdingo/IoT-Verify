@@ -87,6 +87,15 @@ const localeMessage = (locale: 'zh-CN' | 'en', key: string): unknown => {
 }
 
 describe('modelTokenDisplay', () => {
+  it.each(['zh-CN', 'en'] as const)('formats emitted bundled state tokens in %s without changing custom identifiers', locale => {
+    i18n.global.locale.value = locale
+    const translate = (key: string) => i18n.global.t(key)
+    expect(formatModelTokenBySource('BUNDLED', 'takingphoto', translate)).toBe(translate('app.modelTokens.takingPhoto'))
+    expect(formatModelTokenBySource('BUNDLED', 'notauthorized', translate)).toBe(translate('app.modelTokens.notAuthorized'))
+    expect(formatModelTokenBySource('CUSTOM', 'takingphoto', translate)).toBe('takingphoto')
+    expect(formatModelTokenBySource('UNKNOWN', 'takingphoto', translate)).toBe('takingphoto')
+  })
+
   it('formats each segment of a bundled composite working state', () => {
     expect(formatBuiltInModelToken('off; idle', t)).toBe('关闭; 空闲')
     expect(formatBuiltInModelToken('off, locked | idle', t)).toBe('关闭, 已锁定 | 空闲')

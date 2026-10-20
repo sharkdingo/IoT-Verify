@@ -1,5 +1,6 @@
 package cn.edu.nju.Iot_Verify.dto.recommendation;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import lombok.Data;
 
 import java.util.List;
@@ -26,4 +27,8 @@ public class ScenarioRecommendationResponseDto {
     private List<ScenarioReadinessIssueDto> readinessIssues;
     private List<ScenarioSemanticWarningDto> semanticWarnings;
     private PortableSceneDto scene;
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Boolean draftStored;
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Boolean previousDraftRetained;
 }

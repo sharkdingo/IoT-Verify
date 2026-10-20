@@ -63,24 +63,14 @@ describe('solver output visibility', () => {
       .toBeGreaterThan(shortfallAt)
   })
 
-  it('uses light ink on the dark console block', () => {
-    // The console ground is `bg-slate-900` in BOTH themes deliberately, so the ink cannot follow the
-    // theme's text colour. slate-500 measured 3.74 against it — dark on dark; slate-300 is 12.0.
+  it('uses theme-aware paper and ink for diagnostic output', () => {
     const at = board.indexOf('data-testid="verification-nusmv-output"')
     const block = board.slice(at, board.indexOf('</details>', at))
-    expect(block, 'the console keeps its dark ground').toContain('bg-slate-900')
-
-    /*
-     * Scoped to the `<pre>` itself, not the whole disclosure. The `<summary>` label sits on the light card
-     * and correctly uses `text-slate-700`; asserting over the block forbade that too, so the first version
-     * of this test failed on correct code — a check that would have been "fixed" by darkening the console
-     * ink, which is the defect it exists to prevent.
-     */
+    expect(block).toContain('board-bg-muted')
     const preAt = block.indexOf('<pre')
-    expect(preAt, 'the console body should be a pre').toBeGreaterThan(-1)
+    expect(preAt).toBeGreaterThan(-1)
     const pre = block.slice(preAt, block.indexOf('>', preAt))
-    expect(pre, 'with light ink on the dark ground').toContain('text-slate-300')
-    expect(pre, 'never the neutral body ink, which is dark-on-dark here')
-      .not.toMatch(/text-slate-(400|500|600|700|800|900)\b/)
+    expect(pre).toContain('board-text-strong')
+    expect(pre).not.toContain('board-text-success')
   })
 })

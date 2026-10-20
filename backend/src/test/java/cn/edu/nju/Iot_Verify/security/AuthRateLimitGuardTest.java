@@ -19,6 +19,21 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class AuthRateLimitGuardTest {
 
     @Test
+    void accountChangesShareAUserBucketAcrossOperationsAndNamesButDoNotConsumeLoginAttempts() {
+        AuthRateLimitGuard guard = new AuthRateLimitGuard(1, 1, 10, 10);
+        MockHttpServletRequest request = request("203.0.113.10");
+
+        guard.checkAccountChange(7L, request);
+        AuthRateLimitException error = assertThrows(AuthRateLimitException.class,
+                () -> guard.checkAccountChange(7L, request));
+
+        assertEquals("AUTH_ACCOUNT_CHANGE_RATE_LIMIT_REACHED", error.getReasonCode());
+        assertEquals("ACCOUNT", error.getScope());
+        assertDoesNotThrow(() -> guard.checkAccountChange(8L, request));
+        assertDoesNotThrow(() -> guard.checkLogin("Alice", request));
+    }
+
+    @Test
     void usersBehindOneSourceDoNotShareTheLowAccountLimit() {
         AuthRateLimitGuard guard = new AuthRateLimitGuard(1, 1, 10, 10);
         MockHttpServletRequest request = request("203.0.113.10");

@@ -1,10 +1,11 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { i18n } from '@/assets/i18n'
 import {
   canonicalNaturalChangeRate,
   getDeviceIconUrl,
+  indexDeviceTemplates,
   normalizeAssetFolder,
   MANIFEST_VALIDATION_MESSAGE_KEYS,
   naturalChangeCandidateValues,
@@ -13,11 +14,53 @@ import {
   resolveImpactEnvironmentDefinition,
   validateManifest
 } from '../device'
-import type { DeviceManifest } from '@/types/device'
+import type { DeviceManifest, DeviceTemplate } from '@/types/device'
+
+describe('template lookup index', () => {
+  it('normalizes both names, ignores blank aliases and retains the first matching template', () => {
+    const first: DeviceTemplate = { name: ' Thermostat ', manifest: { Name: 'Thermostat alias' } }
+    const second: DeviceTemplate = { name: 'THERMOSTAT ALIAS', manifest: { Name: 'Other' } }
+    const blank: DeviceTemplate = { name: ' ', manifest: { Name: '' } }
+    const index = indexDeviceTemplates([first, second, blank])
+    expect(index.get('thermostat')).toBe(first)
+    expect(index.get('thermostat alias')).toBe(first)
+    expect(index.get('other')).toBe(second)
+    expect(index.has('')).toBe(false)
+    expect(index.get('missing')).toBeUndefined()
+  })
+
+  it('reads aliases once when indexing rather than for every rendered node', () => {
+    let reads = 0
+    const templates = Array.from({ length: 100 }, (_, index) => ({
+      get name() { reads++; return `Template ${index}` },
+      manifest: { get Name() { reads++; return `Alias ${index}` } }
+    }))
+    const indexed = indexDeviceTemplates(templates)
+    for (let iteration = 0; iteration < 20; iteration++) {
+      templates.forEach((template, index) => expect(indexed.get(`alias ${index}`)).toBe(template))
+    }
+    expect(reads).toBe(templates.length * 2)
+  })
+})
 
 describe('device icon resolution', () => {
   const decodeDataSvg = (uri: string) =>
     decodeURIComponent(uri.slice(uri.indexOf(',') + 1))
+
+  it('does not enumerate bundled artwork for each generated-icon fallback', () => {
+    const expected = getDeviceIconUrl('Custom sensor', 'unlisted')
+    const enumerate = vi.spyOn(Object, 'keys')
+    let results: string[]
+    let enumerations: number
+    try {
+      results = Array.from({ length: 50 }, () => getDeviceIconUrl('Custom sensor', 'unlisted'))
+      enumerations = enumerate.mock.calls.length
+    } finally {
+      enumerate.mockRestore()
+    }
+    expect(results.every(icon => icon === expected)).toBe(true)
+    expect(enumerations).toBe(0)
+  })
 
   it('uses bundled assets for default templates without manifest icons', () => {
     const icon = getDeviceIconUrl('Window Shade', 'closed')
@@ -133,6 +176,19 @@ describe('device icon resolution', () => {
     expect(icon).toMatch(/^data:image\/svg\+xml/)
     expect(svg).toContain('viewBox="0 0 72 72"')
     expect(svg).toContain('>CP<')
+  })
+
+  it('keeps generated artwork self-contained and neutral across custom template names', () => {
+    const paints = ['Custom Privacy Beacon', 'Custom Door Sensor', 'Custom Motion Detector'].map(name => {
+      const svg = decodeDataSvg(getDeviceIconUrl(name, 'Working'))
+      expect(svg).not.toContain('var(')
+      const document = new DOMParser().parseFromString(svg, 'image/svg+xml')
+      expect(document.querySelector('parsererror')).toBeNull()
+      return Array.from(document.querySelectorAll('[fill], [stroke]')).map(element =>
+        [element.getAttribute('fill'), element.getAttribute('stroke')])
+    })
+    expect(paints[1]).toEqual(paints[0])
+    expect(paints[2]).toEqual(paints[0])
   })
 
   it('prefers safe manifest icons and ignores unsafe URLs', () => {

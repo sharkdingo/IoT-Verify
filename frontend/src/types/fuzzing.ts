@@ -3,6 +3,7 @@ import type { ModelPlaybackScene, RunInitiator } from './model'
 import type { Specification } from './spec'
 import type { AsyncTaskStatus, TaskProgressStage } from './task'
 import type { TraceState } from './verify'
+import type { ModelTokenSource } from './modelToken'
 
 export const FUZZING_EXPLORATION_MODES = ['BOARD_SNAPSHOT', 'PAPER_COMPATIBLE'] as const
 export type FuzzingExplorationMode = typeof FUZZING_EXPLORATION_MODES[number]
@@ -205,6 +206,8 @@ export interface AvailableFuzzingRunSummary {
   elapsedMs: number
   modelSnapshot: FuzzingModelRunSnapshot
   eligibility: FuzzingEligibility
+  eligibleSpecifications: Record<string, Specification>
+  modelTokenSourcesByDeviceId: Record<string, ModelTokenSource>
   limitations: string[]
   createdAt: string
   completedAt: string

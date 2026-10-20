@@ -3,8 +3,80 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ElMessageBox } from 'element-plus'
 
 import DeviceDialog from '@/components/DeviceDialog.vue'
+import InfoTooltip from '@/components/common/InfoTooltip.vue'
 import { i18n } from '@/assets/i18n'
 import type { DeviceManifest, DeviceTemplate } from '@/types/device'
+
+const mountRuntimeEditor = () => {
+  const manifest: DeviceManifest = { Name: 'Controller', Modes: [], APIs: [], InternalVariables: [{
+    Name: 'threshold', IsInside: true, LowerBound: 0, UpperBound: 100,
+    FalsifiableWhenCompromised: false, Trust: 'trusted', Privacy: 'public'
+  }] }
+  return mount(DeviceDialog, { attachTo: document.body, props: { visible: true, deviceName: manifest.Name,
+    label: 'Controller', nodeId: 'controller', manifest,
+    deviceTemplates: [{ name: manifest.Name, manifest }],
+    nodes: [{ id: 'controller', templateName: manifest.Name, label: 'Controller', position: { x: 0, y: 0 },
+      state: 'Working', width: 176, height: 128, variables: [{ name: 'threshold', value: '10' }] }] },
+    global: { plugins: [i18n] } })
+}
+const setRuntimeValue = async (value: string) => {
+  const input = document.querySelector<HTMLInputElement>('[data-testid="device-runtime-variable-threshold"]')!
+  input.value = value
+  input.dispatchEvent(new Event('input', { bubbles: true }))
+  await flushPromises()
+}
+
+describe('DeviceDialog runtime rejection ownership', () => {
+  afterEach(() => { document.body.innerHTML = ''; localStorage.removeItem('iot_verify_token') })
+  it('blocks fractional text inline, while allowing the template default', async () => {
+    const wrapper = mountRuntimeEditor()
+    await setRuntimeValue('1.5')
+    expect(document.querySelector<HTMLButtonElement>('[data-testid="device-runtime-save"]')!.disabled).toBe(true)
+    expect(document.querySelector('[data-testid="device-runtime-blocked-reason"]')!.textContent).toMatch(/0.*100/)
+    const save = document.querySelector<HTMLButtonElement>('[data-testid="device-runtime-save"]')!
+    const reason = document.querySelector('[data-testid="device-runtime-blocked-reason"]')!
+    expect(save.closest('.device-runtime-header')).not.toBeNull()
+    expect(reason.closest('.device-runtime-header')).toBe(save.closest('.device-runtime-header'))
+    expect(save.getAttribute('aria-describedby')).toBe(reason.id)
+    expect(wrapper.emitted('save-runtime')).toBeUndefined()
+    await setRuntimeValue('')
+    expect(document.querySelector<HTMLButtonElement>('[data-testid="device-runtime-save"]')!.disabled).toBe(false)
+    wrapper.unmount()
+  })
+  it('keeps a current server rejection with the draft and clears it when edited', async () => {
+    const wrapper = mountRuntimeEditor()
+    await setRuntimeValue('25')
+    document.querySelector<HTMLButtonElement>('[data-testid="device-runtime-save"]')!.click()
+    await flushPromises()
+    const complete = wrapper.emitted('save-runtime')![0][2] as Function
+    expect(typeof complete).toBe('function')
+    complete(false, { details: ['Rejected value'], fields: { 'variables[0].value': 'Allowed range 0..100' } })
+    await flushPromises()
+    expect(document.querySelector('[data-testid="device-runtime-save-failure"]')!.textContent).toContain('Allowed range 0..100')
+    expect(document.querySelector('[data-testid="device-runtime-save-failure"] [data-testid="failure-next-step"]')).toBeNull()
+    expect(document.querySelector<HTMLInputElement>('[data-testid="device-runtime-variable-threshold"]')!.value).toBe('25')
+    await setRuntimeValue('26')
+    complete(false, { details: ['Late old rejection'] })
+    await flushPromises()
+    expect(document.querySelector('[data-testid="device-runtime-save-failure"]')).toBeNull()
+    wrapper.unmount()
+  })
+  it.each(['close', 'account', 'unmount'])('does not attach an old runtime rejection after %s', async action => {
+    const wrapper = mountRuntimeEditor()
+    await setRuntimeValue('25')
+    document.querySelector<HTMLButtonElement>('[data-testid="device-runtime-save"]')!.click()
+    await flushPromises()
+    const complete = wrapper.emitted('save-runtime')![0][2] as Function
+    expect(typeof complete).toBe('function')
+    if (action === 'close') { await wrapper.setProps({ visible: false }); await wrapper.setProps({ visible: true }); await setRuntimeValue('25') }
+    if (action === 'account') localStorage.setItem('iot_verify_token', 'different-session')
+    if (action === 'unmount') wrapper.unmount()
+    complete(false, { details: ['Late old rejection'] })
+    await flushPromises()
+    expect(document.querySelector('[data-testid="device-runtime-save-failure"]')).toBeNull()
+    if (action !== 'unmount') wrapper.unmount()
+  })
+})
 
 describe('DeviceDialog template authority', () => {
   afterEach(() => {
@@ -18,7 +90,6 @@ describe('DeviceDialog template authority', () => {
       props: {
         visible: true,
         deviceName: 'Thermostat',
-        description: '',
         label: 'Hall thermostat',
         nodeId: 'node-1',
         manifest: null,
@@ -51,7 +122,6 @@ describe('DeviceDialog template authority', () => {
       props: {
         visible: true,
         deviceName: 'Light',
-        description: '',
         label: 'Hall light',
         nodeId: 'light-1',
         manifest: null,
@@ -64,11 +134,8 @@ describe('DeviceDialog template authority', () => {
 
     const renameButton = document.querySelector<HTMLButtonElement>('[data-testid="device-rename"]')
     expect(renameButton).not.toBeNull()
-    // Narrow-viewport layout and the 44px touch floor now come from styles/dialog.css (the sheet turns the
-    // footer into stacked full-width buttons under 640px and raises every action to 2.75rem there), so what
-    // this asserts is that the dialog is built from that layer rather than re-deriving the padding and the
-    // target sizes per surface. Utility-class assertions here previously passed while the same dialog
-    // disagreed with every other one about button height.
+    // The shared dialog layer owns responsive wrapping and target sizes; local utility assertions
+    // previously passed while different dialogs still rendered different button heights.
     expect(document.querySelector('.iot-dialog')?.classList).toContain('iot-dialog--md')
     expect(document.querySelector('.iot-dialog__header')).not.toBeNull()
     expect(document.querySelector('.iot-dialog__body')).not.toBeNull()
@@ -102,7 +169,6 @@ describe('DeviceDialog template authority', () => {
       props: {
         visible: true,
         deviceName: longName,
-        description: longDescription,
         label: longLabel,
         nodeId: 'long-custom-device',
         manifest,
@@ -135,7 +201,6 @@ describe('DeviceDialog template authority', () => {
       props: {
         visible: true,
         deviceName: 'Garage Door',
-        description: '',
         label: 'Garage Door',
         nodeId: 'garage-1',
         manifest: null,
@@ -191,7 +256,6 @@ describe('DeviceDialog template authority', () => {
       props: {
         visible: true,
         deviceName: 'Camera',
-        description: '',
         label: 'Camera',
         nodeId: 'camera-1',
         manifest,
@@ -266,7 +330,6 @@ describe('DeviceDialog template authority', () => {
       props: {
         visible: true,
         deviceName: template.name,
-        description: '',
         label: 'Controller',
         nodeId: 'controller-defaults',
         manifest,
@@ -353,7 +416,6 @@ describe('DeviceDialog template authority', () => {
       props: {
         visible: true,
         deviceName: template.name,
-        description: '',
         label: node.label,
         nodeId: node.id,
         manifest,
@@ -412,7 +474,7 @@ describe('DeviceDialog template authority', () => {
     expect(input()?.value).toBe('25')
     expect(document.querySelector('[data-testid="device-runtime-conflict"]')).not.toBeNull()
     expect(document.querySelector<HTMLButtonElement>('[data-testid="device-runtime-save"]')?.disabled).toBe(true)
-    expect(document.querySelector('[data-testid="device-runtime-save"]')?.classList).toContain('min-h-11')
+    expect(document.querySelector('[data-testid="device-runtime-save"]')?.classList).toContain('board-action-inline')
     expect(document.querySelector('[data-testid="device-runtime-adopt-latest"]')?.classList).toContain('min-h-11')
     expect(document.querySelector('[data-testid="device-runtime-keep-local"]')?.classList).toContain('min-h-11')
 
@@ -484,7 +546,6 @@ describe('DeviceDialog template authority', () => {
       props: {
         visible: true,
         deviceName: template.name,
-        description: '',
         label: node.label,
         nodeId: node.id,
         manifest,
@@ -575,7 +636,6 @@ describe('DeviceDialog template authority', () => {
       props: {
         visible: true,
         deviceName: originalTemplate.name,
-        description: '',
         label: node.label,
         nodeId: node.id,
         manifest: originalManifest,
@@ -656,7 +716,6 @@ describe('DeviceDialog template authority', () => {
         visible: true,
         runtimeSaving: false,
         deviceName: template.name,
-        description: '',
         label: node.label,
         nodeId: node.id,
         manifest,
@@ -738,7 +797,6 @@ describe('DeviceDialog template authority', () => {
         visible: true,
         runtimeSaving: false,
         deviceName: template.name,
-        description: '',
         label: node.label,
         nodeId: node.id,
         manifest,
@@ -837,7 +895,6 @@ describe('DeviceDialog template authority', () => {
         visible: true,
         runtimeSaving: false,
         deviceName: template.name,
-        description: '',
         label: node.label,
         nodeId: node.id,
         manifest,
@@ -910,7 +967,6 @@ describe('DeviceDialog template authority', () => {
       props: {
         visible: true,
         deviceName: 'Controller',
-        description: '',
         label: node.label,
         nodeId: node.id,
         manifest: originalManifest,
@@ -996,7 +1052,6 @@ describe('DeviceDialog template authority', () => {
       props: {
         visible: true,
         deviceName: originalTemplate.name,
-        description: '',
         label: originalNode.label,
         nodeId: originalNode.id,
         manifest: originalManifest,
@@ -1101,7 +1156,6 @@ describe('DeviceDialog template authority', () => {
         visible: true,
         deleteLoading: true,
         deviceName: 'Light',
-        description: '',
         label: 'Hall light',
         nodeId: 'light-1',
         manifest: null,
@@ -1162,7 +1216,6 @@ describe('DeviceDialog template authority', () => {
         visible: true,
         runtimeSaving,
         deviceName: template.name,
-        description: '',
         label: node.label,
         nodeId: node.id,
         manifest,
@@ -1281,7 +1334,6 @@ describe('DeviceDialog template authority', () => {
     props: {
       visible: true,
       deviceName: name,
-      description: '',
       label: `${name} 1`,
       nodeId: 'transition-node',
       manifest,
@@ -1299,6 +1351,36 @@ describe('DeviceDialog template authority', () => {
     },
     global: { plugins: [i18n] }
   } as never)
+
+  it.each(['en', 'zh-CN'] as const)('shows only authored metadata and no invented action trigger in %s', async locale => {
+    i18n.global.locale.value = locale
+    const manifest: DeviceManifest = {
+      Name: 'Switch', Description: ' ', Modes: ['SwitchState'], InitState: 'off',
+      WorkingStates: [{ Name: 'off', Description: ' ', Trust: 'trusted', Privacy: 'public' },
+        { Name: 'on', Description: '', Trust: 'trusted', Privacy: 'public' }],
+      APIs: [{ Name: 'on', StartState: '', EndState: 'on', Signal: false, Trigger: null }],
+      Contents: [{ Name: 'sample', Description: ' ', Privacy: 'public' }]
+    }
+    const wrapper = mountWithManifest(manifest, manifest.Name, 'off')
+    try {
+      const descriptionLabels = () => Array.from(document.querySelectorAll('th, .device-basic-table td'))
+        .filter(cell => cell.textContent?.trim() === i18n.global.t('app.description'))
+      expect(descriptionLabels()).toHaveLength(0)
+      expect(document.querySelector('.device-api-card')!.textContent).not.toContain(i18n.global.t('app.trigger'))
+      const described: DeviceManifest = { ...manifest, Description: 'Current author note',
+        WorkingStates: [{ ...manifest.WorkingStates![0], Description: 'Idle state' }, manifest.WorkingStates![1]],
+        Contents: [{ ...manifest.Contents![0], Description: 'Selected content' }] }
+      await wrapper.setProps({ manifest: described })
+      expect(descriptionLabels()).toHaveLength(3)
+      expect(document.querySelector('.device-basic-table')!.textContent).toContain('Current author note')
+      expect(document.querySelector('[data-testid="device-dialog-content-sample"]')!.textContent).toContain('Selected content')
+      await wrapper.setProps({ manifest })
+      expect(descriptionLabels()).toHaveLength(0)
+      expect(document.body.textContent).not.toContain('Current author note')
+      expect(document.body.textContent).not.toContain('Idle state')
+      expect(document.querySelector('[data-testid="device-dialog-content-sample"]')!.querySelectorAll('td')).toHaveLength(2)
+    } finally { wrapper.unmount(); i18n.global.locale.value = 'en' }
+  })
 
   it('lists each device-declared transition with its start, end and trigger', () => {
     // The `Door RFID` shape: two transitions falling back to one shared state.
@@ -1367,13 +1449,8 @@ describe('DeviceDialog template authority', () => {
     wrapper.unmount()
   })
 
-  /**
-   * The four template sections are peers, so they get one header shape: accent bar, `<h2>`, and a hint
-   * nested beside the title. Adding transitions with a sibling `<p>` and `mb-1` made it visibly the odd
-   * one out, and giving only that section an explanation made the other three look undocumented rather
-   * than self-evident. Asserted structurally because a screenshot cannot fail a build.
-   */
-  it('gives every template section the same header shape and an explanation', () => {
+  // Section headers share a layout; explanations are reserved for non-obvious device semantics.
+  it('keeps section headers consistent without restating basic fields', () => {
     const manifest: DeviceManifest = {
       Name: 'Door RFID',
       Modes: ['ScanState'],
@@ -1408,21 +1485,32 @@ describe('DeviceDialog template authority', () => {
       expect(host, `section ${section} is missing`).not.toBeNull()
       // Anchor on the accent bar: it identifies the header row unambiguously, where a class query
       // for `.flex.items-center` also matched inner rows and passed for the wrong element.
-      const bar = host!.querySelector('div.w-1')
-      expect(bar?.className, `section ${section} accent bar`).toContain('h-7')
+      const bar = host!.querySelector('.board-section-marker')
+      expect(bar, `section ${section} accent bar`).not.toBeNull()
       const header = bar!.parentElement!
       expect(header.className, `section ${section} header spacing`).toContain('mb-4')
       expect(header.className, `section ${section} header alignment`).toContain('items-start')
       expect(header!.querySelector('h2'), `section ${section} title`).not.toBeNull()
-      // The hint is nested beside the title, not a sibling of the header block.
       const hint = header!.querySelector('h2 + p')
-      expect(hint?.textContent?.trim(), `section ${section} hint`).toBeTruthy()
+      expect(hint).toBeNull()
+      if (section === 'basic') {
+        expect(header.querySelector('.iot-info-tooltip-trigger')).toBeNull()
+      } else {
+        const help = Array.from(wrapper.findAllComponents(InfoTooltip))
+          .find(component => header.contains(component.element))!
+        expect(help, `section ${section} semantics`).toBeTruthy()
+        expect(help.props('text')).toBe(i18n.global.t(`app.device${{
+          variables: 'Variables', states: 'States', transitions: 'Transitions',
+          apis: 'Apis', contents: 'Contents', specs: 'Specs'
+        }[section]}Hint`))
+        expect(help.props('label')).toBe(i18n.global.t('app.showHelpFor', { topic: header.querySelector('h2')!.textContent }))
+      }
     }
     wrapper.unmount()
   })
 
   /**
-   * `Contents` was the second whole manifest array with no surface anywhere: `RuleBuilderDialog` offers
+   * `Contents` was the second whole manifest array with no surface anywhere: `RuleBuilder` offers
    * these as a rule's `contentDevice`/`content` and the model propagates each one's `privacy_<name>` to
    * the command target, so the sensitivity a rule inherits was unreadable until a run. Only two bundled
    * templates declare any, which is how it stayed invisible.
@@ -1454,13 +1542,13 @@ describe('DeviceDialog template authority', () => {
     expect(row).not.toBeNull()
     const cells = Array.from(row!.querySelectorAll('td'))
     expect(cells[0].textContent?.trim()).toBe('photo')
-    const contentChip = cells[2].querySelector('span')
-    expect(contentChip?.textContent?.trim()).toBe('Private sensitivity label')
+    const contentChip = cells.at(-1)!.querySelector('span')
+    expect(contentChip?.textContent?.trim()).toBe('Private')
 
     // Exactly three: the variable, the state and the content. A floor (`>= 3`) would still pass if one
     // stopped rendering, because a chip that is not emitted is invisible to the filter that finds them.
     const privateChips = Array.from(document.querySelectorAll('[data-testid="device-dialog"] span'))
-      .filter(node => node.textContent?.trim() === 'Private sensitivity label')
+      .filter(node => node.textContent?.trim() === 'Private')
     expect(privateChips.length, 'a private label stopped rendering').toBe(3)
 
     // Same value, same appearance — asserted as sameness rather than against a fixed role, so the guard
@@ -1502,7 +1590,7 @@ describe('DeviceDialog template authority', () => {
     const wrapper = mountWithManifest(manifest, 'Oven', 'heating;running')
 
     const withEffect = document.querySelector('[data-testid="device-dialog-state-effects-heating;running"]')
-    expect(withEffect?.textContent?.trim()).toBe('ovenJobState: holds cooking')
+    expect(withEffect?.textContent?.trim()).toBe('ovenJobState: Next value: cooking')
     // A state that declares no Dynamics reads as "-", not as an empty cell.
     const withoutEffect = document.querySelector('[data-testid="device-dialog-state-effects-heating;ready"]')
     expect(withoutEffect?.textContent?.trim()).toBe('-')
@@ -1547,7 +1635,7 @@ describe('DeviceDialog template authority', () => {
 
     // Falls through to Value rather than printing an empty rate.
     expect(document.querySelector('[data-testid="device-dialog-state-effects-idle"]')?.textContent?.trim())
-      .toBe('level: holds high')
+      .toBe('level: Next value: high')
 
     const row = document.querySelector('[data-testid="device-dialog-transition-escalate"]')
     const trigger = Array.from(row!.querySelectorAll('td'))[3].textContent?.trim()
@@ -1599,7 +1687,7 @@ describe('DeviceDialog template authority', () => {
     // Even with the flag true, the cell must not claim a falsified *reading* for a value never read.
     // The cell text carries the icon ligature too, as the neighbouring chips do, so match on content.
     const falsifiable = document.querySelector('[data-testid="device-dialog-variable-falsifiable-temperature"]')
-    expect(falsifiable?.textContent).toContain('Label only under attack')
+    expect(falsifiable?.textContent).toContain('Only the source label changes under compromise')
     expect(falsifiable?.textContent).not.toContain('Reading may be falsified')
     wrapper.unmount()
   })
@@ -1681,7 +1769,6 @@ describe('DeviceDialog template authority', () => {
         // mounting already-visible seeds it from the template instead and would not exercise this path.
         visible: false,
         deviceName: 'Car',
-        description: '',
         label: 'My car',
         nodeId: 'car-legacy',
         manifest,
@@ -1725,5 +1812,25 @@ describe('DeviceDialog template authority', () => {
     expect(document.querySelector('[data-testid="device-dialog-states"]')).not.toBeNull()
     expect(document.querySelector('[data-testid="device-dialog-transitions"]')).toBeNull()
     wrapper.unmount()
+  })
+
+  it('explains stateless devices once without suggesting missing state data', () => {
+    const manifest: DeviceManifest = { Name: 'Motion Detector', Modes: [], APIs: [],
+      InternalVariables: [{ Name: 'motion', IsInside: true, Values: ['active', 'inactive'],
+        Trust: 'trusted', Privacy: 'public', FalsifiableWhenCompromised: false }] }
+    const wrapper = mountWithManifest(manifest, 'Motion Detector', 'stateless')
+    try {
+      expect(document.querySelector('[data-testid="device-dialog-stateless"]')?.textContent)
+        .toContain(i18n.global.t('app.noStateMachineDetail'))
+      expect(document.querySelector('[data-testid="device-dialog-states"]')).toBeNull()
+      const basic = document.querySelector('[data-testid="device-dialog-basic"]')!
+      const labels = Array.from(basic.querySelectorAll('td:first-child')).map(cell => cell.textContent?.trim())
+      expect(labels).not.toContain(i18n.global.t('app.modes'))
+      expect(labels).not.toContain(i18n.global.t('app.initState'))
+      expect(labels).not.toContain(i18n.global.t('app.templateInitialState'))
+      expect(document.querySelector('[data-testid="device-dialog-variables"]')).not.toBeNull()
+      const help = wrapper.findAllComponents(InfoTooltip).find(item => item.props('testId') === 'device-runtime-help')!
+      expect(help.props('text')).toBe(i18n.global.t('app.instanceRuntimeHint'))
+    } finally { wrapper.unmount() }
   })
 })

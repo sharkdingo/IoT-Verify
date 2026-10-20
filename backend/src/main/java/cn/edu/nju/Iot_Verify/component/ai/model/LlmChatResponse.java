@@ -1,9 +1,10 @@
 package cn.edu.nju.Iot_Verify.component.ai.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import java.util.List;
 
 /**
- * Provider-agnostic non-streaming chat-completion result.
+ * Provider-agnostic assembled chat-completion result.
  *
  * <p>A response may contain text, tool calls, or both:
  * <ul>
@@ -12,20 +13,29 @@ import java.util.List;
  *   <li>ReAct-capable providers may attach an explicit safe summary separately from the
  *       assistant text. Raw hidden chain-of-thought is never represented here.</li>
  * </ul>
- * An empty/absent choice from the provider maps to {@link #empty()}.
+ * {@link #empty()} represents an intentionally empty result, including cancellation; it must
+ * not hide a failed or incomplete provider response.
  *
  * @param text      assistant text content (never null; empty when no visible summary was returned)
  * @param toolCalls        tool-call requests (never null; empty when the model replied with text)
  * @param reasoningSummary provider-declared user-safe reasoning summary (never null)
+ * @param continuationItems opaque provider state replayed only within the current tool turn;
+ *                          excluded from serialization, history, and diagnostic strings
  */
 public record LlmChatResponse(String text,
                               List<LlmToolCall> toolCalls,
-                              String reasoningSummary) {
+                              String reasoningSummary,
+                              @JsonIgnore List<?> continuationItems) {
 
     public LlmChatResponse {
         text = text == null ? "" : text;
         toolCalls = toolCalls == null ? List.of() : List.copyOf(toolCalls);
         reasoningSummary = reasoningSummary == null ? "" : reasoningSummary;
+        continuationItems = continuationItems == null ? List.of() : List.copyOf(continuationItems);
+    }
+
+    public LlmChatResponse(String text, List<LlmToolCall> toolCalls, String reasoningSummary) {
+        this(text, toolCalls, reasoningSummary, List.of());
     }
 
     public LlmChatResponse(String text, List<LlmToolCall> toolCalls) {
@@ -50,5 +60,11 @@ public record LlmChatResponse(String text,
 
     public boolean hasToolCalls() {
         return toolCalls != null && !toolCalls.isEmpty();
+    }
+
+    @Override
+    public String toString() {
+        return "LlmChatResponse[text=" + text + ", toolCalls=" + toolCalls
+                + ", reasoningSummary=" + reasoningSummary + "]";
     }
 }

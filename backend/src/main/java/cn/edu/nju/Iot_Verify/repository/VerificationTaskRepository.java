@@ -2,10 +2,13 @@ package cn.edu.nju.Iot_Verify.repository;
 
 import cn.edu.nju.Iot_Verify.dto.verification.VerificationOutcome;
 import cn.edu.nju.Iot_Verify.po.VerificationTaskPo;
+import cn.edu.nju.Iot_Verify.repository.projection.VerificationResultProjection;
 import cn.edu.nju.Iot_Verify.dto.model.TaskProgressStage;
 import cn.edu.nju.Iot_Verify.repository.projection.CompletedRunDeletionProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.VerificationTaskSummaryProjection;
+import cn.edu.nju.Iot_Verify.repository.projection.VerificationTaskProgressProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.VerificationRunSummaryProjection;
+import cn.edu.nju.Iot_Verify.repository.projection.VerificationTraceContextProjection;
 import jakarta.persistence.LockModeType;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -26,9 +29,48 @@ import java.util.Optional;
 @Repository
 public interface VerificationTaskRepository extends JpaRepository<VerificationTaskPo, Long>, DatabaseClockRepository {
 
+    // Java 17 whitespace; both casts use the connection collation even for historical TEXT columns.
+    // Connector/J may bind the regex as binary under NO_BACKSLASH_ESCAPES; MySQL 8 regexp rejects that charset.
+    String SMV_NON_BLANK_CHARACTERS = "[^\\x{0009}-\\x{000D}\\x{001C}-\\x{0020}\\x{1680}"
+            + "\\x{2000}-\\x{2006}\\x{2008}-\\x{200A}\\x{2028}\\x{2029}\\x{205F}\\x{3000}]";
+
+    String RESULT_VIEW_SELECT = "SELECT t.id AS id, t.userId AS userId, t.initiator AS initiator, "
+            + "t.status AS status, t.createdAt AS createdAt, t.startedAt AS startedAt, "
+            + "t.completedAt AS completedAt, t.processingTimeMs AS processingTimeMs, "
+            + "t.isAttack AS isAttack, t.attackBudget AS attackBudget, t.enablePrivacy AS enablePrivacy, "
+            + "t.modeledDeviceAttackPointCount AS modeledDeviceAttackPointCount, "
+            + "t.modeledFalsifiableReadingDeviceCount AS modeledFalsifiableReadingDeviceCount, "
+            + "t.modeledAutomationLinkAttackPointCount AS modeledAutomationLinkAttackPointCount, "
+            + "t.modelSnapshotJson AS modelSnapshotJson, t.modelSemanticsJson AS modelSemanticsJson, "
+            + "t.outcome AS outcome, t.violatedSpecCount AS violatedSpecCount, "
+            + "t.disabledRuleCount AS disabledRuleCount, t.skippedSpecCount AS skippedSpecCount, "
+            + "t.generationIssuesJson AS generationIssuesJson, t.specResultsJson AS specResultsJson, "
+            + "t.checkLogsJson AS checkLogsJson, t.nusmvOutput AS nusmvOutput, "
+            + "CASE WHEN t.smvModelContent IS NOT NULL "
+            + "AND FUNCTION('REGEXP_LIKE', CAST(t.smvModelContent AS string), CAST(:nonBlankCharacters AS string)) = true "
+            + "THEN true ELSE false END AS hasSmvModel, "
+            + "t.errorMessage AS errorMessage, t.progress AS progress, t.progressStage AS progressStage "
+            + "FROM VerificationTaskPo t ";
+
+    @Query(RESULT_VIEW_SELECT + "WHERE t.id = :taskId AND t.userId = :userId")
+    Optional<VerificationResultProjection> findResultViewByIdAndUserId(
+            @Param("taskId") Long taskId, @Param("userId") Long userId,
+            @Param("nonBlankCharacters") String nonBlankCharacters);
+
+    @Query(RESULT_VIEW_SELECT + "WHERE t.id = :runId AND t.userId = :userId AND t.status = :status")
+    Optional<VerificationResultProjection> findCompletedResultView(
+            @Param("runId") Long runId, @Param("userId") Long userId,
+            @Param("status") VerificationTaskPo.TaskStatus status,
+            @Param("nonBlankCharacters") String nonBlankCharacters);
+
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("SELECT t FROM VerificationTaskPo t WHERE t.id = :taskId")
     Optional<VerificationTaskPo> findByIdForUpdate(@Param("taskId") Long taskId);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT t FROM VerificationTaskPo t WHERE t.id = :taskId AND t.userId = :userId")
+    Optional<VerificationTaskPo> findByIdAndUserIdForUpdate(
+            @Param("taskId") Long taskId, @Param("userId") Long userId);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("SELECT t FROM VerificationTaskPo t WHERE t.id = :runId "
@@ -55,7 +97,12 @@ public interface VerificationTaskRepository extends JpaRepository<VerificationTa
             @Param("userId") Long userId,
             @Param("status") VerificationTaskPo.TaskStatus status);
 
+    List<VerificationTraceContextProjection> findTraceContextsByUserIdAndIdInAndStatus(
+            Long userId, List<Long> ids, VerificationTaskPo.TaskStatus status);
+
     long countByUserId(Long userId);
+
+    Optional<VerificationTaskProgressProjection> findProgressByIdAndUserId(Long id, Long userId);
 
     long countByUserIdAndStatusIn(Long userId, List<VerificationTaskPo.TaskStatus> statuses);
 
@@ -85,8 +132,10 @@ public interface VerificationTaskRepository extends JpaRepository<VerificationTa
          + "t.violatedSpecCount AS violatedSpecCount, t.disabledRuleCount AS disabledRuleCount, "
          + "t.skippedSpecCount AS skippedSpecCount, "
          + "t.generationIssuesJson AS generationIssuesJson, "
-         + "CASE WHEN t.smvModelContent IS NOT NULL AND t.smvModelContent <> '' "
-         + "THEN TRUE ELSE FALSE END AS hasSmvModel "
+         // The correlated scalar keeps SMV text out of the outer filesort row, including pagination.
+         + "(SELECT CASE WHEN stored.smvModelContent IS NOT NULL AND stored.smvModelContent <> '' "
+         + "THEN TRUE ELSE FALSE END FROM VerificationTaskPo stored "
+         + "WHERE stored.id = t.id AND stored.userId = t.userId) AS hasSmvModel "
          + "FROM VerificationTaskPo t WHERE t.userId = :userId AND t.status = :status "
          + "ORDER BY t.completedAt DESC, t.id DESC")
     List<VerificationRunSummaryProjection> findCompletedRunSummaries(
@@ -265,7 +314,8 @@ public interface VerificationTaskRepository extends JpaRepository<VerificationTa
          + "t.modeledFalsifiableReadingDeviceCount = :falsifiableReadingDeviceCount, "
          + "t.modeledAutomationLinkAttackPointCount = :linkPointCount, "
          + "t.modelSnapshotJson = :modelSnapshotJson, "
-         + "t.modelSemanticsJson = :modelSemanticsJson "
+         + "t.modelSemanticsJson = :modelSemanticsJson, "
+         + "t.requestJson = :requestJson, t.templateSnapshotsJson = :templateSnapshotsJson "
          + "WHERE t.id = :taskId")
     int updateModelContext(@Param("taskId") Long taskId,
                            @Param("isAttack") boolean isAttack,
@@ -275,5 +325,7 @@ public interface VerificationTaskRepository extends JpaRepository<VerificationTa
                            @Param("falsifiableReadingDeviceCount") int falsifiableReadingDeviceCount,
                            @Param("linkPointCount") int linkPointCount,
                            @Param("modelSnapshotJson") String modelSnapshotJson,
-                           @Param("modelSemanticsJson") String modelSemanticsJson);
+                           @Param("modelSemanticsJson") String modelSemanticsJson,
+                           @Param("requestJson") String requestJson,
+                           @Param("templateSnapshotsJson") String templateSnapshotsJson);
 }

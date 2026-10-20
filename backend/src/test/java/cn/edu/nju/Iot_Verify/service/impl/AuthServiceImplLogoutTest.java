@@ -135,7 +135,7 @@ class AuthServiceImplLogoutTest {
 
         when(userService.findByUsername("alice")).thenReturn(Optional.of(user));
         when(passwordEncoder.matches("Pass1234", "encoded")).thenReturn(true);
-        when(jwtUtil.generateToken(7L, "13900000000")).thenReturn("jwt");
+        when(jwtUtil.generateToken(7L, "13900000000", 0L)).thenReturn("jwt");
         when(userMapper.toAuthResponseDto(user, "jwt")).thenReturn(response);
 
         AuthResponseDto result = authService.login(request);
@@ -157,7 +157,7 @@ class AuthServiceImplLogoutTest {
                 .userId(7L).phone("13800138000").username("bob").token("jwt").build();
         when(userService.findByPhone("13800138000")).thenReturn(Optional.of(phoneOwner));
         when(passwordEncoder.matches("PhoneOwnerPass", "phone-password")).thenReturn(true);
-        when(jwtUtil.generateToken(7L, "13800138000")).thenReturn("jwt");
+        when(jwtUtil.generateToken(7L, "13800138000", 0L)).thenReturn("jwt");
         when(userMapper.toAuthResponseDto(phoneOwner, "jwt")).thenReturn(response);
 
         AuthResponseDto result = authService.login(request);
@@ -194,7 +194,7 @@ class AuthServiceImplLogoutTest {
 
         assertThrows(InternalServerException.class, () -> authService.register(request));
 
-        verify(userMapper, never()).toRegisterResponseDto(any());
+        verify(userMapper, never()).toAuthResponseDto(any(), anyString());
     }
 
     @Test
@@ -213,7 +213,7 @@ class AuthServiceImplLogoutTest {
                 InternalServerException.class, () -> authService.register(request));
 
         assertEquals("defaults invalid", error.getMessage());
-        verify(userMapper, never()).toRegisterResponseDto(any());
+        verify(userMapper, never()).toAuthResponseDto(any(), anyString());
     }
 
     // --- 正常登出 ---

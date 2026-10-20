@@ -680,9 +680,12 @@ class ManageSpecToolTest {
         String preview = tool.execute("{\"action\":\"delete\",\"specId\":\"spec-9\",\"confirmed\":true}");
         JsonNode previewJson = new ObjectMapper().readTree(preview);
         assertTrue(previewJson.path("requiresUserConfirmation").asBoolean());
+        assertEquals(previewJson.path("specification").path("description").asText(),
+                destructiveActionGuard.pendingContext(1L, "spec-test-session")
+                        .orElseThrow().displayTarget());
         verify(boardStorageService, never()).removeSpecIfUnchanged(anyLong(), any(), any());
 
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", previewJson.path("impactToken").asText());
         String result = tool.execute("{\"action\":\"delete\",\"specId\":\"spec-9\",\"confirmed\":true,\"impactToken\":\""
                 + previewJson.path("impactToken").asText() + "\"}");
         JsonNode resultJson = new ObjectMapper().readTree(result);

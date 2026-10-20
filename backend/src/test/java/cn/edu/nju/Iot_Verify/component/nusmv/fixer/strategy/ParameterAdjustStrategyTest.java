@@ -32,6 +32,10 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.util.List;
 import java.util.Map;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -44,6 +48,68 @@ class ParameterAdjustStrategyTest {
     @Mock private NusmvExecutor nusmvExecutor;
 
     private ParameterAdjustStrategy strategy;
+
+    @Test
+    void tryFix_redundantTriggersFindsPairBeforeJointSearchWithoutMovingRequiredResponse() throws Exception {
+        List<RuleDto> rules = List.of(30, 31, 40).stream().map(value -> RuleDto.builder()
+                .conditions(List.of(RuleDto.Condition.builder()
+                        .deviceName("sensor_1").attribute("temperature").targetType("variable")
+                        .relation(">=").value(value.toString()).build()))
+                .command(RuleDto.Command.builder().deviceName("ac_1").action("turnOn").build())
+                .build()).toList();
+        DeviceSmvData actuator = new DeviceSmvData();
+        actuator.setVarName("ac_1");
+        Map<String, DeviceSmvData> deviceMap = new LinkedHashMap<>(buildDeviceMap());
+        deviceMap.get("sensor_1").setDeviceLabel("Hall Sensor");
+        deviceMap.put("ac_1", actuator);
+        SpecificationDto spec = new SpecificationDto();
+        spec.setId("s1");
+        spec.setTemplateId("1");
+        FixContext context = FixContext.builder()
+                .faultRules(List.of(FaultRuleDto.builder().ruleIndex(0).build()))
+                .repairRuleIndices(List.of(0, 1, 2)).allRules(rules).devices(List.of()).specs(List.of(spec))
+                .deviceSmvMap(deviceMap).violatedSpecIndex(0).userId(1L)
+                .attackScenario(AttackScenarioDto.none()).maxAttempts(20).build();
+        FixConfig noRefinement = new FixConfig();
+        noRefinement.setMaxRefineAttempts(0);
+        ParameterAdjustStrategy strategy = new ParameterAdjustStrategy(smvGenerator, nusmvExecutor, noRefinement);
+        AtomicReference<ParameterizationConfig> active =
+                new AtomicReference<>();
+        List<Set<String>> searched = new ArrayList<>();
+        when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
+                any(), anyBoolean(), any(ParameterizationConfig.class), any(SmvGenerator.TempModelContext.class)))
+                .thenAnswer(invocation -> {
+                    ParameterizationConfig config = invocation.getArgument(6);
+                    active.set(config);
+                    searched.add(Set.copyOf(config.getParameterizedThresholds().keySet()));
+                    return createGenResult();
+                });
+        lenient().when(smvGenerator.generate(anyLong(), anyList(), anyList(), anyList(),
+                any(), anyBoolean(), any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class)))
+                .thenAnswer(invocation -> {
+                    active.set(null);
+                    return createGenResult();
+                });
+        Set<String> pair = Set.of("r0_c0", "r1_c0");
+        when(nusmvExecutor.executeRepairSearch(any(File.class), anyLong())).thenAnswer(invocation ->
+                active.get() != null && active.get().getParameterizedThresholds().keySet().equals(pair)
+                        ? solverResult(false, "  -> State: 1.1 <-\n    param_r0_c0 = 35\n    param_r1_c0 = 36\n")
+                        : solverResult(true, ""));
+
+        FixStrategy.StrategyOutcome outcome = strategy.tryFix(context);
+
+        assertEquals(1, outcome.suggestions().size(),
+                "The coordinated pair must remain reachable before the larger joint model");
+        List<ParameterAdjustment> adjustments = outcome.suggestions().get(0).getParameterAdjustments();
+        assertEquals(List.of(0, 1), adjustments.stream().map(ParameterAdjustment::getRuleIndex).toList());
+        assertEquals(List.of(1, 2), adjustments.stream().map(ParameterAdjustment::getRulePosition).toList());
+        assertEquals(List.of("Hall Sensor", "Hall Sensor"), adjustments.stream().map(ParameterAdjustment::getDeviceLabel).toList());
+        assertEquals(List.of(1, 2, 3), context.parameterTargetsSnapshot().stream().map(target -> target.getRulePosition()).toList());
+        assertTrue(context.parameterTargetsSnapshot().stream().allMatch(target -> "Hall Sensor".equals(target.getDeviceLabel())));
+        assertEquals(List.of("35", "36"), adjustments.stream().map(ParameterAdjustment::getNewValue).toList());
+        assertTrue(searched.indexOf(pair) < searched.indexOf(Set.of("r0_c0", "r1_c0", "r2_c0")));
+        assertTrue(outcome.alternativesComplete(), "Only the final unrestricted UNSAT settles the search");
+    }
 
     @Test
     void refinementMath_handlesFullIntegerDomainWithoutOverflow() {

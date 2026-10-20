@@ -23,21 +23,25 @@ export function useTimelineRail(options: {
   selectedStateIndex: Ref<number>
   onSelectState: (index: number, focus?: boolean) => void
   testIdPrefix: string
+  visibleRange?: Ref<{ start: number; end: number }>
 }) {
   const { totalStates, selectedStateIndex, onSelectState, testIdPrefix } = options
 
   /**
    * Which state a horizontal position on the rail addresses.
    *
-   * The rail's own 8px end insets are the track's origin and extent, so the ratio is measured
-   * against the same box the fill is drawn in.
+   * CSS reserves half a touch target at each end; marker centres and the progress line use that
+   * same inset. Read the resolved padding so pointer seeking agrees with the rendered rail.
    */
   const stateIndexAtClientX = (track: HTMLElement, clientX: number): number => {
     const rect = track.getBoundingClientRect()
-    const trackLeft = rect.left + 8
-    const trackWidth = Math.max(1, rect.width - 16)
+    const inset = Number.parseFloat(getComputedStyle(track).paddingLeft) || 0
+    const trackLeft = rect.left + inset
+    const trackWidth = Math.max(1, rect.width - inset * 2)
     const ratio = Math.min(1, Math.max(0, (clientX - trackLeft) / trackWidth))
-    return Math.round(ratio * (totalStates.value - 1))
+    const first = options.visibleRange?.value.start ?? 0
+    const last = options.visibleRange?.value.end ?? totalStates.value - 1
+    return first + Math.round(ratio * (last - first))
   }
 
   /**
@@ -52,7 +56,8 @@ export function useTimelineRail(options: {
         `[data-testid="${testIdPrefix}-state-${index}"]`
       )
       if (!button) return
-      button.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' })
+      const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true
+      button.scrollIntoView({ behavior: reducedMotion ? 'auto' : 'smooth', block: 'nearest', inline: 'center' })
       if (focus) {
         button.focus()
       }

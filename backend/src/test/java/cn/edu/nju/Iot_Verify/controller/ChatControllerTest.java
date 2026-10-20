@@ -2,6 +2,9 @@ package cn.edu.nju.Iot_Verify.controller;
 
 import cn.edu.nju.Iot_Verify.configure.ChatExecutionConfig;
 import cn.edu.nju.Iot_Verify.dto.chat.ChatRequestDto;
+import cn.edu.nju.Iot_Verify.dto.chat.ChatConfirmationCommandDto;
+import jakarta.validation.Validation;
+import jakarta.validation.ValidatorFactory;
 import cn.edu.nju.Iot_Verify.dto.chat.ChatTerminalSeenRequestDto;
 import cn.edu.nju.Iot_Verify.dto.chat.ChatStopRequestDto;
 import cn.edu.nju.Iot_Verify.dto.chat.StreamResponseDto;
@@ -65,6 +68,21 @@ class ChatControllerTest {
         controller.markTerminalSeen(1L, "s1", new ChatTerminalSeenRequestDto(42L));
 
         verify(chatService).markTerminalSeen(1L, "s1", 42L);
+    }
+
+    @Test
+    void chatRequest_rejectsKindOnlyConfirmationBeforeAdmission() {
+        ChatRequestDto request = request("s1", "button confirmation");
+        ChatConfirmationCommandDto confirmation = new ChatConfirmationCommandDto();
+        confirmation.setKind(ChatConfirmationCommandDto.Kind.DESTRUCTIVE);
+        confirmation.setAction(ChatConfirmationCommandDto.Action.CONFIRM);
+        request.setConfirmation(confirmation);
+        try (ValidatorFactory factory = Validation.buildDefaultValidatorFactory()) {
+            assertTrue(factory.getValidator().validate(request).stream()
+                    .anyMatch(violation -> violation.getPropertyPath().toString().equals("confirmation.confirmationId")));
+            confirmation.setConfirmationId("preview-1");
+            assertTrue(factory.getValidator().validate(request).isEmpty());
+        }
     }
 
     @Test

@@ -2,6 +2,7 @@ import { type APIRequestContext, type APIResponse, type Page } from '@playwright
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { selectHistoryResultType } from './support/historyFilter'
 import {
   apiBaseURL,
   createAuthenticatedUser,
@@ -377,8 +378,7 @@ const addRuleViaDialog = async (
   expectedRuleCount: number
 ) => {
   await openControlSection(page, 'rules')
-  await page.getByTestId('open-rule-builder').click()
-  await expect(page.getByTestId('rule-builder-dialog')).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByTestId('rule-builder')).toBeVisible({ timeout: 10_000 })
   await page.locator('#rule-builder-name').fill(rule.name)
 
   for (const source of rule.sources) {
@@ -410,7 +410,8 @@ const addRuleViaDialog = async (
     await page.getByTestId('rule-content-name').selectOption(rule.content || '')
   }
   await page.getByTestId('rule-save').click()
-  await expect(page.getByTestId('rule-builder-dialog')).toBeHidden({ timeout: 10_000 })
+  await expect(page.locator('#rule-builder-name')).toHaveValue('', { timeout: 10_000 })
+  await expect(page.getByTestId('rule-builder')).toBeVisible()
 
   return waitForApi<any[]>(request, auth, '/api/board/rules', rules => rules.length === expectedRuleCount)
 }
@@ -607,6 +608,15 @@ const openHistoryPanel = async (page: Page) => {
   await openFloatingPanel(page, 'open-history-panel', 'trace-history-panel')
 }
 
+const openVerificationEvidence = async (page: Page, taskId: number) => {
+  const evidence = page.getByTestId(`run-evidence-verification-${taskId}`)
+  // Returning from playback preserves the history disclosure's reading context.
+  if (await evidence.getAttribute('open') === null) {
+    await evidence.locator('summary').click()
+  }
+  await expect(evidence).toHaveJSProperty('open', true)
+}
+
 // Assert the accessible state rather than a styling class so the check keeps working
 // when the switch's presentation changes.
 const ensureSwitchOn = async (page: Page, testId: string) => {
@@ -628,9 +638,10 @@ const updateNodeLayouts = async (
     const override = overridesByLabel[node.label]
     if (!override) continue
     await unwrap(await request.put(
-      `${apiBaseURL}/api/board/nodes/${encodeURIComponent(node.id)}/layout`,
+      `${apiBaseURL}/api/board/nodes/layout`,
       {
         headers: authHeaders(auth),
+        params: { nodeId: node.id },
         data: {
           position: override.position,
           width: node.width,
@@ -705,85 +716,48 @@ const expectTimelineNavigationAndContext = async (
 ) => {
   const timeline = page.getByTestId(testId)
   await expect(timeline).toBeVisible({ timeout: 30_000 })
-  // Renamed from `${prefix}-timeline-state-details`: the two rails used ids that collided under a shared
-  // suffix convention, and the panel is the step *values*, not the timeline's own details.
-  const stateDetails = page.getByTestId(`${prefix}-step-values`)
-  await expect(stateDetails).toBeVisible({ timeout: 30_000 })
-  // Only simulation-step-values is a <details> element with a clickable <summary>: it holds the device
-  // and environment tables, which are too tall to leave open on this overlay. trace-step-values is a
-  // plain <div>, because it carries only the cause row.
-  if (prefix === 'simulation' && !await stateDetails.evaluate(element => (element as HTMLDetailsElement).open)) {
-    await stateDetails.locator(':scope > summary').click({ force: true })
-  }
-  // The range slider was removed in 32b22e2: it was a second x-axis over the same index as the rail,
-  // which read as "two timelines". The rail took over the drag interaction the slider uniquely provided.
-  // Only simulation-timeline has a testid on its scroll container; trace-timeline's scroll container
-  // has no testid (the track itself is the landmark).
+  await page.getByTestId(`${prefix}-timeline-details-tab`).click()
+  const stateDetails = page.getByTestId('playback-state-details')
+  await expect(stateDetails).toBeVisible()
   if (prefix === 'simulation') {
-    await expect(page.getByTestId(`${prefix}-timeline-scroll`)).toBeVisible()
-  }
-  // Only the simulation rail has a numeric step input. The counterexample rail's was removed: a spin box
-  // asking for an absolute state index is not how anyone reads a counterexample, and the rail itself plus
-  // the range control already move the cursor.
-  if (prefix === 'simulation') {
-    await expect(page.getByTestId(`${prefix}-timeline-step-input`)).toBeVisible()
-  }
-  /*
-   * Only the simulation rail lists environment values; the counterexample rail no longer does.
-   *
-   * Three surfaces were rendering the same per-step state — the canvas nodes, the trace timeline, and the change
-   * popover — and the canvas is the richest of them (value, previous value, `changed` tint, trust, security
-   * pills). So the trace rail's device and environment chips were the weaker copy, and they were the dominant
-   * cost: the overlay's content measured 529px inside a 318px viewport. Removing them, plus moving the
-   * session-scope notice to the header, brought it to 317px with nothing hidden.
-   *
-   * The simulation rail still has its copy, and this assertion still covers it — but that is scope, not a
-   * justification. Simulation playback also writes `highlightedTrace`, so its canvas nodes show the same
-   * per-step state, which makes its env block very likely the same redundancy. It was not measured here, so it
-   * was not removed here; asserting it keeps the existing behaviour pinned until someone measures that rail the
-   * way this one was measured.
-   */
-  if (prefix === 'simulation') {
-    const environment = page.getByTestId(`${prefix}-timeline-env`)
+    const environment = page.getByTestId('playback-state-environment')
     await expect(environment).toBeVisible()
     await expect(environment).toContainText(/temperature|motion/i)
   }
+  await expect(page.getByTestId(`${prefix}-timeline-scroll`)).toBeVisible()
+  await expect(page.getByTestId(`${prefix}-timeline-step-input`)).toBeVisible()
 
   const track = page.getByTestId(`${prefix}-timeline-track`)
-  // The range slider was removed in 32b22e2. State count is now derived from the number of state buttons in
-  // the track (one button per state, created by v-for over states array).
-  const stateCount = await track.locator('button[type="button"]').count()
+  const position = page.getByTestId(`${prefix}-timeline-step-input`)
+  const stateCount = Number(await position.getAttribute('max'))
   if (stateCount > 1) {
+    await track.locator('[aria-current="step"]').press('End')
+    await expect(timeline).toHaveAttribute('data-selected-state-index', String(stateCount - 1))
+    await track.locator('[aria-current="step"]').press('Home')
+    await expect(timeline).toHaveAttribute('data-selected-state-index', '0')
+    const visibleCount = await track.locator('button[type="button"]').count()
+    expect(visibleCount).toBeLessThanOrEqual(32)
     const box = await track.boundingBox()
     expect(box).toBeTruthy()
     await track.click({ position: { x: Math.max(1, (box?.width || 2) - 2), y: Math.max(1, Math.floor((box?.height || 2) / 2)) } })
     await expect.poll(async () => timeline.getAttribute('data-selected-state-index'), {
       timeout: 5_000
-    }).toBe(String(stateCount - 1))
+    }).toBe(String(visibleCount - 1))
   }
 
-  // Move the cursor to the second state (index 1). The range slider is gone; click the second state button.
   if (stateCount > 1) {
-    await track.locator('button[type="button"]').nth(1).click()
+    await position.fill('2')
+    await position.press('Enter')
   }
   await expect.poll(async () => timeline.getAttribute('data-selected-state-index'), {
     timeout: 5_000
   }).toBe('1')
 
-  /*
-   * Which automation produced this state must not sit behind a disclosure, on either rail.
-   *
-   * Stated as containment rather than visibility, because this helper clicks the simulation summary
-   * open further up: after that, `toBeVisible` cannot tell "outside the disclosure" from "inside it and
-   * expanded", so it would pass for the very regression it is meant to catch. `toContainText` is weaker
-   * still — a closed `<details>` keeps its content in the DOM. Containment holds whatever the
-   * expansion state, and it is the actual requirement: the cause is chrome-free, the value tables are
-   * not. Asserted past the initial state because neither rail renders a cause for state 0.
-   */
-  const causeRow = page.getByTestId(`${prefix}-timeline-triggered-rules`)
+  // Execution records have one home in Step changes; Timeline only navigates the path.
+  await expect(page.getByTestId(`${prefix}-timeline-triggered-rules`)).toHaveCount(0)
+  await page.getByTestId(`${prefix}-timeline-changes-tab`).click()
+  const causeRow = page.getByTestId('playback-change-automation')
   await expect(causeRow).toBeVisible({ timeout: 10_000 })
-  // Not "outside step-values": on the counterexample rail the cause lives inside `trace-step-values`,
-  // which is a plain <div>. The requirement is that no ancestor is a disclosure at all.
   await expect(
     await causeRow.evaluate(element => element.closest('details') !== null),
     'the cause of the selected step must not sit behind a disclosure'
@@ -1206,7 +1180,7 @@ test.describe('authority model full-stack audit', () => {
 
     await openHistoryPanel(page)
     await page.getByTestId('history-layer-results').click()
-    await page.getByTestId('history-result-filter-simulation').click()
+    await selectHistoryResultType(page, 'simulation')
     await expect(page.locator('[data-testid^="replay-simulation-trace-"]').first()).toBeVisible({ timeout: 30_000 })
     await page.locator('[data-testid^="replay-simulation-trace-"]').first().click()
     await expect(page.getByTestId('simulation-timeline')).toBeVisible({ timeout: 20_000 })
@@ -1217,7 +1191,8 @@ test.describe('authority model full-stack audit', () => {
     await openHistoryPanel(page)
     await expect(page.getByTestId('history-layer-results')).toBeVisible({ timeout: 10_000 })
     await page.getByTestId('history-layer-results').click()
-    await page.getByTestId('history-result-filter-verification').click()
+    await selectHistoryResultType(page, 'verification')
+    await openVerificationEvidence(page, violatingTrace.verificationTaskId)
     await page.getByTestId(`view-verification-trace-${violatingTrace.id}`).click()
     await expect(page.getByTestId('trace-timeline')).toBeVisible({ timeout: 20_000 })
     await expect(page.getByTestId('trace-timeline-state-0')).toBeVisible()
@@ -1235,7 +1210,8 @@ test.describe('authority model full-stack audit', () => {
 
     await openHistoryPanel(page)
     await page.getByTestId('history-layer-results').click()
-    await page.getByTestId('history-result-filter-verification').click()
+    await selectHistoryResultType(page, 'verification')
+    await openVerificationEvidence(page, violatingTrace.verificationTaskId)
     await expect(page.getByTestId(`fix-verification-trace-${violatingTrace.id}`)).toBeVisible({ timeout: 10_000 })
     await page.getByTestId(`fix-verification-trace-${violatingTrace.id}`).click()
     await expect(page.getByTestId('fix-result-dialog')).toBeVisible({ timeout: 90_000 })
@@ -1655,7 +1631,8 @@ test.describe('authority model full-stack audit', () => {
 
     await openHistoryPanel(page)
     await page.getByTestId('history-layer-results').click()
-    await page.getByTestId('history-result-filter-verification').click()
+    await selectHistoryResultType(page, 'verification')
+    await openVerificationEvidence(page, violatingTrace.verificationTaskId)
     await page.getByTestId(`fix-verification-trace-${violatingTrace.id}`).click()
     await expect(page.getByTestId('fix-result-dialog')).toBeVisible({ timeout: 90_000 })
     await expect(page.getByTestId('fix-strategy-remove')).toBeVisible({ timeout: 120_000 })

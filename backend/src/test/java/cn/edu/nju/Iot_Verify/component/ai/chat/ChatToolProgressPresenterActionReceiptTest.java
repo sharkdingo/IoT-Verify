@@ -5,12 +5,33 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ChatToolProgressPresenterActionReceiptTest {
 
     private final ChatToolProgressPresenter presenter =
             new ChatToolProgressPresenter(new ObjectMapper());
+
+    @Test
+    void ordinaryUsableResultDoesNotRepeatTheSuccessStatus() {
+        assertNull(presenter.toolProgressDetail("list_rules", "{\"count\":0}", true));
+        assertNull(presenter.toolProgressDetail("list_rules", "{\"count\":0}", false));
+    }
+
+    @Test
+    void operationOnlyResultKeepsItsStatusWithoutAddingAnActionSummary() {
+        String result = "{\"operation\":\"deleted\"}";
+
+        assertEquals("工具操作结果：deleted。", presenter.toolProgressDetail("delete_template", result, true));
+        assertEquals("Tool operation result: deleted.", presenter.toolProgressDetail("delete_template", result, false));
+        ChatToolProgressPresenter.ActionReceipt receipt = presenter
+                .actionReceipt("delete_template", result, true)
+                .orElseThrow();
+        assertEquals("TEMPLATES_UPDATED", receipt.assistantAction());
+        assertEquals(java.util.List.of("template_list"), receipt.refreshTargets());
+        assertNull(receipt.summary());
+    }
 
     @Test
     void previewsAndRuleReorderingAreNeverReportedAsDeletion() {
@@ -99,10 +120,11 @@ class ChatToolProgressPresenterActionReceiptTest {
         String unknown = "{\"outcome\":\"SATISFIED\",\"historyPersistence\":{"
                 + "\"status\":\"OUTCOME_UNKNOWN\"}}";
 
-        assertEquals("FORMAL_VERIFICATION_RUN", presenter
+        ChatToolProgressPresenter.ActionReceipt receipt = presenter
                 .actionReceipt("verify_model", saved, true)
-                .orElseThrow()
-                .assistantAction());
+                .orElseThrow();
+        assertEquals("FORMAL_VERIFICATION_RUN", receipt.assistantAction());
+        assertNull(receipt.summary());
         assertTrue(presenter.actionReceipt("verify_model", failed, true).isEmpty());
         assertTrue(presenter.actionReceipt("verify_model", unknown, true).isEmpty());
     }

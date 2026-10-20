@@ -1,0 +1,1238 @@
+{
+  "schema": "iot-verify.board-scene",
+  "version": 5,
+  "templates": [
+    {
+      "name": "Dynamic Motion Sensor",
+      "manifest": {
+        "Name": "Dynamic Motion Sensor",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "motion",
+            "IsInside": false,
+            "Reads": true,
+            "FalsifiableWhenCompromised": false,
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Values": [
+              "detected",
+              "clear"
+            ]
+          }
+        ],
+        "Modes": [],
+        "InitState": "",
+        "WorkingStates": [],
+        "Transitions": [],
+        "APIs": []
+      }
+    },
+    {
+      "name": "Dynamic Light",
+      "manifest": {
+        "Name": "Dynamic Light",
+        "Description": "",
+        "InternalVariables": [],
+        "Modes": [
+          "SwitchState"
+        ],
+        "InitState": "off",
+        "Transitions": [],
+        "WorkingStates": [
+          {
+            "Name": "on",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          },
+          {
+            "Name": "off",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          }
+        ],
+        "APIs": [
+          {
+            "Name": "on",
+            "StartState": "",
+            "EndState": "on",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "off",
+            "StartState": "",
+            "EndState": "off",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ]
+      }
+    },
+    {
+      "name": "Privacy Camera Power",
+      "manifest": {
+        "Name": "Privacy Camera Power",
+        "Description": "",
+        "InternalVariables": [],
+        "Modes": [
+          "SwitchState"
+        ],
+        "InitState": "off",
+        "Transitions": [],
+        "WorkingStates": [
+          {
+            "Name": "on",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          },
+          {
+            "Name": "off",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          }
+        ],
+        "APIs": [
+          {
+            "Name": "on",
+            "StartState": "",
+            "EndState": "on",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "off",
+            "StartState": "",
+            "EndState": "off",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ]
+      }
+    },
+    {
+      "name": "Dynamic Smoke Sensor",
+      "manifest": {
+        "Name": "Dynamic Smoke Sensor",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "smoke",
+            "IsInside": false,
+            "Reads": true,
+            "FalsifiableWhenCompromised": false,
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Values": [
+              "detected",
+              "clear"
+            ]
+          }
+        ],
+        "Modes": [],
+        "InitState": "",
+        "WorkingStates": [],
+        "Transitions": [],
+        "APIs": []
+      }
+    },
+    {
+      "name": "Dynamic Alarm",
+      "manifest": {
+        "Name": "Dynamic Alarm",
+        "Description": "",
+        "InternalVariables": [],
+        "Modes": [
+          "SwitchState"
+        ],
+        "InitState": "off",
+        "Transitions": [],
+        "WorkingStates": [
+          {
+            "Name": "on",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          },
+          {
+            "Name": "off",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          }
+        ],
+        "APIs": [
+          {
+            "Name": "on",
+            "StartState": "",
+            "EndState": "on",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "off",
+            "StartState": "",
+            "EndState": "off",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ]
+      }
+    },
+    {
+      "name": "Salus Ventilation Fan",
+      "manifest": {
+        "Name": "Salus Ventilation Fan",
+        "Description": "Ventilation actuator for the Salus section 5.1 threshold example",
+        "InternalVariables": [
+          {
+            "Name": "CO2",
+            "Description": "Shared kitchen CO2 level",
+            "IsInside": false,
+            "Reads": false,
+            "FalsifiableWhenCompromised": false,
+            "Trust": "untrusted",
+            "Privacy": "public",
+            "LowerBound": 0,
+            "UpperBound": 2500,
+            "NaturalChangeRate": "1"
+          }
+        ],
+        "ImpactedVariables": [
+          "CO2"
+        ],
+        "Modes": [
+          "SwitchState"
+        ],
+        "InitState": "off",
+        "WorkingStates": [
+          {
+            "Name": "on",
+            "Dynamics": [
+              {
+                "VariableName": "CO2",
+                "ChangeRate": "-1"
+              }
+            ],
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public"
+          },
+          {
+            "Name": "off",
+            "Dynamics": [],
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public"
+          }
+        ],
+        "Transitions": [],
+        "APIs": [
+          {
+            "Name": "on",
+            "StartState": "",
+            "EndState": "on",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "off",
+            "StartState": "",
+            "EndState": "off",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ]
+      }
+    },
+    {
+      "name": "Salus CO2 Sensor",
+      "manifest": {
+        "Name": "Salus CO2 Sensor",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "CO2",
+            "Description": "Shared kitchen CO2 level",
+            "IsInside": false,
+            "Reads": true,
+            "FalsifiableWhenCompromised": true,
+            "Trust": "untrusted",
+            "Privacy": "public",
+            "LowerBound": 0,
+            "UpperBound": 2500,
+            "NaturalChangeRate": "1"
+          }
+        ],
+        "Modes": [],
+        "InitState": "",
+        "WorkingStates": [],
+        "Transitions": [],
+        "APIs": []
+      }
+    }
+  ],
+  "environmentVariables": [
+    {
+      "name": "motion",
+      "value": "clear",
+      "trust": "trusted",
+      "privacy": "public"
+    },
+    {
+      "name": "smoke",
+      "value": "clear",
+      "trust": "trusted",
+      "privacy": "public"
+    },
+    {
+      "name": "CO2",
+      "value": "999",
+      "trust": "untrusted",
+      "privacy": "public"
+    }
+  ],
+  "devices": [
+    {
+      "id": "motion_sensor",
+      "templateName": "Dynamic Motion Sensor",
+      "label": "Motion Sensor",
+      "position": {
+        "x": 40,
+        "y": 40
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "entry_light",
+      "templateName": "Dynamic Light",
+      "label": "Entry Light",
+      "position": {
+        "x": 280,
+        "y": 40
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "camera_power",
+      "templateName": "Privacy Camera Power",
+      "label": "Camera Power",
+      "position": {
+        "x": 520,
+        "y": 40
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "relay_a_1",
+      "templateName": "Dynamic Light",
+      "label": "Branch A Relay 1",
+      "position": {
+        "x": 760,
+        "y": 40
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "relay_a_2",
+      "templateName": "Dynamic Light",
+      "label": "Branch A Relay 2",
+      "position": {
+        "x": 1000,
+        "y": 40
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "relay_b_1",
+      "templateName": "Dynamic Light",
+      "label": "Branch B Relay 1",
+      "position": {
+        "x": 40,
+        "y": 220
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "relay_b_2",
+      "templateName": "Dynamic Light",
+      "label": "Branch B Relay 2",
+      "position": {
+        "x": 280,
+        "y": 220
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "path_light_1",
+      "templateName": "Dynamic Light",
+      "label": "Path Light 1",
+      "position": {
+        "x": 520,
+        "y": 220
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "path_light_2",
+      "templateName": "Dynamic Light",
+      "label": "Path Light 2",
+      "position": {
+        "x": 760,
+        "y": 220
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "path_light_3",
+      "templateName": "Dynamic Light",
+      "label": "Path Light 3",
+      "position": {
+        "x": 1000,
+        "y": 220
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "path_light_4",
+      "templateName": "Dynamic Light",
+      "label": "Path Light 4",
+      "position": {
+        "x": 40,
+        "y": 400
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "path_light_5",
+      "templateName": "Dynamic Light",
+      "label": "Path Light 5",
+      "position": {
+        "x": 280,
+        "y": 400
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "path_light_6",
+      "templateName": "Dynamic Light",
+      "label": "Path Light 6",
+      "position": {
+        "x": 520,
+        "y": 400
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "path_light_7",
+      "templateName": "Dynamic Light",
+      "label": "Path Light 7",
+      "position": {
+        "x": 760,
+        "y": 400
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "path_light_8",
+      "templateName": "Dynamic Light",
+      "label": "Path Light 8",
+      "position": {
+        "x": 1000,
+        "y": 400
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "smoke_sensor",
+      "templateName": "Dynamic Smoke Sensor",
+      "label": "Kitchen Smoke Sensor",
+      "position": {
+        "x": 40,
+        "y": 580
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "kitchen_alarm",
+      "templateName": "Dynamic Alarm",
+      "label": "Kitchen Alarm",
+      "position": {
+        "x": 280,
+        "y": 580
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "hall_alarm",
+      "templateName": "Dynamic Alarm",
+      "label": "Hall Alarm",
+      "position": {
+        "x": 520,
+        "y": 580
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "exit_light",
+      "templateName": "Dynamic Light",
+      "label": "Exit Light",
+      "position": {
+        "x": 760,
+        "y": 580
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "fan_1",
+      "templateName": "Salus Ventilation Fan",
+      "label": "Kitchen Ventilation Fan",
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [],
+      "privacies": [],
+      "position": {
+        "x": 1000,
+        "y": 580
+      },
+      "width": 176,
+      "height": 128
+    },
+    {
+      "id": "co2_1",
+      "templateName": "Salus CO2 Sensor",
+      "label": "Kitchen CO2 Sensor",
+      "variables": [],
+      "privacies": [],
+      "position": {
+        "x": 40,
+        "y": 760
+      },
+      "width": 176,
+      "height": 128
+    }
+  ],
+  "rules": [
+    {
+      "name": "Motion turns on the entry light",
+      "sources": [
+        {
+          "fromId": "motion_sensor",
+          "fromApi": "motion",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "detected"
+        }
+      ],
+      "toId": "entry_light",
+      "toApi": "on"
+    },
+    {
+      "name": "Branch A relay 1",
+      "sources": [
+        {
+          "fromId": "entry_light",
+          "fromApi": "SwitchState",
+          "itemType": "mode",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "toId": "relay_a_1",
+      "toApi": "on"
+    },
+    {
+      "name": "Branch A relay 2",
+      "sources": [
+        {
+          "fromId": "relay_a_1",
+          "fromApi": "SwitchState",
+          "itemType": "mode",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "toId": "relay_a_2",
+      "toApi": "on"
+    },
+    {
+      "name": "Branch A powers the privacy camera",
+      "sources": [
+        {
+          "fromId": "relay_a_2",
+          "fromApi": "SwitchState",
+          "itemType": "mode",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "toId": "camera_power",
+      "toApi": "on"
+    },
+    {
+      "name": "Branch B relay 1",
+      "sources": [
+        {
+          "fromId": "entry_light",
+          "fromApi": "SwitchState",
+          "itemType": "mode",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "toId": "relay_b_1",
+      "toApi": "on"
+    },
+    {
+      "name": "Branch B relay 2",
+      "sources": [
+        {
+          "fromId": "relay_b_1",
+          "fromApi": "SwitchState",
+          "itemType": "mode",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "toId": "relay_b_2",
+      "toApi": "on"
+    },
+    {
+      "name": "Branch B powers the privacy camera",
+      "sources": [
+        {
+          "fromId": "relay_b_2",
+          "fromApi": "SwitchState",
+          "itemType": "mode",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "toId": "camera_power",
+      "toApi": "on"
+    },
+    {
+      "name": "Motion lights path 1",
+      "sources": [
+        {
+          "fromId": "motion_sensor",
+          "fromApi": "motion",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "detected"
+        }
+      ],
+      "toId": "path_light_1",
+      "toApi": "on"
+    },
+    {
+      "name": "Motion lights path 2",
+      "sources": [
+        {
+          "fromId": "motion_sensor",
+          "fromApi": "motion",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "detected"
+        }
+      ],
+      "toId": "path_light_2",
+      "toApi": "on"
+    },
+    {
+      "name": "Motion lights path 3",
+      "sources": [
+        {
+          "fromId": "motion_sensor",
+          "fromApi": "motion",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "detected"
+        }
+      ],
+      "toId": "path_light_3",
+      "toApi": "on"
+    },
+    {
+      "name": "Motion lights path 4",
+      "sources": [
+        {
+          "fromId": "motion_sensor",
+          "fromApi": "motion",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "detected"
+        }
+      ],
+      "toId": "path_light_4",
+      "toApi": "on"
+    },
+    {
+      "name": "Motion lights path 5",
+      "sources": [
+        {
+          "fromId": "motion_sensor",
+          "fromApi": "motion",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "detected"
+        }
+      ],
+      "toId": "path_light_5",
+      "toApi": "on"
+    },
+    {
+      "name": "Motion lights path 6",
+      "sources": [
+        {
+          "fromId": "motion_sensor",
+          "fromApi": "motion",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "detected"
+        }
+      ],
+      "toId": "path_light_6",
+      "toApi": "on"
+    },
+    {
+      "name": "Motion lights path 7",
+      "sources": [
+        {
+          "fromId": "motion_sensor",
+          "fromApi": "motion",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "detected"
+        }
+      ],
+      "toId": "path_light_7",
+      "toApi": "on"
+    },
+    {
+      "name": "Motion lights path 8",
+      "sources": [
+        {
+          "fromId": "motion_sensor",
+          "fromApi": "motion",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "detected"
+        }
+      ],
+      "toId": "path_light_8",
+      "toApi": "on"
+    },
+    {
+      "name": "Smoke sounds the kitchen alarm",
+      "sources": [
+        {
+          "fromId": "smoke_sensor",
+          "fromApi": "smoke",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "detected"
+        }
+      ],
+      "toId": "kitchen_alarm",
+      "toApi": "on"
+    },
+    {
+      "name": "Kitchen alarm relays to the hall",
+      "sources": [
+        {
+          "fromId": "kitchen_alarm",
+          "fromApi": "SwitchState",
+          "itemType": "mode",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "toId": "hall_alarm",
+      "toApi": "on"
+    },
+    {
+      "name": "Hall alarm lights the exit",
+      "sources": [
+        {
+          "fromId": "hall_alarm",
+          "fromApi": "SwitchState",
+          "itemType": "mode",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "toId": "exit_light",
+      "toApi": "on"
+    },
+    {
+      "name": "Above 1000 ppm, turn ventilation on",
+      "sources": [
+        {
+          "fromId": "co2_1",
+          "fromApi": "CO2",
+          "itemType": "variable",
+          "relation": ">",
+          "value": "1000"
+        }
+      ],
+      "toId": "fan_1",
+      "toApi": "on"
+    }
+  ],
+  "specs": [
+    {
+      "templateId": "3",
+      "aConditions": [
+        {
+          "deviceId": "camera_power",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "ifConditions": [],
+      "thenConditions": []
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "motion_sensor",
+          "targetType": "variable",
+          "key": "motion",
+          "relation": "=",
+          "value": "detected",
+          "variableSource": "environment"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "entry_light",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "motion_sensor",
+          "targetType": "variable",
+          "key": "motion",
+          "relation": "=",
+          "value": "detected",
+          "variableSource": "environment"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "path_light_1",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "motion_sensor",
+          "targetType": "variable",
+          "key": "motion",
+          "relation": "=",
+          "value": "detected",
+          "variableSource": "environment"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "path_light_2",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "motion_sensor",
+          "targetType": "variable",
+          "key": "motion",
+          "relation": "=",
+          "value": "detected",
+          "variableSource": "environment"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "path_light_3",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "motion_sensor",
+          "targetType": "variable",
+          "key": "motion",
+          "relation": "=",
+          "value": "detected",
+          "variableSource": "environment"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "path_light_4",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "motion_sensor",
+          "targetType": "variable",
+          "key": "motion",
+          "relation": "=",
+          "value": "detected",
+          "variableSource": "environment"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "path_light_5",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "motion_sensor",
+          "targetType": "variable",
+          "key": "motion",
+          "relation": "=",
+          "value": "detected",
+          "variableSource": "environment"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "path_light_6",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "motion_sensor",
+          "targetType": "variable",
+          "key": "motion",
+          "relation": "=",
+          "value": "detected",
+          "variableSource": "environment"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "path_light_7",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "motion_sensor",
+          "targetType": "variable",
+          "key": "motion",
+          "relation": "=",
+          "value": "detected",
+          "variableSource": "environment"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "path_light_8",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "smoke_sensor",
+          "targetType": "variable",
+          "key": "smoke",
+          "relation": "=",
+          "value": "detected",
+          "variableSource": "environment"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "kitchen_alarm",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "kitchen_alarm",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "hall_alarm",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "hall_alarm",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "exit_light",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ]
+    },
+    {
+      "templateId": "3",
+      "aConditions": [
+        {
+          "deviceId": "co2_1",
+          "targetType": "variable",
+          "key": "CO2",
+          "variableSource": "environment",
+          "relation": ">",
+          "value": "1000"
+        }
+      ],
+      "ifConditions": [],
+      "thenConditions": []
+    },
+    {
+      "templateId": "5",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "co2_1",
+          "targetType": "variable",
+          "key": "CO2",
+          "variableSource": "environment",
+          "relation": ">=",
+          "value": "999"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "fan_1",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ]
+    }
+  ]
+}

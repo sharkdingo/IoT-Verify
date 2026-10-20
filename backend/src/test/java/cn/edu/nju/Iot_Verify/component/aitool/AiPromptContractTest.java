@@ -42,15 +42,15 @@ class AiPromptContractTest {
 
     static {
         PROMPT_SOURCES.put("RecommendRulesTool",
-                MAIN.resolve("component/aitool/rule/RecommendRulesTool.java"));
+                MAIN.resolve("service/recommendation/RuleRecommendationService.java"));
         PROMPT_SOURCES.put("RecommendSpecificationsTool",
-                MAIN.resolve("component/aitool/spec/RecommendSpecificationsTool.java"));
+                MAIN.resolve("service/recommendation/SpecificationRecommendationService.java"));
         PROMPT_SOURCES.put("RecommendRelatedDevicesTool",
-                MAIN.resolve("component/aitool/rule/RecommendRelatedDevicesTool.java"));
+                MAIN.resolve("service/recommendation/DeviceRecommendationService.java"));
         PROMPT_SOURCES.put("RecommendScenarioTool",
-                MAIN.resolve("component/aitool/scenario/RecommendScenarioTool.java"));
+                MAIN.resolve("service/recommendation/ScenarioRecommendationService.java"));
         PROMPT_SOURCES.put("CheckRuleSimilarityTool",
-                MAIN.resolve("component/aitool/rule/CheckRuleSimilarityTool.java"));
+                MAIN.resolve("service/recommendation/RuleCheckService.java"));
     }
 
     private static String source(String tool) throws IOException {
@@ -78,6 +78,22 @@ class AiPromptContractTest {
                 tool + ": extracted only " + prompt.length() + " prompt characters — the scan is broken, "
                         + "so a pass proves nothing");
         return prompt;
+    }
+
+    @Test
+    void deviceRecommendationsDoNotInventIndependentSharedInputs() throws IOException {
+        String prompt = systemPrompt("RecommendRelatedDevicesTool");
+
+        assertTrue(prompt.contains("deviceLocal=false 的同名变量")
+                        && prompt.contains("共享同一个 Environment Pool 值"),
+                "the model must know that shared variable names identify one scene value");
+        assertTrue(prompt.contains("标签、位置和建议部署区域不能产生独立的分区读数"),
+                "moving or renaming an instance must not be presented as a new sensor input");
+        assertTrue(prompt.contains("可以推荐同模板的多个实例")
+                        && prompt.contains("独立状态、本地变量或 API"),
+                "same-template instances remain valid when their modeled capabilities add value");
+        assertFalse(prompt.contains("例如 Bedroom Motion Sensor 和 Hallway Motion Sensor"),
+                "the prompt must not encourage room independence for the shared motion input");
     }
 
     /* ------------------------------------------------------------------ (e) skeletons parse as JSON */
@@ -453,6 +469,16 @@ class AiPromptContractTest {
         SCENARIO_WARNINGS.put("unreachableRuleConditions", "经 capabilities 的 Transitions 与已声明 API 到达");
         SCENARIO_WARNINGS.put("invalidSpecTemplateId", "\"templateId\": \"1|2|3|4|5|6|7\"");
         SCENARIO_WARNINGS.put("invalidSpecConditions", "规约条件只能使用 state、mode、variable、api、trust、privacy");
+        SCENARIO_WARNINGS.put("conditionDeviceMissing", "规则和规约必须引用同一个 devices 列表里的设备实例 id");
+        SCENARIO_WARNINGS.put("conditionTargetUnsupported", "规约条件只能使用 state、mode、variable、api、trust、privacy");
+        SCENARIO_WARNINGS.put("conditionPropertyScopeMissing", "只有 trust/privacy 条件填写 propertyScope=state|variable");
+        SCENARIO_WARNINGS.put("conditionUnexpectedPropertyScope", "其他条件必须省略不适用的 propertyScope/variableSource");
+        SCENARIO_WARNINGS.put("conditionVariableSourceMissing", "只有 variable 条件填写 variableSource=environment|reported");
+        SCENARIO_WARNINGS.put("conditionEnvironmentSourceInvalid", "deviceLocal=false 且 reads=true");
+        SCENARIO_WARNINGS.put("conditionUnexpectedVariableSource", "其他条件必须省略不适用的 propertyScope/variableSource");
+        SCENARIO_WARNINGS.put("conditionComparisonMissing", "非 API 条件必须给出 relation/value");
+        SCENARIO_WARNINGS.put("conditionRelationUnsupported", "relation 只能使用 =、!=、<、<=、>、>=、in、not in");
+        SCENARIO_WARNINGS.put("conditionCapabilityMismatch", "字段名与取值必须符合该设备 capabilities");
         SCENARIO_WARNINGS.put("invalidSpecShape",
                 "每个 condition: {deviceId, targetType, key, propertyScope?, variableSource?, relation?, value?}");
         SCENARIO_WARNINGS.put("contradictorySpecConditionGroup", "每个规约的 A、IF、THEN 条件数组也必须各自可同时满足");

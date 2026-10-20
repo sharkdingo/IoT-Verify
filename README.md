@@ -26,7 +26,7 @@ fix suggestions when a specification is violated.
   each candidate re-verified before it is offered.
 - **Attack simulation** and **interactive simulation** (random N-step traces).
 - **AI assistant** — any OpenAI-compatible LLM endpoint with SSE-streamed final replies
-  and 53 built-in tools; device / rule / specification recommendations, confirmed
+  and [built-in tools](docs/api/ai-tools.md); device / rule / specification recommendations, confirmed
   atomic application of a generated full-scene draft, and confirmed bundled-template reset.
 - **Bilingual UI** — full zh-CN / en internationalization.
 
@@ -34,7 +34,7 @@ fix suggestions when a specification is violated.
 
 - **Backend**: Java 17, Spring Boot 3.5.7, Spring Security + JWT, Spring Data JPA,
   MySQL, Redis, NuSMV 2.6–2.7, OpenAI Java SDK (any OpenAI-compatible endpoint).
-- **Frontend**: Vue 3 + TypeScript, Vite, Tailwind CSS, Ant Design Vue, Element Plus,
+- **Frontend**: Vue 3 + TypeScript, Vite, Tailwind CSS, Element Plus, Ant Design icons,
   Vue Router, Vue I18n.
 
 ## Quick start

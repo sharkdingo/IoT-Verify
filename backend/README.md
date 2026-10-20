@@ -24,37 +24,9 @@ Tests: `mvn test`.
 
 ## Package layout
 
-Base package `cn.edu.nju.Iot_Verify` (entry point `IotVerifyApplication`):
-
-```
-controller/       REST controllers (Result<T> wrapper)
-service/impl/     business logic
-component/
-  nusmv/
-    generator/    SMV model generation
-    executor/     NusmvExecutor — subprocess exec, semaphore concurrency, timeout
-    parser/       SmvTraceParser — counterexample parsing
-    fixer/        fault localization + parameter/condition/permanent-removal fix strategies
-  fuzz/           deterministic bounded path search + finite safety monitor
-  aitool/         the 53 AI tools (board/node/rule/scenario/spec/template/simulation/verification/fuzz)
-  ai/             LLM abstraction — LlmProvider (OpenAiLlmProvider) + facades
-dto/ po/ repository/   DTOs, JPA entities, repositories
-security/         JWT + Spring Security
-configure/        config, thread pools, ProductionSafetyCheck
-exception/        exception hierarchy + GlobalExceptionHandler
-util/             utilities
-resources/
-  application.yaml              main config (env-var overridable)
-  device-template-schema.json   packaged copy of ../device-template-schema.json
-  deviceTemplate/               default device template JSON
-```
-
-`backend/device-template-schema.json` is the canonical device-template manifest schema.
-REST imports, AI `add_template`, and default-template initialization validate raw
-manifests against it before DTO and NuSMV-specific validation.
-
-Detailed package/architecture notes:
-[docs/architecture/overview.md](../docs/architecture/overview.md).
+The base package is `cn.edu.nju.Iot_Verify`; the entry point is `IotVerifyApplication`.
+See the [architecture overview](../docs/architecture/overview.md#backend-package-layout)
+for packages and the canonical template-schema location.
 
 ## Documentation
 

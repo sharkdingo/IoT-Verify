@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest'
  * Both icon families must stay installed, declared, and mutually fallback-safe.
  *
  * The project deliberately uses two Material families — `material-symbols-outlined` (370 uses) and
- * `material-icons-round` (47, confined to `DeviceDialog`, `RuleBuilderDialog` and `Board`). That is a choice, not
+ * `material-icons-round` (47, confined to `DeviceDialog`, `RuleBuilder` and `Board`). That is a choice, not
  * drift: both are installed via fontsource, both classes declare an explicit `font-family`, and **each lists the other
  * as its fallback**.
  *

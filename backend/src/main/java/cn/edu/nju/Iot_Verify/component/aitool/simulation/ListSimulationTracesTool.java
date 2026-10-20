@@ -40,7 +40,9 @@ public class ListSimulationTracesTool extends AbstractAiTool {
                 "object", Collections.emptyMap(), Collections.emptyList()
         );
 
-        return LlmToolSpec.of(getName(), "List all saved simulation traces for the current user.", schema);
+        return LlmToolSpec.of(getName(), "List saved simulation run summaries for the current user. "
+                + "Simulation does not check specifications; modelSnapshot.specificationCount is the run's "
+                + "scope, not the saved Board's specification count. Use get_simulation_trace for state changes.", schema);
     }
 
     @Override
@@ -92,7 +94,10 @@ public class ListSimulationTracesTool extends AbstractAiTool {
 
             return readOnlySuccessJson(Map.of(
                     "message", "Found " + traces.size() + " saved model-trace simulation run(s); "
-                            + unavailableCount + " unavailable due to stored-data errors.",
+                            + unavailableCount + " unavailable due to stored-data errors. "
+                            + "Simulation does not check specifications. modelSnapshot.specificationCount "
+                            + "describes the simulation model, not whether the saved Board has specifications. "
+                            + "These summaries contain no state sequence; read get_simulation_trace before explaining state changes.",
                     "count", traces.size(),
                     "availableCount", traces.size() - unavailableCount,
                     "unavailableCount", unavailableCount,

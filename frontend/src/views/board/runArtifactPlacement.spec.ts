@@ -29,21 +29,18 @@ describe('run artifact placement', () => {
   const history = readFileSync(join(root, 'components/TraceHistoryPanel.vue'), 'utf8')
   const boardApi = readFileSync(join(root, 'api/board.ts'), 'utf8')
 
-  /** A dialog's markup, sliced by the testids that bound it. */
-  const block = (startId: string, endId: string) => {
-    const start = board.indexOf(`data-testid="${startId}"`)
-    expect(start, `${startId} should exist`).toBeGreaterThan(-1)
-    const end = board.indexOf(`data-testid="${endId}"`, start)
-    expect(end, `${endId} should follow ${startId}`).toBeGreaterThan(start)
+  const verificationDialog = () => {
+    const start = board.indexOf('data-testid="verification-result-dialog"')
+    const end = board.indexOf('<PlaybackTerminal', start)
+    expect(start).toBeGreaterThan(-1)
+    expect(end).toBeGreaterThan(start)
     return board.slice(start, end)
   }
-
-  const verificationDialog = () => block('verification-result-dialog', 'trace-details-dialog')
-  const counterexampleDialog = () => {
-    const start = board.indexOf('data-testid="trace-details-dialog"')
+  const counterexampleRunInfo = () => {
+    const start = board.indexOf('data-testid="counterexample-run-info"')
     expect(start).toBeGreaterThan(-1)
-    const end = board.indexOf('board-timeline-host--trace', start)
-    expect(end, 'the replay bar should follow the dialog').toBeGreaterThan(start)
+    const end = board.indexOf('<SimulationTimeline', start)
+    expect(end, 'simulation replay should follow counterexample replay').toBeGreaterThan(start)
     return board.slice(start, end)
   }
 
@@ -80,6 +77,16 @@ describe('run artifact placement', () => {
     }
   })
 
+  it('shows counterexample actions and requirement outcomes before the downloadable model', () => {
+    const dialog = verificationDialog()
+    const positions = ['verification-trace-replay', 'spec-results-section', 'verification-run-artifact', 'run-context-section']
+      .map(id => dialog.indexOf(`data-testid="${id}"`))
+    positions.forEach(position => expect(position).toBeGreaterThan(-1))
+    expect(positions[0]).toBeLessThan(positions[2]!)
+    expect(positions[1]).toBeLessThan(positions[2]!)
+    expect(positions[2]).toBeLessThan(positions[3]!)
+  })
+
   it('disables the download with a reason instead of hiding it', () => {
     // A control that silently vanishes is indistinguishable from a missing feature — which is exactly
     // how this feature read while the flag was never sent. Absence is now stated.
@@ -108,7 +115,7 @@ describe('run artifact placement', () => {
     // whole time under a different name, which is also what a screen reader reads out.
     const listAt = board.indexOf('data-testid="verification-trace-fix"')
     expect(listAt, 'the counterexample action row should exist').toBeGreaterThan(-1)
-    const row = board.slice(listAt, board.indexOf('</div>', board.indexOf('app.view', listAt)))
+    const row = board.slice(listAt, board.indexOf('</div>', board.indexOf('app.replay', listAt)))
     const icons = [...row.matchAll(/<span class="material-symbols-outlined[^"]*"([^>]*)>/g)]
     expect(icons.length, 'both action buttons carry an icon').toBeGreaterThanOrEqual(2)
     for (const [, attributes] of icons) {
@@ -117,39 +124,9 @@ describe('run artifact placement', () => {
     }
   })
 
-  it('carries the artifact fields on every path that builds a simulation result', () => {
-    /*
-     * Whether the download is offered must depend on the run, not on which UI path opened it.
-     *
-     * `lastSimulationResult` has three writers — sync save, async poll, and history replay — and the
-     * history one dropped `hasSmvModel` and `historyPersistence`. So the same trajectory offered the
-     * model right after executing and then claimed "SMV model not available (may be a record saved
-     * before model persistence was enabled)" after a refresh and History → Replay → Run details. The
-     * message is specific enough to be believed, so a user would not retry, while the model sat on disk.
-     *
-     * Neither existing check could see it: the assertion above only proves the availability computed
-     * exists, and `e2e/smv-model-download.spec.ts` exercises a freshly executed run. This asserts the
-     * shape at every construction site instead — the same defect class as the original bug, where a
-     * field the backend sent was dropped by one builder among several.
-     */
-    /*
-     * Anchored on `playbackScene: trace.playbackScene`, the line every one of these builders ends its
-     * trace-derived fields with, rather than on `const result = {`. The three sit at different nesting
-     * depths and only one is a `const` declaration, so a syntax-shaped match found 1 of 3 — a check
-     * that would have passed the very defect it exists to catch.
-     */
-    const anchors = [...board.matchAll(/playbackScene:\s*trace\.playbackScene/g)].map(m => m.index ?? 0)
-    expect(anchors.length, 'the sync, async and history simulation builders').toBeGreaterThanOrEqual(3)
-
-    for (const [index, at] of anchors.entries()) {
-      // The object literal's remaining fields: from the anchor to the closing brace of the literal.
-      const tail = board.slice(at, at + 1400)
-      const body = tail.slice(0, tail.search(/\n\s{0,10}\}/) + 1)
-      expect(body, `simulation result builder #${index + 1} must carry the model-presence flag`)
-        .toContain('hasSmvModel')
-      expect(body, `builder #${index + 1} must carry the record that supplies the download id`)
-        .toContain('historyPersistence')
-    }
+  it('uses the shared result projection on sync, async and history simulation paths', () => {
+    expect([...board.matchAll(/simulationResultFromTrace\(trace\)/g)]).toHaveLength(3)
+    expect([...board.matchAll(/summarizeSimulationResult\(result\)/g)]).toHaveLength(2)
   })
 
   it('resolves the run id in a handler rather than asserting it non-null in the template', () => {
@@ -174,14 +151,13 @@ describe('run artifact placement', () => {
   })
 
   it('applies the same shape to the simulation result', () => {
-    // Two dialogs teaching one shape: a reader who learns where the artifact lives in one finds it in
-    // the other. The simulation download was also a footer secondary button.
+    // Simulations retain an explicit run-level download after removing their details dialog.
     const at = board.indexOf('data-testid="simulation-run-artifact"')
     expect(at, 'the simulation artifact section should exist').toBeGreaterThan(-1)
     const downloadAt = board.indexOf('data-testid="simulation-result-download-smv"')
     expect(downloadAt, 'the simulation download should exist').toBeGreaterThan(-1)
     const element = board.slice(board.lastIndexOf('<button', downloadAt), board.indexOf('</button>', downloadAt))
-    expect(element, 'primary here too').toContain('iot-dialog-btn--primary')
+    expect(element, 'an explicit download action in the terminal').toContain('playback-run__download')
     expect(element, 'disabled with a reason here too')
       .toContain(':disabled="!simulationRunSmvAvailable"')
     const guardAt = board.indexOf('const simulationRunSmvAvailable')
@@ -189,12 +165,12 @@ describe('run artifact placement', () => {
   })
 
   it('keeps run-level artifacts out of counterexample surfaces', () => {
-    // The rule this whole spec exists for. Asserted on the dialog *and* on the history panel's
+    // The rule this whole spec exists for. Asserted on run information and on the history panel's
     // per-trace row, because the same category error appeared in both.
-    const dialog = counterexampleDialog()
-    expect(dialog, 'no artifact download in the counterexample dialog')
+    const runInfo = counterexampleRunInfo()
+    expect(runInfo, 'no artifact download in counterexample run information')
       .not.toContain('download-counterexample-smv')
-    expect(dialog, 'and no trace-keyed download call').not.toContain('downloadVerificationTraceSmv')
+    expect(runInfo, 'and no trace-keyed download call').not.toContain('downloadVerificationTraceSmv')
 
     expect(history, 'no per-counterexample download row in history')
       .not.toContain('download-verification-trace-smv')

@@ -70,7 +70,6 @@ const i18n = createI18n({
           on: 'Enabled'
         },
         resetDefaultTemplates: 'Reset defaults',
-        resetDefaultTemplatesShort: 'Reset',
         resetDefaultTemplatesTitle: 'Reset default templates?',
         resetDefaultTemplatesMessage: 'Review the exact impact.',
         resetDefaultTemplatesImpactSummary: '{types}/{devices}/{variables}',

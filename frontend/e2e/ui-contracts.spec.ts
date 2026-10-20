@@ -1,5 +1,6 @@
-import { type Page, type Route } from '@playwright/test'
-import { expect, test, type AuthUser } from './support/auth'
+import { type APIRequestContext, type Locator, type Page, type Route } from '@playwright/test'
+import { createAuthenticatedUser, expect, test, type AuthUser } from './support/auth'
+import { clickUnderTooltip, dismissHintTooltips } from './support/tooltips'
 
 /**
  * Covers the routing, session, and accessibility contracts that unit tests can only
@@ -26,6 +27,358 @@ const openBoard = async (page: Page, auth: AuthUser) => {
   await seedSession(page, auth, { iot_verify_theme: 'light' })
   await page.goto('/#/board')
   await expect(page.locator('.iot-board')).toBeVisible({ timeout: 60_000 })
+}
+
+const openLayoutTestBoard = async (page: Page, request: APIRequestContext) => {
+  // Layout mutations need an isolated account and hydrated panels before interaction.
+  const auth = await createAuthenticatedUser(request, { usernamePrefix: 'panelUi' })
+  const layoutReady = page.waitForResponse(response =>
+    response.request().method() === 'GET' && new URL(response.url()).pathname === '/api/board/layout'
+  )
+  await openBoard(page, auth)
+  expect((await layoutReady).ok()).toBe(true)
+  await expect(page.getByTestId('control-center')).toHaveClass(/is-expanded/)
+  await expect(page.getByTestId('system-inspector')).toHaveClass(/is-expanded/)
+}
+
+for (const { width, theme } of [{ width: 1440, theme: 'light' }, { width: 375, theme: 'dark' }, { width: 320, theme: 'light' }]) {
+  test(`keeps auxiliary controls readable and reachable at ${width}px in ${theme}`, async ({ page, sharedReadOnlyAccount: auth }) => {
+    await page.setViewportSize({ width, height: 900 })
+    await seedSession(page, auth, { iot_verify_theme: theme })
+    await page.goto('/#/board')
+    const inspector = page.getByTestId('system-inspector')
+    await expect(inspector).toBeVisible({ timeout: 60_000 })
+    const control = page.getByTestId('control-center')
+    const collapseControl = control.getByRole('button', { name: 'Collapse Control Center', exact: true })
+    if (await collapseControl.isVisible()) await collapseControl.click()
+    const expandInspector = inspector.getByRole('button', { name: 'Expand System Inspector', exact: true })
+    if (await expandInspector.isVisible()) await expandInspector.click()
+    await page.getByTestId('inspector-tab-devices').click()
+    const search = page.getByTestId('inspector-search-devices')
+    await search.fill('test')
+    const clear = inspector.getByRole('button', { name: 'Clear search', exact: true })
+    await expect.poll(() => clear.evaluate(element => element.getBoundingClientRect().width)).toBeGreaterThanOrEqual(44)
+    await search.press('Tab')
+    await expect(clear).toBeFocused()
+    await expect(clear).toHaveCSS('outline-width', '2px')
+    await page.keyboard.press('Enter')
+    await expect(search).toHaveValue('')
+    await inspector.getByRole('button', { name: 'Collapse System Inspector', exact: true }).click()
+    const restoreDock = page.getByTestId('restore-action-dock')
+    if (await restoreDock.isVisible()) await restoreDock.click()
+    await clickUnderTooltip(page, page.getByTestId('open-simulation-panel'))
+    const steps = page.getByTestId('simulation-steps-input')
+    await steps.fill(await steps.getAttribute('min') ?? '1')
+    await steps.press('Tab')
+    const decrease = page.getByTestId('simulation-steps-decrease')
+    await expect(decrease).toBeDisabled()
+    await expect(decrease).toHaveCSS('opacity', '1')
+    await expect.poll(() => decrease.evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44)
+    const disabledBackground = await decrease.evaluate(element => {
+      const probe = document.createElement('span')
+      probe.style.color = 'var(--surface-muted)'
+      document.body.append(probe)
+      const color = getComputedStyle(probe).color
+      probe.remove()
+      return color
+    })
+    await expect(decrease).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)')
+    await expect.poll(() => decrease.evaluate(element => getComputedStyle(element, '::before').backgroundColor)).toBe(disabledBackground)
+    await decrease.hover()
+    await expect.poll(() => decrease.evaluate(element => getComputedStyle(element, '::before').backgroundColor)).toBe(disabledBackground)
+    await page.getByTestId('simulation-steps-increase').focus()
+    await page.keyboard.press('Enter')
+    await expect(decrease).toBeEnabled()
+    const unavailableSwitch = page.getByTestId('simulation-attack-toggle')
+    await expect(unavailableSwitch).toBeDisabled()
+    await expect(unavailableSwitch).toHaveCSS('opacity', '1')
+    await expect.poll(() => unavailableSwitch.evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44)
+    const switchControl = page.getByTestId('simulation-privacy-toggle')
+    await expect(switchControl).toBeEnabled()
+    await expect.poll(() => switchControl.evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44)
+    await switchControl.focus()
+    await expect(switchControl).toBeFocused()
+    await expect(switchControl).toHaveCSS('outline-width', '2px')
+    const switchState = await switchControl.getAttribute('aria-checked')
+    await page.keyboard.press('Space')
+    await expect(switchControl).toHaveAttribute('aria-checked', switchState === 'true' ? 'false' : 'true')
+    await page.getByTestId('close-simulation-panel').click()
+    await page.goto('/#/account')
+    await expect(page.getByTestId('account-username-value')).toBeVisible()
+    await page.getByTestId('account-edit-password').click()
+    const password = page.locator('#account-current-password')
+    await expect(password).toHaveCSS('font-size', '14px')
+    await expect(page.locator('label[for="account-current-password"]')).toHaveCSS('font-size', '13px')
+    await password.focus()
+    await expect(password).toHaveCSS('outline-width', '2px')
+    await expect(page.getByTestId('account-save-password')).toBeDisabled()
+    await expect(page.getByTestId('account-save-password')).toHaveCSS('opacity', '1')
+    const newPassword = page.locator('#account-new-password')
+    await newPassword.fill('short')
+    await expect(newPassword).toHaveAttribute('aria-invalid', 'true')
+    await expect.poll(() => newPassword.evaluate(element => {
+      const probe = document.createElement('span')
+      probe.style.color = 'var(--danger-border)'
+      document.body.append(probe)
+      const expected = getComputedStyle(probe).color
+      probe.remove()
+      return getComputedStyle(element).borderTopColor === expected
+    })).toBe(true)
+    await expect(page.locator('#account-new-password-hint')).toHaveCSS('font-size', '12px')
+    await password.fill('Password123')
+    await expect(page.locator('#account-password-blocked')).toHaveCount(0)
+    await expect(page.getByTestId('account-save-password')).toHaveAttribute('aria-describedby', 'account-password-impact account-new-password-hint')
+    expect(await page.getByTestId('account-page').evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
+    await page.getByTestId('account-cancel-password').click()
+  })
+}
+
+test('uses consistent Chinese creation wording on a narrow control center', async ({ page, sharedReadOnlyAccount: auth }) => {
+  await page.setViewportSize({ width: 320, height: 900 })
+  await seedSession(page, auth, { locale: 'zh-CN', iot_verify_theme: 'dark' })
+  await page.goto('/#/board')
+  const inspector = page.getByTestId('system-inspector')
+  const collapseInspector = inspector.getByRole('button', { name: '收起系统检查器', exact: true })
+  if (await collapseInspector.isVisible()) await collapseInspector.click()
+  const control = page.getByTestId('control-center')
+  await expect(control).toBeVisible({ timeout: 60_000 })
+  const expand = control.getByRole('button', { name: '展开控制中心', exact: true })
+  if (await expand.isVisible()) await expand.click()
+  await page.getByTestId('control-tab-templates').click()
+  const format = page.getByTestId('control-template-create').getByRole('button', { name: '下载格式定义', exact: true })
+  const formatHelp = page.getByTestId('template-format-help')
+  await format.scrollIntoViewIfNeeded()
+  await formatHelp.focus()
+  await expect(page.getByRole('tooltip')).toContainText('JSON Schema')
+  expect(await format.evaluate(element => {
+    const box = element.getBoundingClientRect()
+    return [0.5, 2, 8].every(inset =>
+      document.elementFromPoint(box.right - inset, box.top + box.height / 2)?.closest('button') === element)
+  }), 'template format help leaves the whole download button clickable').toBe(true)
+  await formatHelp.press('Tab')
+  for (const [section, heading] of [['devices', '创建设备'], ['rules', '创建规则'], ['specs', '创建规约']]) {
+    await page.getByTestId(`control-tab-${section}`).click()
+    const panel = page.getByTestId(`control-section-${section}`)
+    await expect(panel.locator('.board-section-title').first()).toHaveText(heading)
+    expect(await panel.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
+  }
+})
+
+test('updates the selected field label when its option text changes without changing the value', async ({ page, request }) => {
+  await openLayoutTestBoard(page, request)
+  const control = page.getByTestId('control-center')
+  const expand = control.getByRole('button', { name: 'Expand Control Center', exact: true })
+  if (await expand.isVisible()) await expand.click()
+  await page.getByTestId('control-tab-devices').click()
+  const template = page.getByTestId('single-device-template')
+  await expect(template).toBeEnabled()
+  await template.selectOption('Light')
+  await page.getByTestId('single-device-runtime-toggle').click()
+  const trust = page.getByTestId('single-device-state-trust')
+  const label = trust.locator('selectedcontent')
+  await expect(trust).toHaveValue('')
+  await expect(label).toHaveText('Use template default (Trusted)')
+
+  await clickUnderTooltip(page, page.getByRole('button', { name: '切换到中文', exact: true }))
+  await expect(trust.locator('option:checked')).toHaveText('使用模板默认值（可信）')
+  await expect(label).toHaveText('使用模板默认值（可信）')
+  await expect(trust).toHaveValue('')
+
+  await clickUnderTooltip(page, page.getByRole('button', { name: 'Switch to English', exact: true }))
+  await expect(label).toHaveText('Use template default (Trusted)')
+  await expect(trust).toHaveValue('')
+})
+
+for (const { theme, palette, width } of [
+  { theme: 'light', palette: 'copper', width: 1440 },
+  { theme: 'dark', palette: 'copper', width: 1440 },
+  { theme: 'light', palette: 'monochrome', width: 375 },
+  { theme: 'dark', palette: 'monochrome', width: 375 }
+]) {
+  test(`keeps workspace form typography consistent at ${width}px in ${palette} ${theme}`, async ({ page, sharedReadOnlyAccount: auth }) => {
+    await page.setViewportSize({ width, height: 900 })
+    await seedSession(page, auth, { iot_verify_theme: theme, iot_verify_palette: palette })
+    await page.goto('/#/board')
+    const control = page.getByTestId('control-center')
+    const inspector = page.getByTestId('system-inspector')
+    await expect(control).toBeVisible({ timeout: 60_000 })
+    await expect(page.locator('html')).toHaveAttribute('data-theme', theme)
+    await expect(page.locator('html')).toHaveAttribute('data-palette', palette)
+
+    const exportSceneAndCheckMessage = async () => {
+      const menu = page.locator('details.scene-actions-menu')
+      if (width < 640) await menu.locator('summary').click()
+      const exportButton = width < 640 ? menu.getByRole('button', { name: 'Export Scene', exact: true })
+        : page.getByTestId('scene-export')
+      const download = page.waitForEvent('download')
+      await clickUnderTooltip(page, exportButton)
+      await download
+      const message = page.locator('.el-message__content').filter({ hasText: /Scene JSON download requested/ })
+      await expect(message).toBeVisible()
+      await expect(message).toHaveCSS('font-size', '14px')
+      await expect(message).toHaveCSS('font-weight', '400')
+      await expect(message).toHaveCSS('line-height', '22.4px')
+      const toast = message.locator('..')
+      await expect(toast).toHaveCSS('pointer-events', 'none')
+      await expect(toast).toHaveCSS('border-radius', '14px')
+      await expect(toast).toHaveCSS('padding', '8px 14px')
+      // The transition starts on the next frame; visibility alone can precede its resting position.
+      await expect.poll(() => toast.evaluate(element => {
+        const box = element.getBoundingClientRect()
+        const nav = document.querySelector('.board-nav-bar')!.getBoundingClientRect()
+        return { insideViewport: box.left >= 16 && box.right <= window.innerWidth - 16,
+          centered: Math.abs(box.left + box.width / 2 - window.innerWidth / 2) < 0.5,
+          belowNav: box.top >= nav.bottom, textFits: element.scrollWidth <= element.clientWidth }
+      })).toEqual({ insideViewport: true, centered: true, belowNav: true, textFits: true })
+      if (width < 640) await expect(menu.locator('summary')).toHaveAttribute('aria-expanded', 'false')
+      await expect(toast).toHaveCount(0, { timeout: 10_000 })
+    }
+
+    // Feedback must look the same before and after opening lazy-loaded assistant controls.
+    await exportSceneAndCheckMessage()
+    const expectField = async (field: Locator) => {
+      await expect(field).toBeVisible()
+      await expect(field).toHaveCSS('font-size', '14px')
+      await expect(field).toHaveCSS('font-weight', '400')
+      await expect(field).toHaveCSS('box-shadow', 'none')
+      await expect.poll(() => field.evaluate(element => {
+        const box = element.getBoundingClientRect()
+        const style = getComputedStyle(element)
+        return box.height >= 44 && parseFloat(style.borderTopWidth) > 0
+          && parseFloat(style.borderTopWidth) <= 1
+      })).toBe(true)
+    }
+    const expectAction = async (action: Locator) => {
+      await expect(action).toHaveCSS('font-size', '14px')
+      await expect(action).toHaveCSS('font-weight', '600')
+      await expect(action).toHaveCSS('text-transform', 'none')
+      await expect.poll(() => action.evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44)
+    }
+
+    if (width < 768) {
+      const collapse = inspector.getByRole('button', { name: 'Collapse System Inspector', exact: true })
+      if (await collapse.isVisible()) await collapse.click()
+    } else {
+      const expand = inspector.getByRole('button', { name: 'Expand System Inspector', exact: true })
+      if (await expand.isVisible()) await expand.click()
+      await page.getByTestId('inspector-tab-devices').click()
+      await expectField(page.getByTestId('inspector-search-devices'))
+      await expect(inspector.getByRole('heading', { level: 2 })).toHaveCSS('font-size', '16px')
+    }
+    const expand = control.getByRole('button', { name: 'Expand Control Center', exact: true })
+    if (await expand.isVisible()) await expand.click()
+    await expect(control.getByRole('heading', { level: 2 })).toHaveCSS('font-size', '16px')
+
+    for (const section of ['templates', 'devices', 'rules', 'specs'] as const) {
+      await page.getByTestId(`control-tab-${section}`).click()
+      const panel = page.getByTestId(`control-section-${section}`)
+      await expect(panel).toBeVisible()
+      await expect(panel.locator('.board-section-title').first()).toHaveCSS('font-size', '14px')
+      await expect(panel.locator('.board-section-title').first()).toHaveText({
+        templates: 'Import template', devices: 'Create device', rules: 'Create rule', specs: 'Create specification'
+      }[section]!)
+      if (section === 'templates') {
+        await expectField(panel.getByRole('searchbox', { name: /^Search templates/ }))
+      } else {
+        for (const label of await panel.locator('label').all()) {
+          if (await label.isVisible()) await expect(label).toHaveCSS('font-size', '13px')
+        }
+        const field = section === 'devices' ? panel.getByTestId('single-device-name')
+          : section === 'rules' ? panel.locator('#rule-builder-name') : panel.getByTestId('spec-template-select')
+        await expectField(field)
+        if (section === 'devices') {
+          await expectField(panel.getByTestId('single-device-template'))
+          await expectAction(panel.getByTestId('single-device-create'))
+          await expect(panel.getByTestId('single-device-create')).toHaveAccessibleName('Create device')
+          await field.focus()
+          await expect(field).toHaveCSS('outline-style', 'solid')
+          await expect(field).toHaveCSS('outline-width', '2px')
+        } else if (section === 'rules') {
+          await expectField(panel.locator('#rule-target-device'))
+          await expectAction(panel.getByTestId('rule-reset'))
+          await expectAction(panel.getByTestId('rule-save'))
+        } else {
+          await expectAction(panel.getByTestId('spec-create'))
+        }
+      }
+      expect(await panel.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
+    }
+
+    if (width < 768) await control.getByRole('button', { name: 'Collapse Control Center', exact: true }).click()
+    const restoreDock = page.getByTestId('restore-action-dock')
+    if (await restoreDock.isVisible()) await restoreDock.click()
+    await page.getByTestId('open-fuzzing-panel').hover()
+    const hint = page.locator('.iot-info-tooltip-popper:not([aria-hidden="true"])')
+    await expect(hint).toHaveCount(1)
+    await expect(hint).toHaveCSS('font-size', '13px')
+    await expect(hint).toHaveCSS('font-weight', '400')
+    await expect(hint).toHaveCSS('border-radius', '8px')
+    expect(await hint.evaluate(element => getComputedStyle(element).backgroundColor)).not.toMatch(/rgba\(0, 0, 0, 0\)|transparent/)
+    await dismissHintTooltips(page)
+    await page.getByTestId('open-fuzzing-panel').focus()
+    await page.keyboard.press('Enter')
+    const fuzzing = page.getByTestId('fuzzing-panel')
+    await expect(fuzzing.getByRole('heading', { level: 3 })).toHaveCSS('font-size', '16px')
+    await expectField(fuzzing.getByTestId('fuzz-max-iterations'))
+    await expectField(fuzzing.getByTestId('fuzz-path-length'))
+    await expectAction(fuzzing.getByTestId('run-fuzzing'))
+    expect(await fuzzing.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
+    await clickUnderTooltip(page, page.getByTestId('close-fuzzing-panel'))
+
+    for (const kind of ['scenario', 'rule', 'device', 'spec']) {
+      await clickUnderTooltip(page, page.getByTestId(`open-${kind}-recommendations`))
+      const panel = page.getByTestId(`${kind}-recommendation-panel`)
+      await expect(panel).toBeVisible()
+      await expect(panel.getByRole('heading', { level: 3 })).toHaveCSS('font-size', '16px')
+      await expectField(panel.locator('input[type="number"]').first())
+      await expect(panel.locator('label').first()).toHaveCSS('font-size', '13px')
+      const generateId = kind === 'scenario' ? 'generate-scenario-recommendation' : `generate-${kind}-recommendations`
+      await expectAction(panel.getByTestId(generateId))
+      expect(await panel.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
+      await dismissHintTooltips(page)
+      await panel.getByTestId(`${kind}-recommendation-help`).focus()
+      const explanation = page.locator('.iot-info-tooltip-popper:not([aria-hidden="true"])')
+      await expect(explanation).toHaveCount(1)
+      await expect(explanation).toBeVisible()
+      expect(await explanation.evaluate(element => {
+        const rect = element.getBoundingClientRect()
+        return element.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2))
+      })).toBe(true)
+      await panel.getByTestId(`${kind}-recommendation-help`).press('Tab')
+      await expect(panel.locator('textarea')).toBeFocused()
+      await clickUnderTooltip(page, page.getByTestId(`close-${kind}-recommendations`))
+    }
+
+    await clickUnderTooltip(page, page.locator('.ai-assistant-btn'))
+    const chat = page.getByTestId('chat-panel')
+    await expect(chat).toBeVisible()
+    await expect(chat.locator('.header-title')).toHaveCSS('font-size', '16px')
+    await expect(chat.locator('.header-title')).toHaveCSS('font-weight', '600')
+    await expect(chat.getByTestId('chat-input')).toHaveCSS('font-size', '14px')
+    await chat.getByTestId('chat-sidebar-toggle').click()
+    await expectAction(chat.getByRole('button', { name: 'New Chat', exact: true }))
+    await chat.getByTestId('chat-sidebar-scrim').click()
+    await page.getByTestId('chat-close').click()
+    await expect(chat).toBeHidden()
+    await dismissHintTooltips(page)
+
+    await exportSceneAndCheckMessage()
+
+    if (width < 640) {
+      await page.locator('details.scene-actions-menu summary').click()
+      await page.getByTestId('nav-overflow-account').click()
+    } else {
+      await clickUnderTooltip(page, page.getByTestId('open-account-center'))
+    }
+    await page.getByTestId('open-account-delete').click()
+    const accountDialog = page.getByTestId('account-delete-dialog')
+    await expect(accountDialog).toBeVisible()
+    await expect(accountDialog.locator('.iot-dialog__title')).toHaveCSS('font-size', '16px')
+    await expect(accountDialog.locator('.iot-dialog__title')).toHaveCSS('font-weight', '600')
+    await expectField(accountDialog.getByTestId('account-delete-password'))
+    await expectAction(accountDialog.getByTestId('account-delete-cancel'))
+    await accountDialog.getByTestId('account-delete-cancel').click()
+  })
 }
 
 // Every test here is read-only with respect to account state, so they all share the
@@ -119,28 +472,31 @@ test.describe('routing and session', () => {
 })
 
 test.describe('theme control', () => {
-  test('cycles light, dark, and follow-system, persisting only explicit choices', async ({ page, sharedReadOnlyAccount: auth }) => {
+  test('chooses light, dark, and follow-system, persisting only explicit choices', async ({ page, sharedReadOnlyAccount: auth }) => {
     await openBoard(page, auth)
 
-    // Two toggles exist in the nav bar, and only ever one is visible: the compact one on the bar, and a
-    // full-size one inside the phone-only overflow group (`.nav-overflow-only`, `display: none` above 420px)
-    // that exists because at 320px the assistant and Log Out were unreachable. `.visible` picks whichever the
-    // current viewport actually renders, rather than asserting a single-element DOM that is not the contract.
+    // Select the preference control rendered by the current viewport; its overflow counterpart is hidden.
     const toggle = page.locator('.board-nav-bar .theme-toggle:visible')
     const storedTheme = () => page.evaluate(() => window.localStorage.getItem('iot_verify_theme'))
 
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
 
     await toggle.click()
+    const appearance = page.getByRole('region', { name: 'Appearance' })
+    await expect(appearance).toBeVisible()
+    await expect(appearance.locator('legend').first()).toHaveCSS('font-size', '13px')
+    await expect(appearance.locator('[data-theme-mode="light"]')).toHaveCSS('font-size', '14px')
+    await expect(appearance.locator('[data-theme-mode="light"]')).toHaveCSS('font-weight', '600')
+    await appearance.locator('[data-theme-mode="dark"]').click()
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
     expect(await storedTheme()).toBe('dark')
 
     // Third state: following the OS clears the stored override entirely.
-    await toggle.click()
+    await appearance.locator('[data-theme-mode="system"]').click()
     expect(await storedTheme()).toBeNull()
-    await expect(toggle).toHaveAccessibleName(/follow system/i)
+    await expect(toggle).toHaveAccessibleName(/Appearance: System/i)
 
-    await toggle.click()
+    await appearance.locator('[data-theme-mode="light"]').click()
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
     expect(await storedTheme()).toBe('light')
   })
@@ -200,8 +556,8 @@ test.describe('board accessibility contracts', () => {
     await expect(page.getByTestId('open-verification-panel')).toBeFocused()
   })
 
-  test('drives both side panel tab strips from the keyboard', async ({ page, sharedReadOnlyAccount: auth }) => {
-    await openBoard(page, auth)
+  test('drives both side panel tab strips from the keyboard', async ({ page, request }) => {
+    await openLayoutTestBoard(page, request)
 
     const controlTemplates = page.getByTestId('control-tab-templates')
     await controlTemplates.click()
@@ -222,24 +578,46 @@ test.describe('board accessibility contracts', () => {
     const inspectorRules = page.getByTestId('inspector-tab-rules')
     await expect(inspectorRules).toHaveAttribute('aria-selected', 'true')
     await expect(inspectorRules).toBeFocused()
+    await inspectorRules.press('End')
+    const inspectorEnvironment = page.getByTestId('inspector-tab-environment')
+    await expect(inspectorEnvironment).toHaveAttribute('aria-selected', 'true')
+    await expect(inspectorEnvironment).toBeFocused()
+    await expect(page.getByTestId('inspector-section-environment')).toHaveAttribute('role', 'tabpanel')
+    await inspectorEnvironment.press('ArrowRight')
+    await expect(inspectorDevices).toHaveAttribute('aria-selected', 'true')
+    await expect(inspectorDevices).toBeFocused()
   })
 
-  test('locks background scroll while a real modal is open', async ({ page, sharedReadOnlyAccount: auth }) => {
-    await openBoard(page, auth)
+  test('keeps rule creation inline without locking the canvas or discarding drafts', async ({ page, request }) => {
+    await openLayoutTestBoard(page, request)
 
     const bodyOverflow = () => page.evaluate(() => document.body.style.overflow)
     expect(await bodyOverflow()).not.toBe('hidden')
 
     await page.getByTestId('control-tab-rules').click()
     await expect(page.getByTestId('control-section-rules')).toBeVisible()
-    await page.getByTestId('open-rule-builder').click()
+    const editor = page.getByTestId('control-section-rules').getByTestId('rule-builder')
+    await expect(editor).toBeVisible()
+    await editor.getByTestId('rule-conditions-help').focus()
+    const help = page.locator('.iot-info-tooltip-popper:not([aria-hidden="true"])')
+    await expect(help).toBeVisible()
+    await expect(help).toContainText('All conditions must hold together')
+    await editor.locator('#rule-builder-name').fill('Inline draft')
     const dialog = page.locator('[role="dialog"][aria-modal="true"]')
-    await expect(dialog.first()).toBeVisible()
-    expect(await bodyOverflow()).toBe('hidden')
-
-    await page.keyboard.press('Escape')
     await expect(dialog).toHaveCount(0)
     expect(await bodyOverflow()).not.toBe('hidden')
+    await page.getByTestId('control-tab-devices').click()
+    await expect(editor).toBeHidden()
+    await page.getByTestId('control-tab-rules').click()
+    await expect(editor.locator('#rule-builder-name')).toHaveValue('Inline draft')
+    const toggle = page.getByTestId('control-center').getByRole('button', { name: 'Collapse Control Center', exact: true })
+    await toggle.click()
+    await expect(editor).toBeHidden()
+    await page.getByTestId('control-center').getByRole('button', { name: 'Expand Control Center', exact: true }).click()
+    await expect(editor.locator('#rule-builder-name')).toHaveValue('Inline draft')
+    await expect(editor.locator('#rule-builder-name')).toBeEditable()
+    await editor.getByTestId('rule-reset').click()
+    await expect(editor.locator('#rule-builder-name')).toHaveValue('')
   })
 
   test('gives every board control an accessible name', async ({ page, sharedReadOnlyAccount: auth }) => {

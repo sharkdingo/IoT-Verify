@@ -10,5 +10,9 @@ import java.util.List;
 public class ChatPendingConfirmationDto {
     String sessionId;
     @Builder.Default
-    List<ChatConfirmationCommandDto.Kind> kinds = List.of();
+    List<Action> actions = List.of();
+
+    public record Action(ChatConfirmationCommandDto.Kind kind, String confirmationId,
+                         String toolName, String target) {
+    }
 }

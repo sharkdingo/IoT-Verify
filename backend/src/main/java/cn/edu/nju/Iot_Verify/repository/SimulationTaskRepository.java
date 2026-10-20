@@ -3,6 +3,7 @@ package cn.edu.nju.Iot_Verify.repository;
 import cn.edu.nju.Iot_Verify.po.SimulationTaskPo;
 import cn.edu.nju.Iot_Verify.dto.model.TaskProgressStage;
 import cn.edu.nju.Iot_Verify.repository.projection.SimulationTaskSummaryProjection;
+import cn.edu.nju.Iot_Verify.repository.projection.SimulationTaskProgressProjection;
 import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
@@ -23,11 +24,18 @@ public interface SimulationTaskRepository extends JpaRepository<SimulationTaskPo
     @Query("SELECT t FROM SimulationTaskPo t WHERE t.id = :taskId")
     Optional<SimulationTaskPo> findByIdForUpdate(@Param("taskId") Long taskId);
 
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT t FROM SimulationTaskPo t WHERE t.id = :taskId AND t.userId = :userId")
+    Optional<SimulationTaskPo> findByIdAndUserIdForUpdate(
+            @Param("taskId") Long taskId, @Param("userId") Long userId);
+
     long countByUserId(Long userId);
 
     long countByUserIdAndStatusIn(Long userId, List<SimulationTaskPo.TaskStatus> statuses);
 
     Optional<SimulationTaskPo> findByIdAndUserId(Long id, Long userId);
+
+    Optional<SimulationTaskProgressProjection> findProgressByIdAndUserId(Long id, Long userId);
 
     @Transactional
     @Modifying(clearAutomatically = true, flushAutomatically = true)

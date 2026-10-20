@@ -1,6 +1,11 @@
 <script setup lang="ts">
+import FieldSelect from '@/components/common/FieldSelect.vue'
 import HintTooltip from '@/components/common/HintTooltip.vue'
-import { ref, reactive, computed, onBeforeUnmount, onMounted, useAttrs, watch } from 'vue'
+import RuleBuilder from '@/components/RuleBuilder.vue'
+import deviceImportJsonTemplateUrl from '@/assets/examples/device-list-template.json?url&no-inline'
+import deviceImportCsvTemplateUrl from '@/assets/examples/device-list-template.csv?url&no-inline'
+import type { RuleForm } from '@/types/rule'
+import { ref, reactive, computed, nextTick, onBeforeUnmount, onMounted, useAttrs, watch } from 'vue'
 import { 
   specTemplateDetails, 
   relationOperators, 
@@ -33,9 +38,12 @@ import {
   templateVariableHasEnumValues,
   templateVariableUsesNumericBounds,
   validateDeviceRuntimeConfig,
+  validateTemplateVariableValue,
+  validateNumericConditionValue,
   type DeviceRuntimeConfig
 } from '@/utils/deviceRuntime'
-import { buildSpecFormula, isSpecConditionVariableSourceUnresolved, specFormulaKindFromTemplate } from '@/utils/spec'
+import { describeSpecification, specConditionPropertyLabel, specConditionValueLabel } from '@/utils/modelPresentation'
+import { buildSpecFormula, buildSpecFormulaPreview, isSpecConditionVariableSourceUnresolved } from '@/utils/spec'
 import {
   mergeSourcedEnvironmentPatches,
   type EnvironmentPatchConflict
@@ -50,20 +58,28 @@ import boardApi, {
 import type { ModelEnvironmentVariable } from '@/types/model'
 import type { ModelTokenSource } from '@/types/modelToken'
 import { deviceLabelKey, reserveUniqueDeviceLabel } from '@/utils/canvas/nodeCreate'
-import { localizedErrorMessage } from '@/utils/userMessage'
+import { errorDetails, localizedErrorMessage } from '@/utils/userMessage'
+import { diagnoseJsonParseError } from '@/utils/jsonParseDiagnostics'
+import { DEVICE_IMPORT_TEMPLATE_ALIASES, DEVICE_IMPORT_NAME_ALIASES, parseDeviceImportCsv,
+  decodeDeviceImportFile, DeviceImportEncodingError, type DeviceImportEncoding,
+  type DeviceImportInputRow } from '@/utils/deviceListImport'
 import { useModalAccessibility } from '@/composables/useModalAccessibility'
 import { REQUEST_LIMITS } from '@/constants/requestLimits'
 import { COLLAPSED_PANEL_RAIL_CSS } from '@/constants/boardLayout'
 import { formatBuiltInModelToken } from '@/utils/modelTokenDisplay'
-import { notifyBlocked, notifyError, notifySuccess } from '@/utils/feedback'
+import { dismissCompletionNotifications, notifyBlocked, notifyError, notifySuccess } from '@/utils/feedback'
 import { useRovingTablist } from '@/composables/useRovingTablist'
 import InfoTooltip from '@/components/common/InfoTooltip.vue'
+import FailureDetails from '@/components/FailureDetails.vue'
+import { useAuth } from '@/stores/auth'
+import type { ApiErrorDetails } from '@/utils/userMessage'
 
 defineOptions({ inheritAttrs: false })
 const attrs = useAttrs()
 
 // Element-Plus typings vary by version; we use an `any` alias to keep runtime behavior (e.g. `center`) without TS errors.
 const { t, locale } = useI18n()
+const { state: authState, getToken, isCurrentSessionToken } = useAuth()
 
 const targetTypeLabelKeys: Record<string, string> = {
   state: 'app.state',
@@ -102,6 +118,8 @@ const props = withDefaults(defineProps<Props>(), {
   deviceTemplates: () => [],
   nodes: () => [],
   width: 320,
+  // Vue otherwise casts an absent Boolean prop to false and treats it as controlled.
+  collapsed: undefined,
   templatesLoading: false,
   readOnly: false
 })
@@ -129,7 +147,7 @@ type DeviceCreateItem = {
   runtime?: DeviceRuntimeConfig
 }
 
-type MutationCompletion = (saved: boolean) => void
+type MutationCompletion = (saved: boolean, failure?: ApiErrorDetails) => void
 
 type DeviceCreateItemsPayload = {
   items: DeviceCreateItem[]
@@ -142,7 +160,7 @@ const emit = defineEmits<{
   'create-devices': [data: DeviceCreateItemsPayload]
   'template-drag-start': [templateName: string]
   'template-drag-end': []
-  'open-rule-builder': []
+  'save-rule': [request: { rule: RuleForm; complete: MutationCompletion }]
   'add-spec': [data: {
     templateId: string,
     templateType: string,
@@ -175,32 +193,72 @@ const deviceForm = reactive({
 
 const singleDeviceRuntime = reactive(createDeviceRuntimeDraft())
 const creatingSingleDevice = ref(false)
+const singleDeviceSaveFailure = ref<ApiErrorDetails | null>(null)
+const singleDeviceSaveFailureElement = ref<HTMLElement | null>(null)
+const singleDeviceSaveActionElement = ref<HTMLElement | null>(null)
+let singleDeviceSaveVersion = 0
+watch([deviceForm, singleDeviceRuntime], () => {
+  singleDeviceSaveVersion += 1
+  singleDeviceSaveFailure.value = null
+}, { deep: true, flush: 'sync' })
 const creatingMultipleDevices = ref(false)
 const creatingSpecification = ref(false)
 
 const deviceCreateMode = ref<DeviceCreateMode>('single')
+watch(deviceCreateMode, () => {
+  singleDeviceSaveVersion += 1
+  singleDeviceSaveFailure.value = null
+}, { flush: 'sync' })
 const batchDeviceForm = reactive({
   type: '',
   prefix: '',
   count: 3
 })
-const importDeviceForm = reactive({
-  text: ''
+type DeviceImportFormat = 'json' | 'csv'
+const deviceImportFormat = ref<DeviceImportFormat>('json')
+const deviceImportSource = ref<'file' | 'paste'>('file')
+const deviceImportCsvEncoding = ref<DeviceImportEncoding>('utf-8')
+const deviceImportFormats = {
+  json: { label: 'JSON', extension: '.json', templateUrl: deviceImportJsonTemplateUrl,
+    summaryKey: 'app.deviceImportJsonSummary', helpKey: 'app.deviceImportJsonHint' },
+  csv: { label: 'CSV', extension: '.csv', templateUrl: deviceImportCsvTemplateUrl,
+    summaryKey: 'app.deviceImportCsvSummary', helpKey: 'app.deviceImportCsvHint' }
+} as const
+const selectedDeviceImportFormat = computed(() => deviceImportFormats[deviceImportFormat.value])
+const deviceImportDrafts = reactive({
+  json: { file: '', paste: '', fileName: '' },
+  csv: { file: '', paste: '', fileName: '' }
 })
+const selectedDeviceImportDraft = computed(() => deviceImportDrafts[deviceImportFormat.value])
+const importDeviceText = computed({
+  get: () => selectedDeviceImportDraft.value[deviceImportSource.value],
+  set: (text: string) => { selectedDeviceImportDraft.value[deviceImportSource.value] = text }
+})
+const deviceImportFileFailure = ref<ApiErrorDetails | 'encoding' | null>(null)
+const deviceImportFileInput = ref<HTMLInputElement | null>(null)
+let deviceImportReadVersion = 0
 
 // Debounced import text for performance optimization (avoids re-parsing on every keystroke)
 const debouncedImportText = ref('')
 let importTextDebounceTimer: ReturnType<typeof setTimeout> | null = null
 const IMPORT_TEXT_DEBOUNCE_MS = 300
 
-watch(() => importDeviceForm.text, (newText) => {
+watch([deviceImportFormat, importDeviceText, deviceImportCsvEncoding, deviceImportSource], ([format, newText, encoding, source], previous) => {
+  deviceImportReadVersion += 1
+  deviceImportFileFailure.value = null
   if (importTextDebounceTimer) {
     clearTimeout(importTextDebounceTimer)
+    importTextDebounceTimer = null
+  }
+  // Restore the active source immediately; abandoned file reads cannot replace another draft.
+  if (format !== previous[0] || encoding !== previous[2] || source !== previous[3]) {
+    debouncedImportText.value = newText
+    return
   }
   importTextDebounceTimer = setTimeout(() => {
     debouncedImportText.value = newText
   }, IMPORT_TEXT_DEBOUNCE_MS)
-}, { immediate: true })
+}, { immediate: true, flush: 'sync' })
 
 /**
  * Replace the import text and its parsed view in one tick.
@@ -213,12 +271,19 @@ watch(() => importDeviceForm.text, (newText) => {
  * `import_phone_1`/`import_alarm_1` devices where the CSV's own devices were expected.
  */
 const setImportTextImmediately = (text: string) => {
+  importDeviceText.value = text
   if (importTextDebounceTimer) {
     clearTimeout(importTextDebounceTimer)
     importTextDebounceTimer = null
   }
-  importDeviceForm.text = text
   debouncedImportText.value = text
+}
+
+const clearDeviceImportFile = () => {
+  deviceImportReadVersion += 1
+  deviceImportFileFailure.value = null
+  selectedDeviceImportDraft.value.fileName = ''
+  setImportTextImmediately('')
 }
 
 onBeforeUnmount(() => {
@@ -261,6 +326,29 @@ const selectedDeviceManifest = computed(() => selectedDeviceTemplate.value?.mani
 
 const selectedWorkingStates = computed(() => getTemplateWorkingStates(selectedDeviceTemplate.value))
 const selectedInternalVariables = computed(() => getTemplateLocalVariables(selectedDeviceTemplate.value))
+const singleDeviceValueFailures = computed(() => Object.fromEntries(selectedInternalVariables.value.flatMap(variable => {
+  const value = String(singleDeviceRuntime.variables[variable.Name] ?? '').trim()
+  if (!value || templateVariableIsStateDerived(selectedDeviceTemplate.value, variable.Name)) return []
+  const reason = validateTemplateVariableValue(variable, value, t)
+  return reason ? [[variable.Name, reason]] : []
+})))
+
+const singleDeviceBlockedReason = computed(() => {
+  if (props.templatesLoading) return t('app.loadingDeviceTemplates')
+  if (!selectedDeviceTemplate.value) return t('app.selectDeviceTemplate')
+  if (!deviceForm.name.trim()) return t('app.enterDeviceName')
+  if (singleDeviceNameConflict.value) return t('app.deviceNameAlreadyExists')
+  if (Object.keys(singleDeviceValueFailures.value).length) return t('app.correctDeviceInitialValues')
+  return ''
+})
+
+const revealSingleDeviceValueFailure = async (event: Event, name: string) => {
+  const input = event.currentTarget as HTMLInputElement
+  await nextTick()
+  if (document.activeElement !== input || !singleDeviceValueFailures.value[name]) return
+  // Focusing a field near the panel edge can leave its newly rendered error clipped below it.
+  input.closest('label')?.querySelector<HTMLElement>('[role="alert"]')?.scrollIntoView({ block: 'nearest' })
+}
 
 const selectedTemplateHasModes = computed(() => {
   const manifest = selectedDeviceManifest.value
@@ -305,24 +393,17 @@ type DeviceImportRow = {
   environmentVariables?: ModelEnvironmentVariable[]
   error?: string
   warning?: string
+  diagnostics?: ApiErrorDetails
 }
 
-const DEVICE_IMPORT_TEMPLATE_KEYS = new Set(['template', 'templatename', 'type'])
 const MAX_DEVICE_IMPORT_BYTES = 4 * 1024 * 1024
 const MAX_TEMPLATE_IMPORT_BYTES = 512 * 1024
-const DEVICE_IMPORT_NAME_KEYS = new Set(['name', 'label', 'devicename'])
-const DEVICE_IMPORT_TEMPLATE_ALIASES = ['template', 'templateName', 'type'] as const
-const DEVICE_IMPORT_NAME_ALIASES = ['name', 'label', 'deviceName'] as const
 const DEVICE_IMPORT_JSON_KEYS = new Set([
-  'template', 'templateName', 'type',
-  'name', 'label', 'deviceName',
+  ...DEVICE_IMPORT_TEMPLATE_ALIASES, ...DEVICE_IMPORT_NAME_ALIASES,
   'state', 'currentStateTrust', 'currentStatePrivacy', 'variables', 'privacies'
 ])
 const DEVICE_IMPORT_VARIABLE_KEYS = new Set(['name', 'value', 'trust'])
 const DEVICE_IMPORT_PRIVACY_KEYS = new Set(['name', 'privacy'])
-
-const normalizeImportKey = (value: string) =>
-  normalizeName(value).toLowerCase().replace(/[\s_-]/g, '')
 
 const findUnknownImportField = (value: Record<string, unknown>, allowed: Set<string>) =>
   Object.keys(value).find(key => !allowed.has(key))
@@ -430,6 +511,9 @@ const parseImportedRuntime = (item: any, source: string): { runtime?: DeviceRunt
       const value = parsedValue.value
       const trust = parsedTrust.value.toLowerCase()
       if (!name || !value) {
+        if (deviceImportFormat.value === 'csv' && name) {
+          return { error: t('app.deviceImportCsvVariableValueRequired', { name }) }
+        }
         return { error: t('app.deviceImportRuntimeNameValueRequired', { source, field: `variables[${index}]` }) }
       }
       if (variable.trust !== undefined && variable.trust !== null && !trust) {
@@ -518,45 +602,6 @@ const splitImportedRuntime = (
   }
 }
 
-const parseCsvImportLine = (line: string): { columns: string[]; error?: string } => {
-  const columns: string[] = []
-  let current = ''
-  let quoted = false
-
-  for (let i = 0; i < line.length; i += 1) {
-    const char = line[i]
-    if (char === '"') {
-      if (quoted && line[i + 1] === '"') {
-        current += '"'
-        i += 1
-      } else {
-        quoted = !quoted
-      }
-      continue
-    }
-
-    if (!quoted && (char === ',' || char === '\t')) {
-      columns.push(current.trim())
-      current = ''
-      continue
-    }
-
-    current += char
-  }
-
-  if (quoted) {
-    return { columns: [], error: t('app.deviceImportCsvQuoteError') }
-  }
-
-  columns.push(current.trim())
-  return { columns }
-}
-
-const isDeviceImportHeader = (columns: string[]) =>
-  columns.length >= 2
-  && DEVICE_IMPORT_TEMPLATE_KEYS.has(normalizeImportKey(columns[0]))
-  && DEVICE_IMPORT_NAME_KEYS.has(normalizeImportKey(columns[1]))
-
 // Template search and filter
 const templateSearchQuery = ref('')
 const templateFilterType = ref('all')
@@ -615,6 +660,8 @@ const templateGroups = computed(() => [
 ])
 
 const pinnedTemplatePreviewId = ref<string | number | null>(null)
+const templatePreviewRef = ref<HTMLElement | null>(null)
+let templatePreviewOpener: HTMLElement | null = null
 const templatePreviewPoint = reactive({ x: 24, y: 24 })
 const templatePreviewViewport = reactive({ width: 1440, height: 900 })
 
@@ -630,7 +677,7 @@ const getTemplateName = (template: any) =>
   template?.manifest?.Name || template?.name || t('app.unknown')
 
 const getTemplateDescription = (template: any) =>
-  template?.manifest?.Description || t('app.noDescription')
+  template?.manifest?.Description?.trim() || ''
 
 const getTemplateList = (template: any, field: string, nameField = 'Name') => {
   const value = template?.manifest?.[field]
@@ -639,8 +686,6 @@ const getTemplateList = (template: any, field: string, nameField = 'Name') => {
     .map((item: any) => typeof item === 'string' ? item : item?.[nameField])
     .filter((item: unknown): item is string => typeof item === 'string' && item.trim().length > 0)
 }
-
-const previewItems = (items: string[], limit = 5) => items.slice(0, limit)
 
 const getTemplateInitState = (template: any) => {
   const initState = template?.manifest?.InitState
@@ -746,15 +791,22 @@ const updateTemplatePreviewPosition = (event?: MouseEvent | FocusEvent | Keyboar
 const toggleTemplatePreview = (template: any, event?: MouseEvent | KeyboardEvent) => {
   const key = getTemplateKey(template)
   if (pinnedTemplatePreviewId.value === key) {
-    pinnedTemplatePreviewId.value = null
+    closeTemplatePreview()
     return
   }
+  templatePreviewOpener = event?.currentTarget instanceof HTMLElement ? event.currentTarget : null
   updateTemplatePreviewPosition(event)
   pinnedTemplatePreviewId.value = key
+  void nextTick(() => templatePreviewRef.value?.focus({ preventScroll: true }))
 }
 
 const closeTemplatePreview = () => {
   pinnedTemplatePreviewId.value = null
+  const opener = templatePreviewOpener
+  templatePreviewOpener = null
+  if (!isCollapsed.value && activeSection.value === 'templates') {
+    void nextTick(() => { if (opener?.isConnected) opener.focus({ preventScroll: true }) })
+  }
 }
 
 const isTemplatePreviewVisible = (template: any) => {
@@ -819,70 +871,41 @@ const parsedImportedDevices = computed<DeviceImportRow[]>(() => {
   if (!text) return []
 
   try {
-    const rows: DeviceImportRow[] = []
-    if (text.startsWith('[') || text.startsWith('{')) {
+    let inputRows: DeviceImportInputRow[]
+    if (deviceImportFormat.value === 'json') {
       let parsed: unknown
       try {
-        parsed = JSON.parse(text)
-      } catch {
-        return [makeImportError('#1', t('app.deviceImportInvalidJson'))]
+        parsed = JSON.parse(debouncedImportText.value)
+      } catch (error) {
+        const diagnostic = diagnoseJsonParseError(debouncedImportText.value, error)
+        const message = [t('app.deviceImportInvalidJson'),
+          ...(diagnostic.line !== undefined && diagnostic.column !== undefined
+            ? [t('app.jsonSyntaxLocation', { line: diagnostic.line, column: diagnostic.column })] : [])].join(' ')
+        return [{ ...makeImportError('#1', message), diagnostics: {
+          cause: diagnostic.reason, details: [diagnostic.reason], fields: {}
+        } }]
       }
+      inputRows = (Array.isArray(parsed) ? parsed : [parsed]).map((item, index) => ({ source: `#${index + 1}`, item }))
+    } else inputRows = parseDeviceImportCsv(debouncedImportText.value, t)
 
-      const items = Array.isArray(parsed) ? parsed : [parsed]
-      items.forEach((item: any, index: number) => {
-        const source = `#${index + 1}`
-        if (!item || typeof item !== 'object' || Array.isArray(item)) {
-          rows.push(makeImportError(source, t('app.deviceImportJsonObjectRequired')))
-          return
-        }
-        const unknownField = findUnknownImportField(item, DEVICE_IMPORT_JSON_KEYS)
-        if (unknownField) {
-          rows.push(makeImportError(source, t('app.deviceImportUnknownField', { source, field: unknownField })))
-          return
-        }
-        const templateResult = readJsonImportAlias(item, DEVICE_IMPORT_TEMPLATE_ALIASES, source)
-        if (templateResult.error) {
-          rows.push(makeImportError(source, templateResult.error))
-          return
-        }
-        const nameResult = readJsonImportAlias(item, DEVICE_IMPORT_NAME_ALIASES, source)
-        if (nameResult.error) {
-          rows.push(makeImportError(source, nameResult.error))
-          return
-        }
-        const runtimeResult = parseImportedRuntime(item, source)
-        if (runtimeResult.error) {
-          rows.push(makeImportError(source, runtimeResult.error))
-          return
-        }
-        rows.push({
-          source,
-          templateName: templateResult.value,
-          name: nameResult.value,
-          runtime: runtimeResult.runtime
-        })
-      })
-    } else {
-      text.split(/\r?\n/).forEach((line, index) => {
-        const trimmed = line.trim()
-        if (!trimmed) return
-        const parsedLine = parseCsvImportLine(trimmed)
-        if (parsedLine.error) {
-          rows.push(makeImportError(`#${index + 1}`, parsedLine.error))
-          return
-        }
-        const columns = parsedLine.columns
-        if (rows.length === 0 && isDeviceImportHeader(columns)) {
-          return
-        }
-        if (columns.length > 2 && columns.slice(2).some(column => column.trim())) {
-          rows.push(makeImportError(`#${index + 1}`, t('app.deviceImportCsvColumnCount')))
-          return
-        }
-        const [templateName, name] = columns
-        rows.push({ source: `#${index + 1}`, templateName, name })
-      })
-    }
+    const rows: DeviceImportRow[] = inputRows.map(input => {
+      const { source, item } = input
+      if (input.error !== undefined) return makeImportError(source, input.error)
+      if (!item || typeof item !== 'object' || Array.isArray(item)) {
+        return makeImportError(source, t('app.deviceImportJsonObjectRequired'))
+      }
+      const record = item as Record<string, unknown>
+      const unknownField = findUnknownImportField(record, DEVICE_IMPORT_JSON_KEYS)
+      if (unknownField) return makeImportError(source, t('app.deviceImportUnknownField', { source, field: unknownField }))
+      const templateResult = readJsonImportAlias(record, DEVICE_IMPORT_TEMPLATE_ALIASES, source)
+      if (templateResult.error) return makeImportError(source, templateResult.error)
+      const nameResult = readJsonImportAlias(record, DEVICE_IMPORT_NAME_ALIASES, source)
+      if (nameResult.error) return makeImportError(source, nameResult.error)
+      const runtimeResult = parseImportedRuntime(record, source)
+      if (runtimeResult.error) return { ...makeImportError(source, runtimeResult.error),
+        templateName: templateResult.value, name: nameResult.value }
+      return { source, templateName: templateResult.value, name: nameResult.value, runtime: runtimeResult.runtime }
+    })
 
     const reserved = new Set(existingDeviceLabels.value)
     return rows.map(row => {
@@ -922,6 +945,10 @@ const parsedImportedDevices = computed<DeviceImportRow[]>(() => {
   }
 })
 
+const deviceImportSyntaxFailure = computed(() =>
+  parsedImportedDevices.value.find(item => item.diagnostics) || null
+)
+
 const validImportedDevices = computed(() =>
   parsedImportedDevices.value.filter((item: any) => !item.error && item.template && item.customName)
 )
@@ -940,7 +967,7 @@ const validImportedDevices = computed(() =>
  * the button's enabled state mean "ready for what is currently in the box" for all of them.
  */
 const importPreviewStale = computed(() =>
-  debouncedImportText.value !== importDeviceForm.text
+  debouncedImportText.value !== importDeviceText.value
 )
 
 const importedEnvironmentMerge = computed(() => mergeSourcedEnvironmentPatches(
@@ -956,28 +983,23 @@ const environmentConflictFieldLabel = (field: EnvironmentPatchConflict['field'])
   return t('app.sensitivityLabel')
 }
 
+const deviceImportSourceLabel = (source: string) => t(
+  deviceImportFormat.value === 'csv' ? 'app.deviceImportCsvRow' : 'app.deviceImportJsonEntry',
+  { row: source.slice(1) }
+)
+
 const formatImportedEnvironmentConflict = (conflict: EnvironmentPatchConflict) =>
   t('app.deviceImportEnvironmentConflict', {
     name: conflict.name,
     field: environmentConflictFieldLabel(conflict.field),
-    first: conflict.firstSource,
-    second: conflict.secondSource
+    first: deviceImportSourceLabel(conflict.firstSource),
+    second: deviceImportSourceLabel(conflict.secondSource)
   })
 
 const importedDevicesHaveErrors = computed(() =>
   parsedImportedDevices.value.some((item: any) => item.error)
   || importedEnvironmentMerge.value.conflicts.length > 0
 )
-
-const deviceImportPlaceholder = computed(() => {
-  const jsonExample = JSON.stringify([{
-    template: 'Motion Detector',
-    name: 'entry_motion',
-    variables: [{ name: 'motion', value: 'active', trust: 'trusted' }],
-    privacies: [{ name: 'motion', privacy: 'private' }]
-  }])
-  return `${jsonExample}\n${t('app.deviceImportCsvExamplePrefix')}\nAir Conditioner,living_ac`
-})
 
 const getTemplateIconUrl = (template: DeviceTemplate): string => {
   const name = template.manifest?.Name || template.name
@@ -995,6 +1017,14 @@ const specForm = reactive({
   ifConditions: [] as unknown as SpecCondition[],
   thenConditions: [] as unknown as SpecCondition[]
 })
+const specSaveFailure = ref<ApiErrorDetails | null>(null)
+const hasSpecificationConditions = computed(() =>
+  specForm.aConditions.length + specForm.ifConditions.length + specForm.thenConditions.length > 0)
+let specSaveVersion = 0
+watch(specForm, () => {
+  specSaveVersion += 1
+  specSaveFailure.value = null
+}, { deep: true, flush: 'sync' })
 
 // Specification dialog state
 const showSpecDialog = ref(false)
@@ -1113,6 +1143,7 @@ const openConditionDialog = (side: SpecSide, index: number = -1) => {
 const specConditionBlockedReason = computed<string | null>(() => {
   const draft = editingConditionData
   if (!draft.deviceId) return t('app.selectDevice')
+  if (isSpecConditionDeviceMissing(draft.deviceId)) return t('app.specConditionDeviceMissing', { count: 1 })
   if (!draft.targetType) return t('app.selectType')
   if (draft.targetType !== 'state' && !draft.key?.trim()) return t('app.selectProperty')
   if ((draft.targetType === 'trust' || draft.targetType === 'privacy')
@@ -1126,7 +1157,12 @@ const specConditionBlockedReason = computed<string | null>(() => {
     return t('app.specVariableSourceRequired')
   }
   // An API condition only records that the API was called, so it carries no value.
-  if (draft.targetType !== 'api' && !draft.value?.trim()) return t('app.enterValue')
+  if (draft.targetType !== 'api' && !draft.value?.trim()) {
+    return t(conditionValueOptions.value.length ? 'app.selectValue' : 'app.enterValue')
+  }
+  if (draft.targetType === 'variable' && selectedConditionVariable.value) {
+    return validateNumericConditionValue(selectedConditionVariable.value, draft.value || '', draft.relation || '=', t) || null
+  }
   return null
 })
 
@@ -1413,17 +1449,18 @@ const getAvailableKeys = (deviceId: string, targetType: string): Array<{label: s
   return keys
 }
 
+const specificationPresentationContext = () => ({
+  t,
+  resolveDevice: (id: string) => deviceNodes.value.find(node => node.id === id),
+  formatToken: (id: string, value: unknown) => formatTemplateModelToken(getDeviceTemplate(id), value),
+  modeCount: (id: string) => getDeviceManifestForCondition(id)?.Modes?.length || 0
+})
+
 const formatConditionPropertyLabel = (condition: Pick<SpecCondition, 'deviceId' | 'targetType' | 'key' | 'propertyScope'>) => {
-  const template = getDeviceTemplate(condition.deviceId)
-  if (condition.targetType === 'state') return t('app.state')
-  if ((condition.targetType === 'trust' || condition.targetType === 'privacy')
-    && condition.propertyScope === 'state') {
-    const modes = getDeviceManifestForCondition(condition.deviceId)?.Modes || []
-    return modes.length === 1
-      ? t('app.currentStateProperty')
-      : t('app.currentModeStateProperty', { mode: formatTemplateModelToken(template, condition.key) })
-  }
-  return condition.key ? formatTemplateModelToken(template, condition.key) : t('app.value')
+  const property = specConditionPropertyLabel(condition, specificationPresentationContext())
+  return condition.targetType === 'trust' || condition.targetType === 'privacy'
+    ? `${property} ${t(targetTypeLabelKeys[condition.targetType])}`
+    : property
 }
 
 /**
@@ -1555,14 +1592,29 @@ const availableModeValues = computed(() => {
   return getModeValuesFromManifest(manifest, editingConditionData.key)
 })
 
-const availableVariableValues = computed(() => {
-  if (!editingConditionData.deviceId || !editingConditionData.key) return []
+const selectedConditionVariable = computed<InternalVariable | undefined>(() => {
+  if (!editingConditionData.deviceId || !editingConditionData.key) return undefined
   const template = getDeviceTemplate(editingConditionData.deviceId)
   const variables = template?.manifest?.InternalVariables
-  if (!Array.isArray(variables)) return []
-  const variable = variables.find((v: any) => v?.Name === editingConditionData.key)
-  return Array.isArray(variable?.Values) ? variable.Values.map((value: unknown) => String(value)) : []
+  return variables?.find((variable: InternalVariable) => variable.Name === editingConditionData.key)
 })
+
+const availableVariableValues = computed(() => selectedConditionVariable.value?.Values?.map(String) || [])
+
+const conditionValuePlaceholder = computed(() => {
+  const variable = selectedConditionVariable.value
+  if (editingConditionData.targetType !== 'variable' || !variable || !templateVariableUsesNumericBounds(variable)) {
+    return t('app.enterValuePlaceholder')
+  }
+  return isSpecSetRelation.value
+    ? t('app.conditionIntegerSetPlaceholder', { lower: variable.LowerBound, upper: variable.UpperBound })
+    : `${t('app.enterValuePlaceholder')} (${variable.LowerBound} - ${variable.UpperBound})`
+})
+
+const conditionValueFailure = computed(() => editingConditionData.targetType === 'variable'
+  && selectedConditionVariable.value && editingConditionData.value?.trim()
+  ? validateNumericConditionValue(selectedConditionVariable.value, editingConditionData.value, editingConditionData.relation || '=', t)
+  : '')
 
 // Allowed values for trust/privacy conditions — must match the backend enum domains
 // (SmvDeviceModuleBuilder: trust ∈ {untrusted, trusted}, privacy ∈ {private, public}).
@@ -1615,27 +1667,22 @@ watch(() => editingConditionData.relation, () => {
 const hasConditionValue = (value: unknown) =>
   value !== null && value !== undefined && value !== ''
 
-const formatConditionValue = (value: unknown, deviceId?: string) =>
-  hasConditionValue(value)
-    ? formatTemplateModelToken(getDeviceTemplate(deviceId || ''), value)
+const formatConditionValue = (condition: SpecCondition) =>
+  hasConditionValue(condition.value)
+    ? specConditionValueLabel(condition, specificationPresentationContext())
     : '*'
 
-const formatEditingConditionModelToken = (value: unknown) =>
-  formatTemplateModelToken(getDeviceTemplate(editingConditionData.deviceId || ''), value)
+const formatEditingConditionValue = (value: unknown) =>
+  specConditionValueLabel({ ...editingConditionData, value } as SpecCondition, specificationPresentationContext())
 
-/*
- * Derived from the template, not from the formula text this same component builds.
- *
- * It used to look for a `CTLSPEC`/`LTLSPEC` prefix, which `buildSpecFormula` never writes — it emits
- * `CTL AG(...)` / `LTL G(...)`, and NuSMV's keyword form appears only in a trace's `checkedExpression`.
- * So this chip fell through to the generic "Model" label for all seven templates, sitting immediately
- * beside a formula preview that begins with the very word it failed to read.
- */
-const specFormulaKind = computed(
-  () => specFormulaKindFromTemplate(specForm.templateId) ?? t('app.modelFormulaKind')
-)
+const specFormulaPreview = computed(() => buildSpecFormulaPreview({
+  templateId: specForm.templateId as SpecTemplateId,
+  templateLabel: currentTemplateDetail.value?.label || '',
+  aConditions: specForm.aConditions,
+  ifConditions: specForm.ifConditions,
+  thenConditions: specForm.thenConditions
+}, { nodes: props.nodes }))
 
-// Update model formula preview based on conditions
 const updateFormula = () => {
   if (!currentTemplateDetail.value) {
     specForm.formula = ''
@@ -1653,113 +1700,12 @@ const updateFormula = () => {
   })
 }
 
-// Generate natural language specification description
-const naturalLanguageRule = computed(() => {
-  if (!currentTemplateDetail.value || specForm.templateType === '') {
-    return t('app.specPreviewConfigureConditions')
-  }
-
-  const template = currentTemplateDetail.value
-  const type = template.type
-
-  const conditionSubject = (condition: SpecCondition): string => {
-    const deviceName = condition.deviceLabel || condition.deviceId || t('app.device')
-    const keyName = formatConditionPropertyLabel(condition)
-    switch (condition.targetType) {
-      case 'variable':
-        // The plain-language sentence must name the same question the formula compiles, otherwise a
-        // reader checking one against the other cannot tell which one their specification is.
-        if (condition.variableSource === 'environment') {
-          return t('app.specPreviewVariableEnvironmentSubject', { key: keyName })
-        }
-        if (condition.variableSource === 'reported') {
-          return t('app.specPreviewVariableReportedSubject', { key: keyName, device: deviceName })
-        }
-        return t('app.specPreviewVariableSourceUnresolvedSubject', { key: keyName, device: deviceName })
-      case 'mode':
-        return t('app.specPreviewModeSubject', { key: keyName, device: deviceName })
-      case 'state':
-        return t('app.specPreviewStateSubject', { device: deviceName })
-      case 'api':
-        return t('app.specPreviewApiSubject', { key: keyName, device: deviceName })
-      case 'trust':
-        return t('app.specPreviewTrustSubject', { key: keyName, device: deviceName })
-      case 'privacy':
-        return t('app.specPreviewPrivacySubject', { key: keyName, device: deviceName })
-      default:
-        return t('app.specPreviewPropertySubject', { key: keyName, device: deviceName })
-    }
-  }
-
-  // Helper to format conditions in natural language
-  const formatConditions = (conditions: SpecCondition[]): string => {
-    if (conditions.length === 0) return ''
-
-    return conditions.map(c => {
-      const relationText = getRelationLabel(c.relation || '=')
-      const valueText = hasConditionValue(c.value) ? ` ${relationText} "${formatConditionValue(c.value, c.deviceId)}"` : ''
-      return `${conditionSubject(c)}${valueText}`
-    }).join(` ${t('app.specPreviewAnd')} `)
-  }
-
-  const aConditions = formatConditions(specForm.aConditions)
-  const ifConditions = formatConditions(specForm.ifConditions)
-  const thenConditions = formatConditions(specForm.thenConditions)
-
-  // Generate natural language based on template type
-  switch (type) {
-    case 'always':
-      if (aConditions) {
-        return t('app.specPreviewAlways', { conditions: aConditions })
-      }
-      return t('app.specPreviewConfigureACondition')
-
-    case 'eventually':
-      if (aConditions) {
-        return t('app.specPreviewEventually', { conditions: aConditions })
-      }
-      return t('app.specPreviewConfigureACondition')
-
-    case 'never':
-      if (aConditions) {
-        return t('app.specPreviewNever', { conditions: aConditions })
-      }
-      return t('app.specPreviewConfigureACondition')
-
-    case 'immediate':
-      if (ifConditions && thenConditions) {
-        return t('app.specPreviewImmediate', { ifConditions, thenConditions })
-      } else if (ifConditions) {
-        return t('app.specPreviewImmediatePartial', { ifConditions })
-      }
-      return t('app.specPreviewConfigureIfThen')
-
-    case 'response':
-      if (ifConditions && thenConditions) {
-        return t('app.specPreviewResponse', { ifConditions, thenConditions })
-      } else if (ifConditions) {
-        return t('app.specPreviewResponsePartial', { ifConditions })
-      }
-      return t('app.specPreviewConfigureIfThen')
-
-    case 'persistence':
-      if (ifConditions && thenConditions) {
-        return t('app.specPreviewPersistence', { ifConditions, thenConditions })
-      } else if (ifConditions) {
-        return t('app.specPreviewPersistencePartial', { ifConditions })
-      }
-      return t('app.specPreviewConfigureIfThen')
-
-    case 'safety':
-      if (aConditions) {
-        return t('app.specPreviewSafety', { conditions: aConditions })
-      }
-      return t('app.specPreviewConfigureACondition')
-
-    default:
-      return t('app.specPreviewConfigureConditions')
-  }
-})
+const naturalLanguageRule = computed(() => describeSpecification({
+  templateId: specForm.templateId as SpecTemplateId,
+  aConditions: specForm.aConditions,
+  ifConditions: specForm.ifConditions,
+  thenConditions: specForm.thenConditions
+}, specificationPresentationContext()))
 
 // Precomputed formatted condition data for v-for loops (optimization)
 const formattedAConditions = computed(() =>
@@ -1767,7 +1713,7 @@ const formattedAConditions = computed(() =>
     ...condition,
     deviceLabel: getDeviceLabel(condition.deviceId),
     propertyLabel: formatConditionPropertyLabel(condition),
-    formattedValue: formatConditionValue(condition.value, condition.deviceId),
+    formattedValue: formatConditionValue(condition),
     variableSourceLabel: formatConditionVariableSourceLabel(condition),
     relationLabel: getRelationLabel(condition.relation || '='),
     isDeviceMissing: isSpecConditionDeviceMissing(condition.deviceId),
@@ -1780,7 +1726,7 @@ const formattedIfConditions = computed(() =>
     ...condition,
     deviceLabel: getDeviceLabel(condition.deviceId),
     propertyLabel: formatConditionPropertyLabel(condition),
-    formattedValue: formatConditionValue(condition.value, condition.deviceId),
+    formattedValue: formatConditionValue(condition),
     variableSourceLabel: formatConditionVariableSourceLabel(condition),
     relationLabel: getRelationLabel(condition.relation || '='),
     isDeviceMissing: isSpecConditionDeviceMissing(condition.deviceId),
@@ -1793,7 +1739,7 @@ const formattedThenConditions = computed(() =>
     ...condition,
     deviceLabel: getDeviceLabel(condition.deviceId),
     propertyLabel: formatConditionPropertyLabel(condition),
-    formattedValue: formatConditionValue(condition.value, condition.deviceId),
+    formattedValue: formatConditionValue(condition),
     variableSourceLabel: formatConditionVariableSourceLabel(condition),
     relationLabel: getRelationLabel(condition.relation || '='),
     isDeviceMissing: isSpecConditionDeviceMissing(condition.deviceId),
@@ -1862,6 +1808,9 @@ const validateSpecification = () => {
 const createSpecification = async () => {
   if (!ensureWritable()) return
   if (creatingSpecification.value || !validateSpecification()) return
+  specSaveFailure.value = null
+  const submittedVersion = specSaveVersion
+  const ownerToken = getToken()
 
   const cloneConditions = (conditions: SpecCondition[]) =>
     conditions.map(condition => ({ ...condition }))
@@ -1881,11 +1830,15 @@ const createSpecification = async () => {
   const saved = await new Promise<boolean>(resolve => {
     emit('add-spec', {
       ...submittedForm,
-      complete: resolve
+      complete: (saved, failure) => {
+        if (!saved && failure && submittedVersion === specSaveVersion
+          && !controlCenterDisposed && isCurrentSessionToken(ownerToken)) specSaveFailure.value = failure
+        resolve(saved)
+      }
     })
   })
   creatingSpecification.value = false
-  if (saved) resetSpecForm()
+  if (saved && !controlCenterDisposed && isCurrentSessionToken(ownerToken)) resetSpecForm()
 }
 
 // Reset specification form
@@ -1902,14 +1855,7 @@ const resetSpecForm = () => {
 const handleCreateDevice = async () => {
   if (!ensureWritable()) return
   if (creatingSingleDevice.value) return
-  // Name problems are reported inline next to the field, and the submit button is disabled
-  // while either holds, so there is nothing left to announce here.
-  if (!deviceForm.name.trim() || singleDeviceNameConflict.value) return
-
-  if (!deviceForm.type) {
-    notifyBlocked(t('app.selectDeviceTemplate'))
-    return
-  }
+  if (singleDeviceBlockedReason.value) return
 
   // Find the selected template from backend templates
   let template = props.deviceTemplates.find((tpl: any) => 
@@ -1930,20 +1876,33 @@ const handleCreateDevice = async () => {
     return
   }
 
-  // Emit device creation event with template.
-  // 成功提示由父组件在保存成功后弹出：emit 不会 await 父组件的异步保存，
-  // 若在此提前报成功，父组件保存失败并回滚时会同时出现「Device added」和保存失败提示。
+  singleDeviceSaveFailure.value = null
+  const submittedVersion = singleDeviceSaveVersion
+  const ownerToken = getToken()
+  const ownsSubmittedDraft = () => submittedVersion === singleDeviceSaveVersion
+    && !controlCenterDisposed && isCurrentSessionToken(ownerToken)
   creatingSingleDevice.value = true
   const saved = await new Promise<boolean>(resolve => {
     emit('create-device', {
       template,
       customName: deviceForm.name,
       runtime: buildRuntimeConfig(template as DeviceTemplate),
-      complete: resolve
+      complete: (saved, failure) => {
+        if (!saved && failure && ownsSubmittedDraft()) singleDeviceSaveFailure.value = failure
+        resolve(saved)
+      }
     })
   })
-  creatingSingleDevice.value = false
-  if (saved) {
+  if (!controlCenterDisposed && isCurrentSessionToken(ownerToken)) creatingSingleDevice.value = false
+  const failure = singleDeviceSaveFailure.value
+  if (!saved && failure && ownsSubmittedDraft()) {
+    await nextTick()
+    if (ownsSubmittedDraft() && singleDeviceSaveFailure.value === failure) {
+      singleDeviceSaveFailureElement.value?.focus({ preventScroll: true })
+      singleDeviceSaveActionElement.value?.scrollIntoView({ block: 'nearest' })
+    }
+  }
+  if (saved && ownsSubmittedDraft()) {
     deviceForm.name = ''
     resetSingleDeviceRuntime()
   }
@@ -1987,7 +1946,7 @@ const handleCreateImportedDevices = async () => {
    * cannot rely on that alone — it is what makes the invariant hold for any caller.
    */
   const importBlockedBy = importPreviewStale.value ? 'preview is stale'
-    : !importDeviceForm.text.trim() ? 'import text is empty'
+    : !importDeviceText.value.trim() ? 'import text is empty'
       : importedEnvironmentMerge.value.conflicts.length > 0 ? 'environment patch conflicts'
         : importedDevicesHaveErrors.value ? 'per-row parse errors'
           : validImportedDevices.value.length === 0 ? 'no valid devices parsed'
@@ -2017,42 +1976,37 @@ const handleCreateImportedDevices = async () => {
 const handleDeviceImportFile = async (event: Event) => {
   const target = event.target as HTMLInputElement
   const file = target.files?.[0]
-  if (!file) return
+  if (!file || deviceImportSource.value !== 'file') return
   if (!ensureWritable()) {
     target.value = ''
     return
   }
+  const ownerToken = getToken()
+  const admittedReadOnlyEpoch = readOnlyEpoch
+  const admittedFormat = deviceImportFormat.value
+  const admittedEncoding = admittedFormat === 'csv' ? deviceImportCsvEncoding.value : 'utf-8'
+  let requestVersion = ++deviceImportReadVersion
+  deviceImportFileFailure.value = null
+  const ownsCurrentSelection = () => !controlCenterDisposed && requestVersion === deviceImportReadVersion
+    && admittedFormat === deviceImportFormat.value
+    && deviceImportSource.value === 'file'
+    && admittedReadOnlyEpoch === readOnlyEpoch && isCurrentSessionToken(ownerToken)
   try {
     if (file.size > MAX_DEVICE_IMPORT_BYTES) {
       notifyError(t('app.importFileTooLarge', { size: '4 MiB' }))
       return
     }
-    /*
-     * Invalidate the preview BEFORE the first await, not after it. Placed after the size check, which is
-     * synchronous: a rejected oversized file then leaves whatever the user had pasted before intact.
-     *
-     * `setImportTextImmediately` below closes the debounce window, but it can only run once
-     * `await file.text()` resolves — and reading a file is asynchronous. In that gap the preview, the
-     * parsed counts and the create button all still describe the PREVIOUS content, and the button is
-     * still enabled from it. A click landing there imports the old payload.
-     *
-     * Measured from the CI artifact for "imports devices from pasted JSON and selected CSV", which
-     * failed two consecutive nights: the JSON payload was imported a second time and neither CSV device
-     * appeared, while the snapshot taken at the timeout shows the CSV did land — just after the click
-     * had already read the JSON state. Both payloads parse to exactly two devices, so neither
-     * `toBeEnabled()` nor the button's own label could tell them apart.
-     *
-     * Everything above this line is synchronous, so the clear lands inside the `change` dispatch: no
-     * text means no parsed devices, means a disabled button, and a caller waiting on the button waits
-     * through the empty window rather than observing the previous payload's enabled state.
-     */
-    setImportTextImmediately('')
-    // Immediately, not debounced: see `setImportTextImmediately`. Deferring a file's contents left the
-    // create button enabled and describing the file the user had just replaced.
-    setImportTextImmediately(await file.text())
+    // Clear before the first await so Import cannot submit the previously selected file.
+    clearDeviceImportFile()
+    requestVersion = ++deviceImportReadVersion
+    const buffer = await file.arrayBuffer()
+    if (ownsCurrentSelection()) {
+      setImportTextImmediately(decodeDeviceImportFile(buffer, admittedEncoding))
+      selectedDeviceImportDraft.value.fileName = file.name
+    }
   } catch (error) {
     console.error('Failed to read device import file:', error)
-    notifyError(t('app.invalidJsonFile'))
+    if (ownsCurrentSelection()) deviceImportFileFailure.value = error instanceof DeviceImportEncodingError ? 'encoding' : errorDetails(error)
   } finally {
     target.value = ''
   }
@@ -2081,6 +2035,7 @@ const handleTemplateDragEnd = () => {
 // Panel state
 const localCollapsed = ref(typeof window !== 'undefined' && window.innerWidth < 768)
 const localActiveSection = ref<ControlCenterSection>('templates')
+const ruleSectionExpanded = ref(true)
 
 const isControlCenterSection = (value: string | undefined): value is ControlCenterSection =>
   value === 'devices' || value === 'templates' || value === 'rules' || value === 'specs'
@@ -2104,29 +2059,24 @@ const activeSection = computed<ControlCenterSection>({
   }
 })
 
-// Mirrors SystemInspector's tab strip so both side panels expose the same tablist
-// semantics and keyboard model.
-/*
- * One active-tab treatment, not four.
- *
- * Each tab used to carry its own `activeClass` — orange, purple, blue, red — so "this tab is selected" was
- * said in four different colours. The state is identical in every case; only the section differs, and the
- * label already says which section. That is the "do not spend a new hue on a new category" rule in
- * `frontend-ui-conventions.md` §4, and the per-tab property was the mechanism that made it easy to break.
- *
- * `--accent-fill` is the fill half of the accent role, so white ink on it is legible in both themes
- * (`--accent` alone measures 2.54:1 in dark). Matches SystemInspector's strip exactly, which is the point:
- * the two side panels should not look like two products.
- */
-const controlTabs = computed(() => [
-  { id: 'templates' as const, label: t('app.templates'), icon: 'inventory_2' },
-  { id: 'devices' as const, label: t('app.devices'), icon: 'devices' },
-  { id: 'rules' as const, label: t('app.rules'), icon: 'rule' },
-  { id: 'specs' as const, label: t('app.specifications'), icon: 'verified' }
-])
+watch(() => [activeSection.value, isCollapsed.value], () => {
+  if (activeSection.value !== 'templates' || isCollapsed.value) closeTemplatePreview()
+  if (activeSection.value !== 'devices' || isCollapsed.value) {
+    singleDeviceSaveVersion += 1
+    singleDeviceSaveFailure.value = null
+  }
+  if (activeSection.value !== 'specs' || isCollapsed.value) {
+    specSaveVersion += 1
+    specSaveFailure.value = null
+  }
+}, { flush: 'sync' })
 
-/** The selected-tab treatment, shared by every tab in the strip. */
-const CONTROL_TAB_ACTIVE_CLASS = 'bg-[color:var(--accent-fill)] text-white shadow-sm'
+const controlTabs = computed(() => [
+  { id: 'templates' as const, label: t('app.templates') },
+  { id: 'devices' as const, label: t('app.devicesTool') },
+  { id: 'rules' as const, label: t('app.rulesTool') },
+  { id: 'specs' as const, label: t('app.specificationsShort') }
+])
 
 const { handleTablistKeydown: handleControlTabKeydown } = useRovingTablist<ControlCenterSection>({
   tabIds: () => controlTabs.value.map(tab => tab.id),
@@ -2163,9 +2113,12 @@ const templateMutationErrorMessage = (error: any, fallback: string): string => {
   return localizedErrorMessage(error, fallback, locale.value)
 }
 
-const refreshTemplateCatalogForReconciliation = async (): Promise<DeviceTemplate[] | null> => {
+const refreshTemplateCatalogForReconciliation = async (
+  ownsCurrentSession: () => boolean = () => true
+): Promise<DeviceTemplate[] | null> => {
   try {
     const current = await boardApi.getDeviceTemplates()
+    if (!ownsCurrentSession()) return null
     emit('replace-template-catalog', current)
     return current
   } catch (error) {
@@ -2173,6 +2126,41 @@ const refreshTemplateCatalogForReconciliation = async (): Promise<DeviceTemplate
     return null
   }
 }
+
+const templateImportFile = ref<HTMLInputElement | null>(null)
+const templateImportFeedback = ref<(ApiErrorDetails & {
+  title: string
+  message: string
+  suggestion: string
+  confirmedTemplateId?: number
+}) | null>(null)
+let templateImportVersion = 0
+let controlCenterDisposed = false
+
+watch(() => props.deviceTemplates, current => {
+  const confirmedId = templateImportFeedback.value?.confirmedTemplateId
+  if (confirmedId !== undefined && current.some(template => template.id === confirmedId)) {
+    templateImportFeedback.value = null
+  }
+})
+
+watch(() => [authState.token, authState.user?.userId], () => {
+  templateImportVersion += 1
+  deviceImportReadVersion += 1
+  specSaveVersion += 1
+  singleDeviceSaveVersion += 1
+  singleDeviceSaveFailure.value = null
+  creatingSingleDevice.value = false
+  templateImportFeedback.value = null
+  deviceImportFileFailure.value = null
+  specSaveFailure.value = null
+}, { flush: 'sync' })
+
+onBeforeUnmount(() => {
+  controlCenterDisposed = true
+  singleDeviceSaveVersion += 1
+  templateImportVersion += 1
+})
 
 const templateDeletionConflictReasonCodes = new Set([
   'TEMPLATE_DELETION_PREVIEW_STALE',
@@ -2217,6 +2205,11 @@ const handleImportTemplate = async (event: Event) => {
   const admittedReadOnlyEpoch = readOnlyEpoch
   const file = target.files?.[0]
   if (!file) return
+  const requestVersion = ++templateImportVersion
+  const ownerToken = getToken()
+  const ownsCurrentSession = () => !controlCenterDisposed && isCurrentSessionToken(ownerToken)
+  const ownsCurrentSelection = () => ownsCurrentSession() && requestVersion === templateImportVersion
+  templateImportFeedback.value = null
 
   if (file.size > MAX_TEMPLATE_IMPORT_BYTES) {
     notifyError(t('app.importFileTooLarge', { size: '512 KiB' }))
@@ -2226,34 +2219,59 @@ const handleImportTemplate = async (event: Event) => {
 
   let manifest: DeviceTemplate['manifest']
   let requestedName: string
+  let source: string
   try {
-    const text = await file.text()
-    manifest = JSON.parse(text)
-    requestedName = String(manifest?.Name || '').trim()
-  } catch (error: any) {
-    const message = templateMutationErrorMessage(error, t('app.invalidJsonFile'))
-    notifyError(message)
+    source = await file.text()
+  } catch (error: unknown) {
+    if (ownsCurrentSelection()) templateImportFeedback.value = {
+      title: t('app.templateFileReadFailedTitle'),
+      message: t('app.templateFileReadFailedMessage'),
+      suggestion: t('app.templateFileReadCorrectionHint'),
+      ...errorDetails(error)
+    }
     target.value = ''
     return
   }
+  if (!ownsCurrentSelection()) {
+    target.value = ''
+    return
+  }
+  try {
+    manifest = JSON.parse(source)
+  } catch (error: unknown) {
+    const diagnostic = diagnoseJsonParseError(source, error)
+    templateImportFeedback.value = {
+      title: t('app.jsonSyntaxInvalidTitle'),
+      message: t('app.jsonSyntaxInvalidMessage') + (diagnostic.line !== undefined
+        ? `\n${t('app.jsonSyntaxLocation', { line: diagnostic.line, column: diagnostic.column })}` : ''),
+      suggestion: t('app.jsonSyntaxCorrectionHint'),
+      cause: diagnostic.reason,
+      details: diagnostic.reason ? [diagnostic.reason] : [],
+      fields: {}
+    }
+    target.value = ''
+    return
+  }
+  requestedName = typeof manifest?.Name === 'string' ? manifest.Name.trim() : ''
 
   // The scene can enter playback/replacement while the file is being parsed.
   // Re-check immediately before starting the network mutation so a late file
   // read cannot write after the UI became read-only.
-  if (admittedReadOnlyEpoch !== readOnlyEpoch || !ensureWritable()) {
+  if (!ownsCurrentSelection() || admittedReadOnlyEpoch !== readOnlyEpoch || !ensureWritable()) {
     target.value = ''
     return
   }
 
   await runBoardMutation(async () => {
+    if (!ownsCurrentSelection() || admittedReadOnlyEpoch !== readOnlyEpoch || !ensureWritable()) return
+    let confirmedTemplate: DeviceTemplate
     try {
-      await boardApi.addDeviceTemplate({ name: requestedName, manifest })
-      const current = await boardApi.getDeviceTemplates()
-      emit('replace-template-catalog', current)
-      notifySuccess(t('app.templateImportedSuccessfully'))
+      confirmedTemplate = await boardApi.addDeviceTemplate({ name: requestedName, manifest })
     } catch (error: any) {
+      if (!ownsCurrentSession()) return
       if (!isDefinitiveTemplateMutationRejection(error)) {
-        const current = await refreshTemplateCatalogForReconciliation()
+        const current = await refreshTemplateCatalogForReconciliation(ownsCurrentSession)
+        if (!ownsCurrentSession()) return
         if (!current) {
           emit('authoritative-state-unavailable', ['templates'])
           notifyBlocked(t('app.templateMutationOutcomeUnknownRefreshFailed'))
@@ -2265,8 +2283,33 @@ const handleImportTemplate = async (event: Event) => {
           notifyBlocked(t('app.templateImportOutcomeUnconfirmedAfterRefresh'))
         }
       } else {
-        const message = templateMutationErrorMessage(error, t('app.invalidJsonFile'))
-        notifyError(message)
+        const definitionInvalid = error?.response?.status === 400 || error?.response?.status === 422
+        if (ownsCurrentSelection()) templateImportFeedback.value = {
+          title: t(definitionInvalid ? 'app.templateDefinitionInvalidTitle' : 'app.templateImportRejectedTitle'),
+          message: t(definitionInvalid ? 'app.templateDefinitionInvalidMessage' : 'app.templateImportRejectedMessage'),
+          suggestion: t(definitionInvalid ? 'app.templateDefinitionCorrectionHint' : 'app.templateImportRejectedHint'),
+          ...errorDetails(error)
+        }
+      }
+      return
+    }
+
+    if (!ownsCurrentSession()) return
+    try {
+      const current = await boardApi.getDeviceTemplates()
+      if (!ownsCurrentSession()) return
+      emit('replace-template-catalog', current)
+      if (ownsCurrentSelection()) templateImportFeedback.value = null
+      notifySuccess(t('app.templateImportedSuccessfully'))
+    } catch (error: unknown) {
+      if (!ownsCurrentSession()) return
+      emit('authoritative-state-unavailable', ['templates'])
+      if (ownsCurrentSelection()) templateImportFeedback.value = {
+        title: t('app.templateCatalogRefreshFailedTitle'),
+        message: t('app.templateCatalogRefreshFailedMessage'),
+        suggestion: '',
+        confirmedTemplateId: confirmedTemplate.id,
+        ...errorDetails(error)
       }
     }
   })
@@ -2289,11 +2332,6 @@ const downloadTemplateSchema = async () => {
     console.error('Failed to download template schema:', error)
     notifyError(t('app.downloadSchemaFailed'))
   }
-}
-
-const openRuleBuilder = () => {
-  if (!ensureWritable()) return
-  emit('open-rule-builder')
 }
 
 const closeTemplateDeleteConfirm = (force = false) => {
@@ -2589,6 +2627,14 @@ const exportTemplate = (template: any) => {
 watch(() => props.readOnly, readOnly => {
   if (!readOnly) return
   readOnlyEpoch += 1
+  templateImportVersion += 1
+  deviceImportReadVersion += 1
+  specSaveVersion += 1
+  singleDeviceSaveVersion += 1
+  singleDeviceSaveFailure.value = null
+  templateImportFeedback.value = null
+  deviceImportFileFailure.value = null
+  specSaveFailure.value = null
   closeSpecDialog()
   if (!isDeletingTemplate.value) closeTemplateDeleteConfirm(true)
   if (!isResettingDefaultTemplates.value) closeResetDefaultsConfirm(true)
@@ -2597,64 +2643,50 @@ watch(() => props.readOnly, readOnly => {
 </script>
 
 <template>
-  <!-- Collapsed width comes from COLLAPSED_PANEL_RAIL_CSS — see the note in SystemInspector, and the
-       rationale on the constant itself. -->
   <aside
     v-bind="attrs"
     data-testid="control-center"
-    class="absolute left-0 top-0 bottom-0 modern-panel board-side-panel z-40 flex flex-col overflow-hidden border-r border-white/20 shadow-xl transition-all duration-300 ease-in-out"
+    class="absolute left-0 top-0 bottom-0 modern-panel board-side-panel z-40 flex flex-col overflow-hidden border-r"
     :class="isCollapsed ? 'is-collapsed' : 'is-expanded'"
-    :style="{ width: isCollapsed ? COLLAPSED_PANEL_RAIL_CSS : panelWidth }"
+    :style="{ width: isCollapsed ? COLLAPSED_PANEL_RAIL_CSS : panelWidth, '--board-panel-expanded-width': panelWidth }"
   >
-    <!-- 顶部标题区域 -->
     <div
-      class="board-panel-header relative overflow-hidden border-b"
-      :class="isCollapsed ? 'p-2.5' : 'p-4'"
+      class="board-panel-header border-b"
     >
-      <div v-if="!isCollapsed" class="relative flex items-center justify-between">
-        <div class="flex items-center gap-3">
-          <div class="w-10 h-10 bg-slate-100 rounded-xl flex items-center justify-center">
-            <span class="material-symbols-outlined text-slate-600 text-xl">dashboard</span>
+      <div class="board-panel-heading">
+        <div v-if="!isCollapsed" class="board-panel-heading__identity">
+          <div class="board-panel-icon" aria-hidden="true">
+            <span class="material-symbols-outlined">dashboard</span>
           </div>
-          <div>
-            <h2 class="board-panel-title text-sm font-bold tracking-wide">{{ t('app.controlCenter') }}</h2>
-            <p class="board-panel-subtitle text-xs">{{ t('app.deviceManagement') }}</p>
+          <div class="min-w-0">
+            <h2 class="board-panel-title">{{ t('app.controlCenter') }}</h2>
           </div>
         </div>
-        <HintTooltip :content="t('app.collapse')">
-          <button
-            type="button"
-            @click="togglePanel"
-            class="h-11 w-11 shrink-0 board-chip-neutral hover:board-control-hover rounded-lg flex items-center justify-center transition-all hover:scale-105"
-            :aria-label="t('app.collapse')"
-          >
-            <span class="material-symbols-outlined text-slate-600 text-base transition-transform duration-200" aria-hidden="true">dock_to_left</span>
-          </button>
-        </HintTooltip>
-      </div>
-      <div v-else class="flex items-center justify-center">
-        <HintTooltip :content="t('app.expand')">
-          <button
-            type="button"
-            @click="togglePanel"
-            class="h-11 w-11 shrink-0 board-chip-neutral hover:board-control-hover rounded-xl flex items-center justify-center transition-all hover:scale-105"
-            :aria-label="t('app.expand')"
-          >
-            <span class="material-symbols-outlined text-slate-600 text-base" aria-hidden="true">dock_to_right</span>
-          </button>
+        <HintTooltip :content="t(isCollapsed ? 'app.expandPanel' : 'app.collapsePanel', { panel: t('app.controlCenter') })">
+          <span class="inline-flex shrink-0">
+            <button
+              type="button"
+              @click="togglePanel"
+              class="board-panel-toggle"
+              data-testid="control-center-toggle"
+              :aria-label="t(isCollapsed ? 'app.expandPanel' : 'app.collapsePanel', { panel: t('app.controlCenter') })"
+              :aria-expanded="!isCollapsed"
+            >
+              <span class="material-symbols-outlined" aria-hidden="true">{{ isCollapsed ? 'dock_to_right' : 'dock_to_left' }}</span>
+            </button>
+          </span>
         </HintTooltip>
       </div>
     </div>
 
     <!-- Section tabs (only when expanded) -->
-    <div v-if="!isCollapsed" class="board-panel-tabs px-4 py-3 border-b">
+    <Transition name="board-panel-content" @before-leave="element => element.setAttribute('inert', '')">
+    <div v-if="!isCollapsed" class="board-panel-tabs border-b">
       <div
-        class="board-segmented grid grid-cols-4 gap-2 p-1 rounded-xl border shadow-sm"
+        class="board-segmented board-section-tabs"
         role="tablist"
         :aria-label="t('app.boardTools')"
       >
-        <!-- No tooltip: the tab prints `tab.label` itself, so a hint repeating it is the duplicate-feedback
-             case the project's own rule forbids. -->
         <button
             v-for="tab in controlTabs"
             :key="tab.id"
@@ -2667,22 +2699,20 @@ watch(() => props.readOnly, readOnly => {
             :tabindex="activeSection === tab.id ? 0 : -1"
             @click="activeSection = tab.id"
             @keydown="handleControlTabKeydown($event, tab.id)"
-            :class="[
-   'min-w-0 min-h-11 py-2.5 rounded-lg text-xs font-semibold uppercase tracking-wider transition-all duration-200 flex flex-col items-center gap-1',
-   activeSection === tab.id
-   ? CONTROL_TAB_ACTIVE_CLASS
-   : 'board-text-muted hover:board-control-hover hover:board-text-strong'
-   ]"
+            class="board-section-tab board-section-tab--stacked"
           >
-            <span class="material-symbols-outlined text-sm" aria-hidden="true">{{ tab.icon }}</span>
-            <span class="w-full truncate px-0.5 text-center text-[length:var(--iot-font-min)]">{{ tab.label }}</span>
+            <span class="board-section-tab__label">{{ tab.label }}</span>
           </button>
       </div>
     </div>
 
+    </Transition>
+    <Transition name="board-panel-content"
+      @before-enter="element => element.removeAttribute('inert')"
+      @before-leave="element => element.setAttribute('inert', '')">
     <div
-      v-if="!isCollapsed"
-      class="board-panel-body flex-1 iot-scroll-region transition-all duration-300 max-h-[calc(100vh-140px)] p-2"
+      v-show="!isCollapsed"
+      class="board-panel-body flex-1 iot-scroll-region p-3"
     >
       <!-- Devices -->
       <div
@@ -2692,21 +2722,20 @@ watch(() => props.readOnly, readOnly => {
         aria-labelledby="control-tab-devices"
         data-testid="control-section-devices"
       >
-        <details class="group mb-3 rounded-xl bg-white shadow-sm border border-slate-200 overflow-hidden" open>
-        <summary class="flex items-center justify-between p-4 cursor-pointer hover:board-chip-accent transition-all list-none select-none">
-          <div class="flex items-center gap-3">
-            <div class="w-10 h-10 bg-[color:var(--accent-fill)] rounded-xl flex items-center justify-center">
+        <details class="group mb-3 board-panel-section overflow-hidden" open>
+        <summary class="board-section-heading list-none select-none">
+          <div class="board-section-heading__identity">
+            <div class="board-section-icon board-section-icon--lg">
               <span aria-hidden="true" class="material-symbols-outlined text-white text-lg">add_circle</span>
             </div>
-            <div>
-              <span class="text-sm font-bold text-slate-800">{{ t('app.deviceManager') }}</span>
-              <p class="text-xs text-slate-500">{{ t('app.addAndManageDevices') }}</p>
+            <div class="board-section-heading__copy">
+              <span class="board-section-title">{{ t('app.createDevice') }}</span>
             </div>
           </div>
-          <span class="material-symbols-outlined text-slate-500 transition-transform group-open:rotate-180 text-lg">expand_more</span>
+          <span aria-hidden="true" class="board-section-heading__chevron material-symbols-outlined board-text-muted transition-transform group-open:rotate-180 text-lg">expand_more</span>
         </summary>
 
-        <div class="px-3 pb-4 space-y-3 bg-slate-50/50 pt-2">
+        <div class="px-3 pb-4 space-y-3 board-bg-muted pt-2">
           <div class="control-mode-tabs">
             <button
               type="button"
@@ -2741,14 +2770,12 @@ watch(() => props.readOnly, readOnly => {
             class="m-0 min-w-0 space-y-3 border-0 p-0"
           >
             <div class="relative">
-              <label class="block text-[length:var(--iot-font-min)] font-bold text-slate-500 mb-1 uppercase tracking-wide">{{ t('app.type') }}</label>
+              <label for="single-device-template" class="board-form-label mb-1 block">{{ t('app.deviceTemplateLabel') }}</label>
               <div class="relative">
-                <span class="absolute left-2.5 top-1/2 -translate-y-1/2 material-symbols-outlined text-slate-500 text-xs">devices</span>
-                <select
+                <FieldSelect
+                  id="single-device-template"
                   v-model="deviceForm.type"
                   data-testid="single-device-template"
-                  class="w-full min-h-11 bg-white border-2 border-slate-200 rounded-lg px-8 py-2 text-xs text-slate-700 focus:border-[color:var(--accent-border)] focus:ring-2 focus:ring-[color:var(--accent-border)] transition-all appearance-none shadow-sm"
-                  :class="isTemplateSelectorDisabled ? 'cursor-not-allowed opacity-70' : 'cursor-pointer'"
                   :disabled="isTemplateSelectorDisabled"
                   :title="templateSelectorTitle"
                 >
@@ -2756,21 +2783,18 @@ watch(() => props.readOnly, readOnly => {
                   <option v-else-if="deviceTypes.length === 0" value="">{{ t('app.none') }}</option>
                   <option v-else value="" disabled hidden>{{ t('app.selectDeviceTemplate') }}</option>
                   <option v-for="type in deviceTypes" :key="type" :value="type">{{ type }}</option>
-                </select>
+                </FieldSelect>
               </div>
             </div>
 
             <div class="relative">
-              <label class="block text-[length:var(--iot-font-min)] font-bold text-slate-500 mb-1 uppercase tracking-wide">{{ t('app.deviceName') }}</label>
+              <label for="single-device-name" class="board-form-label mb-1 block">{{ t('app.deviceName') }}</label>
               <div class="relative">
-                <span class="absolute left-2.5 top-1/2 -translate-y-1/2 material-symbols-outlined text-slate-500 text-xs">badge</span>
                 <input
+                  id="single-device-name"
                   v-model="deviceForm.name"
                   data-testid="single-device-name"
-                  class="w-full min-h-11 bg-white border-2 rounded-lg px-8 py-2 text-xs text-slate-700 focus:ring-2 placeholder:text-slate-400 transition-all shadow-sm"
-                  :class="singleDeviceNameConflict
- ? 'border-[color:var(--danger-border)] focus:border-[color:var(--accent-border)] focus:ring-[color:var(--accent-border)]'
- : 'border-slate-200 focus:border-[color:var(--accent-border)] focus:ring-[color:var(--accent-border)]'"
+                  class="board-field"
                   :placeholder="t('app.deviceNamePlaceholder')"
                   :title="deviceForm.name || t('app.deviceNamePlaceholder')"
                   :aria-invalid="singleDeviceNameConflict ? 'true' : undefined"
@@ -2782,7 +2806,7 @@ watch(() => props.readOnly, readOnly => {
                 v-if="singleDeviceNameConflict"
                 id="single-device-name-conflict"
                 role="alert"
-                class="mt-1 text-[length:var(--iot-font-min)] font-semibold board-text-danger"
+                class="mt-1 text-xs font-semibold board-text-danger"
                 data-testid="single-device-name-conflict"
               >
                 {{ t('app.deviceNameAlreadyExists') }}
@@ -2792,56 +2816,53 @@ watch(() => props.readOnly, readOnly => {
             <details
               v-if="hasSingleDeviceRuntimeFields"
               data-testid="single-device-runtime"
-              class="device-runtime-box rounded-xl border border-[color:var(--accent-border)] bg-white/80 p-3 shadow-sm"
+              class="device-runtime-box rounded-xl border border-[color:var(--accent-border)] board-bg-elevated p-3 shadow-sm"
             >
               <summary
                 data-testid="single-device-runtime-toggle"
-                class="flex cursor-pointer select-none items-center justify-between gap-2 text-[11px] font-bold text-slate-600"
+                class="board-form-label flex cursor-pointer select-none items-center justify-between gap-2"
               >
-                <span class="inline-flex items-center gap-1.5">
-                  <span class="material-symbols-outlined text-sm board-text-accent" aria-hidden="true">tune</span>
-                  {{ t('app.advancedInitialValuesOverrides') }}
+                <span class="inline-flex min-w-0 flex-1 items-center gap-1.5">
+                  <span class="material-symbols-outlined shrink-0 text-sm board-text-accent" aria-hidden="true">tune</span>
+                  <span class="min-w-0 break-words">{{ t('app.advancedInitialValuesOverrides') }}</span>
                 </span>
-                <span class="material-symbols-outlined text-sm text-slate-400 transition-transform group-open:rotate-180" aria-hidden="true">expand_more</span>
+                <span class="material-symbols-outlined shrink-0 text-sm board-text-muted transition-transform group-open:rotate-180" aria-hidden="true">expand_more</span>
               </summary>
-              <p class="mt-2 text-[length:var(--iot-font-min)] leading-relaxed text-slate-500">
+              <p class="mt-2 text-xs leading-relaxed board-text-muted">
                 {{ t('app.initialValuesHint') }}
               </p>
 
-              <div v-if="selectedTemplateHasModes" class="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+              <div v-if="selectedTemplateHasModes" class="board-field-grid mt-3">
                 <label class="min-w-0">
-                  <span class="mb-1 block text-[length:var(--iot-font-min)] font-bold uppercase tracking-wide text-slate-500">{{ t('app.initialState') }}</span>
-                  <select
+                  <span class="board-form-label mb-1 block">{{ t('app.initialState') }}</span>
+                  <FieldSelect
                     v-model="singleDeviceRuntime.state"
                     data-testid="single-device-state"
-                    class="w-full rounded-lg border-2 border-slate-200 bg-white px-2 py-2 text-xs text-slate-700 shadow-sm transition-all focus:border-[color:var(--accent-border)] focus:ring-2 focus:ring-[color:var(--accent-border)]"
                   >
                     <option v-for="state in formattedSelectedWorkingStates" :key="state.name" :value="state.name">{{ state.label }}</option>
-                  </select>
+                  </FieldSelect>
                 </label>
 
                 <label class="min-w-0">
-                  <span class="mb-1 block text-[length:var(--iot-font-min)] font-bold uppercase tracking-wide text-slate-500">{{ t('app.stateTrust') }}</span>
-                  <select
+                  <span class="board-form-label mb-1 block">{{ t('app.stateTrust') }}</span>
+                  <FieldSelect
                     v-model="singleDeviceRuntime.currentStateTrust"
                     data-testid="single-device-state-trust"
-                    class="w-full rounded-lg border-2 border-slate-200 bg-white px-2 py-2 text-xs text-slate-700 shadow-sm transition-all focus:border-[color:var(--accent-border)] focus:ring-2 focus:ring-[color:var(--accent-border)]"
                   >
                     <option value="">{{ t('app.useTemplateDefaultWithValue', { value: t(`app.${findTemplateStateTrust(selectedDeviceTemplate, singleDeviceRuntime.state) || 'trusted'}`) }) }}</option>
                     <option v-for="trust in TRUST_OPTIONS" :key="trust" :value="trust">{{ t(`app.${trust}`) }}</option>
-                  </select>
+                  </FieldSelect>
                 </label>
 
                 <label class="min-w-0">
-                  <span class="mb-1 block text-[length:var(--iot-font-min)] font-bold uppercase tracking-wide text-slate-500">{{ t('app.statePrivacy') }}</span>
-                  <select
+                  <span class="board-form-label mb-1 block">{{ t('app.statePrivacy') }}</span>
+                  <FieldSelect
                     v-model="singleDeviceRuntime.currentStatePrivacy"
                     data-testid="single-device-state-privacy"
-                    class="w-full rounded-lg border-2 border-slate-200 bg-white px-2 py-2 text-xs text-slate-700 shadow-sm transition-all focus:border-[color:var(--accent-border)] focus:ring-2 focus:ring-[color:var(--accent-border)]"
                   >
                     <option value="">{{ t('app.useTemplateDefaultWithValue', { value: t(`app.${findTemplateStatePrivacy(selectedDeviceTemplate, singleDeviceRuntime.state) || 'public'}`) }) }}</option>
                     <option v-for="privacy in PRIVACY_OPTIONS" :key="privacy" :value="privacy">{{ t(`app.${privacy}`) }}</option>
-                  </select>
+                  </FieldSelect>
                 </label>
               </div>
 
@@ -2849,87 +2870,105 @@ watch(() => props.readOnly, readOnly => {
                 <div
                   v-for="variable in formattedSelectedInternalVariables"
                   :key="variable.Name"
-                  class="rounded-lg border border-slate-200 bg-slate-50/80 p-2"
+                  class="rounded-lg border board-border-subtle board-bg-muted p-2"
                 >
-                  <div class="mb-2 flex items-center justify-between gap-2">
-                    <span class="truncate text-[11px] font-bold text-slate-700" :title="variable.formattedName">{{ variable.formattedName }}</span>
-                    <span v-if="templateVariableUsesNumericBounds(variable)" class="text-[length:var(--iot-font-min)] font-semibold text-slate-500">
+                  <div class="mb-2 flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
+                    <span class="max-w-full break-words text-xs font-semibold board-text-strong" :title="variable.formattedName">{{ variable.formattedName }}</span>
+                    <span v-if="templateVariableUsesNumericBounds(variable)" class="max-w-full break-words text-xs font-semibold board-text-muted">
                       {{ variableInputPlaceholder(variable) }}
                     </span>
                   </div>
 
-                  <div class="grid grid-cols-[minmax(0,1fr)_5.8rem_5.8rem] gap-2">
+                  <div class="board-field-grid">
                     <label class="min-w-0">
-                      <span class="mb-1 block text-[length:var(--iot-font-min)] font-bold uppercase text-slate-500">{{ t('app.variableValue') }}</span>
+                      <span class="board-form-label mb-1 block">{{ t('app.variableValue') }}</span>
                       <!-- A variable every state constrains is the state's consequence, not an instance
                            choice: see `templateVariableIsStateDerived`. Editing it here would be discarded
                            one step into the model, and the writers refuse a pair that disagrees. -->
                       <div
                         v-if="templateVariableIsStateDerived(selectedDeviceTemplate, variable.Name)"
                         :data-testid="`single-device-variable-derived-${variable.Name}`"
-                        class="flex min-w-0 items-center gap-2 rounded-lg border border-dashed border-slate-200 bg-slate-50 px-2 py-1.5"
+                        class="flex min-w-0 items-center gap-2 rounded-lg border border-dashed board-border-subtle board-bg-muted px-2 py-1.5"
                       >
-                        <span class="min-w-0 break-words text-xs font-medium text-slate-700">
+                        <span class="min-w-0 break-words text-xs font-medium board-text-strong">
                           {{ formatTemplateModelToken(selectedDeviceTemplate, singleDeviceRuntime.variables[variable.Name]) }}
                         </span>
-                        <span class="shrink-0 text-[length:var(--iot-font-min)] text-slate-500">{{ t('app.variableFollowsState') }}</span>
+                        <span class="shrink-0 text-xs board-text-muted">{{ t('app.variableFollowsState') }}</span>
                       </div>
-                      <select
+                      <FieldSelect
                         v-else-if="templateVariableHasEnumValues(variable)"
                         v-model="singleDeviceRuntime.variables[variable.Name]"
                         :data-testid="`single-device-variable-${variable.Name}`"
-                        class="w-full min-w-0 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-700"
+                        :aria-invalid="singleDeviceValueFailures[variable.Name] ? 'true' : undefined"
+                        :aria-describedby="singleDeviceValueFailures[variable.Name] ? `single-device-value-error-${encodeURIComponent(variable.Name)}` : undefined"
                       >
                         <option value="">{{ t('app.useTemplateDefaultWithValue', { value: variable.formattedDefaultValue }) }}</option>
                         <option v-for="val in variable.formattedValues" :key="val.raw" :value="val.raw">{{ val.formatted }}</option>
-                      </select>
+                      </FieldSelect>
                       <input
                         v-else
                         v-model="singleDeviceRuntime.variables[variable.Name]"
+                        @input="revealSingleDeviceValueFailure($event, variable.Name)"
                         :data-testid="`single-device-variable-${variable.Name}`"
-                        class="w-full min-w-0 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-700 placeholder:text-slate-400"
+                        :aria-invalid="singleDeviceValueFailures[variable.Name] ? 'true' : undefined"
+                        :aria-describedby="singleDeviceValueFailures[variable.Name] ? `single-device-value-error-${encodeURIComponent(variable.Name)}` : undefined"
+                        class="board-field"
                         :placeholder="variableInputPlaceholder(variable)"
                         type="text"
                       />
+                      <span v-if="singleDeviceValueFailures[variable.Name]"
+                        :id="`single-device-value-error-${encodeURIComponent(variable.Name)}`"
+                        :data-testid="`single-device-value-error-${variable.Name}`" role="alert"
+                        class="mt-1 block text-sm board-text-danger">
+                        {{ singleDeviceValueFailures[variable.Name] }}
+                      </span>
                     </label>
 
                     <label class="min-w-0">
-                      <span class="mb-1 block text-[length:var(--iot-font-min)] font-bold uppercase text-slate-500">{{ t('app.variableTrust') }}</span>
-                      <select
+                      <span class="board-form-label mb-1 block">{{ t('app.variableTrust') }}</span>
+                      <FieldSelect
                         v-model="singleDeviceRuntime.variableTrusts[variable.Name]"
                         :data-testid="`single-device-variable-trust-${variable.Name}`"
-                        class="w-full min-w-0 rounded-lg border border-slate-200 bg-white px-1.5 py-1.5 text-[11px] text-slate-700"
                       >
                         <option value="">{{ t('app.useTemplateDefaultWithValue', { value: t(`app.${variable.Trust || 'trusted'}`) }) }}</option>
                         <option v-for="trust in TRUST_OPTIONS" :key="trust" :value="trust">{{ t(`app.${trust}`) }}</option>
-                      </select>
+                      </FieldSelect>
                     </label>
 
                     <label class="min-w-0">
-                      <span class="mb-1 block text-[length:var(--iot-font-min)] font-bold uppercase text-slate-500">{{ t('app.privacy') }}</span>
-                      <select
+                      <span class="board-form-label mb-1 block">{{ t('app.privacy') }}</span>
+                      <FieldSelect
                         v-model="singleDeviceRuntime.privacies[variable.Name]"
                         :data-testid="`single-device-privacy-${variable.Name}`"
-                        class="w-full min-w-0 rounded-lg border border-slate-200 bg-white px-1.5 py-1.5 text-[11px] text-slate-700"
                       >
                         <option value="">{{ t('app.useTemplateDefaultWithValue', { value: t(`app.${variable.Privacy || 'public'}`) }) }}</option>
                         <option v-for="privacy in PRIVACY_OPTIONS" :key="privacy" :value="privacy">{{ t(`app.${privacy}`) }}</option>
-                      </select>
+                      </FieldSelect>
                     </label>
                   </div>
                 </div>
               </div>
             </details>
 
-            <button
-              @click="createDevice()"
-              data-testid="single-device-create"
-              :disabled="isTemplateSelectorDisabled || creatingSingleDevice || !deviceForm.name.trim() || singleDeviceNameConflict"
-              class="w-full min-h-11 py-2.5 bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)] disabled:bg-[color:var(--accent-fill)] disabled:cursor-not-allowed disabled:hover:scale-100 text-white rounded-lg text-xs font-bold uppercase tracking-wider transition-all shadow-md hover:shadow-lg hover:scale-[1.02] active:scale-[0.98] flex items-center justify-center gap-1.5"
-            >
-              <span class="material-symbols-outlined text-sm">add_location</span>
-              {{ creatingSingleDevice ? t('app.saving') : `${t('app.add')} ${t('app.dropNode')}` }}
-            </button>
+            <div ref="singleDeviceSaveActionElement" class="space-y-3">
+              <div v-if="singleDeviceSaveFailure" ref="singleDeviceSaveFailureElement" data-testid="single-device-save-failure" role="alert" tabindex="-1" class="text-sm board-text-danger">
+                <p class="font-semibold">{{ t('app.saveNodesFailed') }}</p>
+                <FailureDetails v-bind="singleDeviceSaveFailure" suggestion="" />
+              </div>
+              <p v-if="singleDeviceBlockedReason && !singleDeviceNameConflict" id="single-device-readiness"
+                data-testid="single-device-readiness" role="status" class="text-xs board-text-muted">{{ singleDeviceBlockedReason }}</p>
+              <button
+                @click="createDevice()"
+                data-testid="single-device-create"
+                :disabled="creatingSingleDevice || Boolean(singleDeviceBlockedReason)"
+                :aria-describedby="singleDeviceNameConflict ? 'single-device-name-conflict'
+                  : singleDeviceBlockedReason ? 'single-device-readiness' : undefined"
+                class="board-panel-submit board-action-disarmed"
+              >
+                <span class="material-symbols-outlined text-sm" aria-hidden="true">add_location</span>
+                {{ creatingSingleDevice ? t('app.saving') : t('app.createDevice') }}
+              </button>
+            </div>
           </fieldset>
 
           <fieldset
@@ -2939,37 +2978,39 @@ watch(() => props.readOnly, readOnly => {
             class="m-0 min-w-0 space-y-3 border-0 p-0"
           >
             <div class="relative">
-              <label class="block text-[length:var(--iot-font-min)] font-bold text-slate-500 mb-1 uppercase tracking-wide">{{ t('app.type') }}</label>
-              <select
+              <label for="batch-device-template" class="board-form-label mb-1 block">{{ t('app.deviceTemplateLabel') }}</label>
+              <FieldSelect
+                id="batch-device-template"
                 v-model="batchDeviceForm.type"
                 data-testid="batch-device-template"
-                class="w-full bg-white border-2 border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-700 focus:border-[color:var(--accent-border)] focus:ring-2 focus:ring-[color:var(--accent-border)] transition-all appearance-none shadow-sm"
                 :disabled="isTemplateSelectorDisabled"
               >
                 <option v-if="props.templatesLoading" value="">{{ t('app.loadingDeviceTemplates') }}</option>
                 <option v-else-if="deviceTypes.length === 0" value="">{{ t('app.none') }}</option>
                 <option v-else value="" disabled hidden>{{ t('app.selectDeviceTemplate') }}</option>
                 <option v-for="type in deviceTypes" :key="type" :value="type">{{ type }}</option>
-              </select>
+              </FieldSelect>
             </div>
 
-            <div class="grid grid-cols-[minmax(0,1fr)_5.5rem] gap-2">
+            <div class="board-field-grid">
               <div>
-                <label class="block text-[length:var(--iot-font-min)] font-bold text-slate-500 mb-1 uppercase tracking-wide">{{ t('app.deviceNamePrefix') }}</label>
+                <label for="batch-device-prefix" class="board-form-label mb-1 block">{{ t('app.deviceNamePrefix') }}</label>
                 <input
+                  id="batch-device-prefix"
                   v-model="batchDeviceForm.prefix"
                   data-testid="batch-device-prefix"
-                  class="w-full bg-white border-2 border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-700 focus:border-[color:var(--accent-border)] focus:ring-2 focus:ring-[color:var(--accent-border)] placeholder:text-slate-400 transition-all shadow-sm"
+                  class="board-field"
                   :placeholder="t('app.devicePrefixPlaceholder')"
                   type="text"
                 />
               </div>
               <div>
-                <label class="block text-[length:var(--iot-font-min)] font-bold text-slate-500 mb-1 uppercase tracking-wide">{{ t('app.count') }}</label>
+                <label for="batch-device-count" class="board-form-label mb-1 block">{{ t('app.count') }}</label>
                 <input
+                  id="batch-device-count"
                   v-model.number="batchDeviceForm.count"
                   data-testid="batch-device-count"
-                  class="w-full bg-white border-2 border-slate-200 rounded-lg px-2 py-2 text-xs text-slate-700 focus:border-[color:var(--accent-border)] focus:ring-2 focus:ring-[color:var(--accent-border)] transition-all shadow-sm"
+                  class="board-field"
                   type="number"
                   min="1"
                   :max="MAX_BATCH_DEVICE_COUNT"
@@ -2980,7 +3021,7 @@ watch(() => props.readOnly, readOnly => {
                   v-if="batchDeviceCountError"
                   id="batch-device-count-error"
                   role="alert"
-                  class="mt-1 text-[length:var(--iot-font-min)] font-semibold leading-4 board-text-danger"
+                  class="mt-1 text-xs font-semibold leading-4 board-text-danger"
                 >
                   {{ batchDeviceCountError }}
                 </p>
@@ -3008,7 +3049,7 @@ watch(() => props.readOnly, readOnly => {
               @click="handleCreateBatchDevices"
               data-testid="batch-device-create"
               :disabled="Boolean(batchDeviceCountError) || batchDevicePreview.length === 0 || creatingMultipleDevices"
-              class="w-full py-2.5 bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)] disabled:bg-[color:var(--accent-fill)] disabled:cursor-not-allowed disabled:hover:scale-100 text-white rounded-lg text-xs font-bold uppercase tracking-wider transition-all shadow-md hover:shadow-lg hover:scale-[1.02] active:scale-[0.98] flex items-center justify-center gap-1.5"
+              class="board-panel-submit board-action-disarmed"
             >
               <span class="material-symbols-outlined text-sm">playlist_add</span>
               {{ creatingMultipleDevices ? t('app.saving') : t('app.createDevicesWithCount', { count: batchDevicePreview.length }) }}
@@ -3019,39 +3060,97 @@ watch(() => props.readOnly, readOnly => {
             v-else
             :disabled="props.readOnly || creatingMultipleDevices"
             data-testid="import-device-fieldset"
+            @focusin="dismissCompletionNotifications"
             class="m-0 min-w-0 space-y-3 border-0 p-0"
           >
-            <div class="device-import-help">
-              <span class="material-symbols-outlined text-sm" aria-hidden="true">info</span>
-              <span class="min-w-0 flex-1 truncate" :title="t('app.deviceImportShortHint')">
-                {{ t('app.deviceImportShortHint') }}
+            <div role="group" :aria-label="t('app.deviceImportFormat')" class="control-mode-tabs control-mode-tabs--formats">
+              <button v-for="(format, key) in deviceImportFormats" :key="key" type="button"
+                :data-testid="`device-import-format-${key}`" :aria-pressed="deviceImportFormat === key"
+                :class="{ active: deviceImportFormat === key }"
+                @click="deviceImportFormat = key">
+                {{ t('app.deviceImportOption', { format: format.label }) }}
+              </button>
+            </div>
+            <div v-if="deviceImportSyntaxFailure" id="device-import-syntax-failure" data-testid="device-import-syntax-failure" role="alert"
+              class="rounded-lg board-surface-danger px-3 py-2 text-sm board-text-danger">
+              <p class="font-semibold">{{ deviceImportSyntaxFailure.error }}</p>
+              <FailureDetails suggestion="" v-bind="deviceImportSyntaxFailure.diagnostics" />
+            </div>
+            <div v-else class="device-import-help">
+              <span id="device-import-format-summary" class="min-w-0 flex-1 break-words">
+                {{ t(selectedDeviceImportFormat.summaryKey) }}
               </span>
-              <InfoTooltip
-                :text="t('app.deviceImportHint')"
-                :label="t('app.deviceImportHelpTitle')"
-                placement="bottom-end"
-                test-id="device-import-help"
-              />
+              <InfoTooltip :text="t(selectedDeviceImportFormat.helpKey)"
+                :label="t('app.deviceImportHelpTitle', { format: selectedDeviceImportFormat.label })"
+                placement="bottom-end" test-id="device-import-help" />
             </div>
-            <div class="flex items-center justify-between gap-2">
-              <!-- `hover:board-chip-accent` was a Tailwind variant applied to a hand-written class, which
-                   Tailwind cannot generate — the hover had no effect at all. `board-file-trigger` owns both
-                   states in CSS instead. -->
-              <label class="board-file-trigger inline-flex cursor-pointer items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[length:var(--iot-font-min)] font-bold transition-colors">
-                <input data-testid="device-import-file" type="file" accept=".json,.csv,.txt" class="hidden" @change="handleDeviceImportFile">
-                <span class="material-symbols-outlined text-xs">upload_file</span>
-                {{ t('app.chooseFile') }}
+            <a :href="selectedDeviceImportFormat.templateUrl" :download="`devices.${deviceImportFormat}`"
+              :data-testid="`device-import-${deviceImportFormat}-template`" class="board-action-secondary"
+              :aria-label="t('app.downloadDeviceImportTemplate', { format: selectedDeviceImportFormat.label })">
+              <span class="material-symbols-outlined text-sm" aria-hidden="true">download</span>
+              {{ t('app.deviceImportTemplateFormat', { format: selectedDeviceImportFormat.label }) }}
+            </a>
+            <fieldset class="min-w-0 space-y-2 border-0 p-0">
+              <legend class="board-form-label mb-2">{{ t('app.deviceImportSource') }}</legend>
+              <div class="grid grid-cols-2 gap-2">
+                <label v-for="source in ['file', 'paste'] as const" :key="source"
+                  class="flex min-w-0 cursor-pointer items-center gap-2 rounded-lg border board-border-subtle px-3 py-2 text-sm"
+                  :class="deviceImportSource === source ? 'board-surface-info' : 'board-card'">
+                  <input v-model="deviceImportSource" type="radio" name="device-import-source" :value="source"
+                    :data-testid="`device-import-source-${source}`" class="shrink-0 accent-primary" />
+                  <span>{{ t(source === 'file' ? 'app.deviceImportSourceFile' : 'app.deviceImportSourcePaste') }}</span>
+                </label>
+              </div>
+            </fieldset>
+            <template v-if="deviceImportSource === 'file'">
+              <div v-if="deviceImportFormat === 'csv'" class="space-y-1">
+                <div class="flex items-center gap-2">
+                  <label for="device-import-csv-encoding" class="board-form-label">{{ t('app.deviceImportFileEncoding') }}</label>
+                  <InfoTooltip :text="t('app.deviceImportEncodingHint')" :label="t('app.deviceImportEncodingHelp')"
+                    placement="bottom-end" test-id="device-import-encoding-help" />
+                </div>
+                <FieldSelect id="device-import-csv-encoding" v-model="deviceImportCsvEncoding" data-testid="device-import-csv-encoding">
+                  <option value="utf-8">UTF-8</option>
+                  <option value="gb18030">GB18030 / GBK</option>
+                </FieldSelect>
+              </div>
+              <div class="flex flex-wrap items-center gap-2">
+                <button type="button" class="board-file-trigger" data-testid="device-import-file-trigger"
+                  @click="deviceImportFileInput?.click()">
+                  <span class="material-symbols-outlined text-xs" aria-hidden="true">upload_file</span>
+                  {{ t('app.deviceImportChooseFile', { format: selectedDeviceImportFormat.label }) }}
+                </button>
+                <input :key="deviceImportFormat" ref="deviceImportFileInput" data-testid="device-import-file" type="file"
+                  :accept="selectedDeviceImportFormat.extension" class="hidden" @change="handleDeviceImportFile">
+              </div>
+              <div v-if="selectedDeviceImportDraft.fileName" class="flex min-w-0 items-start gap-2 rounded-lg border board-border-subtle p-3">
+                <span data-testid="device-import-file-name" class="min-w-0 flex-1 break-words text-sm">{{ selectedDeviceImportDraft.fileName }}</span>
+                <button type="button" data-testid="device-import-file-clear" class="board-action-inline-subtle shrink-0"
+                  @click="clearDeviceImportFile">{{ t('app.deviceImportClearFile') }}</button>
+              </div>
+            </template>
+            <template v-else>
+              <label for="device-import-text" class="board-form-label block">
+                {{ t('app.deviceImportTextLabel', { format: selectedDeviceImportFormat.label }) }}
               </label>
-              <span class="text-[length:var(--iot-font-min)] font-semibold text-slate-500">{{ t('app.jsonOrCsv') }}</span>
-            </div>
-            <textarea
-              v-model="importDeviceForm.text"
-              data-testid="device-import-text"
-              class="min-h-32 w-full resize-y rounded-lg border-2 border-slate-200 bg-white px-3 py-2 font-mono text-[11px] leading-relaxed text-slate-700 shadow-sm transition-all placeholder:text-slate-400 focus:border-[color:var(--accent-border)] focus:ring-2 focus:ring-[color:var(--accent-border)]"
-              :placeholder="deviceImportPlaceholder"
-            ></textarea>
+              <textarea id="device-import-text" v-model="importDeviceText" data-testid="device-import-text"
+                :aria-invalid="deviceImportSyntaxFailure ? 'true' : undefined"
+                :aria-describedby="deviceImportSyntaxFailure ? 'device-import-syntax-failure' : 'device-import-format-summary'"
+                class="board-field min-h-32 resize-y font-mono leading-relaxed"
+                :placeholder="t('app.deviceImportPlaceholder', { format: selectedDeviceImportFormat.label })"
+              ></textarea>
+            </template>
 
-            <div v-if="parsedImportedDevices.length > 0" data-testid="device-import-preview" class="device-preview-box">
+            <div v-if="deviceImportFileFailure" data-testid="device-import-file-failure" role="alert"
+              class="rounded-lg board-surface-danger px-3 py-3 text-sm board-text-danger">
+              <p class="font-semibold">{{ t(deviceImportFileFailure === 'encoding' ? 'app.deviceImportEncodingFailed' : 'app.deviceImportFileReadFailedTitle') }}</p>
+              <p class="mt-1">{{ t(deviceImportFileFailure === 'encoding'
+                ? (deviceImportFormat === 'csv' ? 'app.deviceImportCsvEncodingRetry' : 'app.deviceImportJsonEncodingRetry')
+                : 'app.deviceImportFileReadFailedMessage') }}</p>
+              <FailureDetails v-if="deviceImportFileFailure !== 'encoding'" :suggestion="t('app.deviceImportFileReadFailedHint')" v-bind="deviceImportFileFailure" />
+            </div>
+
+            <div v-if="parsedImportedDevices.length > 0 && !deviceImportSyntaxFailure" data-testid="device-import-preview" class="device-preview-box">
               <div class="device-preview-box__header">
                 <span>{{ t('app.parsedDevices') }}</span>
                 <strong>{{ validImportedDevices.length }}/{{ parsedImportedDevices.length }}</strong>
@@ -3063,8 +3162,10 @@ watch(() => props.readOnly, readOnly => {
                   class="device-preview-row"
                   :class="{ 'has-error': item.error, 'has-warning': item.warning && !item.error }"
                 >
-                  <span class="truncate">{{ item.customName || item.name || t('app.unnamed') }}</span>
-                  <small class="truncate" :title="item.error || item.warning || item.templateName">
+                  <span v-if="item.error || item.warning || importedEnvironmentMerge.conflicts.length > 0"
+                    class="device-import-row-source" data-testid="device-import-row-source">{{ deviceImportSourceLabel(item.source) }}</span>
+                  <span data-testid="device-import-row-name" :class="{ truncate: !item.error && !item.warning }">{{ item.customName || item.name || t('app.unnamed') }}</span>
+                  <small :class="{ truncate: !item.error && !item.warning }" :title="!item.error && !item.warning ? item.templateName : undefined">
                     {{ item.error || item.warning || item.templateName }}
                   </small>
                 </div>
@@ -3074,21 +3175,30 @@ watch(() => props.readOnly, readOnly => {
             <div
               v-if="importedEnvironmentMerge.conflicts.length > 0"
               data-testid="device-import-environment-conflicts"
-              class="space-y-1 rounded-lg board-surface-danger px-3 py-2 text-[length:var(--iot-font-min)] font-semibold leading-4 board-text-danger"
+              role="alert"
+              class="space-y-1 rounded-lg board-surface-danger px-3 py-2 text-xs font-semibold leading-4 board-text-danger"
             >
-              <div v-for="(conflict, index) in importedEnvironmentMerge.conflicts" :key="`${conflict.name}-${conflict.field}-${index}`">
-                {{ formatImportedEnvironmentConflict(conflict) }}
-              </div>
+              <p>{{ t('app.deviceImportEnvironmentConflicts') }}</p>
+              <ul class="m-0 list-disc space-y-1 pl-4 break-words">
+                <li v-for="(conflict, index) in importedEnvironmentMerge.conflicts" :key="`${conflict.name}-${conflict.field}-${index}`">
+                  {{ formatImportedEnvironmentConflict(conflict) }}
+                </li>
+              </ul>
             </div>
 
+            <p v-if="importedDevicesHaveErrors && !deviceImportSyntaxFailure" id="device-import-blocked-reason"
+              data-testid="device-import-blocked-reason" class="board-caption board-text-danger">
+              {{ t('app.deviceImportResolveErrors') }}
+            </p>
             <button
               @click="handleCreateImportedDevices"
               data-testid="device-import-create"
               :disabled="importPreviewStale || validImportedDevices.length === 0 || importedDevicesHaveErrors || importedEnvironmentMerge.conflicts.length > 0 || creatingMultipleDevices"
-              class="w-full py-2.5 bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)] disabled:bg-[color:var(--accent-fill)] disabled:cursor-not-allowed disabled:hover:scale-100 text-white rounded-lg text-xs font-bold uppercase tracking-wider transition-all shadow-md hover:shadow-lg hover:scale-[1.02] active:scale-[0.98] flex items-center justify-center gap-1.5"
+              :aria-describedby="importedDevicesHaveErrors && !deviceImportSyntaxFailure ? 'device-import-blocked-reason' : undefined"
+              class="board-panel-submit board-action-disarmed"
             >
               <span class="material-symbols-outlined text-sm">library_add</span>
-              {{ creatingMultipleDevices ? t('app.saving') : t('app.createDevicesWithCount', { count: validImportedDevices.length }) }}
+              {{ creatingMultipleDevices ? t('app.saving') : t('app.importDevicesWithCount', { count: validImportedDevices.length }) }}
             </button>
           </fieldset>
         </div>
@@ -3104,117 +3214,100 @@ watch(() => props.readOnly, readOnly => {
         data-testid="control-section-templates"
         class="space-y-3"
       >
-        <details data-testid="control-template-create" class="group rounded-xl bg-white shadow-sm border border-slate-200 overflow-hidden" open>
-          <summary class="flex items-center justify-between p-4 cursor-pointer hover:board-chip-warning transition-all list-none select-none">
-            <div class="flex items-center gap-3">
-              <div class="w-10 h-10 bg-[color:var(--warning-fill)] rounded-xl flex items-center justify-center">
-                <span class="material-symbols-outlined text-white text-lg">add_box</span>
+        <details data-testid="control-template-create" class="group board-panel-section overflow-hidden" open>
+          <summary class="board-section-heading list-none select-none">
+            <div class="board-section-heading__identity">
+              <div class="board-section-icon board-section-icon--lg">
+                <span class="material-symbols-outlined board-text-muted text-lg">add_box</span>
               </div>
-              <div>
-                <span class="text-sm font-bold text-slate-800">{{ t('app.createTemplate') }}</span>
-                <p class="text-xs text-slate-500">{{ t('app.createTemplateSubtitleShort') }}</p>
+              <div class="board-section-heading__copy">
+                <span class="board-section-title">{{ t('app.createTemplate') }}</span>
               </div>
             </div>
-            <span class="material-symbols-outlined text-slate-500 transition-transform group-open:rotate-180 text-lg">expand_more</span>
+            <span aria-hidden="true" class="board-section-heading__chevron material-symbols-outlined board-text-muted transition-transform group-open:rotate-180 text-lg">expand_more</span>
           </summary>
 
-          <div class="px-3 pb-4 bg-slate-50/50 pt-2 space-y-3">
-            <!--
-              The tint comes from the role token directly, not from `board-chip-warning`. A chip role
-              declares `border: 0`, and `board.css` is unlayered while Tailwind's border utilities are in
-              `@layer utilities` — so the chip silenced this dropzone's `border-2 border-dashed` entirely
-              (measured 0px; the same markup without the chip renders 2px dashed). `board-surface-warning`
-              is not the fix either: it brings a *solid* 1px border, which is the opposite of the dashed
-              affordance a drop target wants.
-            -->
-            <div class="relative overflow-hidden rounded-lg border-2 border-dashed border-[color:var(--warning-border)] bg-[color:var(--warning-surface)] transition-all hover:border-[color:var(--warning-fill)] hover:shadow-md">
-              <label
-                class="group block"
+          <div class="px-3 pb-4 board-bg-muted pt-2 space-y-3">
+            <!-- Role chips remove borders, so the drop target owns its dashed border. -->
+            <div class="relative overflow-hidden rounded-lg border-2 border-dashed border-[color:var(--accent-border)] bg-[color:var(--surface-muted)] p-3 transition-all hover:border-[color:var(--accent)] hover:shadow-md">
+              <input ref="templateImportFile" data-testid="template-import-file" type="file" accept=".json"
+                class="hidden" :disabled="props.readOnly" @change="handleImportTemplate">
+              <button type="button" data-testid="template-import-open"
+                class="group block w-full rounded-md p-2 text-left"
                 :class="props.readOnly ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'"
-                :title="mutationTitle(t('app.importJsonTemplate'))"
-              >
-                <input type="file" accept=".json" class="hidden" :disabled="props.readOnly" @change="handleImportTemplate">
-                <div class="p-3 flex items-center gap-3">
-                  <div class="w-9 h-9 bg-[color:var(--warning-fill)] rounded-lg flex items-center justify-center flex-shrink-0 group-hover:bg-[color:var(--warning-fill-hover)] transition-colors">
-                    <span class="material-symbols-outlined text-white text-base">upload_file</span>
-                  </div>
-                  <div class="min-w-0 flex-1">
-                    <div class="text-xs font-bold board-text-warning">{{ t('app.importJsonTemplate') }}</div>
-                    <!-- A sentence wraps; it does not truncate. This hint was cut at 26% of its length, breaking off
-                     mid-word — a name's prefix still identifies it, but a fragment of guidance identifies nothing.
-                     Clamped to three lines so it cannot push the panel out of shape. -->
-                <p class="text-[length:var(--iot-font-min)] board-text-warning line-clamp-3" :title="t('app.deviceTemplateSchemaHint')">
-                      {{ t('app.deviceTemplateSchemaHint') }}
-                    </p>
-                  </div>
-                </div>
-              </label>
-              <HintTooltip :content="t('app.downloadTemplateSchema')">
-                <button
-                  type="button"
-   class="mx-3 mb-3 min-h-11 inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[length:var(--iot-font-min)] font-bold board-text-warning transition-colors hover:board-chip-warning"
-                  @click="downloadTemplateSchema"
-                >
-                  <span class="material-symbols-outlined text-xs">download</span>
+                :disabled="props.readOnly"
+                @click="templateImportFile?.click()">
+                <span class="flex items-center gap-3">
+                  <span class="board-section-icon">
+                    <span class="material-symbols-outlined board-text-muted text-base" aria-hidden="true">upload_file</span>
+                  </span>
+                  <span class="board-section-title">{{ t('app.importJsonTemplate') }}</span>
+                </span>
+              </button>
+              <div class="mt-2 flex flex-wrap items-center gap-4">
+                <button type="button" class="board-action-secondary" @click="downloadTemplateSchema">
+                  <span class="material-symbols-outlined text-xs" aria-hidden="true">download</span>
                   {{ t('app.downloadTemplateSchema') }}
                 </button>
-              </HintTooltip>
+                <InfoTooltip :text="t('app.deviceTemplateSchemaHint')"
+                  :label="t('app.showHelpFor', { topic: t('app.createTemplate') })"
+                  test-id="template-format-help" />
+              </div>
+            </div>
+            <div v-if="templateImportFeedback" data-testid="template-import-feedback" role="alert"
+              class="rounded-lg board-surface-danger px-3 py-3 text-sm board-text-danger">
+              <p class="font-semibold">{{ templateImportFeedback.title }}</p>
+              <p class="mt-1 whitespace-pre-wrap" data-testid="failure-summary">{{ templateImportFeedback.message }}</p>
+              <FailureDetails v-bind="templateImportFeedback" />
             </div>
           </div>
         </details>
 
-        <details data-testid="control-template-repository" class="group rounded-xl bg-white shadow-sm border border-slate-200 overflow-hidden" open>
-          <summary class="flex items-center justify-between p-4 cursor-pointer hover:board-chip-warning transition-all list-none select-none">
-            <div class="flex items-center gap-3">
-              <div class="w-10 h-10 bg-[color:var(--warning-fill)] rounded-xl flex items-center justify-center">
-                <span class="material-symbols-outlined text-white text-lg">inventory_2</span>
+        <details data-testid="control-template-repository" class="group board-panel-section overflow-hidden" open>
+          <summary class="board-section-heading list-none select-none">
+            <div class="board-section-heading__identity">
+              <div class="board-section-icon board-section-icon--lg">
+                <span class="material-symbols-outlined board-text-muted text-lg">inventory_2</span>
               </div>
-              <div>
-                <span class="text-sm font-bold text-slate-800">{{ t('app.templateRepository') }}</span>
-                <p class="text-xs text-slate-500">{{ t('app.templateRepositoryHint') }}</p>
+              <div class="board-section-heading__copy">
+                <span class="board-section-title">{{ t('app.templateRepository') }}</span>
               </div>
+              <InfoTooltip :text="t('app.dragTemplateToCanvasHint')"
+                :label="t('app.showHelpFor', { topic: t('app.templateRepository') })"
+                test-id="template-repository-help" />
             </div>
-            <span class="material-symbols-outlined text-slate-500 transition-transform group-open:rotate-180 text-lg">expand_more</span>
+            <span aria-hidden="true" class="board-section-heading__chevron material-symbols-outlined board-text-muted transition-transform group-open:rotate-180 text-lg">expand_more</span>
           </summary>
 
-          <div class="px-3 pb-4 bg-slate-50/50 pt-2 space-y-3">
-            <div class="rounded-lg board-surface-warning px-3 py-2 text-[length:var(--iot-font-min)] font-semibold leading-relaxed board-text-warning">
-              {{ t('app.dragTemplateToCanvasHint') }}
-            </div>
-
+          <div class="px-3 pb-4 board-bg-muted pt-2 space-y-3">
             <div class="relative">
-              <span aria-hidden="true" class="absolute left-2.5 top-1/2 -translate-y-1/2 material-symbols-outlined text-slate-400 text-xs">search</span>
+              <span aria-hidden="true" class="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 material-symbols-outlined board-text-muted text-sm">search</span>
               <input
                 v-model="templateSearchQuery"
-                class="w-full min-h-11 bg-white border-2 border-slate-200 rounded-lg px-8 py-2 text-xs text-slate-700 focus:border-[color:var(--accent-border)] focus:ring-2 focus:ring-[color:var(--accent-border)] placeholder:text-slate-400 transition-all shadow-sm"
+                class="board-field board-field--clearable pl-8 pr-12"
                 :placeholder="t('app.searchTemplates')"
                 :aria-label="t('app.searchTemplates')"
-                type="text"
+                type="search"
               />
-              <HintTooltip :content="t('app.clearSearch')">
+              <HintTooltip v-if="templateSearchQuery" :content="t('app.clearSearch')">
                 <button
-                  v-if="templateSearchQuery"
                   type="button"
                   :aria-label="t('app.clearSearch')"
                   @click="templateSearchQuery = ''"
-                  class="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-600 transition-colors"
+                  class="board-field-clear"
                 >
-                  <span aria-hidden="true" class="material-symbols-outlined text-xs">close</span>
+                  <span aria-hidden="true" class="material-symbols-outlined text-sm">close</span>
                 </button>
               </HintTooltip>
             </div>
 
-            <div class="flex items-center justify-between px-1">
-              <div class="flex items-center gap-1.5">
-                <span class="material-symbols-outlined text-slate-500 text-xs">folder_open</span>
-                <span class="text-[length:var(--iot-font-min)] font-bold text-slate-500 uppercase tracking-wide">{{ t('app.templates') }}</span>
-              </div>
+            <div class="flex flex-wrap items-center justify-between gap-2 px-1">
               <div class="flex items-center gap-1.5">
                 <HintTooltip :content="mutationTitle(t('app.resetDefaultTemplates'))">
                   <button
                     type="button"
                     data-testid="reset-default-templates"
-   class="inline-flex min-h-11 items-center gap-1 rounded-full px-2 py-0.5 text-[length:var(--iot-font-min)] font-bold board-text-warning transition-colors hover:board-chip-warning disabled:cursor-not-allowed disabled:opacity-60"
+                    class="board-action-secondary"
                     :disabled="props.readOnly || props.templatesLoading || isLoadingDefaultTemplateResetPreview"
                     @click="openResetDefaultsConfirm"
                   >
@@ -3224,13 +3317,13 @@ watch(() => props.readOnly, readOnly => {
                       aria-hidden="true"
                     ></span>
                     <span v-else class="material-symbols-outlined text-xs" aria-hidden="true">restart_alt</span>
-                    <span class="truncate">{{ t('app.resetDefaultTemplatesShort') }}</span>
+                    <span class="whitespace-normal text-left">{{ t('app.resetDefaultTemplates') }}</span>
                   </button>
                 </HintTooltip>
                 <!-- A count is not a status. `board-chip-warning` here was read by a review as a queue of
                      things needing attention when it is only how many templates are listed;
                      `board-chip-neutral` exists so a number does not have to borrow a role's meaning. -->
-                <span class="text-[length:var(--iot-font-min)] font-bold board-chip-neutral px-2 py-0.5 rounded-full">
+                <span class="text-xs font-semibold board-chip-neutral px-2 py-0.5 rounded-full">
                   {{ filteredTemplates.length }}
                 </span>
               </div>
@@ -3242,7 +3335,6 @@ watch(() => props.readOnly, readOnly => {
             >
               <span class="material-symbols-outlined mb-2 block animate-spin text-2xl">sync</span>
               <p class="font-semibold">{{ t('app.loadingDeviceTemplates') }}</p>
-              <p class="mt-1 text-[length:var(--iot-font-min)] board-text-warning">{{ t('app.preparingDefaultTemplates') }}</p>
             </div>
 
             <div v-else-if="filteredTemplates.length > 0" class="space-y-2.5">
@@ -3267,23 +3359,20 @@ watch(() => props.readOnly, readOnly => {
                 <summary class="template-group__summary flex cursor-pointer select-none items-center justify-between gap-2 px-2.5 py-2 transition-colors">
                   <div class="flex min-w-0 items-center gap-2">
                     <span class="template-group__chevron material-symbols-outlined text-sm transition-transform">expand_more</span>
-                    <span class="template-group__label truncate text-[length:var(--iot-font-min)] font-bold uppercase tracking-wide" :title="group.label">{{ group.label }}</span>
+                    <span class="template-group__label board-form-label truncate" :title="group.label">{{ group.label }}</span>
                   </div>
-                  <span class="template-group__count rounded-full px-2 py-0.5 text-[length:var(--iot-font-min)] font-bold">{{ group.templates.length }}</span>
+                  <span class="template-group__count rounded-full px-2 py-0.5 text-xs font-semibold">{{ group.templates.length }}</span>
                 </summary>
 
-                <!-- Columns follow the available width, not a fixed count. `grid-cols-2` in a 320px panel gave
-                     each template title 51px regardless of the name, and one default template needs 217px.
-                     11rem is the floor at which the longest bundled name stops truncating, so a narrow panel
-                     drops to one column rather than printing two unreadable ones. -->
+                <!-- A narrow column may shrink below the preferred card width. -->
                 <div
                   v-if="group.templates.length > 0"
-                  class="template-group__grid grid grid-cols-[repeat(auto-fill,minmax(11rem,1fr))] gap-2 px-2.5 pb-2.5"
+                  class="template-group__grid grid grid-cols-[repeat(auto-fill,minmax(min(100%,11rem),1fr))] gap-2 px-2.5 pb-2.5"
                 >
                   <div
                     v-for="template in group.templates"
                     :key="template.id"
-                    class="template-card relative rounded-lg p-2 border transition-all duration-200"
+                    class="template-card board-inventory-card relative"
                     :class="{ 'template-card--active': isTemplatePreviewVisible(template) }"
                     :draggable="!props.readOnly"
                     :title="getTemplateName(template)"
@@ -3303,7 +3392,7 @@ watch(() => props.readOnly, readOnly => {
                             :src="getTemplateIconUrl(template)"
                             alt=""
                             aria-hidden="true"
-                            class="h-full w-full object-contain"
+                            class="h-full w-full object-contain iot-device-artwork"
                           />
                         </div>
                         <div class="min-w-0 flex-1">
@@ -3316,12 +3405,12 @@ watch(() => props.readOnly, readOnly => {
                               The group label above ("Default Templates") is a <span> inside a <summary> and carries no
                               level, so h3 is the correct rung for the card titles themselves rather than a new heading.
                             -->
-                            <h3 class="template-card__title min-w-0 flex-1 text-xs font-bold transition-colors truncate" :title="getTemplateName(template)">
+                            <h3 class="template-card__title board-inventory-name min-w-0 flex-1 transition-colors truncate" :title="getTemplateName(template)">
                               {{ getTemplateName(template) }}
                             </h3>
                             <span class="template-card__drag-cue material-symbols-outlined" aria-hidden="true">drag_indicator</span>
                           </div>
-                          <div class="template-card__stats text-[length:var(--iot-font-min)] mt-0.5 flex items-center gap-1.5">
+                          <div class="template-card__stats text-xs mt-0.5 flex items-center gap-1.5">
                             <span class="template-card__pill px-1.5 py-0.5 rounded">{{ template.manifest.InternalVariables?.length || 0 }} {{ t('app.varsShort') }}</span>
                             <span class="template-card__pill px-1.5 py-0.5 rounded">{{ template.manifest.APIs?.length || 0 }} {{ t('app.apisShort') }}</span>
                           </div>
@@ -3330,25 +3419,25 @@ watch(() => props.readOnly, readOnly => {
                     </button>
 
                     <div class="template-card__actions mt-0.5 pt-0.5 border-t flex justify-end gap-1">
-                      <HintTooltip :content="t('app.export')">
+                      <HintTooltip :content="`${t('app.export')}: ${getTemplateName(template)}`">
                         <button
                           type="button"
                           @click.stop="exportTemplate(template)"
                           @dragstart.stop.prevent
-                          class="template-card__action cursor-pointer p-1 rounded transition-colors"
-                          :aria-label="t('app.export')"
+                          class="template-card__action board-panel-icon-action"
+                          :aria-label="`${t('app.export')}: ${getTemplateName(template)}`"
                         >
                           <span class="material-symbols-outlined text-xs" aria-hidden="true">download</span>
                         </button>
                       </HintTooltip>
-                      <HintTooltip :content="mutationTitle(t('app.delete'))">
+                      <HintTooltip :content="mutationTitle(`${t('app.deleteTemplate')}: ${getTemplateName(template)}`)">
                         <button
                           type="button"
                           @click.stop="openDeleteConfirm(template)"
                           @dragstart.stop.prevent
                           :disabled="props.readOnly || isLoadingTemplateDeletePreview || isDeletingTemplate"
-                          class="template-card__action template-card__action--danger cursor-pointer p-1 rounded transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-                          :aria-label="t('app.delete')"
+                          class="template-card__action template-card__action--danger board-panel-icon-action board-panel-icon-action--danger"
+                          :aria-label="`${t('app.deleteTemplate')}: ${getTemplateName(template)}`"
                         >
                           <span class="material-symbols-outlined text-xs" aria-hidden="true">delete</span>
                         </button>
@@ -3357,28 +3446,28 @@ watch(() => props.readOnly, readOnly => {
                   </div>
                 </div>
 
-                <div v-else class="template-group__empty mx-2.5 mb-2.5 rounded-lg border border-dashed px-3 py-2 text-center text-[length:var(--iot-font-min)]">
+                <div v-else class="template-group__empty mx-2.5 mb-2.5 rounded-lg border border-dashed px-3 py-2 text-center text-xs">
                   {{ group.key === 'default' ? t('app.noDefaultTemplates') : t('app.noCustomTemplates') }}
                 </div>
               </details>
             </div>
 
-            <div v-else class="relative overflow-hidden text-center py-8 border-2 border-dashed border-slate-200 rounded-xl bg-slate-50/50">
+            <div v-else class="relative overflow-hidden text-center py-8 border-2 border-dashed board-border-subtle rounded-xl board-bg-muted">
               <div class="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-[color:var(--warning)] via-[color:var(--warning)] to-[color:var(--warning)]"></div>
               <div class="relative">
                 <div class="w-14 h-14 mx-auto board-chip-warning rounded-full flex items-center justify-center mb-3 shadow-inner">
                   <span class="material-symbols-outlined board-text-warning text-2xl">inventory_2</span>
                 </div>
-                <p class="text-xs text-slate-600 mb-1 font-semibold">
+                <p class="text-xs board-text-muted mb-1 font-semibold">
                   {{ templateSearchQuery ? t('app.noMatchingTemplates') : t('app.noTemplatesYet') }}
                 </p>
-                <p class="text-[length:var(--iot-font-min)] text-slate-500">
+                <p class="text-xs board-text-muted">
                   {{ templateSearchQuery ? t('app.tryDifferentSearchTerm') : t('app.importJsonTemplateHint') }}
                 </p>
                 <button
                   v-if="templateSearchQuery"
                   @click="templateSearchQuery = ''"
-                  class="mt-3 px-4 py-1.5 text-[length:var(--iot-font-min)] font-semibold board-text-warning board-chip-warning hover:board-chip-warning rounded-lg transition-colors"
+                  class="mt-3 px-4 py-1.5 text-xs font-semibold board-text-warning board-chip-warning hover:board-chip-warning rounded-lg transition-colors"
                 >
                   {{ t('app.clearSearch') }}
                 </button>
@@ -3390,59 +3479,35 @@ watch(() => props.readOnly, readOnly => {
 
       <!-- Rules -->
       <div
-        v-if="activeSection === 'rules'"
+        v-show="activeSection === 'rules'"
         id="control-section-rules"
         role="tabpanel"
         aria-labelledby="control-tab-rules"
         data-testid="control-section-rules"
       >
-        <details class="group mb-3 rounded-xl bg-white shadow-sm border border-slate-200 overflow-hidden" open>
-        <summary class="flex items-center justify-between p-4 cursor-pointer hover:board-chip-info transition-all list-none select-none">
-          <div class="flex items-center gap-3">
-            <div class="w-10 h-10 bg-[color:var(--accent-fill)] rounded-xl flex items-center justify-center">
+        <details class="group mb-3 board-panel-section overflow-hidden" open
+          data-testid="rule-creation-card"
+          @toggle="ruleSectionExpanded = ($event.target as HTMLDetailsElement).open">
+        <summary class="board-section-heading list-none select-none">
+          <div class="board-section-heading__identity">
+            <div class="board-section-icon board-section-icon--lg">
               <span class="material-symbols-outlined text-white text-lg">function</span>
             </div>
-            <div>
-              <span class="text-sm font-bold text-slate-800">{{ t('app.iftttRule') }}</span>
-              <p class="text-xs text-slate-500">{{ t('app.createConditionalLogic') }}</p>
+            <div class="board-section-heading__copy">
+              <span class="board-section-title">{{ t('app.createRule') }}</span>
             </div>
           </div>
-          <span class="material-symbols-outlined text-slate-500 transition-transform group-open:rotate-180 text-lg">expand_more</span>
+          <span aria-hidden="true" class="board-section-heading__chevron material-symbols-outlined board-text-muted transition-transform group-open:rotate-180 text-lg">expand_more</span>
         </summary>
 
-        <div class="px-3 pb-4 bg-slate-50/50 pt-2 grid grid-cols-1 gap-3">
-          <!-- Rule Creation Block -->
-          <HintTooltip :content="mutationTitle(t('app.createRule'))">
-            <button
-              type="button"
-              data-testid="open-rule-builder"
-              :disabled="props.readOnly"
-              class="relative w-full overflow-hidden border-0 text-left group cursor-pointer rounded-xl bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)] transition-all hover:shadow-lg hover:-translate-y-0.5 focus-visible:outline focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-border)]"
-              @click="openRuleBuilder"
-            >
-              <div class="relative p-3 flex items-center gap-3">
-                <div class="w-10 h-10 bg-[color:var(--accent-fill)] rounded-lg flex items-center justify-center">
-                  <span aria-hidden="true" class="material-symbols-outlined text-black text-lg">add_circle</span>
-                </div>
-                <div class="flex-1">
-                  <span class="text-sm font-bold text-white block">{{ t('app.createRule') }}</span>
-                  <!--
-                    This card's ground is an accent *fill*, so its subtitle needs the ink that belongs on a
-                    fill. `board-text-info` is the accent-family *text* colour, meant for a neutral page
-                    ground: accent-on-accent measured **1.04:1** in light theme, making the subtitle of the
-                    most prominent action on the panel very nearly invisible.
-
-                    `/90` rather than `/85`: /85 measures 4.19, under AA. Chosen by measurement after picking
-                    the wrong one by eye first.
-                  -->
-                  <span class="text-xs text-white/90">{{ t('app.ifThenLogic') }}</span>
-                </div>
-                <div class="w-7 h-7 bg-[color:var(--accent-fill)] rounded-lg flex items-center justify-center">
-                  <span class="material-symbols-outlined text-white text-sm">arrow_forward</span>
-                </div>
-              </div>
-            </button>
-          </HintTooltip>
+        <div class="px-3 pb-4 board-bg-muted pt-2 grid grid-cols-1 gap-3">
+          <RuleBuilder
+            :nodes="deviceNodes"
+            :device-templates="deviceTemplates"
+            :active="activeSection === 'rules' && !isCollapsed && ruleSectionExpanded"
+            :read-only="props.readOnly"
+            @save-rule="emit('save-rule', $event)"
+          />
         </div>
       </details>
       </div>
@@ -3455,21 +3520,20 @@ watch(() => props.readOnly, readOnly => {
         aria-labelledby="control-tab-specs"
         data-testid="control-section-specs"
       >
-        <details class="group mb-3 rounded-xl bg-white shadow-sm border border-slate-200 overflow-hidden" open>
-        <summary class="flex items-center justify-between p-4 cursor-pointer hover:board-chip-danger transition-all list-none select-none">
-          <div class="flex items-center gap-3">
-            <div class="w-10 h-10 bg-[color:var(--danger-fill)] rounded-xl flex items-center justify-center">
+        <details class="group mb-3 board-panel-section overflow-hidden" open>
+        <summary class="board-section-heading list-none select-none">
+          <div class="board-section-heading__identity">
+            <div class="board-section-icon board-section-icon--lg">
               <span class="material-symbols-outlined text-white text-lg">verified</span>
             </div>
-            <div>
-              <span class="text-sm font-bold text-slate-800">{{ t('app.specifications') }}</span>
-              <p class="text-xs text-slate-500">{{ t('app.ltlVerificationRules') }}</p>
+            <div class="board-section-heading__copy">
+              <span class="board-section-title">{{ t('app.createSpecification') }}</span>
             </div>
           </div>
-          <span class="material-symbols-outlined text-slate-500 transition-transform group-open:rotate-180 text-lg">expand_more</span>
+          <span aria-hidden="true" class="board-section-heading__chevron material-symbols-outlined board-text-muted transition-transform group-open:rotate-180 text-lg">expand_more</span>
         </summary>
 
-        <div class="px-3 pb-4 bg-slate-50/50 pt-2 space-y-3">
+        <div class="px-3 pb-4 board-bg-muted pt-2 space-y-3">
           <!-- Specification Creation -->
           <fieldset
             data-testid="spec-editor-fieldset"
@@ -3479,12 +3543,13 @@ watch(() => props.readOnly, readOnly => {
           >
             <!-- Step 1: Select Template -->
             <div>
-              <label class="block text-[length:var(--iot-font-min)] font-bold text-slate-600 uppercase tracking-wide mb-2">{{ t('app.selectTemplate') }}</label>
-              <select
+              <label for="spec-template-select" class="board-form-label mb-2 block">{{ t('app.selectTemplate') }}</label>
+              <FieldSelect
+                id="spec-template-select"
                 v-model="specForm.templateId"
                 data-testid="spec-template-select"
+                :aria-describedby="hasSpecificationConditions ? 'spec-template-change-notice' : undefined"
                 @change="handleTemplateChange"
-                class="w-full min-h-11 bg-white border-2 border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-700 focus:border-[color:var(--accent-border)] focus:ring-2 focus:ring-[color:var(--accent-border)] transition-all shadow-sm appearance-none cursor-pointer"
               >
                 <option value="" disabled hidden>{{ t('app.selectSpecificationTemplate') }}</option>
                 <option
@@ -3495,9 +3560,12 @@ watch(() => props.readOnly, readOnly => {
                 >
                   {{ templateMessage(template.labelKey, template.label) }}
                 </option>
-              </select>
-              <p v-if="currentTemplateDetail" class="text-[length:var(--iot-font-min)] text-slate-500 mt-1.5 px-1">
-                <span class="line-clamp-2">
+              </FieldSelect>
+              <p v-if="hasSpecificationConditions" id="spec-template-change-notice" class="mt-1.5 text-xs leading-5 board-text-warning">
+                {{ t('app.specTemplateChangeNotice') }}
+              </p>
+              <p v-if="currentTemplateDetail" class="text-xs board-text-muted mt-1.5 px-1">
+                <span>
                   {{ templateMessage(currentTemplateDetail.descriptionKey, currentTemplateDetail.description) }}
                 </span>
               </p>
@@ -3505,23 +3573,23 @@ watch(() => props.readOnly, readOnly => {
 
             <!-- Step 2: Add Conditions based on template requirements -->
             <div v-if="specForm.templateId" class="space-y-2">
-              <label class="block text-[length:var(--iot-font-min)] font-bold text-slate-600 uppercase tracking-wide">{{ t('app.configureConditions') }}</label>
+              <label class="board-form-label block">{{ t('app.configureConditions') }}</label>
 
               <!-- A Conditions (Always/Forall) -->
-              <div v-if="isSideRequired('a')" class="relative overflow-hidden rounded-lg board-surface-danger p-2.5">
+              <div v-if="isSideRequired('a')" class="relative overflow-hidden rounded-lg board-card p-2.5">
                 <div class="relative flex items-center justify-between mb-2">
                   <div class="flex items-center gap-2">
-                    <span class="w-6 h-6 bg-[color:var(--danger-fill)] rounded-md flex items-center justify-center">
+                    <span class="w-6 h-6 bg-[color:var(--accent-fill)] rounded-md flex items-center justify-center">
                       <svg class="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24">
                         <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
                       </svg>
                     </span>
-                    <span class="text-[length:var(--iot-font-min)] font-bold board-text-danger uppercase tracking-wide">{{ t('app.aConditions') }}</span>
+                    <span class="board-form-label">{{ t('app.aConditions') }}</span>
                   </div>
                   <button
                     @click="openConditionDialog('a')"
                     data-testid="spec-add-condition-a"
-                    class="px-2.5 py-1 bg-[color:var(--danger-fill)] text-white rounded-md text-[length:var(--iot-font-min)] font-bold uppercase tracking-wide hover:bg-[color:var(--danger-fill-hover)] transition-all shadow-sm flex items-center gap-1"
+                    class="board-action-inline"
                   >
                     <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
@@ -3533,41 +3601,41 @@ watch(() => props.readOnly, readOnly => {
                   <div
                     v-for="(condition, index) in formattedAConditions"
                     :key="condition.id"
-                    class="flex items-center justify-between bg-white rounded-md px-2.5 py-1.5 border border-[color:var(--danger-border)] shadow-sm hover:shadow-md transition-all"
+                    class="flex items-center justify-between board-bg-elevated rounded-md px-2.5 py-1.5 border border-[color:var(--border)] shadow-sm hover:shadow-md transition-all"
                   >
                     <div class="flex items-center gap-2 overflow-hidden flex-1">
-                      <div class="w-6 h-6 board-chip-danger rounded-md flex items-center justify-center flex-shrink-0">
-                        <svg class="w-3.5 h-3.5 board-text-danger" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <div class="w-6 h-6 board-meta-chip rounded-md flex items-center justify-center flex-shrink-0">
+                        <svg class="w-3.5 h-3.5 board-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z"/>
                         </svg>
                       </div>
                       <div class="flex items-center gap-1 overflow-hidden flex-1 min-w-0">
                         <span
-                          class="text-[length:var(--iot-font-min)] font-medium truncate min-w-0"
+                          class="text-xs font-medium truncate min-w-0"
                           :class="condition.isDeviceMissing
  ? 'board-text-danger line-through'
- : 'text-slate-700'"
+ : 'board-text-strong'"
                           :title="condition.deviceLabel"
                         >
                           {{ condition.deviceLabel }}
                         </span>
-                        <span class="text-slate-500 flex-shrink-0">·</span>
-                        <span class="text-[length:var(--iot-font-min)] board-text-danger font-medium truncate flex-shrink-0" :title="condition.propertyLabel">{{ condition.propertyLabel }}</span>
+                        <span class="board-text-muted flex-shrink-0">·</span>
+                        <span class="text-xs board-text-muted font-medium truncate flex-shrink-0" :title="condition.propertyLabel">{{ condition.propertyLabel }}</span>
                         <!-- Which of the two variable questions this row asks. A row with no
                              recorded choice is marked unresolved rather than shown as either. -->
                         <span
                           v-if="condition.targetType === 'variable'"
-                          class="text-[length:var(--iot-font-min)] px-1 py-0.5 rounded flex-shrink-0 border"
+                          class="text-xs px-1 py-0.5 rounded flex-shrink-0 border"
                           :class="condition.isVariableSourceUnresolved
                             ? 'board-chip-danger board-text-danger border-[color:var(--danger-border)]'
-                            : 'text-slate-600 bg-slate-100 border-slate-200'"
+                            : 'board-text-muted board-bg-control board-border-subtle'"
                           :title="condition.variableSourceLabel || ''"
                           data-testid="spec-condition-row-variable-source"
                         >{{ condition.variableSourceLabel }}</span>
-                        <span class="text-[length:var(--iot-font-min)] text-slate-500 bg-slate-100 px-1 py-0.5 rounded flex-shrink-0">
+                        <span class="text-xs board-text-muted board-bg-control px-1 py-0.5 rounded flex-shrink-0">
                           {{ condition.relationLabel }}
                         </span>
-                        <span class="text-[length:var(--iot-font-min)] board-surface-danger board-text-danger px-1 py-0.5 rounded truncate max-w-[60px] flex-shrink-0" :title="condition.formattedValue">
+                        <span class="text-xs board-card board-text-muted px-1 py-0.5 rounded truncate max-w-[60px] flex-shrink-0" :title="condition.formattedValue">
                           {{ condition.formattedValue }}
                         </span>
                       </div>
@@ -3589,7 +3657,7 @@ watch(() => props.readOnly, readOnly => {
                         <button
                           type="button"
                           @click="removeCondition('a', index)"
-                          class="p-1 text-slate-500 hover:board-text-danger hover:board-chip-danger rounded transition-colors"
+                          class="p-1 board-text-muted hover:board-text-danger hover:board-chip-danger rounded transition-colors"
                           :aria-label="t('app.removeConditionNumbered', { number: index + 1 })"
                         >
                           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -3599,27 +3667,27 @@ watch(() => props.readOnly, readOnly => {
                       </HintTooltip>
                     </div>
                   </div>
-                  <div v-if="specForm.aConditions.length === 0" class="text-center py-2 text-[length:var(--iot-font-min)] text-slate-500 italic bg-white/50 rounded border border-dashed border-[color:var(--danger-border)]">
+                  <div v-if="specForm.aConditions.length === 0" class="text-center py-2 text-xs board-text-muted italic board-bg-elevated rounded border border-dashed border-[color:var(--border)]">
                     {{ t('app.noConditionsAdded') }}
                   </div>
                 </div>
               </div>
 
               <!-- IF Conditions (Antecedent) -->
-              <div v-if="isSideRequired('if')" class="relative overflow-hidden rounded-lg board-surface-danger p-2.5">
+              <div v-if="isSideRequired('if')" class="relative overflow-hidden rounded-lg board-card p-2.5">
                 <div class="relative flex items-center justify-between mb-2">
                   <div class="flex items-center gap-2">
-                    <span class="w-6 h-6 bg-[color:var(--danger-fill)] rounded-md flex items-center justify-center">
+                    <span class="w-6 h-6 bg-[color:var(--accent-fill)] rounded-md flex items-center justify-center">
                       <svg class="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
                       </svg>
                     </span>
-                    <span class="text-[length:var(--iot-font-min)] font-bold board-text-danger uppercase tracking-wide">{{ t('app.ifConditions') }}</span>
+                    <span class="board-form-label">{{ t('app.ifConditions') }}</span>
                   </div>
                   <button
                     @click="openConditionDialog('if')"
                     data-testid="spec-add-condition-if"
-                    class="px-2.5 py-1 bg-[color:var(--danger-fill)] text-white rounded-md text-[length:var(--iot-font-min)] font-bold uppercase tracking-wide hover:bg-[color:var(--danger-fill-hover)] transition-all shadow-sm flex items-center gap-1"
+                    class="board-action-inline"
                   >
                     <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
@@ -3631,41 +3699,41 @@ watch(() => props.readOnly, readOnly => {
                   <div
                     v-for="(condition, index) in formattedIfConditions"
                     :key="condition.id"
-                    class="flex items-center justify-between bg-white rounded-md px-2.5 py-1.5 border border-[color:var(--danger-border)] shadow-sm hover:shadow-md transition-all"
+                    class="flex items-center justify-between board-bg-elevated rounded-md px-2.5 py-1.5 border border-[color:var(--border)] shadow-sm hover:shadow-md transition-all"
                   >
                     <div class="flex items-center gap-2 overflow-hidden flex-1">
-                      <div class="w-6 h-6 board-chip-danger rounded-md flex items-center justify-center flex-shrink-0">
-                        <svg class="w-3.5 h-3.5 board-text-danger" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <div class="w-6 h-6 board-meta-chip rounded-md flex items-center justify-center flex-shrink-0">
+                        <svg class="w-3.5 h-3.5 board-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z"/>
                         </svg>
                       </div>
                       <div class="flex items-center gap-1 overflow-hidden flex-1 min-w-0">
                         <span
-                          class="text-[length:var(--iot-font-min)] font-medium truncate min-w-0"
+                          class="text-xs font-medium truncate min-w-0"
                           :class="condition.isDeviceMissing
  ? 'board-text-danger line-through'
- : 'text-slate-700'"
+ : 'board-text-strong'"
                           :title="condition.deviceLabel"
                         >
                           {{ condition.deviceLabel }}
                         </span>
-                        <span class="text-slate-500 flex-shrink-0">·</span>
-                        <span class="text-[length:var(--iot-font-min)] board-text-danger font-medium truncate flex-shrink-0" :title="condition.propertyLabel">{{ condition.propertyLabel }}</span>
+                        <span class="board-text-muted flex-shrink-0">·</span>
+                        <span class="text-xs board-text-muted font-medium truncate flex-shrink-0" :title="condition.propertyLabel">{{ condition.propertyLabel }}</span>
                         <!-- Which of the two variable questions this row asks. A row with no
                              recorded choice is marked unresolved rather than shown as either. -->
                         <span
                           v-if="condition.targetType === 'variable'"
-                          class="text-[length:var(--iot-font-min)] px-1 py-0.5 rounded flex-shrink-0 border"
+                          class="text-xs px-1 py-0.5 rounded flex-shrink-0 border"
                           :class="condition.isVariableSourceUnresolved
                             ? 'board-chip-danger board-text-danger border-[color:var(--danger-border)]'
-                            : 'text-slate-600 bg-slate-100 border-slate-200'"
+                            : 'board-text-muted board-bg-control board-border-subtle'"
                           :title="condition.variableSourceLabel || ''"
                           data-testid="spec-condition-row-variable-source"
                         >{{ condition.variableSourceLabel }}</span>
-                        <span class="text-[length:var(--iot-font-min)] text-slate-500 bg-slate-100 px-1 py-0.5 rounded flex-shrink-0">
+                        <span class="text-xs board-text-muted board-bg-control px-1 py-0.5 rounded flex-shrink-0">
                           {{ condition.relationLabel }}
                         </span>
-                        <span class="text-[length:var(--iot-font-min)] board-surface-danger board-text-danger px-1 py-0.5 rounded truncate max-w-[60px] flex-shrink-0" :title="condition.formattedValue">
+                        <span class="text-xs board-card board-text-muted px-1 py-0.5 rounded truncate max-w-[60px] flex-shrink-0" :title="condition.formattedValue">
                           {{ condition.formattedValue }}
                         </span>
                       </div>
@@ -3687,7 +3755,7 @@ watch(() => props.readOnly, readOnly => {
                         <button
                           type="button"
                           @click="removeCondition('if', index)"
-                          class="p-1 text-slate-500 hover:board-text-danger hover:board-chip-danger rounded transition-colors"
+                          class="p-1 board-text-muted hover:board-text-danger hover:board-chip-danger rounded transition-colors"
                           :aria-label="t('app.removeConditionNumbered', { number: index + 1 })"
                         >
                           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -3697,27 +3765,27 @@ watch(() => props.readOnly, readOnly => {
                       </HintTooltip>
                     </div>
                   </div>
-                  <div v-if="specForm.ifConditions.length === 0" class="text-center py-2 text-[length:var(--iot-font-min)] text-slate-500 italic bg-white/50 rounded border border-dashed border-[color:var(--danger-border)]">
+                  <div v-if="specForm.ifConditions.length === 0" class="text-center py-2 text-xs board-text-muted italic board-bg-elevated rounded border border-dashed border-[color:var(--border)]">
                     {{ t('app.noConditionsAdded') }}
                   </div>
                 </div>
               </div>
 
               <!-- THEN Conditions (Consequent) -->
-              <div v-if="isSideRequired('then')" class="relative overflow-hidden rounded-lg board-surface-warning p-2.5">
+              <div v-if="isSideRequired('then')" class="relative overflow-hidden rounded-lg board-card p-2.5">
                 <div class="relative flex items-center justify-between mb-2">
                   <div class="flex items-center gap-2">
-                    <span class="w-6 h-6 bg-[color:var(--warning-fill)] rounded-md flex items-center justify-center">
+                    <span class="w-6 h-6 bg-[color:var(--accent-fill)] rounded-md flex items-center justify-center">
                       <svg class="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8l4 4m0 0l-4 4m4-4H3"/>
                       </svg>
                     </span>
-                    <span class="text-[length:var(--iot-font-min)] font-bold board-text-warning uppercase tracking-wide">{{ t('app.thenConditions') }}</span>
+                    <span class="board-form-label">{{ t('app.thenConditions') }}</span>
                   </div>
                   <button
                     @click="openConditionDialog('then')"
                     data-testid="spec-add-condition-then"
-                    class="px-2.5 py-1 bg-[color:var(--warning-fill)] text-white rounded-md text-[length:var(--iot-font-min)] font-bold uppercase tracking-wide hover:bg-[color:var(--warning-fill-hover)] transition-all shadow-sm flex items-center gap-1"
+                    class="board-action-inline"
                   >
                     <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
@@ -3729,41 +3797,41 @@ watch(() => props.readOnly, readOnly => {
                   <div
                     v-for="(condition, index) in formattedThenConditions"
                     :key="condition.id"
-                    class="flex items-center justify-between bg-white rounded-md px-2.5 py-1.5 border border-[color:var(--warning-border)] shadow-sm hover:shadow-md transition-all"
+                    class="flex items-center justify-between board-bg-elevated rounded-md px-2.5 py-1.5 border border-[color:var(--border)] shadow-sm hover:shadow-md transition-all"
                   >
                     <div class="flex items-center gap-2 overflow-hidden flex-1">
-                      <div class="w-6 h-6 board-chip-warning rounded-md flex items-center justify-center flex-shrink-0">
-                        <svg class="w-3.5 h-3.5 board-text-warning" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <div class="w-6 h-6 board-meta-chip rounded-md flex items-center justify-center flex-shrink-0">
+                        <svg class="w-3.5 h-3.5 board-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z"/>
                         </svg>
                       </div>
                       <div class="flex items-center gap-1 overflow-hidden flex-1 min-w-0">
                         <span
-                          class="text-[length:var(--iot-font-min)] font-medium truncate min-w-0"
+                          class="text-xs font-medium truncate min-w-0"
                           :class="condition.isDeviceMissing
  ? 'board-text-danger line-through'
- : 'text-slate-700'"
+ : 'board-text-strong'"
                           :title="condition.deviceLabel"
                         >
                           {{ condition.deviceLabel }}
                         </span>
-                        <span class="text-slate-500 flex-shrink-0">·</span>
-                        <span class="text-[length:var(--iot-font-min)] board-text-warning font-medium truncate flex-shrink-0" :title="condition.propertyLabel">{{ condition.propertyLabel }}</span>
+                        <span class="board-text-muted flex-shrink-0">·</span>
+                        <span class="text-xs board-text-muted font-medium truncate flex-shrink-0" :title="condition.propertyLabel">{{ condition.propertyLabel }}</span>
                         <!-- Which of the two variable questions this row asks. A row with no
                              recorded choice is marked unresolved rather than shown as either. -->
                         <span
                           v-if="condition.targetType === 'variable'"
-                          class="text-[length:var(--iot-font-min)] px-1 py-0.5 rounded flex-shrink-0 border"
+                          class="text-xs px-1 py-0.5 rounded flex-shrink-0 border"
                           :class="condition.isVariableSourceUnresolved
                             ? 'board-chip-danger board-text-danger border-[color:var(--danger-border)]'
-                            : 'text-slate-600 bg-slate-100 border-slate-200'"
+                            : 'board-text-muted board-bg-control board-border-subtle'"
                           :title="condition.variableSourceLabel || ''"
                           data-testid="spec-condition-row-variable-source"
                         >{{ condition.variableSourceLabel }}</span>
-                        <span class="text-[length:var(--iot-font-min)] text-slate-500 bg-slate-100 px-1 py-0.5 rounded flex-shrink-0">
+                        <span class="text-xs board-text-muted board-bg-control px-1 py-0.5 rounded flex-shrink-0">
                           {{ condition.relationLabel }}
                         </span>
-                        <span class="text-[length:var(--iot-font-min)] board-surface-warning board-text-warning px-1 py-0.5 rounded truncate max-w-[60px] flex-shrink-0" :title="condition.formattedValue">
+                        <span class="text-xs board-card board-text-muted px-1 py-0.5 rounded truncate max-w-[60px] flex-shrink-0" :title="condition.formattedValue">
                           {{ condition.formattedValue }}
                         </span>
                       </div>
@@ -3785,7 +3853,7 @@ watch(() => props.readOnly, readOnly => {
                         <button
                           type="button"
                           @click="removeCondition('then', index)"
-                          class="p-1 text-slate-500 hover:board-text-warning hover:board-chip-warning rounded transition-colors"
+                          class="p-1 board-text-muted hover:board-text-danger hover:board-chip-danger rounded transition-colors"
                           :aria-label="t('app.removeConditionNumbered', { number: index + 1 })"
                         >
                           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -3795,40 +3863,50 @@ watch(() => props.readOnly, readOnly => {
                       </HintTooltip>
                     </div>
                   </div>
-                  <div v-if="specForm.thenConditions.length === 0" class="text-center py-2 text-[length:var(--iot-font-min)] text-slate-500 italic bg-white/50 rounded border border-dashed border-[color:var(--warning-border)]">
+                  <div v-if="specForm.thenConditions.length === 0" class="text-center py-2 text-xs board-text-muted italic board-bg-elevated rounded border border-dashed border-[color:var(--border)]">
                     {{ t('app.noConditionsAdded') }}
                   </div>
                 </div>
               </div>
             </div>
 
+            <div v-if="specSaveFailure" data-testid="spec-save-failure" role="alert"
+              class="rounded-lg board-surface-danger px-3 py-3 text-sm board-text-danger">
+              <p class="font-semibold">{{ t(specSaveFailure.reasonCode === 'DUPLICATE_SPECIFICATION'
+                ? 'app.specDuplicate' : 'app.saveSpecsFailed') }}</p>
+              <FailureDetails :suggestion="specSaveFailure.reasonCode === 'DUPLICATE_SPECIFICATION'
+                ? t('app.specSaveDuplicateHint') : ''" v-bind="specSaveFailure" />
+            </div>
+
             <!-- Step 3: Generated Specification Description -->
-            <div v-if="specForm.templateId" class="relative overflow-hidden rounded-lg bg-white border border-[color:var(--danger-border)] p-3 shadow-sm">
+            <div v-if="!specificationBlockedReason" class="relative overflow-hidden rounded-lg board-bg-elevated border border-[color:var(--border)] p-3 shadow-sm">
               <div class="relative">
                 <div class="flex items-center gap-2 mb-2">
-                  <span class="w-6 h-6 board-chip-danger rounded-md flex items-center justify-center">
-                    <svg class="w-4 h-4 board-text-danger" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <span class="w-6 h-6 board-meta-chip rounded-md flex items-center justify-center">
+                    <svg class="w-4 h-4 board-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5h12M9 3v2m1.048 9.5A18.022 18.022 0 016.412 9m6.088 9h7M11 21l5-10 5 10M12.751 5C11.783 10.77 8.07 15.61 3 18.129"/>
                     </svg>
                   </span>
-                  <span class="text-[length:var(--iot-font-min)] font-bold board-text-danger uppercase tracking-wide">{{ t('app.specificationDescription') }}</span>
+                  <span class="board-form-label">{{ t('app.specificationDescription') }}</span>
                 </div>
-                <div class="text-xs text-slate-700 leading-relaxed pl-8">
+                <div class="text-xs board-text-strong leading-relaxed pl-8" data-testid="spec-description">
                   {{ naturalLanguageRule }}
                 </div>
-                <div class="mt-2 pt-2 border-t border-slate-200 flex items-center gap-2">
-                  <span class="text-[length:var(--iot-font-min)] font-bold text-slate-500 uppercase tracking-wide">{{ t('app.formulaPreview') }}</span>
-                  <span
-                    class="px-1.5 py-0.5 bg-slate-100 rounded text-[length:var(--iot-font-min)] font-bold text-slate-600 uppercase"
-                    data-testid="spec-formula-kind"
-                  >{{ specFormulaKind }}</span>
+                <details data-testid="spec-formula-details" class="mt-2 border-t board-border-subtle pt-2">
+                  <summary class="cursor-pointer py-3">
+                    <span class="board-form-label">{{ t('app.formulaPreview') }}</span>
+                    <span
+                      class="board-form-label ml-2 px-1.5 py-0.5 board-bg-control rounded"
+                      data-testid="spec-formula-kind"
+                    >{{ specFormulaPreview.kind || t('app.modelFormulaKind') }}</span>
+                  </summary>
                   <!-- `iot-scroll-region-x` rather than raw `overflow-x-auto`: the primitive owns the token
                        scrollbar and overscroll containment, which a bare overflow does not. Type at the
                        product floor, since a formula is the thing a user is trying to read here. -->
-                  <code class="iot-scroll-region-x flex-1 text-[length:var(--iot-font-min)] bg-slate-100 text-slate-700 px-2 py-1 rounded font-mono">
-                    {{ specForm.formula }}
+                  <code class="iot-scroll-region-x block whitespace-nowrap text-xs board-bg-control board-text-strong px-2 py-1 rounded font-mono" data-testid="spec-formula-expression">
+                    {{ specFormulaPreview.expression }}
                   </code>
-                </div>
+                </details>
               </div>
             </div>
 
@@ -3837,7 +3915,7 @@ watch(() => props.readOnly, readOnly => {
               v-if="specificationBlockedReason"
               id="spec-create-blocked-reason"
               role="status"
-              class="mb-2 text-[length:var(--iot-font-min)] font-semibold leading-4 board-text-danger"
+              class="mb-2 text-xs font-semibold leading-4 board-text-danger"
               data-testid="spec-create-blocked-reason"
             >
               {{ specificationBlockedReason }}
@@ -3847,7 +3925,7 @@ watch(() => props.readOnly, readOnly => {
               data-testid="spec-create"
               :disabled="Boolean(specificationBlockedReason) || creatingSpecification"
               :aria-describedby="specificationBlockedReason ? 'spec-create-blocked-reason' : undefined"
-              class="w-full min-h-11 py-2.5 bg-[color:var(--danger-fill)] hover:bg-[color:var(--danger-fill-hover)] disabled:bg-slate-300 text-white rounded-lg text-xs font-bold uppercase tracking-wider transition-all shadow-md hover:shadow-lg hover:scale-[1.02] active:scale-[0.98] disabled:hover:scale-100 flex items-center justify-center gap-1.5 disabled:cursor-not-allowed"
+              class="board-panel-submit board-action-disarmed"
             >
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
@@ -3862,6 +3940,7 @@ watch(() => props.readOnly, readOnly => {
 
     </div>
 
+    </Transition>
   </aside>
 
   <!-- Specification Condition Dialog -->
@@ -3874,7 +3953,7 @@ watch(() => props.readOnly, readOnly => {
   >
     <div
       :ref="setSpecDialogRef"
-      class="iot-dialog iot-dialog--md control-center-dialog-surface"
+      class="iot-dialog iot-dialog--md"
       role="dialog"
       aria-modal="true"
       aria-labelledby="spec-condition-dialog-title"
@@ -3892,7 +3971,6 @@ watch(() => props.readOnly, readOnly => {
           <h3 id="spec-condition-dialog-title" class="iot-dialog__title">
             {{ editingConditionIndex >= 0 ? t('app.editCondition') : t('app.addConditionTitle') }}
           </h3>
-          <p class="iot-dialog__subtitle">{{ t('app.configureSpecification') }}</p>
         </div>
         <button
           type="button"
@@ -3911,15 +3989,14 @@ watch(() => props.readOnly, readOnly => {
         <!-- Device Selection -->
         <div class="space-y-2">
           <div class="flex items-center gap-2">
-            <span class="text-sm font-bold text-black">{{ t('app.deviceSelection') }}</span>
+            <label for="spec-condition-device" class="board-form-label">{{ t('app.device') }}</label>
           </div>
           <div class="relative w-full">
-            <select
+            <FieldSelect
+              id="spec-condition-device"
               v-model="editingConditionData.deviceId"
               data-testid="spec-condition-device"
               @change="editingConditionData.key = ''"
-              class="w-full bg-white border-2 border-slate-300 rounded-lg px-3 py-2.5 text-sm text-black focus:border-[color:var(--accent-border)] focus:outline-none appearance-none cursor-pointer"
-              :class="deviceNodes.length === 0 ? 'cursor-not-allowed opacity-70' : 'cursor-pointer'"
               :disabled="deviceNodes.length === 0"
             >
               <option v-if="deviceNodes.length === 0" value="">{{ t('app.none') }}</option>
@@ -3931,52 +4008,51 @@ watch(() => props.readOnly, readOnly => {
               >
                 {{ device.label }}
               </option>
-            </select>
+            </FieldSelect>
           </div>
         </div>
 
         <!-- Type -->
         <div class="space-y-2" v-if="editingConditionData.deviceId">
           <div class="flex items-center gap-2">
-            <svg class="w-5 h-5 text-black" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg class="w-5 h-5 board-text-strong" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A2 2 0 013 12V7a4 4 0 014-4z"/>
             </svg>
-            <span class="text-sm font-bold text-black">{{ t('app.type') }}</span>
+            <label for="spec-condition-type" class="board-form-label">{{ t('app.type') }}</label>
           </div>
           <div class="relative w-full">
-            <select
+            <FieldSelect
+              id="spec-condition-type"
               v-model="editingConditionData.targetType"
               data-testid="spec-condition-type"
               @change="handleTargetTypeChange"
-              class="w-full bg-white border-2 border-slate-300 rounded-lg px-3 py-2.5 text-sm text-black focus:border-[color:var(--accent-border)] focus:outline-none appearance-none cursor-pointer"
             >
               <option v-if="localizedTargetTypes.length === 0" value="">{{ t('app.none') }}</option>
-              <option v-else value="" hidden>{{ t('app.type') }}</option>
+              <option v-else value="" hidden>{{ t('app.selectType') }}</option>
               <option v-for="type in localizedTargetTypes" :key="type.value" :value="type.value">
                 {{ type.label }}
               </option>
-            </select>
+            </FieldSelect>
           </div>
         </div>
 
         <!-- Property -->
         <div class="space-y-2" v-if="editingConditionData.targetType !== 'state' && editingConditionData.deviceId">
           <div class="flex items-center gap-2">
-            <svg class="w-5 h-5 text-black" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg class="w-5 h-5 board-text-strong" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/>
             </svg>
-            <span class="text-sm font-bold text-black">{{ t('app.property') }}</span>
+            <label for="spec-condition-key" class="board-form-label">{{ t('app.property') }}</label>
           </div>
           <div class="relative w-full">
-            <select
+            <FieldSelect
+              id="spec-condition-key"
               v-model="conditionKeySelection"
               data-testid="spec-condition-key"
-              class="w-full bg-white border-2 border-slate-300 rounded-lg px-3 py-2.5 text-sm text-black focus:border-[color:var(--accent-border)] focus:outline-none appearance-none cursor-pointer"
-              :class="availableKeys.length === 0 ? 'cursor-not-allowed opacity-70' : 'cursor-pointer'"
               :disabled="availableKeys.length === 0"
             >
               <option v-if="availableKeys.length === 0" value="">{{ t('app.none') }}</option>
-              <option v-else value="" hidden>{{ t('app.property') }}</option>
+              <option v-else value="" hidden>{{ t('app.selectProperty') }}</option>
               <option
                 v-for="key in availableKeys"
                 :key="key.value"
@@ -3984,7 +4060,7 @@ watch(() => props.readOnly, readOnly => {
               >
                 {{ key.label }}
               </option>
-            </select>
+            </FieldSelect>
           </div>
         </div>
 
@@ -3999,18 +4075,18 @@ watch(() => props.readOnly, readOnly => {
           data-testid="spec-condition-variable-source"
         >
           <legend class="flex items-center gap-2">
-            <svg class="w-5 h-5 text-black" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg class="w-5 h-5 board-text-strong" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
             </svg>
-            <span class="text-sm font-bold text-black">{{ t('app.specVariableSourceTitle') }}</span>
+            <span class="board-section-title">{{ t('app.specVariableSourceTitle') }}</span>
           </legend>
           <label
             v-for="option in editingConditionVariableSourceOptions"
             :key="option.value"
-            class="flex items-start gap-2 w-full bg-white border-2 rounded-lg px-3 py-2.5 text-sm text-black cursor-pointer"
+            class="flex items-start gap-2 w-full board-bg-elevated border-2 rounded-lg px-3 py-2.5 text-sm board-text-strong cursor-pointer"
             :class="editingConditionData.variableSource === option.value
               ? 'border-[color:var(--accent-border)]'
-              : 'border-slate-300'"
+              : 'border-[color:var(--border-strong)]'"
             :data-testid="`spec-condition-variable-source-${option.value}`"
           >
             <!-- `name` is what makes these ONE radio group. Without it the browser treats each input as
@@ -4026,108 +4102,105 @@ watch(() => props.readOnly, readOnly => {
             />
             <span class="min-w-0">{{ option.label }}</span>
           </label>
-          <p class="text-xs text-slate-600" data-testid="spec-condition-variable-source-help">
+          <p class="text-xs board-text-muted" data-testid="spec-condition-variable-source-help">
             {{ editingConditionVariableSourceOptions.length === 1
               ? t('app.specVariableSourceDeviceLocalHelp')
-              : t('app.specVariableSourceHelp') }}
-          </p>
-          <!-- The general help says the two readings differ "once a device is compromised". Whether THIS
-               device can falsify THIS reading is the fact that decides the choice, it is declared in the
-               manifest, and without it the choice looks arbitrary exactly when it is inert. -->
-          <p
-            v-if="editingConditionVariableSourceOptions.length > 1"
-            class="text-xs text-slate-600"
-            data-testid="spec-condition-variable-source-falsifiable"
-          >
-            {{ editingConditionVariableIsFalsifiable
-              ? t('app.specVariableSourceFalsifiableHint')
-              : t('app.specVariableSourceNotFalsifiableHint') }}
+              : editingConditionVariableIsFalsifiable
+                ? t('app.specVariableSourceFalsifiableHint')
+                : t('app.specVariableSourceNotFalsifiableHint') }}
           </p>
         </fieldset>
 
         <!-- Condition Details -->
-        <div class="space-y-2" v-if="showRelationAndValue">
+        <div class="space-y-2" v-if="editingConditionData.deviceId && showRelationAndValue">
           <div class="flex items-center gap-2">
-            <svg class="w-5 h-5 text-black" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg class="w-5 h-5 board-text-strong" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"/>
             </svg>
-            <span class="text-sm font-bold text-black">{{ t('app.conditionDetails') }}</span>
+            <span class="board-section-title">{{ t('app.conditionDetails') }}</span>
           </div>
-          <div class="flex gap-2 w-full">
+          <div class="board-condition-value-grid">
             <!-- Operator -->
-            <div class="relative w-1/4">
-              <select
+            <div class="min-w-0">
+              <label for="spec-condition-relation" class="board-form-label mb-1 block">{{ t('app.conditionOperator') }}</label>
+              <FieldSelect
+                id="spec-condition-relation"
                 v-model="editingConditionData.relation"
                 data-testid="spec-condition-relation"
-                class="w-full bg-white border-2 border-slate-300 rounded-lg px-2 py-2.5 text-sm text-center font-bold text-black focus:border-[color:var(--accent-border)] focus:outline-none appearance-none cursor-pointer"
               >
                 <option v-for="op in filteredRelationOperators" :key="op.value" :value="op.value">
                   {{ op.label }}
                 </option>
-              </select>
+              </FieldSelect>
             </div>
             <!-- Value -->
-            <div class="relative w-3/4">
-              <select
+            <div class="min-w-0">
+              <label for="spec-condition-value" class="board-form-label mb-1 block">{{ t('app.value') }}</label>
+              <FieldSelect
+                id="spec-condition-value"
                 v-if="conditionValueOptions.length > 0 && isSpecSetRelation"
                 v-model="editingConditionValueList"
                 data-testid="spec-condition-value"
                 multiple
                 size="4"
-                class="w-full min-h-[7.5rem] bg-white border-2 border-slate-300 rounded-lg px-3 py-2.5 text-sm text-black focus:border-[color:var(--accent-border)] focus:outline-none cursor-pointer"
+                class="min-h-[7.5rem]"
               >
                 <option v-for="val in conditionValueOptions" :key="val" :value="val">
-                  {{ formatEditingConditionModelToken(val) }}
+                  {{ formatEditingConditionValue(val) }}
                 </option>
-              </select>
-              <select
+              </FieldSelect>
+              <FieldSelect
+                id="spec-condition-value"
                 v-else-if="conditionValueOptions.length > 0"
                 v-model="editingConditionData.value"
                 data-testid="spec-condition-value"
-                class="w-full bg-white border-2 border-slate-300 rounded-lg px-3 py-2.5 text-sm text-black focus:border-[color:var(--accent-border)] focus:outline-none appearance-none cursor-pointer"
               >
-                <option value="" hidden>{{ t('app.value') }}</option>
+                <option value="" hidden>{{ t('app.selectValue') }}</option>
                 <option v-for="val in conditionValueOptions" :key="val" :value="val">
-                  {{ formatEditingConditionModelToken(val) }}
+                  {{ formatEditingConditionValue(val) }}
                 </option>
-              </select>
+              </FieldSelect>
               <input
+                id="spec-condition-value"
                 v-else
                 v-model="editingConditionData.value"
                 data-testid="spec-condition-value"
-                class="w-full bg-white border-2 border-slate-300 rounded-lg px-3 py-2.5 text-sm text-black placeholder:text-slate-400 focus:border-[color:var(--accent-border)] focus:outline-none"
-                :placeholder="t('app.enterValuePlaceholder')"
+                class="board-field"
+                :placeholder="conditionValuePlaceholder"
+                :aria-invalid="conditionValueFailure ? 'true' : undefined"
+                :aria-describedby="conditionValueFailure ? 'spec-condition-blocked-reason' : undefined"
               />
             </div>
           </div>
         </div>
 
         <!-- Preview -->
-        <div class="space-y-2">
+        <div v-if="!specConditionBlockedReason" class="space-y-2">
           <div class="flex items-center gap-2">
-            <svg class="w-5 h-5 text-black" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg class="w-5 h-5 board-text-strong" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
             </svg>
-            <span class="text-xs font-bold uppercase text-black tracking-wider">{{ t('app.preview') }}</span>
+            <span class="board-form-label">{{ t('app.preview') }}</span>
           </div>
-          <div class="font-mono text-xs bg-slate-100 rounded-lg px-3 py-2.5 border border-slate-300 text-black break-all w-full">
-            <span class="board-text-danger font-bold">{{ getDeviceLabel(editingConditionData.deviceId || t('app.device')) }}</span>
+          <div data-testid="spec-condition-preview" class="font-mono text-xs board-bg-control rounded-lg px-3 py-2.5 border border-[color:var(--border-strong)] board-text-strong break-all w-full">
+            <span v-if="!editingConditionData.deviceId" class="board-text-muted">{{ t('app.selectDevicePlaceholder') }}</span>
+            <span v-else class="board-text-danger font-semibold">{{ getDeviceLabel(editingConditionData.deviceId) }}</span>
             <template v-if="editingConditionData.targetType !== 'state' && editingConditionData.key">
-              <span class="text-slate-500">.</span>
-              <span class="board-text-danger font-bold">{{ formatEditingConditionModelToken(editingConditionData.key) }}</span>
+              <span class="board-text-muted">.</span>
+              <span class="board-text-danger font-semibold">{{ formatConditionPropertyLabel(editingConditionData as SpecCondition) }}</span>
             </template>
             <!-- Without this the preview reads the same for both questions, which is what let an
                  author believe they had pinned the device's own reading. -->
             <template v-if="editingConditionData.targetType === 'variable' && editingConditionData.key">
               <span
-                class="ml-1 text-slate-600"
+                class="ml-1 board-text-muted"
                 data-testid="spec-condition-preview-variable-source"
               >({{ formatConditionVariableSourceLabel(editingConditionData as SpecCondition) }})</span>
             </template>
-            <template v-if="showRelationAndValue">
-              <span class="text-slate-500 mx-1">{{ getRelationLabel(editingConditionData.relation || '=') }}</span>
-              <span class="text-black">"{{ editingConditionData.value ? formatEditingConditionModelToken(editingConditionData.value) : t('app.value') }}"</span>
+            <template v-if="editingConditionData.deviceId && showRelationAndValue">
+              <span class="board-text-muted mx-1">{{ getRelationLabel(editingConditionData.relation || '=') }}</span>
+              <span class="board-text-strong">"{{ formatEditingConditionValue(editingConditionData.value) }}"</span>
             </template>
           </div>
         </div>
@@ -4139,7 +4212,7 @@ watch(() => props.readOnly, readOnly => {
           v-if="specConditionBlockedReason"
           id="spec-condition-blocked-reason"
           role="status"
-          class="mr-auto text-xs font-semibold board-text-danger"
+          class="w-full text-xs font-semibold board-text-danger"
           data-testid="spec-condition-blocked-reason"
         >
           {{ specConditionBlockedReason }}
@@ -4169,15 +4242,20 @@ watch(() => props.readOnly, readOnly => {
   <Teleport to="body">
     <div
       v-if="activeTemplatePreview"
-      class="template-preview"
+      ref="templatePreviewRef"
+      class="template-preview iot-scroll-region"
+      role="region"
+      aria-labelledby="template-preview-title"
+      tabindex="-1"
       :style="templatePreviewStyle"
       :data-testid="`template-preview-${getTemplateKey(activeTemplatePreview)}`"
       @click.stop
+      @keydown.esc.stop.prevent="closeTemplatePreview"
     >
       <div class="template-preview__header">
         <div class="min-w-0">
           <p class="template-preview__eyebrow">{{ t('app.templateDetails') }}</p>
-          <h5 class="template-preview__title truncate" :title="getTemplateName(activeTemplatePreview)">{{ getTemplateName(activeTemplatePreview) }}</h5>
+          <h5 id="template-preview-title" class="template-preview__title break-words">{{ getTemplateName(activeTemplatePreview) }}</h5>
         </div>
         <HintTooltip :content="t('app.close')">
           <button
@@ -4191,7 +4269,7 @@ watch(() => props.readOnly, readOnly => {
         </HintTooltip>
       </div>
 
-      <p class="template-preview__description" :title="getTemplateDescription(activeTemplatePreview)">
+      <p v-if="getTemplateDescription(activeTemplatePreview)" class="template-preview__description" :title="getTemplateDescription(activeTemplatePreview)">
         {{ getTemplateDescription(activeTemplatePreview) }}
       </p>
 
@@ -4210,6 +4288,7 @@ watch(() => props.readOnly, readOnly => {
         <div
           v-for="section in activeTemplatePreviewSections"
           :key="section.key"
+          :data-testid="`template-preview-section-${section.key}`"
           class="template-preview__section"
         >
           <span class="template-preview__section-label">{{ section.label }}</span>
@@ -4217,15 +4296,12 @@ watch(() => props.readOnly, readOnly => {
             <span v-if="section.items.length === 0" class="template-preview__empty">{{ t('app.none') }}</span>
             <template v-else>
               <span
-                v-for="item in previewItems(section.items)"
+                v-for="item in section.items"
                 :key="`${section.key}-${item}`"
                 class="template-preview__chip"
                 :title="item"
               >
                 {{ item }}
-              </span>
-              <span v-if="section.items.length > previewItems(section.items).length" class="template-preview__chip">
-                +{{ section.items.length - previewItems(section.items).length }}
               </span>
             </template>
           </div>
@@ -4251,17 +4327,16 @@ watch(() => props.readOnly, readOnly => {
       tabindex="-1"
       @click.stop
     >
-      <!-- The tone tile carries the warning. This used to be a full-bleed red banner with a 64px circle
-           inside it, which shouted louder than the account-deletion dialog for a reversible catalog edit. -->
+      <!-- The preview owns whether deletion is allowed and which consequences apply. -->
       <div class="iot-dialog__header">
         <div class="iot-dialog__icon">
           <span class="material-symbols-outlined" aria-hidden="true">delete</span>
         </div>
         <div class="iot-dialog__heading">
           <h3 id="delete-template-dialog-title" class="iot-dialog__title">
-            {{ templateToDelete ? templateToDelete.manifest.Name : t('app.youAreAboutToDelete') }}
+            {{ t('app.deleteTemplate') }}
           </h3>
-          <p class="iot-dialog__subtitle">{{ t('app.actionCannotBeUndone') }}</p>
+          <p v-if="templateToDelete" class="iot-dialog__subtitle break-words">{{ getTemplateName(templateToDelete) }}</p>
         </div>
       </div>
 
@@ -4270,16 +4345,16 @@ watch(() => props.readOnly, readOnly => {
         v-if="templateDeletePreview && !templateDeletePreview.canDelete"
         class="rounded-lg board-surface-warning p-3 text-left"
       >
-        <p class="text-sm font-bold board-text-warning">{{ t('app.templateDeleteBlocked') }}</p>
+        <p class="text-sm font-semibold board-text-warning">{{ t('app.templateDeleteBlocked') }}</p>
         <p class="mt-1 text-xs leading-5 board-text-warning">{{ t('app.templateDeleteBlockedDetail') }}</p>
         <ul class="mt-2 space-y-1.5">
           <li
             v-for="blocker in templateDeletePreview.blockers"
             :key="blocker.itemId"
-            class="flex items-center gap-2 rounded border border-[color:var(--warning-border)] bg-white px-2 py-1.5 text-xs text-slate-700"
+            class="flex items-center gap-2 rounded border border-[color:var(--warning-border)] board-bg-elevated px-2 py-1.5 text-xs board-text-strong"
           >
             <span class="material-symbols-outlined text-sm board-text-warning" aria-hidden="true">devices</span>
-            <span class="min-w-0 truncate" :title="blocker.itemLabel">{{ blocker.itemLabel }}</span>
+            <span class="min-w-0 break-words">{{ blocker.itemLabel }}</span>
           </li>
         </ul>
       </div>
@@ -4352,14 +4427,14 @@ watch(() => props.readOnly, readOnly => {
           }) }}
         </div>
 
-        <div class="mt-3 max-h-44 iot-scroll-region border-y border-slate-200 py-1 dark:border-slate-700">
+        <div class="mt-3 max-h-44 iot-scroll-region border-y board-border-subtle py-1">
           <div
             v-for="change in defaultTemplateResetPreview.templateChanges"
             :key="`${change.changeType}:${change.templateName}`"
             class="flex items-start justify-between gap-3 py-1.5 text-xs"
           >
             <span class="min-w-0 break-words font-semibold">{{ change.templateName }}</span>
-            <span class="shrink-0 text-right text-slate-500 dark:text-slate-400">
+            <span class="shrink-0 text-right board-text-muted">
               {{ defaultTemplateResetChangeLabel(change.changeType) }}
               <span v-if="change.semanticsChanged"> · {{ t('app.templateSemanticsChanged') }}</span>
             </span>
@@ -4367,8 +4442,8 @@ watch(() => props.readOnly, readOnly => {
         </div>
 
         <div v-if="defaultTemplateResetPreview.affectedDevices.length" class="mt-3 text-xs">
-          <div class="font-bold">{{ t('app.devicesUsingChangedTemplates') }}</div>
-          <div class="mt-1 max-h-20 iot-scroll-region text-slate-600 dark:text-slate-300">
+          <div class="font-semibold">{{ t('app.devicesUsingChangedTemplates') }}</div>
+          <div class="mt-1 max-h-20 iot-scroll-region board-text-muted">
             <div
               v-for="device in defaultTemplateResetPreview.affectedDevices"
               :key="device.deviceId"
@@ -4384,10 +4459,10 @@ watch(() => props.readOnly, readOnly => {
           data-testid="default-template-reset-environment-changes"
           class="mt-3 text-xs"
         >
-          <div class="font-bold">{{ t('app.environmentVariablesWillChange', {
+          <div class="font-semibold">{{ t('app.environmentVariablesWillChange', {
             count: defaultTemplateResetPreview.environmentChanges.length
           }) }}</div>
-          <ul class="mt-1 max-h-28 list-disc space-y-1 iot-scroll-region pl-5 text-slate-600 dark:text-slate-300">
+          <ul class="mt-1 max-h-28 list-disc space-y-1 iot-scroll-region pl-5 board-text-muted">
             <li
               v-for="change in defaultTemplateResetPreview.environmentChanges"
               :key="`${change.changeType}:${change.name}`"
@@ -4403,7 +4478,7 @@ watch(() => props.readOnly, readOnly => {
           class="mt-3 border-l-2 border-[color:var(--danger-border)] pl-3 text-xs board-text-danger"
           role="alert"
         >
-          <div class="font-bold">{{ t('app.defaultTemplateResetBlocked') }}</div>
+          <div class="font-semibold">{{ t('app.defaultTemplateResetBlocked') }}</div>
           <div
             v-for="(blocker, index) in defaultTemplateResetPreview.blockers"
             :key="`${blocker.itemLabel}:${index}`"
@@ -4412,7 +4487,7 @@ watch(() => props.readOnly, readOnly => {
             <div>
               <strong>{{ blocker.itemLabel }}</strong>: {{ defaultTemplateResetBlockerReason(blocker.reasonCode) }}
             </div>
-            <details class="mt-1 text-[11px] board-text-danger">
+            <details class="mt-1 text-xs board-text-danger">
               <summary class="cursor-pointer font-semibold">{{ t('app.technicalDetails') }}</summary>
               <code class="mt-1 block whitespace-pre-wrap break-words rounded board-chip-danger px-2 py-1">{{ blocker.reason }}</code>
             </details>
@@ -4463,39 +4538,6 @@ watch(() => props.readOnly, readOnly => {
 </template>
 
 <style scoped>
-/* Modern panel effect */
-.modern-panel {
-  background: var(--board-panel-bg, linear-gradient(180deg, rgba(255, 255, 255, 0.95) 0%, rgba(248, 250, 252, 0.95) 100%));
-  backdrop-filter: blur(20px);
-  border: 1px solid var(--board-border);
-}
-
-/* Glass panel effect */
-.glass-panel {
-  background: var(--board-panel-bg);
-  backdrop-filter: blur(16px);
-  border: 1px solid var(--board-border);
-}
-
-/* Custom scrollbar */
-.custom-scrollbar::-webkit-scrollbar {
-  width: 6px;
-}
-
-.custom-scrollbar::-webkit-scrollbar-track {
-  background: rgba(0, 0, 0, 0.02);
-  border-radius: var(--iot-radius-well);
-}
-
-.custom-scrollbar::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
-  border-radius: var(--iot-radius-well);
-}
-
-.custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: #94a3b8;
-}
-
 /* Material Symbols font */
 .material-symbols-outlined {
   font-family: 'Material Symbols Outlined';
@@ -4514,39 +4556,39 @@ details > summary::-webkit-details-marker {
 .control-mode-tabs {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0.35rem;
+  gap: var(--iot-space-2xs);
   border: 1px solid var(--board-border);
   border-radius: var(--iot-radius-well);
   background: var(--board-control-bg);
-  padding: 0.25rem;
+  padding: var(--iot-space-2xs);
 }
 
 .control-mode-tabs button {
   min-width: 0;
   border: 0;
   border-radius: var(--iot-radius-action);
-  padding: 0.45rem 0.35rem;
+  padding: var(--iot-space-sm) var(--iot-space-2xs);
   color: var(--board-text-muted);
-  font-size: var(--iot-font-min);
-  font-weight: 800;
-  line-height: 1.1;
-  transition: background 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
-  /* 44px floor: these measured 26px, and a mode switch is primary navigation. */
-  min-height: 2.75rem;
+  font-size: var(--iot-font-label);
+  font-weight: 600;
+  line-height: 1.4;
+  transition: background-color var(--iot-motion-fast), color var(--iot-motion-fast);
+  min-height: var(--iot-target-min);
+}
+
+.control-mode-tabs--formats {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.control-mode-tabs button:hover:not(.active) {
+  background: var(--surface-control-hover);
+  color: var(--text);
 }
 
 .control-mode-tabs button.active {
-  /*
-   * `--accent-fill`, not a raw purple. `var(--accent)` under white ink measures **3.96:1** — under AA, and the kind
-   * of near-miss nobody sees by looking. It was also a hue this component used nowhere else, so "the selected
-   * mode" was said in a colour that meant nothing in particular.
-   *
-   * The fill half specifically: `--accent` alone is tuned as *text* and lightens in dark theme, where white
-   * ink on it drops to 2.54:1.
-   */
-  background: var(--accent-fill);
-  color: #ffffff;
-  box-shadow: 0 8px 18px color-mix(in srgb, var(--accent-fill) 22%, transparent);
+  background: var(--surface-elevated);
+  color: var(--accent);
+  box-shadow: var(--shadow-raised);
 }
 
 .device-preview-box {
@@ -4567,8 +4609,8 @@ details > summary::-webkit-details-marker {
   background: color-mix(in srgb, var(--board-control-bg) 86%, var(--iot-color-accent) 8%);
   color: var(--board-text-muted);
   padding: 0.55rem 0.65rem;
-  font-size: var(--iot-font-min);
-  font-weight: 700;
+  font-size: var(--iot-font-caption);
+  font-weight: 600;
   line-height: 1.2;
 }
 
@@ -4578,10 +4620,8 @@ details > summary::-webkit-details-marker {
   justify-content: space-between;
   gap: 0.5rem;
   color: var(--board-text-muted);
-  font-size: var(--iot-font-min);
-  font-weight: 800;
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
+  font-size: var(--iot-font-label);
+  font-weight: 600;
 }
 
 .device-preview-box__header strong {
@@ -4617,16 +4657,23 @@ details > summary::-webkit-details-marker {
 .device-preview-row span {
   min-width: 0;
   color: var(--board-text);
-  font-size: 0.7rem;
-  font-weight: 800;
+  font-size: var(--iot-font-control);
+  font-weight: 600;
 }
 
 .device-preview-row small {
   min-width: 0;
   color: var(--board-text-muted);
-  font-size: var(--iot-font-min);
-  font-weight: 700;
+  font-size: var(--iot-font-caption);
+  font-weight: 600;
   text-align: right;
+}
+
+.device-preview-row .device-import-row-source {
+  grid-column: 1 / -1;
+  color: var(--board-text-muted);
+  font-size: var(--iot-font-caption);
+  font-weight: 500;
 }
 
 .device-preview-row.has-error {
@@ -4635,7 +4682,7 @@ details > summary::-webkit-details-marker {
 }
 
 .device-preview-row.has-error small {
-  color: #dc2626;
+  color: var(--danger);
 }
 
 .device-preview-row.has-warning {
@@ -4644,15 +4691,27 @@ details > summary::-webkit-details-marker {
 }
 
 .device-preview-row.has-warning small {
-  color: color-mix(in srgb, #d97706 88%, var(--board-text));
+  color: var(--warning);
+}
+
+.device-preview-row.has-error,
+.device-preview-row.has-warning {
+  grid-template-columns: minmax(0, 1fr);
+  overflow-wrap: anywhere;
+}
+
+.device-preview-row.has-error small,
+.device-preview-row.has-warning small {
+  overflow-wrap: anywhere;
+  text-align: left;
 }
 
 .device-preview-more,
 .device-preview-empty {
   margin-top: 0.45rem;
   color: var(--board-text-muted);
-  font-size: var(--iot-font-min);
-  font-weight: 700;
+  font-size: var(--iot-font-caption);
+  font-weight: 600;
   text-align: center;
 }
 
@@ -4660,36 +4719,6 @@ details > summary::-webkit-details-marker {
   background: color-mix(in srgb, var(--board-card-bg) 88%, transparent);
   border-color: color-mix(in srgb, var(--accent) 26%, var(--board-border));
   color: var(--board-text);
-}
-
-/*
- * This box neutralises the Tailwind slate utilities its markup still carries, so its text follows the theme.
- * `span` is deliberately broad — but it also matched the one span that asks for a *role* colour, and because
- * this rule is scoped (`[data-v-…]`) it outranked the global `.iot-board .board-text-accent`, so the accent
- * icon rendered `rgb(148,163,184)` instead of the accent. Measured with CDP matched-styles; a global rule
- * could not have won this, and appending an identical rule last did not either.
- */
-.device-runtime-box summary,
-.device-runtime-box p,
-.device-runtime-box span:not(.board-text-accent) {
-  color: inherit;
-}
-
-.device-runtime-box input,
-.device-runtime-box select {
-  background: var(--board-card-bg);
-  border-color: var(--board-border);
-  color: var(--board-text);
-}
-
-.device-runtime-box input::placeholder {
-  color: var(--board-text-muted);
-}
-
-.device-runtime-box .text-slate-400,
-.device-runtime-box .text-slate-500,
-.device-runtime-box .text-slate-600 {
-  color: var(--board-text-muted);
 }
 
 .template-group[open] .template-group__chevron {
@@ -4709,7 +4738,12 @@ details > summary::-webkit-details-marker {
 }
 
 .template-group__summary:hover {
-  background: color-mix(in srgb, var(--warning) 13%, var(--board-card-bg));
+  background: var(--surface-control-hover);
+}
+
+.template-group__summary:hover .template-group__label,
+.template-group__summary:hover .template-group__chevron {
+  color: var(--text);
 }
 
 .template-group__label,
@@ -4718,8 +4752,8 @@ details > summary::-webkit-details-marker {
 }
 
 .template-group__count {
-  background: color-mix(in srgb, var(--warning) 16%, var(--board-control-bg));
-  color: var(--board-text);
+  background: var(--surface-control);
+  color: var(--text-muted);
 }
 
 .template-group__grid {
@@ -4738,61 +4772,6 @@ details > summary::-webkit-details-marker {
   color: var(--board-text);
 }
 
-/*
- * Single-level token references, not three-deep fallback chains.
- *
- * These read `var(--board-panel-bg)`. Both fallbacks are unreachable:
- * `--board-*` is declared at `:root` in `board.css` (hoisted there precisely so teleported surfaces can
- * reach it), so the guard never fires — measured, all seven of these tokens have three `:root` definitions
- * in the shipped bundle, one per theme. What the chain did instead was put a light-theme hex in front of a
- * reader trying to learn what a dark panel is painted with, implying the dark theme might degrade to a white
- * card. That is the "silent fallback" the root CLAUDE.md rules out: robustness for a case that cannot occur,
- * paid for in comprehension.
- */
-/* The card shell (background, border, radius, max-height) comes from `.iot-dialog`; what stays here is the
-   board ink context the body content below is written against. */
-.control-center-dialog-surface {
-  color: var(--board-text);
-}
-
-.control-center-dialog-surface :is(input, select, textarea) {
-  background: var(--board-card-bg) !important;
-  border-color: var(--board-border) !important;
-  color: var(--board-text) !important;
-}
-
-/* These controls declare `focus:outline-none focus:border-[color:var(--accent-border)]`, i.e. the border colour is meant
-   to be the focus cue — but the `!important` border-colour above wins, leaving keyboard users with
-   no indicator at all. An outline is a different property, so it cannot be overridden the same way. */
-.control-center-dialog-surface :is(input, select, textarea):focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--iot-color-accent) 85%, transparent);
-  outline-offset: 1px;
-}
-
-.control-center-dialog-surface :is(.bg-white, .bg-slate-50, .bg-slate-100, .bg-slate-200) {
-  background-color: var(--board-card-bg) !important;
-}
-
-.control-center-dialog-surface .board-chip-danger {
-  background-color: color-mix(in srgb, var(--danger) 12%, var(--board-card-bg)) !important;
-}
-
-.control-center-dialog-surface .board-chip-warning {
-  background-color: color-mix(in srgb, var(--warning) 12%, var(--board-card-bg)) !important;
-}
-
-.control-center-dialog-surface :is(.text-black, .text-slate-700, .text-slate-800, .text-slate-900) {
-  color: var(--board-text) !important;
-}
-
-.control-center-dialog-surface :is(.text-slate-400, .text-slate-500, .text-slate-600) {
-  color: var(--board-text-muted) !important;
-}
-
-.control-center-dialog-surface :is(.border-slate-100, .border-slate-200, .border-slate-300, .border-slate-400) {
-  border-color: var(--board-border) !important;
-}
-
 .template-reset-dialog__notice {
   background: color-mix(in srgb, var(--warning) 8%, var(--board-panel-bg));
   border-color: color-mix(in srgb, var(--warning) 28%, var(--board-border));
@@ -4802,8 +4781,8 @@ details > summary::-webkit-details-marker {
 .template-reset-dialog__spinner {
   width: 0.9rem;
   height: 0.9rem;
-  border: 2px solid rgba(255, 255, 255, 0.38);
-  border-top-color: #ffffff;
+  border: 2px solid color-mix(in srgb, var(--text-on-fill) 38%, transparent);
+  border-top-color: var(--text-on-fill);
   border-radius: var(--iot-radius-pill);
   animation: template-reset-spin 0.8s linear infinite;
 }
@@ -4815,9 +4794,6 @@ details > summary::-webkit-details-marker {
 .template-card {
   z-index: 0;
   min-height: 5.15rem;
-  background: var(--board-card-bg);
-  border-color: var(--board-border);
-  color: var(--board-text);
   cursor: pointer;
 }
 
@@ -4829,29 +4805,7 @@ details > summary::-webkit-details-marker {
   cursor: grabbing;
 }
 
-.template-card:hover,
-.template-card:focus-visible,
-.template-card--active {
-  z-index: 30;
-  /* Tokens, not hex: `var(--warning)` and `#e2e8f0` are a light-theme amber and a light border, so on a dark card
-     they painted a light-theme treatment. The role tokens resolve per theme. */
-  border-color: color-mix(in srgb, var(--warning) 58%, var(--board-border));
-  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);
-}
-
-/*
- * Focus gets a real indicator, and one that is not the same as hover.
- *
- * The card shared hover's styling and then set `outline: none`, so tabbing through the template list produced
- * a lift and a shadow but no ring — measured **1.07:1**, i.e. no discernible indicator at all. Two problems
- * in one: a keyboard user could not see where they were, and could not tell "focused" from "hovered" even
- * when they could. The list is 45 default templates long, so this is where losing the cursor costs most.
- *
- * The ring goes on the **inner button**, because that is what actually receives focus: the card is a `div`
- * wrapping a transparent full-width `button`. Styling `.template-card:focus-visible` looked right and did
- * nothing in dark theme — it passed in light only because the browser's own default outline happened to be
- * visible there, which is the kind of accidental pass that makes a fix look complete when it is not.
- */
+/* The inner button receives keyboard focus; the surrounding card only owns hover and selection. */
 .template-card > button:focus-visible {
   outline: 2px solid var(--accent-border);
   outline-offset: 3px;
@@ -4859,21 +4813,13 @@ details > summary::-webkit-details-marker {
 }
 
 .template-card__icon {
-  background: color-mix(in srgb, var(--warning) 13%, var(--board-control-bg));
-}
-
-.template-card:hover .template-card__icon,
-.template-card--active .template-card__icon {
-  background: color-mix(in srgb, var(--warning) 22%, var(--board-control-bg));
+  background: var(--surface-control);
 }
 
 .template-card__title {
+  font-size: var(--iot-font-control);
+  font-weight: 600;
   color: var(--board-text);
-}
-
-.template-card:hover .template-card__title,
-.template-card--active .template-card__title {
-  color: color-mix(in srgb, var(--warning) 78%, var(--board-text));
 }
 
 .template-card__stats {
@@ -4888,12 +4834,6 @@ details > summary::-webkit-details-marker {
   opacity: 0.72;
 }
 
-.template-card:hover .template-card__drag-cue,
-.template-card--active .template-card__drag-cue {
-  color: color-mix(in srgb, var(--warning) 85%, var(--board-text));
-  opacity: 1;
-}
-
 .template-card__pill {
   background: var(--board-control-bg);
   color: var(--board-text-muted);
@@ -4901,32 +4841,6 @@ details > summary::-webkit-details-marker {
 
 .template-card__actions {
   border-color: var(--board-border);
-}
-
-.template-card__action {
-  display: inline-flex;
-  min-width: 2rem;
-  min-height: 2rem;
-  align-items: center;
-  justify-content: center;
-  color: var(--board-text-muted);
-}
-
-@media (pointer: coarse) {
-  .template-card__action {
-    min-width: 2.75rem;
-    min-height: 2.75rem;
-  }
-}
-
-.template-card__action:hover {
-  color: color-mix(in srgb, var(--warning) 82%, var(--board-text));
-  background: color-mix(in srgb, var(--warning) 15%, var(--board-control-bg));
-}
-
-.template-card__action--danger:hover {
-  color: var(--danger);
-  background: color-mix(in srgb, var(--danger) 14%, var(--board-control-bg));
 }
 
 .template-preview {
@@ -4937,7 +4851,7 @@ details > summary::-webkit-details-marker {
   --template-preview-muted: var(--board-text-muted);
 
   position: fixed;
-  z-index: 45;
+  z-index: var(--z-board-panel-above-alert);
   box-sizing: border-box;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -4947,7 +4861,7 @@ details > summary::-webkit-details-marker {
   background: color-mix(in srgb, var(--template-preview-card-bg) 96%, transparent);
   color: var(--template-preview-text);
   backdrop-filter: blur(16px);
-  box-shadow: 0 22px 55px rgba(15, 23, 42, 0.24);
+  box-shadow: var(--shadow-elevated);
 }
 
 .template-preview__header {
@@ -4960,17 +4874,15 @@ details > summary::-webkit-details-marker {
 .template-preview__eyebrow {
   margin: 0;
   color: var(--template-preview-muted);
-  font-size: var(--iot-font-min);
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  font-size: var(--iot-font-caption);
+  font-weight: 600;
 }
 
 .template-preview__title {
   margin: 0.1rem 0 0;
   color: var(--template-preview-text);
-  font-size: 0.82rem;
-  font-weight: 800;
+  font-size: var(--iot-font-base);
+  font-weight: 600;
 }
 
 .template-preview__close {
@@ -5000,7 +4912,7 @@ details > summary::-webkit-details-marker {
   margin: 0.55rem 0 0;
   overflow: hidden;
   color: var(--template-preview-muted);
-  font-size: 0.7rem;
+  font-size: var(--iot-font-caption);
   line-height: 1.45;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
@@ -5025,10 +4937,8 @@ details > summary::-webkit-details-marker {
 .template-preview__section-label {
   display: block;
   color: var(--template-preview-muted);
-  font-size: var(--iot-font-min);
-  font-weight: 800;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  font-size: var(--iot-font-label);
+  font-weight: 600;
 }
 
 .template-preview__meta strong {
@@ -5037,7 +4947,7 @@ details > summary::-webkit-details-marker {
   margin-top: 0.15rem;
   overflow: hidden;
   color: var(--template-preview-text);
-  font-size: 0.72rem;
+  font-size: var(--iot-font-control);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -5058,14 +4968,13 @@ details > summary::-webkit-details-marker {
 .template-preview__chip,
 .template-preview__empty {
   max-width: 100%;
-  overflow: hidden;
+  overflow-wrap: anywhere;
   border-radius: var(--iot-radius-pill);
   padding: 0.18rem 0.45rem;
   background: var(--template-preview-control-bg);
   color: var(--template-preview-text);
-  font-size: var(--iot-font-min);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-size: var(--iot-font-caption);
+  white-space: normal;
 }
 
 .template-preview__empty {
@@ -5080,10 +4989,10 @@ select:focus {
 
 @keyframes focus-ring {
   0% {
-    box-shadow: 0 0 0 0 rgba(100, 116, 139, 0.4);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--text-muted) 40%, transparent);
   }
   100% {
-    box-shadow: 0 0 0 4px rgba(100, 116, 139, 0.1);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--text-muted) 10%, transparent);
   }
 }
 

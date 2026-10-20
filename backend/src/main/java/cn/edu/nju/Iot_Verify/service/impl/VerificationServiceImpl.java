@@ -16,7 +16,6 @@ import cn.edu.nju.Iot_Verify.dto.Result;
 import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
-import cn.edu.nju.Iot_Verify.dto.model.EnvironmentValueProvenanceDto;
 import cn.edu.nju.Iot_Verify.dto.model.ModelGenerationIssueDto;
 import cn.edu.nju.Iot_Verify.dto.model.ModelTokenSource;
 import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
@@ -35,6 +34,7 @@ import cn.edu.nju.Iot_Verify.dto.trace.*;
 import cn.edu.nju.Iot_Verify.dto.verification.VerificationRequestDto;
 import cn.edu.nju.Iot_Verify.dto.verification.VerificationResultDto;
 import cn.edu.nju.Iot_Verify.dto.verification.SpecResultDto;
+import cn.edu.nju.Iot_Verify.dto.verification.SpecificationSnapshotDto;
 import cn.edu.nju.Iot_Verify.dto.verification.VerificationOutcome;
 import cn.edu.nju.Iot_Verify.dto.verification.VerificationTaskDto;
 import cn.edu.nju.Iot_Verify.dto.verification.VerificationTaskSummaryDto;
@@ -52,11 +52,13 @@ import cn.edu.nju.Iot_Verify.exception.SmvGenerationException;
 import cn.edu.nju.Iot_Verify.exception.ValidationException;
 import cn.edu.nju.Iot_Verify.po.TracePo;
 import cn.edu.nju.Iot_Verify.po.VerificationTaskPo;
+import cn.edu.nju.Iot_Verify.po.VerificationResultView;
 import cn.edu.nju.Iot_Verify.repository.TraceRepository;
 import cn.edu.nju.Iot_Verify.repository.UserRepository;
 import cn.edu.nju.Iot_Verify.repository.VerificationTaskRepository;
 import cn.edu.nju.Iot_Verify.repository.projection.CompletedRunDeletionProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.TraceSummaryProjection;
+import cn.edu.nju.Iot_Verify.repository.projection.VerificationTraceContextProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.VerificationTaskSummaryProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.VerificationRunSummaryProjection;
 import cn.edu.nju.Iot_Verify.util.JsonUtils;
@@ -83,14 +85,19 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.*;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.stream.Collectors;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
+
+import static cn.edu.nju.Iot_Verify.service.impl.ModelRequestSnapshotSupport.copyOptionalList;
+import static cn.edu.nju.Iot_Verify.service.impl.ModelRequestSnapshotSupport.copyRequiredList;
 
 /**
  * Verification service implementation.
@@ -295,15 +302,6 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                 () -> verifyInput(userId, validateAndNormalize(userId, request)));
     }
 
-    @Override
-    public VerificationResultDto verifyWithTemplateSnapshot(
-            Long userId,
-            VerificationRequestDto request,
-            Map<String, DeviceManifest> templateManifests) {
-        return formalOperationAdmission.execute(userId,
-                () -> verifyInput(userId, validateAndNormalize(userId, request, templateManifests)));
-    }
-
     private VerificationResultDto verifyInput(Long userId, VerificationInput input) {
 
         requireVerificationRunStorageCapacity(userId);
@@ -315,11 +313,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
         long timeoutMs = nusmvConfig.getTimeoutMs() * 2; // generate + execute total timeout
         Future<VerificationResultDto> future;
         try {
-            future = syncVerificationExecutor.submit(() ->
-                    doVerify(userId, input.devices(), input.rules(), input.specs(),
-                            input.enablePrivacy(), input.request(),
-                            input.deviceSmvMap(), input.templateManifests(), input.modelSnapshot(),
-                            SmvGenerator.TempModelContext.sync()));
+            future = syncVerificationExecutor.submit(() -> doVerify(userId, input, null));
         } catch (RejectedExecutionException e) {
             log.warn("Sync verification request rejected: executor is saturated ({})", syncVerificationExecutorSnapshot());
             throw new ServiceUnavailableException("Verification service is busy, please retry later", e);
@@ -334,7 +328,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
             log.warn("Sync verification timed out after {}ms", timeoutMs);
             result = applyRunContext(buildErrorResult("", List.of("Verification timed out")),
                     input.attackScenario(), input.enablePrivacy(), input.attackSurface(), input.modelSnapshot(),
-                    buildTemplateSnapshotsJson(input.templateManifests(), input.deviceSmvMap()), input.request());
+                    input.request());
         } catch (ExecutionException e) {
             Throwable cause = e.getCause();
             if (cause instanceof InternalServerException ise) throw ise;
@@ -383,69 +377,85 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
         }
     }
 
-    private VerificationResultDto doVerify(Long userId,
-                                           List<DeviceVerificationDto> devices,
-                                           List<RuleDto> rules,
-                                           List<SpecificationDto> specs,
-                                           boolean enablePrivacy,
-                                            VerificationRequestDto request,
-                                            Map<String, DeviceSmvData> resolvedDeviceSmvMap,
-                                            Map<String, DeviceManifest> templateManifests,
-                                            ModelRunSnapshotDto modelSnapshot,
-                                            SmvGenerator.TempModelContext tempModelContext) {
+    private VerificationResultDto doVerify(Long userId, VerificationInput input, VerificationTaskPo task) {
+        Long taskId = task != null ? task.getId() : null;
         List<String> checkLogs = new ArrayList<>();
         File smvFile = null;
-        Map<String, DeviceSmvData> deviceSmvMap = null;
-        AttackSurface attackSurface = new AttackSurface(Set.of(), rules != null ? rules.size() : 0, 0);
         VerificationResultDto finalResult = null;
-        String requestJson = buildRequestSnapshot(request);
-        String templateSnapshotsJson = buildTemplateSnapshotsJson(
-                templateManifests, resolvedDeviceSmvMap);
-        String smvModelContent = null;
 
         try {
+            if (taskId != null) {
+                updateTaskProgress(taskId, 20, TaskProgressStage.GENERATING_MODEL);
+            }
             checkLogs.add("Generating NuSMV model...");
             SmvGenerator.GenerateResult genResult = generateResolvedModel(
-                    userId, devices, request.getEnvironmentVariables(), rules, specs,
-                    request.resolvedAttackScenario(), enablePrivacy, SmvGenerator.GeneratePurpose.VERIFICATION,
-                    tempModelContext, resolvedDeviceSmvMap);
+                    userId, input.devices(), input.request().getEnvironmentVariables(), input.rules(), input.specs(),
+                    input.attackScenario(), input.enablePrivacy(), SmvGenerator.GeneratePurpose.VERIFICATION,
+                    taskId != null ? SmvGenerator.TempModelContext.task(taskId) : SmvGenerator.TempModelContext.sync(),
+                    input.deviceSmvMap());
             smvFile = genResult.smvFile();
-            deviceSmvMap = genResult.deviceSmvMap();
-            attackSurface = AttackSurface.analyze(rules, deviceSmvMap);
             appendGenerationWarnings(checkLogs, genResult);
+            if (taskId != null && (isTaskCancelled(taskId) || Thread.currentThread().isInterrupted())) {
+                return null;
+            }
             if (smvFile == null || !smvFile.exists()) {
-                checkLogs.add("Failed to generate NuSMV model file");
+                String message = "Failed to generate NuSMV model file";
+                checkLogs.add(message);
+                if (task != null) failTask(task, message);
                 finalResult = buildErrorResult("", checkLogs);
                 return finalResult;
             }
             checkLogs.add("Model generated: " + smvFile.getName());
-            saveRequestJson(smvFile, requestJson);
+            saveRequestJson(smvFile, input.requestJson());
 
             // Read SMV content for persistence before NuSMV execution
-            smvModelContent = readSmvModelContent(smvFile);
+            String smvModelContent = readSmvModelContent(smvFile);
 
+            if (taskId != null) {
+                updateTaskProgress(taskId, 50, TaskProgressStage.EXECUTING_MODEL_CHECKER);
+            }
             checkLogs.add("Executing NuSMV verification...");
             NusmvResult result = nusmvExecutor.execute(smvFile);
 
+            if (taskId != null && (isTaskCancelled(taskId) || Thread.currentThread().isInterrupted())) {
+                return null;
+            }
             if (!result.isSuccess()) {
                 if (result.isBusy()) {
                     checkLogs.add("NuSMV execution is busy, please retry later");
                     finalResult = buildErrorResult("", checkLogs);
                     throw new ServiceUnavailableException("NuSMV verification service is busy, please retry later");
                 }
-                checkLogs.add("NuSMV execution failed: " + result.getErrorMessage());
+                String message = "NuSMV execution failed: " + result.getErrorMessage();
+                checkLogs.add(message);
+                if (task != null) failTask(task, message);
                 finalResult = buildErrorResult("", checkLogs);
                 return finalResult;
             }
             checkLogs.add("NuSMV execution completed.");
 
+            if (taskId != null) {
+                updateTaskProgress(taskId, 80, TaskProgressStage.PARSING_RESULTS);
+            }
             // Build per-spec results and reuse deviceSmvMap from generation stage.
-            finalResult = buildVerificationResult(result, devices, rules, specs, userId, null, checkLogs, deviceSmvMap,
-                    templateManifests,
-                    requestJson, genResult.emittedSpecs(), genResult.generationIssues(),
+            finalResult = buildVerificationResult(result, input.devices(), input.rules(), input.specs(),
+                    userId, taskId, checkLogs, genResult.deviceSmvMap(), input.templateManifests(),
+                    genResult.emittedSpecs(), genResult.generationIssues(),
                     genResult.disabledRuleCount(), genResult.skippedSpecCount(), smvModelContent);
-            applyRunContext(finalResult, request.resolvedAttackScenario(), enablePrivacy,
-                    attackSurface, modelSnapshot, templateSnapshotsJson, request);
+            if (taskId != null) {
+                if (isTaskCancelled(taskId) || Thread.currentThread().isInterrupted()) {
+                    return finalResult;
+                }
+                boolean completed = completeTaskAndSaveTraces(task, finalResult.getTraces(), userId, taskId,
+                        finalResult.getOutcome(),
+                        countViolatedSpecs(finalResult.getSpecResults(), finalResult.getTraces()),
+                        finalResult.getSpecResults(), finalResult.getCheckLogs(), finalResult.getNusmvOutput(),
+                        finalResult.getGenerationIssues(), finalResult.getDisabledRuleCount(),
+                        finalResult.getSkippedSpecCount(), finalResult.getSmvModelContent());
+                if (!completed && !isCompletionCancelled(taskId)) {
+                    failTask(task, "RESULT_PERSISTENCE_FAILED: Verification finished, but its result could not be saved.");
+                }
+            }
             return finalResult;
 
         } catch (IOException | InterruptedException e) {
@@ -453,6 +463,9 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
             log.error("Verification error", e);
             checkLogs.add("Error: " + e.getMessage());
             finalResult = buildErrorResult("", checkLogs);
+            if (task != null && !isTaskCancelled(taskId)) {
+                failTask(task, "Verification failed: " + e.getMessage());
+            }
             return finalResult;
         } catch (ServiceUnavailableException e) {
             throw e;
@@ -460,17 +473,25 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
             log.error("SMV generation failed", e);
             checkLogs.add("Error: " + e.getMessage());
             finalResult = buildErrorResult("", checkLogs);
+            if (task != null) {
+                if (!isTaskCancelled(taskId)) failTask(task, "Verification failed: " + e.getMessage());
+                return finalResult;
+            }
             throw e;
         } catch (Exception e) {
             log.error("Verification failed", e);
             checkLogs.add("Error: " + e.getMessage());
             finalResult = buildErrorResult("", checkLogs);
+            if (task != null) {
+                if (!isTaskCancelled(taskId)) failTask(task, "Verification failed: " + e.getMessage());
+                return finalResult;
+            }
             throw new InternalServerException("Verification failed: " + e.getMessage());
         } finally {
             // Persist result.json when tempDir exists (both success and failure) for debugging.
             if (finalResult != null) {
-                applyRunContext(finalResult, request.resolvedAttackScenario(), enablePrivacy,
-                        attackSurface, modelSnapshot, templateSnapshotsJson, request);
+                applyRunContext(finalResult, input.attackScenario(), input.enablePrivacy(),
+                        input.attackSurface(), input.modelSnapshot(), input.request());
                 saveResultJson(smvFile, finalResult);
             }
             cleanupTempFile(smvFile);
@@ -515,26 +536,13 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
     }
 
     private VerificationInput validateAndNormalize(Long userId, VerificationRequestDto request) {
-        return validateAndNormalize(userId, request, null);
-    }
-
-    private VerificationInput validateAndNormalize(
-            Long userId,
-            VerificationRequestDto request,
-            Map<String, DeviceManifest> suppliedTemplateManifests) {
         if (request == null) {
             throw new ValidationException("request", "Verification request cannot be null");
         }
         AttackScenarioDto attackScenario = AttackScenarioValidator.canonicalizeForVerification(
                 request.getAttackScenario());
-        // The board defines WHAT is verified; the request only selects run parameters. Accepting a
-        // caller-supplied scene was an authority inversion: an account whose board held no devices
-        // could post a fabricated two-device scene and have the VIOLATED verdict persisted into its
-        // own run history, where the UI presents it as "this saved scene was checked". Fuzz and the
-        // AI tools already read the board here, so this makes one rule out of two.
-        //
-        // The board read happens BEFORE snapshotRequest so the frozen snapshot deep-copies the board
-        // scene too. Assigning it afterwards would leave the run holding the live board objects.
+        // Capture scene and templates together, then deep-copy the scene before workers receive it.
+        // The request supplies run options; every entry point uses this same board authority.
         ModelInputSnapshot board = boardDataConverter.getModelInputSnapshot(userId);
         request.setDevices(board.devices());
         request.setSpecs(board.specifications());
@@ -563,11 +571,16 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
         NusmvRequestValidator.validateDevices(devices, errors);
         NusmvRequestValidator.validateRules(rules, devices, errors);
         NusmvRequestValidator.validateSpecifications(specs, devices, errors);
-        ModelBoundaryInput modelInput = validateModelSemantics(
-                userId, devices, rules, specs, environmentVariables, snapshot.isAttack(),
-                suppliedTemplateManifests, errors);
+        ModelRunPreparation.PreparedModel modelInput = ModelRunPreparation.prepare(
+                smvGenerator, provenanceCollector,
+                devices, rules, specs, environmentVariables, snapshot.isAttack(),
+                board.templateManifests(), errors);
         snapshot.setEnvironmentVariables(modelInput.environmentVariables());
         NusmvRequestValidator.throwIfErrors(errors);
+
+        modelInput.modelSnapshot().setModelFingerprint(modelFingerprint.modelFingerprint(
+                new ModelInputSnapshot(board.nodes(), devices, environmentVariables, rules, specs,
+                        modelInput.templateManifests())));
 
         try {
             snapshot.setPlaybackNodes(ModelPlaybackSceneSnapshot.canonicalize(
@@ -582,7 +595,9 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
         return new VerificationInput(modelInput.devices(), rules, specs,
                 snapshot.isEnablePrivacy(), attackSurface.deviceCount(), attackSurface.automationLinkCount(),
                 attackSurface.falsifiableReadingDeviceCount(), attackScenario, snapshot, modelInput.deviceSmvMap(),
-                modelInput.templateManifests(), modelInput.modelSnapshot(), attackSurface);
+                modelInput.templateManifests(), modelInput.modelSnapshot(), attackSurface,
+                buildRequestSnapshot(snapshot), buildTemplateSnapshotsJson(
+                        modelInput.templateManifests(), modelInput.deviceSmvMap()));
     }
 
     private boolean specificationsRequirePrivacy(List<SpecificationDto> specs) {
@@ -633,19 +648,18 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                                                    boolean enablePrivacy,
                                                    AttackSurface attackSurface,
                                                    ModelRunSnapshotDto modelSnapshot,
-                                                   String templateSnapshotsJson,
                                                    VerificationRequestDto request) {
         applyModelContext(result, attackScenario, enablePrivacy, attackSurface);
         if (result == null) {
             return null;
         }
         result.setModelSnapshot(modelSnapshot);
-        if (result.getTraces() != null) {
+        if (result.getTraces() != null && !result.getTraces().isEmpty()) {
+            var playbackScene = ModelPlaybackSceneSnapshot.canonicalize(
+                    request.getPlaybackNodes(), request.getDevices(), request.getRules());
             for (TraceDto trace : result.getTraces()) {
                 trace.setModelSnapshot(modelSnapshot);
-                trace.setTemplateSnapshotsJson(templateSnapshotsJson);
-                trace.setPlaybackScene(ModelPlaybackSceneSnapshot.canonicalize(
-                        request.getPlaybackNodes(), request.getDevices(), request.getRules()));
+                trace.setPlaybackScene(playbackScene);
             }
         }
         return result;
@@ -669,67 +683,6 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                 templateManifests, sourcesByDeviceId));
     }
 
-    private ModelBoundaryInput validateModelSemantics(Long userId,
-                                                      List<DeviceVerificationDto> devices,
-                                                      List<RuleDto> rules,
-                                                      List<SpecificationDto> specs,
-                                                      List<BoardEnvironmentVariableDto> environmentVariables,
-                                                      boolean isAttack,
-                                                      Map<String, DeviceManifest> suppliedTemplateManifests,
-                                                      Map<String, String> errors) {
-        if (!errors.isEmpty()) {
-            return new ModelBoundaryInput(devices, environmentVariables, new AttackSurface(Set.of(), 0, 0),
-                    Map.of(), Map.of(), null);
-        }
-        try {
-            SmvGenerator.CapturedDeviceModel capturedDeviceModel = suppliedTemplateManifests == null
-                    ? smvGenerator.captureDeviceModel(userId, devices)
-                    : smvGenerator.captureDeviceModelFromTemplateSnapshots(
-                            devices, suppliedTemplateManifests);
-            Map<String, DeviceSmvData> deviceSmvMap = capturedDeviceModel.deviceSmvMap();
-            LocalDateTime capturedAt = LocalDateTime.now();
-            NusmvRequestValidator.validateDeviceSemantics(devices, deviceSmvMap, errors);
-            NusmvRequestValidator.validateEnvironmentVariableOverrides(
-                    environmentVariables, deviceSmvMap, errors);
-            List<BoardEnvironmentVariableDto> mergedEnvironmentVariables =
-                    NusmvEnvironmentPool.mergeWithDefaults(environmentVariables, deviceSmvMap);
-            NusmvRequestValidator.validateEnvironmentVariables(mergedEnvironmentVariables, deviceSmvMap, errors);
-            NusmvRequestValidator.validateMainNamespace(devices, rules, deviceSmvMap, isAttack, errors);
-            NusmvRequestValidator.validateRuleSemantics(rules, deviceSmvMap, errors);
-            NusmvRequestValidator.validateSpecificationSemantics(specs, deviceSmvMap, errors);
-            NusmvRequestValidator.validateAttackHasModeledEffect(isAttack, rules, deviceSmvMap, errors);
-            AttackSurface attackSurface = AttackSurface.analyze(rules, deviceSmvMap);
-            if (!errors.isEmpty()) {
-                return new ModelBoundaryInput(devices, mergedEnvironmentVariables, attackSurface,
-                        Map.of(), capturedDeviceModel.templateManifests(), null);
-            }
-            List<DeviceVerificationDto> expandedDevices = NusmvEnvironmentPool.expandDevices(
-                    devices, mergedEnvironmentVariables, deviceSmvMap);
-            Map<String, DeviceSmvData> expandedDeviceSmvMap =
-                    smvGenerator.buildDeviceSmvMapFromTemplateSnapshots(
-                            expandedDevices, capturedDeviceModel.templateManifests());
-            List<EnvironmentValueProvenanceDto> environmentProvenance =
-                    provenanceCollector.collectEnvironmentProvenance(
-                            mergedEnvironmentVariables, expandedDevices, expandedDeviceSmvMap);
-            ModelRunSnapshotDto modelSnapshot = ModelRunSnapshotDto.captured(
-                    capturedAt,
-                    expandedDevices.size(),
-                    rules != null ? rules.size() : 0,
-                    specs != null ? specs.size() : 0,
-                    mergedEnvironmentVariables.size(),
-                    capturedDeviceModel.templateManifests().size())
-                    .toBuilder()
-                    .environmentProvenance(environmentProvenance)
-                    .build();
-            return new ModelBoundaryInput(expandedDevices, mergedEnvironmentVariables, attackSurface,
-                    expandedDeviceSmvMap, capturedDeviceModel.templateManifests(), modelSnapshot);
-        } catch (SmvGenerationException e) {
-            errors.putIfAbsent("devices", e.getMessage());
-            return new ModelBoundaryInput(devices, environmentVariables, new AttackSurface(Set.of(), 0, 0),
-                    Map.of(), Map.of(), null);
-        }
-    }
-
     private VerificationRequestDto snapshotRequest(VerificationRequestDto request,
                                                    AttackScenarioDto attackScenario) {
         try {
@@ -741,30 +694,6 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
         } catch (IllegalArgumentException e) {
             throw new ValidationException("request", "Verification request cannot be snapshotted");
         }
-    }
-
-    private <T> List<T> copyRequiredList(List<T> values, String field, String emptyMessage) {
-        if (values == null || values.isEmpty()) {
-            throw new ValidationException(field, emptyMessage);
-        }
-        return copyList(values, field);
-    }
-
-    private <T> List<T> copyOptionalList(List<T> values, String field) {
-        if (values == null || values.isEmpty()) {
-            return List.of();
-        }
-        return copyList(values, field);
-    }
-
-    private <T> List<T> copyList(List<T> values, String field) {
-        List<T> copy = new ArrayList<>(values);
-        for (int i = 0; i < copy.size(); i++) {
-            if (copy.get(i) == null) {
-                throw new ValidationException(field + "[" + i + "]", "must not be null");
-            }
-        }
-        return copy;
     }
 
     private Result<VerificationResultDto> wrapResultForDebugFile(VerificationResultDto verificationResult) {
@@ -819,21 +748,13 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
         return submitVerificationInput(userId, validateAndNormalize(userId, request));
     }
 
-    @Override
-    public Long submitVerificationWithTemplateSnapshot(
-            Long userId,
-            VerificationRequestDto request,
-            Map<String, DeviceManifest> templateManifests) {
-        return submitVerificationInput(
-                userId, validateAndNormalize(userId, request, templateManifests));
-    }
-
     private Long submitVerificationInput(Long userId, VerificationInput input) {
         Long taskId = createTask(userId, input.attackScenario(), input.enablePrivacy(),
                 input.modeledDeviceAttackPointCount(), input.modeledAutomationLinkAttackPointCount(),
                 input.modeledFalsifiableReadingDeviceCount(), input.modelSnapshot(),
                 JsonUtils.toJson(ModelSemanticsDto.forRun(
-                        input.attackScenario(), input.enablePrivacy(), input.attackSurface())));
+                        input.attackScenario(), input.enablePrivacy(), input.attackSurface())),
+                input.requestJson(), input.templateSnapshotsJson());
         try {
             enqueueVerificationTask(userId, taskId, input);
         } catch (RuntimeException e) {
@@ -866,7 +787,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                 devicePointCount, linkPointCount, falsifiableReadingDeviceCount, modelSnapshot,
                 JsonUtils.toJson(ModelSemanticsDto.forRun(
                         requiredScenario, enablePrivacy, devicePointCount, linkPointCount,
-                        falsifiableReadingDeviceCount)));
+                        falsifiableReadingDeviceCount)), null, null);
     }
 
     private Long createTask(Long userId,
@@ -876,7 +797,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                             int linkPointCount,
                             int falsifiableReadingDeviceCount,
                             ModelRunSnapshotDto modelSnapshot,
-                            String modelSemanticsJson) {
+                            String modelSemanticsJson, String requestJson, String templateSnapshotsJson) {
         AttackScenarioDto requiredScenario = Objects.requireNonNull(
                 attackScenario, "attackScenario is required");
         return transactionTemplate.execute(status -> {
@@ -906,6 +827,8 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                     .modeledFalsifiableReadingDeviceCount(falsifiableReadingDeviceCount)
                     .modeledAutomationLinkAttackPointCount(linkPointCount)
                     .enablePrivacy(enablePrivacy)
+                    .requestJson(requestJson)
+                    .templateSnapshotsJson(templateSnapshotsJson)
                     .modelSnapshotJson(JsonUtils.toJson(modelSnapshot))
                     .modelSemanticsJson(modelSemanticsJson)
                     .createdAt(createdAt)
@@ -945,7 +868,8 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                     input.modeledDeviceAttackPointCount(), input.modeledAutomationLinkAttackPointCount(),
                     input.modeledFalsifiableReadingDeviceCount(), input.modelSnapshot(),
                     JsonUtils.toJson(ModelSemanticsDto.forRun(
-                            input.attackScenario(), input.enablePrivacy(), input.attackSurface())));
+                            input.attackScenario(), input.enablePrivacy(), input.attackSurface())),
+                    input.requestJson(), input.templateSnapshotsJson());
             enqueueVerificationTask(userId, requiredTaskId, input);
         } catch (RuntimeException e) {
             String message = e instanceof TaskRejectedException
@@ -1016,14 +940,9 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
     }
 
     private void runVerificationTask(Long userId, Long taskId, VerificationInput input) {
-        String requestJson = buildRequestSnapshot(input.request());
-        String templateSnapshotsJson = buildTemplateSnapshotsJson(
-                input.templateManifests(), input.deviceSmvMap());
         log.info("Starting async verification task: {} for user: {}", taskId, userId);
 
-        File smvFile = null;
         VerificationTaskPo task = null;
-        VerificationResultDto finalResult = null;
         try {
             // Both of these must be inside the try: `updateTaskProgress` writes the in-memory map
             // before its database write, so a database failure here would otherwise leave this
@@ -1073,69 +992,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                 return;
             }
 
-            updateTaskProgress(taskId, 20, TaskProgressStage.GENERATING_MODEL);
-            SmvGenerator.GenerateResult genResult = generateResolvedModel(
-                    userId, input.devices(), input.request().getEnvironmentVariables(), input.rules(), input.specs(),
-                    input.attackScenario(), input.enablePrivacy(), SmvGenerator.GeneratePurpose.VERIFICATION,
-                    SmvGenerator.TempModelContext.task(taskId), input.deviceSmvMap());
-            smvFile = genResult.smvFile();
-            Map<String, DeviceSmvData> deviceSmvMap = genResult.deviceSmvMap();
-            List<String> checkLogs = new ArrayList<>();
-            checkLogs.add("Generating NuSMV model...");
-            appendGenerationWarnings(checkLogs, genResult);
-            if (isTaskCancelled(taskId) || Thread.currentThread().isInterrupted()) {
-                return;
-            }
-            if (smvFile == null || !smvFile.exists()) {
-                String msg = "Failed to generate NuSMV model file";
-                failTask(task, msg);
-                finalResult = buildErrorResult("", List.of(msg));
-                return;
-            }
-            checkLogs.add("Model generated: " + smvFile.getName());
-            saveRequestJson(smvFile, requestJson);
-
-            // Read SMV model content for persistence
-            String smvModelContent = readSmvModelContent(smvFile);
-
-            updateTaskProgress(taskId, 50, TaskProgressStage.EXECUTING_MODEL_CHECKER);
-            checkLogs.add("Executing NuSMV verification...");
-            NusmvResult result = nusmvExecutor.execute(smvFile);
-
-            if (isTaskCancelled(taskId) || Thread.currentThread().isInterrupted()) {
-                return;
-            }
-
-            if (!result.isSuccess()) {
-                String msg = "NuSMV execution failed: " + result.getErrorMessage();
-                failTask(task, msg);
-                finalResult = buildErrorResult("", List.of(msg));
-                return;
-            }
-            checkLogs.add("NuSMV execution completed.");
-
-            updateTaskProgress(taskId, 80, TaskProgressStage.PARSING_RESULTS);
-            finalResult = buildVerificationResult(
-                    result, input.devices(), input.rules(), input.specs(), userId, taskId, checkLogs, deviceSmvMap,
-                    input.templateManifests(), requestJson,
-                    genResult.emittedSpecs(), genResult.generationIssues(),
-                    genResult.disabledRuleCount(), genResult.skippedSpecCount(), smvModelContent);
-            applyRunContext(finalResult, input.attackScenario(), input.enablePrivacy(),
-                    input.attackSurface(), input.modelSnapshot(), templateSnapshotsJson, input.request());
-
-            if (isTaskCancelled(taskId) || Thread.currentThread().isInterrupted()) {
-                return;
-            }
-
-            boolean completed = completeTaskAndSaveTraces(task, finalResult.getTraces(), userId, taskId, finalResult.getOutcome(),
-                    countViolatedSpecs(finalResult.getSpecResults(), finalResult.getTraces()),
-                    finalResult.getSpecResults(), finalResult.getCheckLogs(), truncateOutput(result.getOutput()),
-                    finalResult.getGenerationIssues(),
-                    finalResult.getDisabledRuleCount(), finalResult.getSkippedSpecCount(),
-                    finalResult.getSmvModelContent());
-            if (!completed && !isCompletionCancelled(taskId)) {
-                failTask(task, "RESULT_PERSISTENCE_FAILED: Verification finished, but its result could not be saved.");
-            }
+            doVerify(userId, input, task);
 
         } catch (Exception e) {
             if (isTaskCancelled(taskId)) {
@@ -1145,15 +1002,8 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                 String msg = "Verification failed: " + e.getMessage();
                 log.error("Async verification failed for task: {}", taskId, e);
                 failTask(task, msg);
-                finalResult = buildErrorResult("", List.of(msg));
             }
         } finally {
-            if (finalResult != null) {
-                applyRunContext(finalResult, input.attackScenario(), input.enablePrivacy(),
-                        input.attackSurface(), input.modelSnapshot(), templateSnapshotsJson, input.request());
-                saveResultJson(smvFile, finalResult);
-            }
-            cleanupTempFile(smvFile);
             // Unified cancellation handling.
             if (removeCancelledMark(taskId)) {
                 if (task != null) handleCancellation(task);
@@ -1181,7 +1031,8 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                                      Map<String, DeviceSmvData> deviceSmvMap,
                                      Map<String, DeviceManifest> templateManifests,
                                      ModelRunSnapshotDto modelSnapshot,
-                                     AttackSurface attackSurface) {
+                                     AttackSurface attackSurface,
+                                     String requestJson, String templateSnapshotsJson) {
         private VerificationInput {
             Objects.requireNonNull(attackScenario, "attackScenario is required");
         }
@@ -1195,21 +1046,14 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
         }
     }
 
-    private record ModelBoundaryInput(List<DeviceVerificationDto> devices,
-                                       List<BoardEnvironmentVariableDto> environmentVariables,
-                                       AttackSurface attackSurface,
-                                       Map<String, DeviceSmvData> deviceSmvMap,
-                                       Map<String, DeviceManifest> templateManifests,
-                                       ModelRunSnapshotDto modelSnapshot) {}
-
     // ==================== 查询方法 ====================
 
     @Override
     @Transactional(readOnly = true)
     public VerificationTaskDto getTask(Long userId, Long taskId) {
-        VerificationTaskPo task = taskRepository.findByIdAndUserId(taskId, userId)
+        VerificationResultView task = taskRepository.findResultViewByIdAndUserId(
+                        taskId, userId, VerificationTaskRepository.SMV_NON_BLANK_CHARACTERS)
                 .orElseThrow(() -> new ResourceNotFoundException("VerificationTask", taskId));
-        task.setCheckLogs(readCheckLogs(task));
         return verificationTaskMapper.toDto(task);
     }
 
@@ -1242,26 +1086,35 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
     }
 
     @Override
-    @Transactional(readOnly = true)
+    @Transactional(readOnly = true, propagation = Propagation.SUPPORTS)
     public List<VerificationRunSummaryDto> getRuns(Long userId) {
-        List<VerificationRunSummaryProjection> runs =
-                taskRepository.findCompletedRunSummaries(
-                        userId, VerificationTaskPo.TaskStatus.COMPLETED,
-                        PageRequest.of(0, taskAdmissionLimits.getMaxStoredTasksPerUser()));
-        if (runs.isEmpty()) return List.of();
-        List<Long> runIds = runs.stream().map(VerificationRunSummaryProjection::getId).toList();
+        var readTransaction = new TransactionTemplate(transactionTemplate.getTransactionManager());
+        readTransaction.setReadOnly(true);
+        RunHistoryRows rows = readTransaction.execute(status -> {
+            List<VerificationRunSummaryProjection> runs = taskRepository.findCompletedRunSummaries(
+                    userId, VerificationTaskPo.TaskStatus.COMPLETED,
+                    PageRequest.of(0, taskAdmissionLimits.getMaxStoredTasksPerUser()));
+            if (runs.isEmpty()) return new RunHistoryRows(runs, List.of());
+            List<Long> runIds = runs.stream().map(VerificationRunSummaryProjection::getId).toList();
+            return new RunHistoryRows(runs,
+                    traceRepository.findSummariesByUserIdAndVerificationTaskIdIn(userId, runIds));
+        });
+        // JSON validation and summary assembly must not retain a standalone read's JDBC connection.
         Map<Long, List<TraceSummaryDto>> tracesByRun = new LinkedHashMap<>();
-        for (TraceSummaryProjection trace :
-                traceRepository.findSummariesByUserIdAndVerificationTaskIdIn(userId, runIds)) {
+        for (TraceSummaryProjection trace : rows.traces()) {
             if (trace == null || trace.getVerificationTaskId() == null) continue;
             tracesByRun.computeIfAbsent(trace.getVerificationTaskId(), ignored -> new ArrayList<>())
                     .add(toTraceSummaryOrUnavailable(trace));
         }
-        return runs.stream()
+        tracesByRun.values().forEach(traces -> traces.sort(TRACE_SUMMARY_ORDER));
+        return rows.runs().stream()
                 .map(run -> toRunSummaryOrUnavailable(
                         run, tracesByRun.getOrDefault(run.getId(), List.of())))
                 .toList();
     }
+
+    private record RunHistoryRows(List<VerificationRunSummaryProjection> runs,
+                                  List<TraceSummaryProjection> traces) {}
 
     private VerificationRunSummaryDto toRunSummaryOrUnavailable(
             VerificationRunSummaryProjection run, List<TraceSummaryDto> counterexamples) {
@@ -1293,7 +1146,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
 
     private TraceSummaryDto toTraceSummaryOrUnavailable(TraceSummaryProjection trace) {
         try {
-            return traceMapper.toSummaryDto(trace);
+            return traceMapper.toSummaryDto(trace, trace);
         } catch (PersistedDataIntegrityException e) {
             log.error("Verification trace summary {} is unavailable because persisted data is invalid",
                     trace != null ? trace.getId() : null, e);
@@ -1308,19 +1161,34 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
         }
     }
 
+    private static final Comparator<TraceSummaryDto> TRACE_SUMMARY_ORDER = Comparator
+            .comparing(TraceSummaryDto::getCreatedAt, Comparator.nullsLast(Comparator.reverseOrder()))
+            .thenComparing(TraceSummaryDto::getId, Comparator.nullsLast(Comparator.reverseOrder()));
+
     @Override
-    @Transactional(readOnly = true)
+    @Transactional(readOnly = true, propagation = Propagation.SUPPORTS)
     public VerificationRunDto getRun(Long userId, Long runId) {
-        VerificationTaskPo run = getCompletedRun(userId, runId);
-        run.setCheckLogs(readCheckLogs(run));
-        List<TraceSummaryDto> counterexamples = traceRepository
-                .findSummariesByUserIdAndVerificationTaskIdIn(userId, List.of(runId))
+        var readTransaction = new TransactionTemplate(transactionTemplate.getTransactionManager());
+        readTransaction.setReadOnly(true);
+        RunDetailRows rows = readTransaction.execute(status -> {
+            VerificationResultView run = taskRepository.findCompletedResultView(
+                        runId, userId, VerificationTaskPo.TaskStatus.COMPLETED, VerificationTaskRepository.SMV_NON_BLANK_CHARACTERS)
+                .orElseThrow(() -> new ResourceNotFoundException("VerificationRun", runId));
+            return new RunDetailRows(run,
+                    traceRepository.findSummariesByUserIdAndVerificationTaskIdIn(userId, List.of(runId)));
+        });
+        List<TraceSummaryDto> counterexamples = rows.traces()
                 .stream()
                 .filter(Objects::nonNull)
                 .map(this::toTraceSummaryOrUnavailable)
+                .sorted(TRACE_SUMMARY_ORDER)
                 .toList();
-        return verificationTaskMapper.toRunDto(run, replayableCounterexampleCount(counterexamples));
+        VerificationRunDto result = verificationTaskMapper.toRunDto(rows.run(), replayableCounterexampleCount(counterexamples));
+        result.setCounterexamples(counterexamples);
+        return result;
     }
+
+    private record RunDetailRows(VerificationResultView run, List<TraceSummaryProjection> traces) {}
 
     @Override
     @Transactional(readOnly = true)
@@ -1338,11 +1206,21 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
     }
 
     @Override
-    @Transactional(readOnly = true)
+    @Transactional(readOnly = true, propagation = Propagation.SUPPORTS)
     public List<TraceDto> getRunTraces(Long userId, Long runId) {
-        getCompletedRun(userId, runId);
-        return traceMapper.toDtoList(traceRepository.findByUserIdAndVerificationTaskId(userId, runId));
+        var readTransaction = new TransactionTemplate(transactionTemplate.getTransactionManager());
+        readTransaction.setReadOnly(true);
+        RunTraceRows rows = readTransaction.execute(status -> {
+            Map<Long, VerificationTraceContextProjection> contexts = traceRunContexts(userId, List.of(runId));
+            if (!contexts.containsKey(runId)) {
+                throw new ResourceNotFoundException("VerificationRun", runId);
+            }
+            return new RunTraceRows(traceRepository.findByUserIdAndVerificationTaskId(userId, runId), contexts);
+        });
+        return traceMapper.toDtoList(rows.traces(), rows.contexts());
     }
+
+    private record RunTraceRows(List<TracePo> traces, Map<Long, VerificationTraceContextProjection> contexts) {}
 
     @Override
     @Transactional
@@ -1430,21 +1308,36 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                         .thenComparing(TracePo::getId,
                                 Comparator.nullsLast(Comparator.reverseOrder())))
                 .toList();
-        return traceMapper.toDtoList(traces);
+        if (traces.isEmpty()) return List.of();
+        List<Long> runIds = traces.stream().map(TracePo::getVerificationTaskId)
+                .filter(Objects::nonNull).distinct().toList();
+        return traceMapper.toDtoList(traces, traceRunContexts(userId, runIds));
     }
 
     @Override
     @Transactional(readOnly = true)
     public List<TraceDto> getTracesByTask(Long userId, Long taskId) {
-        return traceMapper.toDtoList(traceRepository.findByUserIdAndVerificationTaskId(userId, taskId));
+        List<TracePo> traces = traceRepository.findByUserIdAndVerificationTaskId(userId, taskId);
+        if (traces.isEmpty()) return List.of();
+        return traceMapper.toDtoList(traces, traceRunContexts(userId, List.of(taskId)));
     }
 
     @Override
     @Transactional(readOnly = true)
     public TraceDto getTrace(Long userId, Long traceId) {
-        return traceRepository.findByIdAndUserId(traceId, userId)
-                .map(traceMapper::toDto)
+        TracePo trace = traceRepository.findByIdAndUserId(traceId, userId)
                 .orElseThrow(() -> new ResourceNotFoundException("Trace", traceId));
+        Long runId = trace.getVerificationTaskId();
+        Map<Long, VerificationTraceContextProjection> contexts =
+                traceRunContexts(userId, runId != null ? List.of(runId) : List.of());
+        return traceMapper.toDto(trace, runId != null ? contexts.get(runId) : null);
+    }
+
+    private Map<Long, VerificationTraceContextProjection> traceRunContexts(Long userId, List<Long> runIds) {
+        if (runIds.isEmpty()) return Map.of();
+        return taskRepository.findTraceContextsByUserIdAndIdInAndStatus(
+                        userId, runIds, VerificationTaskPo.TaskStatus.COMPLETED).stream()
+                .collect(Collectors.toMap(VerificationTraceContextProjection::getId, item -> item));
     }
 
     @Override
@@ -1470,13 +1363,13 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                                          int linkPointCount,
                                          int falsifiableReadingDeviceCount,
                                          ModelRunSnapshotDto modelSnapshot,
-                                         String modelSemanticsJson) {
+                                         String modelSemanticsJson, String requestJson, String templateSnapshotsJson) {
         AttackScenarioDto requiredScenario = Objects.requireNonNull(
                 attackScenario, "attackScenario is required");
         taskRepository.updateModelContext(taskId, requiredScenario.isEnabled(),
                 requiredScenario.effectiveBudget(), enablePrivacy,
                 devicePointCount, falsifiableReadingDeviceCount, linkPointCount,
-                JsonUtils.toJson(modelSnapshot), modelSemanticsJson);
+                JsonUtils.toJson(modelSnapshot), modelSemanticsJson, requestJson, templateSnapshotsJson);
     }
 
     @Override
@@ -1487,7 +1380,13 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
     @Override
     @Transactional(readOnly = true)
     public int getTaskProgress(Long userId, Long taskId) {
-        return super.getTaskProgress(userId, taskId);
+        var task = taskRepository.findProgressByIdAndUserId(taskId, userId)
+                .orElseThrow(() -> new ResourceNotFoundException("VerificationTask", taskId));
+        var status = task.getStatus();
+        return resolveTaskProgress(taskId, task.getProgress(),
+                status == VerificationTaskPo.TaskStatus.COMPLETED
+                        || status == VerificationTaskPo.TaskStatus.FAILED
+                        || status == VerificationTaskPo.TaskStatus.CANCELLED);
     }
 
     // ==================== Core: build per-spec verification result ====================
@@ -1500,7 +1399,6 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                                                           List<String> checkLogs,
                                                           Map<String, DeviceSmvData> deviceSmvMap,
                                                           Map<String, DeviceManifest> templateManifests,
-                                                          String requestJson,
                                                           List<SmvGenerationContext.EmittedSpec> emittedSpecs,
                                                           List<ModelGenerationIssueDto> generationIssues,
                                                           int disabledRuleCount,
@@ -1541,7 +1439,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
             log.warn("No spec results parsed from NuSMV output; reporting all {} emitted specs as inconclusive", effectiveSpecs.size());
             for (SmvGenerationContext.EmittedSpec emittedSpec : effectiveSpecs) {
                 specResults.add(toSpecResult(
-                        emittedSpec, VerificationOutcome.INCONCLUSIVE, null, formulaPreviewContext));
+                        emittedSpec, VerificationOutcome.INCONCLUSIVE, null, formulaPreviewContext, deviceSmvMap));
             }
             parseIncomplete = true;
         } else {
@@ -1561,11 +1459,11 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                 SmvGenerationContext.EmittedSpec emittedSpec = effectiveSpecs.get(specIdx);
                 if (scr != null) {
                     appendParsedSpecResult(specResults, traces, specIdx, scr, emittedSpec,
-                            userId, taskId, checkLogs, deviceSmvMap, rules, requestJson,
-                            formulaPreviewContext, smvModelContent);
+                            userId, taskId, checkLogs, deviceSmvMap, rules,
+                            formulaPreviewContext);
                 } else {
                     specResults.add(toSpecResult(
-                            emittedSpec, VerificationOutcome.INCONCLUSIVE, null, formulaPreviewContext));
+                            emittedSpec, VerificationOutcome.INCONCLUSIVE, null, formulaPreviewContext, deviceSmvMap));
                     checkLogs.add("Spec " + describeSpec(emittedSpec, specIdx)
                             + " result missing, reported as inconclusive");
                 }
@@ -1579,8 +1477,8 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                 int specIdx = 0;
                 for (SpecCheckResult scr : specCheckResults) {
                     appendParsedSpecResult(specResults, traces, specIdx, scr, effectiveSpecs.get(specIdx),
-                            userId, taskId, checkLogs, deviceSmvMap, rules, requestJson,
-                            formulaPreviewContext, smvModelContent);
+                            userId, taskId, checkLogs, deviceSmvMap, rules,
+                            formulaPreviewContext);
                     specIdx++;
                 }
             }
@@ -1655,14 +1553,12 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                                         List<String> checkLogs,
                                         Map<String, DeviceSmvData> deviceSmvMap,
                                         List<RuleDto> rules,
-                                        String requestJson,
-                                        SpecificationFormulaPreview.Context formulaPreviewContext,
-                                        String smvModelContent) {
+                                        SpecificationFormulaPreview.Context formulaPreviewContext) {
         specResults.add(toSpecResult(
                 emittedSpec,
                 scr.isPassed() ? VerificationOutcome.SATISFIED : VerificationOutcome.VIOLATED,
                 scr.getSpecExpression(),
-                formulaPreviewContext));
+                formulaPreviewContext, deviceSmvMap));
         if (!scr.isPassed() && scr.getCounterexample() != null) {
             checkLogs.add("Spec " + describeSpec(emittedSpec, specIdx) + " violated: "
                     + firstText(scr.getSpecExpression(), expression(emittedSpec)));
@@ -1678,10 +1574,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                         .violatedSpec(violatedSpec)
                         .checkedExpression(scr.getSpecExpression())
                         .states(states)
-                        .requestJson(requestJson)
-                        // No `.smvModelContent(...)`: the run row this trace belongs to holds the one
-                        // model that was checked, and copying it per counterexample stored the same
-                        // bytes N+1 times for N violations. See `TracePo`.
+                        // The owning run retains the checked model once.
                         .createdAt(LocalDateTime.now())
                         .build();
                 traces.add(trace);
@@ -1698,7 +1591,8 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
     private SpecResultDto toSpecResult(SmvGenerationContext.EmittedSpec emittedSpec,
                                        VerificationOutcome outcome,
                                        String parsedExpression,
-                                       SpecificationFormulaPreview.Context formulaPreviewContext) {
+                                       SpecificationFormulaPreview.Context formulaPreviewContext,
+                                       Map<String, DeviceSmvData> deviceSmvMap) {
         SpecificationDto spec = emittedSpec != null ? emittedSpec.spec() : null;
         String templateId = spec != null ? firstText(spec.getTemplateId(), "unknown") : "unknown";
         String checkedExpression = firstText(parsedExpression, expression(emittedSpec));
@@ -1709,10 +1603,33 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                 .formulaPreview(spec != null
                         ? SpecificationFormulaPreview.format(spec, formulaPreviewContext)
                         : "Structured specification")
+                .specificationSnapshot(spec != null ? snapshotSpecification(spec, deviceSmvMap) : null)
                 .formulaKind(checkedFormulaKind(checkedExpression, templateId))
                 .outcome(outcome)
                 .expression(checkedExpression)
                 .build();
+    }
+
+    private SpecificationSnapshotDto snapshotSpecification(
+            SpecificationDto spec, Map<String, DeviceSmvData> deviceSmvMap) {
+        SpecificationDto copy = objectMapper.convertValue(spec, SpecificationDto.class);
+        Map<String, SpecificationSnapshotDto.Device> devices = new LinkedHashMap<>();
+        for (List<SpecConditionDto> conditions : List.of(
+                copy.getAConditions(), copy.getIfConditions(), copy.getThenConditions())) {
+            for (SpecConditionDto condition : conditions) {
+                String id = condition.getDeviceId();
+                DeviceSmvData device = deviceSmvMap != null ? deviceSmvMap.get(id) : null;
+                devices.putIfAbsent(id, new SpecificationSnapshotDto.Device(
+                        device != null ? firstText(device.getDeviceLabel(), id)
+                                : firstText(condition.getDeviceLabel(), id),
+                        device != null && device.getModelTokenSource() != null
+                                ? device.getModelTokenSource() : ModelTokenSource.UNKNOWN,
+                        device != null ? device.getModes().size() : null));
+            }
+        }
+        return new SpecificationSnapshotDto(copy.getId(), copy.getTemplateId(),
+                List.copyOf(copy.getAConditions()), List.copyOf(copy.getIfConditions()),
+                List.copyOf(copy.getThenConditions()), Map.copyOf(devices));
     }
 
     private String checkedFormulaKind(String expression, String templateId) {
@@ -1879,6 +1796,8 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                     .modeledFalsifiableReadingDeviceCount(input.modeledFalsifiableReadingDeviceCount())
                     .modeledAutomationLinkAttackPointCount(input.modeledAutomationLinkAttackPointCount())
                     .enablePrivacy(input.enablePrivacy())
+                    .requestJson(input.requestJson())
+                    .templateSnapshotsJson(input.templateSnapshotsJson())
                     .modelSnapshotJson(JsonUtils.toJson(input.modelSnapshot()))
                     .modelSemanticsJson(JsonUtils.toJson(result.getModelSemantics()))
                     .outcome(outcome)
@@ -2099,6 +2018,11 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
     @Override
     protected Optional<VerificationTaskPo> findTaskByIdAndUserId(Long id, Long userId) {
         return taskRepository.findByIdAndUserId(id, userId);
+    }
+
+    @Override
+    protected Optional<VerificationTaskPo> findTaskByIdAndUserIdForUpdate(Long id, Long userId) {
+        return taskRepository.findByIdAndUserIdForUpdate(id, userId);
     }
 
     @Override

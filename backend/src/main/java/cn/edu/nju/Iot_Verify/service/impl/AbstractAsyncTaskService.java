@@ -6,6 +6,7 @@ import cn.edu.nju.Iot_Verify.dto.model.TaskProgressStage;
 import cn.edu.nju.Iot_Verify.exception.ResourceNotFoundException;
 import cn.edu.nju.Iot_Verify.po.TaskView;
 import cn.edu.nju.Iot_Verify.service.AsyncTaskExecutionControl;
+import cn.edu.nju.Iot_Verify.util.ModelFingerprint;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -21,7 +22,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * <ul>
  *   <li>3 个并发容器（runningTasks / taskProgress / cancelledTasks）+ 语义操作方法</li>
  *   <li>serializeCheckLogs / readCheckLogs / writeCheckLogs / truncateOutput</li>
- *   <li>updateTaskProgress / getTaskProgress / cancelTask / handleCancellation</li>
+ *   <li>updateTaskProgress / resolveTaskProgress / cancelTask / handleCancellation</li>
  * </ul>
  *
  * <p>子类通过实现 Repository 委托钩子来适配具体实体类型。
@@ -52,8 +53,11 @@ public abstract class AbstractAsyncTaskService<T extends TaskView>
     protected AbstractAsyncTaskService(ObjectMapper objectMapper,
                                        String taskResourceType) {
         this.objectMapper = objectMapper;
+        this.modelFingerprint = new ModelFingerprint(objectMapper);
         this.taskResourceType = taskResourceType;
     }
+
+    protected final ModelFingerprint modelFingerprint;
 
     /** 用于 ResourceNotFoundException 和日志输出的资源类型名称 */
     private final String taskResourceType;
@@ -241,29 +245,20 @@ public abstract class AbstractAsyncTaskService<T extends TaskView>
     }
 
     /**
-     * 获取任务进度。
-     *
-     * <p><b>语义保真</b>：不存在或越权的任务抛 {@link ResourceNotFoundException}，
-     * 不得返回 0 或静默忽略。
-     *
-     * <p>逻辑来源：VerificationServiceImpl:L543-563, SimulationServiceImpl:L274-294
+     * 调用者先用用户范围内的标量查询确认归属，再按内存值、持久化值、终态依次解析进度。
      */
-    protected int getTaskProgress(Long userId, Long taskId) {
-        // 归属校验——不存在则抛异常
-        T task = findTaskByIdAndUserId(taskId, userId)
-                .orElseThrow(() -> new ResourceNotFoundException(taskResourceType, taskId));
-
+    protected int resolveTaskProgress(Long taskId, Integer persistedProgress, boolean terminal) {
         // 优先使用内存值（当前实例上的活跃任务）
         TaskProgressState progress = taskProgress.get(taskId);
         if (progress != null) {
             return progress.progress();
         }
         // 退回 DB 列（任务在其他实例上或重启后）
-        if (task.getProgress() != null) {
-            return task.getProgress();
+        if (persistedProgress != null) {
+            return persistedProgress;
         }
         // 终态推断
-        if (task.isTerminalStatus()) {
+        if (terminal) {
             return 100;
         }
         return 0;
@@ -277,14 +272,16 @@ public abstract class AbstractAsyncTaskService<T extends TaskView>
      * <p>逻辑来源：VerificationServiceImpl:L504-529, SimulationServiceImpl:L298-321
      */
     protected TaskCancellationResultDto cancelTask(Long userId, Long taskId) {
-        T task = findTaskByIdAndUserId(taskId, userId)
+        // A locking read sees the committed row under MySQL REPEATABLE_READ. A snapshot read
+        // could keep reporting RUNNING after a worker or another instance committed cancellation.
+        T task = findTaskByIdAndUserIdForUpdate(taskId, userId)
                 .orElseThrow(() -> new ResourceNotFoundException(taskResourceType, taskId));
         boolean markerWasPresent = cancelledTasks.contains(taskId);
         cancelledTasks.add(taskId);
         try {
             int updated = atomicCancelTask(taskId, currentTaskTime());
             if (updated == 0) {
-                T currentTask = findTaskByIdAndUserId(taskId, userId)
+                T currentTask = findTaskByIdAndUserIdForUpdate(taskId, userId)
                         .orElseThrow(() -> new ResourceNotFoundException(taskResourceType, taskId));
                 String currentStatus = currentTask.getTaskStatusName();
                 boolean alreadyCancelled = currentTask.isCancelledStatus();
@@ -371,6 +368,9 @@ public abstract class AbstractAsyncTaskService<T extends TaskView>
      * 根据 ID 和用户 ID 查找任务。
      */
     protected abstract Optional<T> findTaskByIdAndUserId(Long id, Long userId);
+
+    /** Reads an owned task's current status and holds its row lock through cancellation. */
+    protected abstract Optional<T> findTaskByIdAndUserIdForUpdate(Long id, Long userId);
 
     /**
      * 原子取消任务（仅当任务处于 PENDING 或 RUNNING 状态时）。

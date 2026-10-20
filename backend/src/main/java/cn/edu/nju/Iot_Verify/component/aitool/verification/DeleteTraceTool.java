@@ -76,10 +76,13 @@ public class DeleteTraceTool extends AbstractAiTool {
 
             TraceDto trace = verificationService.getTrace(userId, traceId);
             Map<String, Object> previewSummary = previewSummary(traceId, trace);
+            String displayTarget = "Formal counterexample: " + trace.getCreatedAt() + " · "
+                    + safeList(trace.getStates()).size() + " states";
             boolean confirmed = booleanArg(args, "confirmed", false);
             if (!confirmed || !UserContextHolder.isDestructiveActionConfirmed()) {
                 String impactToken = destructiveActionGuard.issue(
-                        userId, getName(), Long.toString(traceId), previewSummary, null);
+                        userId, getName(), Long.toString(traceId),
+                        displayTarget, previewSummary, null);
                 Map<String, Object> preview = previewResponse(previewSummary, impactToken);
                 return readOnlySuccessJson(preview, "Verification trace deletion preview prepared; no changes were made.");
             }
@@ -89,7 +92,8 @@ public class DeleteTraceTool extends AbstractAiTool {
                     userId, getName(), Long.toString(traceId), impactToken, previewSummary);
             if (!confirmation.approved()) {
                 String freshToken = destructiveActionGuard.issue(
-                        userId, getName(), Long.toString(traceId), previewSummary, null);
+                        userId, getName(), Long.toString(traceId),
+                        displayTarget, previewSummary, null);
                 return errorJson(confirmation.message(), confirmation.errorCode(), 409, Map.of(
                         "requiresUserConfirmation", true,
                         "currentPreview", previewResponse(previewSummary, freshToken)));

@@ -50,13 +50,8 @@ describe('typography floor', () => {
       found.push({ px: toPx(match[1], match[2]), raw: match[0], index: match.index! })
     }
     // A `clamp()` floor is the smallest size the text can take, so it is subject to the same rule.
-    for (const match of text.matchAll(/font-size:\s*clamp\(\s*([\d.]+)(rem|px)\s*,([^,]+),([^)]*)\)/g)) {
-      const [, value, unit, preferred, ceiling] = match
-      // Only a zoom-counter-scaling preferred term earns the exemption. See the dedicated rule below for the
-      // measurements that removed container-relative units from this list.
-      const ceilingPx = /([\d.]+)(rem|px)/.exec(ceiling)
-      const canGrow = ceilingPx ? toPx(ceilingPx[1], ceilingPx[2]) >= 16 : true
-      if (/--canvas-zoom/.test(preferred) && canGrow) continue
+    for (const match of text.matchAll(/font-size:\s*clamp\(\s*([\d.]+)(rem|px)\s*,/g)) {
+      const [, value, unit] = match
       found.push({ px: toPx(value, unit), raw: match[0].slice(0, 52), index: match.index! })
     }
     return found
@@ -101,33 +96,6 @@ describe('typography floor', () => {
       for (const match of scanned.matchAll(/text-\[(0\.\d+)rem\]/g)) {
         if (Number(match[1]) < 0.6875) {
           offenders.push(`${name}:${scanned.slice(0, match.index).split('\n').length}  ${match[0]}`)
-        }
-      }
-    }
-    expect(offenders).toEqual([])
-  })
-
-  it('uses a sub-floor clamp() lower bound only where the size counter-scales with canvas zoom', () => {
-    // This rule previously also exempted container-relative units, on the strength of a comment claiming that
-    // `clamp(0.58rem, 4.3cqmin, 4rem)` "renders at 16px on a real 150x110 node". A browser measurement showed
-    // that was simply wrong: `4.3cqmin` of a 110px node is **4.73px**, and these chips only exist on expanded
-    // nodes measuring 110-137px tall, so the preferred term lost at every viewport and the 0.58rem floor was
-    // the rendered size — a flat 9.28px on desktop, tablet and mobile alike. Reaching 11px would have needed
-    // ~215cqmin. The exemption was therefore not a narrow allowance; it was a hole shaped exactly like the two
-    // declarations it was written to excuse, and it is why a route sweep found sub-floor text that this file
-    // called clean.
-    //
-    // A percentage of a container is only large enough to matter when the container is large, and a *node* is
-    // not. `--canvas-zoom` is different in kind and keeps its exemption: it divides, so the computed size
-    // rises as the canvas shrinks, which is measurable — 11px at 1.0x becomes 14.4px at 0.4x.
-    const offenders: string[] = []
-    for (const { name, text } of sources()) {
-      const scanned = withoutComments(text)
-      for (const match of scanned.matchAll(/font-size:\s*clamp\(\s*([\d.]+)(rem|px)\s*,([^,]+),/g)) {
-        const floor = Number(match[1])
-        const belowFloor = match[2] === 'rem' ? floor < 0.6875 : floor < 11
-        if (belowFloor && !/--canvas-zoom/.test(match[3])) {
-          offenders.push(`${name}:${scanned.slice(0, match.index).split('\n').length}  ${match[0].slice(0, 60)}`)
         }
       }
     }

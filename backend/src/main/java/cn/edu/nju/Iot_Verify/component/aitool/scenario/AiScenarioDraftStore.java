@@ -3,18 +3,19 @@ package cn.edu.nju.Iot_Verify.component.aitool.scenario;
 import cn.edu.nju.Iot_Verify.component.ai.state.AiSessionStateStore;
 import cn.edu.nju.Iot_Verify.component.ai.state.InMemoryAiSessionStateStore;
 import cn.edu.nju.Iot_Verify.dto.board.BoardReplacementPreviewDto;
+import cn.edu.nju.Iot_Verify.exception.ConflictException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.beans.factory.annotation.Autowired;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
+import java.util.UUID;
 
 /**
  * Server-side lifecycle for the latest chat-generated scene draft.
@@ -23,7 +24,6 @@ import java.util.Optional;
  * can be much larger than the chat context window, and a confirmation must never depend on the
  * model copying the scene or an impact token back from a truncated tool result.</p>
  */
-@Slf4j
 @Component
 public class AiScenarioDraftStore {
 
@@ -61,7 +61,9 @@ public class AiScenarioDraftStore {
                 scene.deepCopy(),
                 now.plus(DRAFT_TTL),
                 null,
-                null));
+                null,
+                null,
+                0L));
         return new DraftSaveResult(true, false);
     }
 
@@ -70,12 +72,12 @@ public class AiScenarioDraftStore {
         stateStore.remove(scope.userId(), scope.sessionId(), AiSessionStateStore.Kind.SCENARIO_DRAFT);
     }
 
-    public void clearPendingApplication(Long userId, String sessionId) {
+    public boolean clearPendingApplication(Long userId, String sessionId, String confirmationId) {
         SessionScope scope = scope(userId, sessionId);
         Entry entry = active(scope);
-        if (entry != null && entry.pendingPreview() != null) {
-            save(scope, entry.withPending(null, null));
-        }
+        if (entry == null || !confirmationId.equals(entry.confirmationId())) return false;
+        save(scope, entry.withPending(null, null, null));
+        return true;
     }
 
     public Optional<DraftSnapshot> latestDraft(Long userId, String sessionId) {
@@ -91,7 +93,7 @@ public class AiScenarioDraftStore {
         Entry entry = active(scope);
         if (entry == null || preview == null) return Optional.empty();
         Instant expiresAt = clock.instant().plus(PENDING_TTL);
-        Entry pending = entry.withPending(copyPreview(preview), expiresAt);
+        Entry pending = entry.withPending(copyPreview(preview), expiresAt, UUID.randomUUID().toString());
         save(scope, pending);
         return Optional.of(toPending(pending));
     }
@@ -102,17 +104,7 @@ public class AiScenarioDraftStore {
             return Optional.empty();
         }
         if (!entry.pendingExpiresAt().isAfter(clock.instant())) {
-            // Clearing the lapsed confirmation is housekeeping, not part of this read's contract:
-            // `getPendingConfirmation` is `@Transactional(readOnly = true)` and holds no chat
-            // execution lease, so letting the write's failure escape turned an honest "nothing
-            // pending" answer into a 500. The answer below is correct either way, and the state
-            // store's own expiry sweep is the backstop.
-            try {
-                save(scope(userId, sessionId), entry.withPending(null, null));
-            } catch (Exception e) {
-                log.warn("Could not clear an expired scenario confirmation: exception={}",
-                        e.getClass().getName());
-            }
+            // Reading a lapsed preview leaves the still-valid draft available for a fresh preview.
             return Optional.empty();
         }
         return Optional.of(toPending(entry));
@@ -124,13 +116,20 @@ public class AiScenarioDraftStore {
         SessionScope scope = scope(userId, sessionId);
         Entry entry = active(scope);
         if (entry == null || entry.pendingPreview() == null || preview == null) return Optional.empty();
-        Entry refreshed = entry.withPending(copyPreview(preview), clock.instant().plus(PENDING_TTL));
+        Entry refreshed = entry.withPending(copyPreview(preview), clock.instant().plus(PENDING_TTL),
+                UUID.randomUUID().toString());
         save(scope, refreshed);
         return Optional.of(toPending(refreshed));
     }
 
-    public void completeApplication(Long userId, String sessionId) {
-        clearDraft(userId, sessionId);
+    public void completeApplication(Long userId, String sessionId, String confirmationId) {
+        Entry entry = active(scope(userId, sessionId));
+        if (entry == null || !confirmationId.equals(entry.confirmationId())
+                || entry.pendingExpiresAt() == null || !entry.pendingExpiresAt().isAfter(clock.instant())
+                || !stateStore.remove(userId, sessionId, AiSessionStateStore.Kind.SCENARIO_DRAFT,
+                        entry.version())) {
+            throw new ConflictException("The confirmed scenario draft changed or expired. No replacement was committed.");
+        }
     }
 
     public void clearSession(Long userId, String sessionId) {
@@ -159,19 +158,14 @@ public class AiScenarioDraftStore {
             Instant pendingExpiresAt = payload.hasNonNull("pendingExpiresAt")
                     ? Instant.parse(payload.path("pendingExpiresAt").asText())
                     : null;
-            return new Entry(scenarioName, scene.deepCopy(), snapshot.expiresAt(), preview, pendingExpiresAt);
-        } catch (Exception e) {
-            // Same reasoning as the lapsed-confirmation cleanup in pendingApplication: discarding an
-            // unreadable draft is housekeeping, and this runs under the readOnly transaction of
-            // getPendingConfirmation, where letting the delete's failure escape would turn an honest
-            // "no usable draft" answer into a 500. JpaAiSessionStateStore sweeps the row itself.
-            try {
-                stateStore.remove(scope.userId(), scope.sessionId(), AiSessionStateStore.Kind.SCENARIO_DRAFT,
-                        snapshot.version());
-            } catch (Exception cleanupFailure) {
-                log.warn("Could not discard an unreadable scenario draft: exception={}",
-                        cleanupFailure.getClass().getName());
+            String confirmationId = payload.path("confirmationId").asText(null);
+            if (preview != null && (confirmationId == null || confirmationId.isBlank())) {
+                throw new IllegalArgumentException("missing scenario confirmation identity");
             }
+            return new Entry(scenarioName, scene.deepCopy(), snapshot.expiresAt(), preview,
+                    pendingExpiresAt, confirmationId, snapshot.version());
+        } catch (Exception e) {
+            // Invalid state grants no authority; expiry cleanup or a subsequent draft write replaces it.
             return null;
         }
     }
@@ -186,6 +180,7 @@ public class AiScenarioDraftStore {
         if (entry.pendingExpiresAt() != null) {
             payload.put("pendingExpiresAt", entry.pendingExpiresAt().toString());
         }
+        if (entry.confirmationId() != null) payload.put("confirmationId", entry.confirmationId());
         stateStore.put(scope.userId(), scope.sessionId(), AiSessionStateStore.Kind.SCENARIO_DRAFT,
                 payload, entry.draftExpiresAt());
     }
@@ -195,7 +190,8 @@ public class AiScenarioDraftStore {
                 entry.scenarioName(),
                 entry.scene().deepCopy(),
                 copyPreview(entry.pendingPreview()),
-                entry.pendingExpiresAt());
+                entry.pendingExpiresAt(),
+                entry.confirmationId());
     }
 
     private BoardReplacementPreviewDto copyPreview(BoardReplacementPreviewDto source) {
@@ -206,6 +202,7 @@ public class AiScenarioDraftStore {
                 .environmentVariableCount(source.getEnvironmentVariableCount())
                 .ruleCount(source.getRuleCount())
                 .specificationCount(source.getSpecificationCount())
+                .editHistoryEntryCount(source.getEditHistoryEntryCount())
                 .build();
     }
 
@@ -219,6 +216,7 @@ public class AiScenarioDraftStore {
                 .environmentVariableCount(source.path("environmentVariableCount").asInt())
                 .ruleCount(source.path("ruleCount").asInt())
                 .specificationCount(source.path("specificationCount").asInt())
+                .editHistoryEntryCount(source.path("editHistoryEntryCount").asInt())
                 .build();
     }
 
@@ -238,7 +236,8 @@ public class AiScenarioDraftStore {
     public record PendingApplication(String scenarioName,
                                      JsonNode scene,
                                      BoardReplacementPreviewDto preview,
-                                     Instant expiresAt) {
+                                     Instant expiresAt,
+                                     String confirmationId) {
     }
 
     private record SessionScope(Long userId, String sessionId) {
@@ -248,9 +247,11 @@ public class AiScenarioDraftStore {
                          JsonNode scene,
                          Instant draftExpiresAt,
                          BoardReplacementPreviewDto pendingPreview,
-                         Instant pendingExpiresAt) {
-        private Entry withPending(BoardReplacementPreviewDto preview, Instant expiresAt) {
-            return new Entry(scenarioName, scene, draftExpiresAt, preview, expiresAt);
+                         Instant pendingExpiresAt,
+                         String confirmationId,
+                         long version) {
+        private Entry withPending(BoardReplacementPreviewDto preview, Instant expiresAt, String confirmationId) {
+            return new Entry(scenarioName, scene, draftExpiresAt, preview, expiresAt, confirmationId, version);
         }
     }
 }

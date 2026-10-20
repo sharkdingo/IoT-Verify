@@ -1,4 +1,4 @@
-const NODE_ACCENT_COUNT = 8
+export const NODE_ACCENT_COUNT = 3
 
 export const getNodeColorIndex = (nodeId: string): number => {
   let hash = 5381
@@ -12,7 +12,7 @@ export const getNodeAccentColor = (nodeId: string): string =>
   `var(--iot-node-accent-${getNodeColorIndex(nodeId)})`
 
 export const getNodeSurfaceColor = (nodeId: string): string =>
-  `color-mix(in srgb, ${getNodeAccentColor(nodeId)} 14%, var(--surface-elevated))`
+  `color-mix(in srgb, ${getNodeAccentColor(nodeId)} var(--iot-node-tint), var(--surface-elevated))`
 
 export const getNodeBorderColor = (nodeId: string): string =>
   `color-mix(in srgb, ${getNodeAccentColor(nodeId)} 78%, var(--text))`

@@ -49,6 +49,8 @@ security:
 
 llm:
   provider: ${LLM_PROVIDER:openai}
+  api: ${IOT_VERIFY_OPENAI_API:auto}
+  reasoning-effort: ${IOT_VERIFY_OPENAI_REASONING_EFFORT:}
   api-key: ${IOT_VERIFY_OPENAI_API_KEY:your_api_key_here}
   model: ${IOT_VERIFY_OPENAI_MODEL:gpt-5.6-luna}
   recommendation-model: ${IOT_VERIFY_OPENAI_RECOMMENDATION_MODEL:}

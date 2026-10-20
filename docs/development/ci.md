@@ -1,49 +1,20 @@
 # CI pipeline
 
-Two tiers, chosen by what a change can actually break rather than by how large it is.
+Two E2E tiers selected by affected code, plus a separate live-AI gate.
+
+Verified against code on 2026-10-21. Sources: `.github/workflows/`,
+`.github/ci-risk-router.mjs`, `.github/scripts/run-e2e.sh`, `frontend/playwright.config.ts`,
+and `frontend/e2e/live-ai-no-mock.spec.ts`.
 
 ## Why it is split
 
-Measured on this repo before the split (four consecutive `main` runs, GitHub-hosted `ubuntu-latest`):
-
-| job | duration |
-| :--- | ---: |
-| frontend | ~95s |
-| backend | ~103s |
-| Full-stack E2E | ~590s |
-| **wall clock** | **~700s** |
-
-The E2E job was 85% of the critical path, and inside it the suite itself was 478s of 588s. Two specs
-(`authority-model-audit`, `board-full-flow`) were **59% of that** with 20 of 93 tests. Every push paid
-all of it, including a README fix.
-
-It also redid work the other jobs had already done: Java setup, Node setup, NuSMV install, a full
-backend recompile, and a second `npm ci` — **~73s per run** of pure duplication.
-
-## Measured result
-
-Verified by pushing real branches, not by reasoning about the config:
-
-| scenario | before | after |
-| :--- | ---: | ---: |
-| docs-only change | ~700s | **25s** (every tier skipped) |
-| low-risk source change | ~700s | **300s** (fast tier only, warm caches) |
-| high-risk one-line change | ~700s | 300s to a fast verdict, Full CI running alongside |
-
-The high-risk proof was a two-line comment in `SmvMainModuleBuilder.java`. It escalated with the
-reason `NuSMV model generation`, which is the property that matters: the trigger was the *area*, not
-the size.
-
-Setup reuse inside the E2E tier, per run:
-
-| step | before | after |
-| :--- | ---: | ---: |
-| backend jar | 33s (full recompile) | 2s (artifact download) |
-| npm install + browsers | 25s | 17s (browsers cached) |
+Fast CI runs the build, unit tests, and a real-backend smoke subset. Full CI adds the
+complete E2E suite where model, security, persistence, or shared-contract changes warrant it.
+The [risk router](../../.github/ci-risk-router.mjs) owns the path rules.
 
 ## Tier 1 — Fast CI (`fast-ci.yml`)
 
-Runs on every push and pull request. Required for merge.
+Runs on every push and pull request; the router selects which jobs execute.
 
 1. **Route by risk** — computes the changed paths and asks [`ci-risk-router.mjs`](../../.github/ci-risk-router.mjs)
    which tiers to run. Runs the router's own tests first, so a broken router fails loudly instead of
@@ -53,29 +24,38 @@ Runs on every push and pull request. Required for merge.
    Both checks need no dependency install and add about a second.
 2. **Frontend** — `npm ci`, typecheck, unit tests, build. Typecheck runs before tests because it is
    the cheapest check that catches the largest class of mistake.
-3. **Backend** — `mvn package` (tests plus the jar), with NuSMV available so the real-solver tests run.
+3. **Backend** — `mvn package` (tests plus the jar), with NuSMV and a dedicated MySQL test database.
 4. **E2E smoke** — a browser-driven barrier against real MySQL, Redis, and the packaged jar.
 
-The smoke barrier is 22 tests in ~44s (measured locally), chosen for coverage per second:
+The smoke subset is selected in [run-e2e.sh](../../.github/scripts/run-e2e.sh):
 
-| spec | cost | what it protects |
-| :--- | ---: | :--- |
-| `error-contract` | 0.9s | the REST error envelope every screen depends on |
-| `board-recovery` | 4.7s | the stack recovers instead of wedging |
-| `canvas-runtime-environment` | 8.0s | a board renders and shared values reach the canvas |
-| `ui-contracts` | 15.6s | 14 tests of cross-page contracts — the cheapest broad net |
-
-That is ~9% of the full suite's runtime for a genuine barrier: the app boots, authenticates, renders a
-board, and reports errors in the agreed shape.
+| Spec | Protects |
+| :--- | :--- |
+| `error-contract` | REST error envelopes |
+| `board-recovery` | Recovery after failed operations |
+| `canvas-runtime-environment` | Canvas and shared environment values |
+| `ui-contracts` | Cross-page UI contracts |
 
 ## Tier 2 — Full CI (`full-ci.yml`)
 
-The complete suite (91 tests) against real infrastructure. Runs where completeness matters:
+The complete E2E suite, excluding live AI, runs against real infrastructure:
 
 - **`main`** — what gets released.
 - **Nightly (03:17 UTC)** — the only thing that catches decay in code nobody touched.
 - **Manual dispatch** — release candidates, or re-checking a suspicious branch.
 - **High-risk branch pushes** — escalated automatically by the router.
+
+Both Maven jobs provision `iot_verify_undo_it`, separate from the E2E application database,
+and pass `-Diot.verify.mysql.required=true`. The MySQL integration tests cover
+fresh-schema constraints, edit undo, task leases, cancellation, Board captures, history queries
+and transaction ownership, and verification-result projections. An unavailable or invalid connection
+fails CI instead of silently skipping them. Local runs retain optional MySQL admission; use the same flag when that coverage
+is required. The workflow tests guard the database provisioning and required-test flag.
+
+The full browser suite has a 30-minute global deadline inside a 40-minute E2E job, leaving time
+for infrastructure setup and diagnostic uploads. The expanded serial suite exceeded the former
+15-minute deadline while still making progress, leaving tests unexecuted. Individual test and
+assertion deadlines remain in force, and `--fail-on-flaky-tests` still rejects retry-only success.
 
 ## What counts as high risk
 
@@ -102,13 +82,11 @@ the list stays a standard rather than folklore.
 
 ## Tier 3 — Live AI (`live-ai-ci.yml`)
 
-The two tests that call a real external model endpoint, on their own gate: nightly at 04:23 UTC
+Tests that call a real external model endpoint have their own gate: nightly at 04:23 UTC
 (after Full CI, so a shared infrastructure failure shows up in the cheaper workflow first) and on
 demand, never a merge blocker. Three reasons:
 
-- A provider outage would fail the run for reasons unrelated to the commit. This repo has already seen
-  it — a different one of the two tests failed on consecutive runs with identical code. A required
-  check that goes red on someone else's outage teaches people to ignore red checks.
+- Provider availability can fail a run independently of the commit.
 - It costs real quota per run.
 - It needs a secret, unavailable to fork pull requests.
 
@@ -121,12 +99,8 @@ unavailable in a job-level `if:`, so a secret cannot gate a job directly. A miss
 warning annotation and a job summary stating that the AI path was **not** verified, then skips; red
 stays reserved for an actual break in that path.
 
-That distinction was learned the hard way: the gate previously hard-failed at a credential check, so it
-went red on **eleven consecutive nightly runs**, each exiting in under a minute without building
-anything. A daily red that carries no information and that no reader can act on is worse than no gate,
-because it trains people to ignore the colour. If this tier is skipping and you want it live, set
-`IOT_VERIFY_OPENAI_API_KEY` (and `IOT_VERIFY_OPENAI_BASE_URL` for a non-OpenAI endpoint) as repository
-secrets.
+To enable this tier, set `IOT_VERIFY_OPENAI_API_KEY` and, for a compatible endpoint,
+`IOT_VERIFY_OPENAI_BASE_URL` as repository secrets.
 
 **A skipped job still makes the run report `success`**, which is why a third `status` job exists. It
 depends on both others with `if: always()` and renames itself to `Live AI NOT verified (no API key)`
@@ -144,14 +118,35 @@ own repository check rather than inheriting it through `needs:`, and the `status
 unverified run — are asserted in `.github/ci-risk-router.test.mjs`, because dropping any of them turns a
 paid gate into a permanent silent skip that nothing else notices.
 
+The rule-recommendation subset in `live-ai-no-mock.spec.ts` makes twelve real model requests:
+API signals, numeric conditions, enum conditions, working states, modes, and content-label
+transfer, each in English and Simplified Chinese. Each case uses a disposable account, checks
+the validated candidate and its language, opens its details and rationale without changing the
+board, explicitly adds the rule, and checks that undo restores the complete scene. It covers
+the ordinary add action with an empty starting rule set; similarity-review confirmation is a
+separate flow.
+
+To run only this subset against existing application servers, run from `frontend/` with
+`RUN_LIVE_AI_E2E=1`, `E2E_BASE_URL` set to the frontend URL, and `E2E_API_BASE_URL` set to the
+backend URL:
+
+```bash
+npx playwright test e2e/live-ai-no-mock.spec.ts --grep 'bilingual rule flow' --workers=1 --retries=0
+```
+
+The external provider must be configured on the backend; see
+[AI configuration](../getting-started/configuration.md). Keep the same backend process running
+through the subset and correlate the attached request/user ids with the recommendation
+validation and worker-failure logs described in [troubleshooting](../guides/troubleshooting.md#ai-recommendation-failed).
+
 ## Caching
 
 | cached | key derived from | why it is safe |
 | :--- | :--- | :--- |
 | Maven repository | `pom.xml` (via `setup-java`) | immutable released artifacts |
 | npm modules | `package-lock.json` (via `setup-node`) | lockfile pins exact versions |
-| Playwright browsers | resolved Playwright version + OS | a dependency bump misses, so new test code never runs against an old browser |
-| NuSMV 2.7.1 | version + sha256 + OS + arch | fixed URL, verified digest; the runner image is in the key because the binary links against system libraries |
+| Playwright browsers | `frontend/package-lock.json` + OS | a lockfile change invalidates the browser cache |
+| NuSMV 2.7.1 | version + sha256 + OS + arch | fixed URL and verified digest; runtime libraries are installed separately |
 
 **Deliberately not cached:** the MySQL and Redis service containers, the compiled backend jar across
 runs, build outputs, and apt packages. Caching mutable application state or generated results is how a
@@ -162,43 +157,30 @@ as an artifact, which is reuse of a verified build rather than a stale one.
 
 - **Concurrency cancellation** on non-`main` refs. A superseded push is wasted capacity and leaves a
   misleading red X on an old commit. `main` never cancels: every landed commit needs its own verdict.
-- **Sequential main commits each get their own Full CI run, and that is intentional.** Pushing N
-  commits queues N full runs of ~15 minutes. It looks wasteful, and the temptation is to let a newer
-  push cancel an older one — but that would leave a commit in history with no full validation, which
-  is the gap this design exists to close. Each main commit is releasable, so its verdict is the record
-  you consult when something turns out to be broken. The cost lands on runner queue time, not on
-  developer feedback: Fast CI still answers in ~300s regardless of how many full runs are pending.
 - **Fail-fast ordering**: route → typecheck → unit → build → smoke. Each stage is cheaper than the one
   it gates.
-- **Artifact reuse**: the backend jar and frontend bundle are built once and downloaded by the E2E
-  tier, replacing a 33s recompile and a second `npm ci`.
+- **Artifact reuse**: each workflow passes its tested backend jar to its E2E job.
+  Playwright builds the frontend before starting the preview server.
 - **Shared startup**: [`run-e2e.sh`](../../.github/scripts/run-e2e.sh) owns the readiness probe and
   process lifecycle for all three tiers. Duplicated inline in YAML, a subtly different probe in one job
   reports "never became ready" for a backend that was fine.
-- **Aggregate status check**: `fast-ci` succeeds only if no required tier failed, so branch protection
-  can require one stable check name instead of a list that changes whenever routing does.
+- **Aggregate status check**: `fast-ci` collects route, frontend, backend, and smoke
+  results; the escalated Full CI result remains separate.
 - **Actions are pinned to a commit SHA with the version in a trailing comment**, so a moved tag cannot
   change what runs. The pin *shape* is asserted for every `uses:` line in `.github/workflows/` **and**
   every `.github/actions/*/action.yml` — scanning only the workflows once left the `setup-nusmv`
   composite action unguarded through a version bump. What no test can check is whether the comment names
   the SHA's actual tag: one bump left `# v4.2.0` beside a v4.3.0 SHA. When bumping, resolve the tag with
   `gh api repos/<owner>/<action>/git/ref/tags/<tag> --jq .object.sha` and update both halves together.
-  Every pinned action must run on `node24`: GitHub now forces the Node 20 runtimes it deprecated onto
-  Node 24 regardless of what `action.yml` declares, and a deprecation warning is the only notice you
-  get before the pin starts running on an untested runtime. Local composite actions are asserted;
-  for a remote pin, check `using:` in its `action.yml` at the SHA you are pinning.
+  Local JavaScript composite actions are checked for `node24` by the router tests.
 
 ## Branch protection
 
-Not currently configured on this repository — `main` accepts direct pushes, which is why every commit
-here also triggers Full CI. The recommendation below applies when protection is enabled.
-
-Require exactly one check: **`Fast CI / fast-ci`**. It rolls up the routed tiers, so a docs-only PR is
-green in about a minute without weakening anything, and a high-risk PR still cannot merge until its
-escalated Full CI run passes.
-
-Do not require `Full CI` directly — on a low-risk PR it never runs, and a required check that never
-runs blocks every such PR forever.
+Branch protection is a GitHub repository setting; workflow files do not establish
+which checks are required. The aggregate `Fast CI` job depends on route, frontend,
+backend, and smoke jobs. It does **not** depend on `escalate`, so its success alone
+does not establish that the high-risk Full CI run passed. Check that result separately
+before merging a high-risk change.
 
 ## Local equivalents
 

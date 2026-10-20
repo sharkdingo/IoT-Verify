@@ -1,9 +1,14 @@
 package cn.edu.nju.Iot_Verify.component.aitool.spec;
 
 import cn.edu.nju.Iot_Verify.component.ai.PromptCompletionService;
-import cn.edu.nju.Iot_Verify.component.aitool.rule.DeviceInfoHelper;
+import cn.edu.nju.Iot_Verify.service.recommendation.DeviceInfoHelper;
+import cn.edu.nju.Iot_Verify.service.recommendation.SpecificationRecommendationService;
+import cn.edu.nju.Iot_Verify.service.recommendation.RecommendationResultParser;
+import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
+import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
 import cn.edu.nju.Iot_Verify.security.UserContextHolder;
 import cn.edu.nju.Iot_Verify.service.BoardStorageService;
+import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
 import cn.edu.nju.Iot_Verify.testutil.LogCapture;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -19,13 +24,16 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.lenient;
 
 @ExtendWith(MockitoExtension.class)
 class RecommendSpecificationsToolTest {
@@ -39,12 +47,17 @@ class RecommendSpecificationsToolTest {
     @Mock
     private PromptCompletionService promptCompletionService;
 
+    private BoardSemanticSnapshotDto snapshot;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
     private RecommendSpecificationsTool tool;
 
     @BeforeEach
     void setUp() {
-        tool = new RecommendSpecificationsTool(deviceInfoHelper, boardStorageService, promptCompletionService, objectMapper);
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of());
+        lenient().when(boardStorageService.getSemanticSnapshot(1L)).thenAnswer(invocation -> snapshot);
+        tool = new RecommendSpecificationsTool(new SpecificationRecommendationService(deviceInfoHelper, boardStorageService,
+                promptCompletionService, objectMapper, new RecommendationResultParser(objectMapper)), objectMapper);
         UserContextHolder.setUserId(1L);
     }
 
@@ -54,20 +67,53 @@ class RecommendSpecificationsToolTest {
     }
 
     @Test
+    void promptAndValidationUseOneCapturedSceneEvenIfBoardChangesDuringCompletion() throws Exception {
+        DeviceNodeDto node = new DeviceNodeDto();
+        node.setId("thermostat");
+        node.setLabel("Thermostat");
+        node.setTemplateName("Thermostat");
+        DeviceTemplateDto template = new DeviceTemplateDto();
+        template.setName("Thermostat");
+        template.setManifest(DeviceTemplateDto.DeviceManifest.builder().name("Thermostat")
+                .internalVariables(List.of(DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
+                        .name("temperature").isInside(true).lowerBound(15).upperBound(35).build()))
+                .build());
+        snapshot = new BoardSemanticSnapshotDto(
+                List.of(node), List.of(), List.of(), List.of(), List.of(template));
+        tool = new RecommendSpecificationsTool(new SpecificationRecommendationService(new DeviceInfoHelper(), boardStorageService,
+                promptCompletionService, objectMapper, new RecommendationResultParser(objectMapper)), objectMapper);
+        when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
+                .thenAnswer(invocation -> {
+                    assertTrue(invocation.<String>getArgument(1).contains("thermostat"));
+                    snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of());
+                    return """
+                            {"recommendations":[{"rationale":"Limit temperature","templateId":"3",
+                              "aConditions":[{"deviceId":"thermostat","targetType":"variable",
+                                "key":"temperature","variableSource":"reported","relation":">","value":"25"}],
+                              "ifConditions":[],"thenConditions":[]}]}
+                            """;
+                });
+
+        JsonNode result = objectMapper.readTree(tool.execute("{}"));
+
+        assertEquals(1, result.path("validatedCount").asInt(), result.toString());
+        verify(boardStorageService).getSemanticSnapshot(1L);
+        verifyNoMoreInteractions(boardStorageService);
+    }
+
+    @Test
     void execute_rejectsUnknownRequestFieldBeforeReadingBoardOrCallingAi() throws Exception {
         JsonNode json = objectMapper.readTree(tool.execute("{\"catgory\":\"security\"}"));
 
         assertEquals("VALIDATION_ERROR", json.path("errorCode").asText());
         assertEquals("$ contains unsupported field(s): catgory.", json.path("error").asText());
-        verify(deviceInfoHelper, never()).getDevicesWithTemplateInfo(1L);
+        verify(deviceInfoHelper, never()).getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class));
         verify(promptCompletionService, never()).complete(anyString(), anyString(), anyDouble(), anyInt());
     }
 
     @Test
     void execute_withUnparseableAiResponse_returnsUpstreamErrorNotEmptySuccess() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(thermostatDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(thermostatDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("not-json");
 
@@ -81,9 +127,7 @@ class RecommendSpecificationsToolTest {
     @Test
     void execute_doesNotLogRejectedModelCandidateContent() throws Exception {
         String sensitive = "private-spec-value-never-log";
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(thermostatDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(thermostatDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -100,7 +144,7 @@ class RecommendSpecificationsToolTest {
                         }
                         """);
 
-        try (LogCapture logs = LogCapture.forClass(RecommendSpecificationsTool.class)) {
+        try (LogCapture logs = LogCapture.forClass(SpecificationRecommendationService.class)) {
             JsonNode json = objectMapper.readTree(tool.execute("{}"));
 
             assertEquals(2, json.path("filteredCount").asInt());
@@ -110,9 +154,7 @@ class RecommendSpecificationsToolTest {
 
     @Test
     void execute_whenAiReturnsNoCandidates_reportsNoFiltering() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(thermostatDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(thermostatDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("{\"recommendations\":[]}");
 
@@ -125,9 +167,7 @@ class RecommendSpecificationsToolTest {
 
     @Test
     void execute_withChineseLanguage_returnsLocalizedBackendMessage() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(thermostatDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(thermostatDevice()));
         when(promptCompletionService.completeRecommendation(
                 anyString(),
                 contains("输出语言: 简体中文"),
@@ -170,9 +210,7 @@ class RecommendSpecificationsToolTest {
 
     @Test
     void execute_stripsVolunteeredCategoryInsteadOfDiscardingTheCandidate() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(homeModeDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(homeModeDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -203,9 +241,7 @@ class RecommendSpecificationsToolTest {
 
     @Test
     void execute_acceptsModeConditionWithCanonicalDeviceId() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(homeModeDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(homeModeDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -238,9 +274,7 @@ class RecommendSpecificationsToolTest {
 
     @Test
     void execute_returnsStatePrivacyAsSemanticScopeAndModeRatherThanGeneratedKey() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(homeModeDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(homeModeDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -274,9 +308,7 @@ class RecommendSpecificationsToolTest {
 
     @Test
     void execute_normalizesSetRelationRecommendation() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(homeModeDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(homeModeDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -308,9 +340,7 @@ class RecommendSpecificationsToolTest {
 
     @Test
     void execute_acceptsFullStateTupleSetRecommendation() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(homeModeDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(homeModeDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -344,9 +374,7 @@ class RecommendSpecificationsToolTest {
 
     @Test
     void execute_defaultsApiConditionValueToTrue() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(cameraDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(cameraDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -379,9 +407,7 @@ class RecommendSpecificationsToolTest {
 
     @Test
     void execute_canonicalizesAiFieldCaseBeforeReturningRecommendation() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(homeModeDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(homeModeDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -414,9 +440,7 @@ class RecommendSpecificationsToolTest {
 
     @Test
     void execute_filtersAiConditionThatSuppliesConflictingDerivedSide() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(thermostatDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(thermostatDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -449,9 +473,7 @@ class RecommendSpecificationsToolTest {
 
     @Test
     void execute_filtersRecommendationWithHiddenTemplateOneImplicationShape() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(thermostatDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(thermostatDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -495,7 +517,7 @@ class RecommendSpecificationsToolTest {
 
         assertEquals("VALIDATION_ERROR", json.path("errorCode").asText());
         assertEquals(400, json.path("status").asInt());
-        verify(deviceInfoHelper, never()).getDevicesWithTemplateInfo(1L);
+        verify(deviceInfoHelper, never()).getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class));
         verify(promptCompletionService, never()).complete(anyString(), anyString(), anyDouble(), anyInt());
     }
 
@@ -507,7 +529,7 @@ class RecommendSpecificationsToolTest {
         assertEquals("VALIDATION_ERROR", json.path("errorCode").asText());
         assertEquals(400, json.path("status").asInt());
         assertEquals("maxRecommendations must be between 1 and 10.", json.path("error").asText());
-        verify(deviceInfoHelper, never()).getDevicesWithTemplateInfo(1L);
+        verify(deviceInfoHelper, never()).getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class));
         verify(promptCompletionService, never()).complete(anyString(), anyString(), anyDouble(), anyInt());
     }
 
@@ -517,15 +539,13 @@ class RecommendSpecificationsToolTest {
 
         assertEquals("VALIDATION_ERROR", json.path("errorCode").asText());
         assertEquals("language must be en or zh-CN.", json.path("error").asText());
-        verify(deviceInfoHelper, never()).getDevicesWithTemplateInfo(1L);
+        verify(deviceInfoHelper, never()).getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class));
         verify(promptCompletionService, never()).complete(anyString(), anyString(), anyDouble(), anyInt());
     }
 
     @Test
     void execute_filtersSafetyApiThatHasNoModeledReliabilityTarget() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(serviceWithoutApiEndState()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(serviceWithoutApiEndState()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -558,9 +578,7 @@ class RecommendSpecificationsToolTest {
 
     @Test
     void execute_filtersCandidateWithUnknownSemanticField() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(thermostatDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(thermostatDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {"recommendations":[{
@@ -583,9 +601,7 @@ class RecommendSpecificationsToolTest {
 
     @Test
     void execute_filtersCandidateWithoutUserFacingRationale() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(thermostatDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(thermostatDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {"recommendations":[{
@@ -611,9 +627,7 @@ class RecommendSpecificationsToolTest {
          * in the batch over one bad row — and the user could accept a recommendation that `addSpec` would
          * then refuse.
          */
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(thermostatDevice()));
-        when(boardStorageService.getRules(1L)).thenReturn(List.of());
-        when(boardStorageService.getSpecs(1L)).thenReturn(List.of());
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(thermostatDevice()));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {"recommendations":[{

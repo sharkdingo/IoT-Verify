@@ -7,6 +7,7 @@ import {
   validateInteractiveOperationStatus,
   validateSimulationResult,
   validateSimulationTask,
+  validateSimulationTrace,
   validateSimulationTraceSummary,
   validateTaskCancellationResult,
   validateTaskProgress,
@@ -102,6 +103,43 @@ const validVerification = () => ({
   nusmvOutput: '-- specification is true'
 })
 
+const specificationSnapshot = () => ({
+  id: 'spec_1', templateId: '1',
+  aConditions: [{ id: 'reading', side: 'a', deviceId: 'sensor', deviceLabel: 'Old label',
+    targetType: 'variable', variableSource: 'reported', key: 'temperature', relation: '>', value: '25' }],
+  ifConditions: [], thenConditions: [],
+  devices: { sensor: { label: 'Frozen sensor', modelTokenSource: 'BUNDLED', modeCount: 1 } }
+})
+
+describe('frozen specification interpretation contract', () => {
+  it('retains recorded conditions and accepts explicitly absent evidence in older records', () => {
+    const result = validVerification()
+    expect(validateVerificationResult(result).specResults[0].specificationSnapshot).toBeUndefined()
+    const snapshot = specificationSnapshot()
+    const withSnapshot = { ...result, specResults: [{ ...result.specResults[0], specificationSnapshot: snapshot }] }
+    expect(validateVerificationResult(withSnapshot).specResults[0].specificationSnapshot).toBe(snapshot)
+  })
+
+  it.each([
+    ['identity', (snapshot: any) => { snapshot.id = 'different_spec' }],
+    ['template', (snapshot: any) => { snapshot.templateId = '6' }],
+    ['condition collection', (snapshot: any) => { snapshot.aConditions = null }],
+    ['condition value', (snapshot: any) => { snapshot.aConditions[0].value = 25 }],
+    ['reading source', (snapshot: any) => { delete snapshot.aConditions[0].variableSource }],
+    ['condition side', (snapshot: any) => { snapshot.aConditions[0].side = 'then' }],
+    ['device identity', (snapshot: any) => { snapshot.devices = {} }],
+    ['token provenance', (snapshot: any) => { snapshot.devices.sensor.modelTokenSource = 'guessed' }],
+    ['mode count', (snapshot: any) => { snapshot.devices.sensor.modeCount = -1 }],
+    ['template shape', (snapshot: any) => { snapshot.aConditions = [] }]
+  ])('rejects malformed %s instead of displaying an invented explanation', (_name, corrupt) => {
+    const result = validVerification()
+    const snapshot = specificationSnapshot()
+    corrupt(snapshot)
+    expect(() => validateVerificationResult({ ...result,
+      specResults: [{ ...result.specResults[0], specificationSnapshot: snapshot }] })).toThrow()
+  })
+})
+
 const unpersistedViolation = () => ({
   ...validVerification(),
   historyPersistence: {
@@ -191,6 +229,7 @@ const validVerificationRun = () => ({
   modelComplete: true,
   violatedSpecCount: 0,
   counterexampleCount: 0,
+  counterexamples: [],
   disabledRuleCount: 0,
   skippedSpecCount: 0,
   generationIssues: [],
@@ -223,6 +262,14 @@ const validCompletedSimulationTask = () => ({
 })
 
 describe('verification and simulation response contracts', () => {
+  it('retains valid fingerprints and rejects malformed comparison evidence', () => {
+    const result = validVerification()
+    const captured = { ...result.modelSnapshot, modelFingerprint: 'a'.repeat(64) }
+    expect(validateVerificationResult({ ...result, modelSnapshot: captured }).modelSnapshot.modelFingerprint).toBe('a'.repeat(64))
+    for (const modelFingerprint of ['', 'a'.repeat(63), 'A'.repeat(64), 1]) {
+      expect(() => validateVerificationResult({ ...result, modelSnapshot: { ...captured, modelFingerprint } })).toThrow()
+    }
+  })
   it('accepts an explicitly complete verification result', () => {
     expect(validateVerificationResult(validVerification())).toEqual(validVerification())
   })
@@ -324,6 +371,30 @@ describe('verification and simulation response contracts', () => {
 
   it('accepts a playable simulation whose step count matches its states', () => {
     expect(validateSimulationResult(validSimulation())).toEqual(validSimulation())
+  })
+
+  it.each([false, true])('rejects empty simulation states at the API boundary, saved=%s', saved => {
+    const result = {
+      ...validSimulation(),
+      ...(saved ? { id: 3, initiator: 'USER', createdAt: '2026-10-08T00:00:00',
+        historyPersistence: { status: 'SAVED', runId: 3 } } : {}),
+      steps: 0,
+      states: []
+    }
+    const validate = saved ? validateSimulationTrace : validateSimulationResult
+    expect(() => validate(result)).toThrow(expect.objectContaining({ code: RUN_RESPONSE_INCOMPLETE_CODE }))
+  })
+
+  it.each([false, true])('accepts a zero-transition simulation with its initial state, saved=%s', saved => {
+    const result = {
+      ...validSimulation(),
+      ...(saved ? { id: 3, initiator: 'USER', createdAt: '2026-10-08T00:00:00',
+        historyPersistence: { status: 'SAVED', runId: 3 } } : {}),
+      steps: 0,
+      states: [state(1)]
+    }
+    const validate = saved ? validateSimulationTrace : validateSimulationResult
+    expect(validate(result)).toEqual(result)
   })
 
   it.each([
@@ -612,6 +683,7 @@ describe('verification and simulation response contracts', () => {
         thenConditions: []
       },
       stateCount: 2,
+      modelTokenSourcesByDeviceId: { door_1: 'BUNDLED' },
       createdAt: '2026-07-12T00:00:00',
       dataAvailable: true
     }
@@ -622,6 +694,13 @@ describe('verification and simulation response contracts', () => {
       counterexampleCount: 1,
       counterexamples: [traceSummary]
     }).counterexamples).toEqual([traceSummary])
+
+    for (const sources of [undefined, { door_1: 'INVENTED' }, { '': 'BUNDLED' }]) {
+      expect(() => validateVerificationRunSummary({
+        ...summary, outcome: 'VIOLATED', violatedSpecCount: 1, counterexampleCount: 1,
+        counterexamples: [{ ...traceSummary, modelTokenSourcesByDeviceId: sources }]
+      })).toThrow(expect.objectContaining({ code: RUN_RESPONSE_INCOMPLETE_CODE }))
+    }
 
     const unavailableTraceSummary = {
       id: 18,
@@ -654,6 +733,26 @@ describe('verification and simulation response contracts', () => {
       counterexampleCount: 1,
       counterexamples: [traceWithoutTimestamp]
     })).toThrow(expect.objectContaining({ code: RUN_RESPONSE_INCOMPLETE_CODE }))
+  })
+
+  it('validates exact run-scoped counterexample references on detail reads', () => {
+    const run = validVerificationRun()
+    const unavailable = {
+      id: 18,
+      verificationTaskId: run.id,
+      dataAvailable: false,
+      unavailableReasonCode: 'PERSISTED_SEMANTIC_DATA_INVALID'
+    }
+    expect(validateVerificationRun({ ...run, counterexamples: [unavailable] }).counterexamples)
+      .toEqual([unavailable])
+    for (const counterexamples of [undefined, null, {},
+      [{ ...unavailable, verificationTaskId: run.id + 1 }],
+      [{ ...unavailable, dataAvailable: 'false' }]]) {
+      expect(() => validateVerificationRun({ ...run, counterexamples }))
+        .toThrow(expect.objectContaining({ code: RUN_RESPONSE_INCOMPLETE_CODE }))
+    }
+    expect(() => validateVerificationRun({ ...run, counterexamples: [unavailable], counterexampleCount: 1 }))
+      .toThrow(/counterexampleCount must match available counterexamples/)
   })
 
   it('rejects results that cannot prove templates were frozen at submission', () => {
@@ -730,20 +829,21 @@ describe('verification and simulation response contracts', () => {
     }))
   })
 
-  it('validates server-observed interactive operation stages', () => {
-    const status = {
-      requestId: 'request-123',
-      state: 'RUNNING',
-      stage: 'REQUESTING_MODEL',
-      elapsedMs: 1250
-    }
+  it.each(['REQUESTING_MODEL', 'COMPARING_VERIFIED_OPTIONS'])(
+    'validates the server-observed %s interactive phase', stage => {
+      const status = {
+        requestId: 'request-123',
+        state: 'RUNNING',
+        stage,
+        elapsedMs: 1250
+      }
 
-    expect(validateInteractiveOperationStatus(status)).toEqual(status)
-    expect(() => validateInteractiveOperationStatus({
-      ...status,
-      stage: 'THINKING_FOR_A_WHILE'
-    })).toThrow(expect.objectContaining({ code: RUN_RESPONSE_INCOMPLETE_CODE }))
-  })
+      expect(validateInteractiveOperationStatus(status)).toEqual(status)
+      expect(() => validateInteractiveOperationStatus({
+        ...status,
+        stage: 'THINKING_FOR_A_WHILE'
+      })).toThrow(expect.objectContaining({ code: RUN_RESPONSE_INCOMPLETE_CODE }))
+    })
 
   it('does not present a stale active phase after a task reaches a terminal state', () => {
     expect(activeTaskProgressStage('PERSISTING_RESULT', 'RUNNING')).toBe('PERSISTING_RESULT')

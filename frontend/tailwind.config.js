@@ -1,3 +1,8 @@
+const neutralColors = Object.fromEntries(
+  [50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950]
+    .map(step => [step, `var(--iot-neutral-${step})`]),
+)
+
 /** @type {import('tailwindcss').Config} */
 export default {
   darkMode: 'class',
@@ -8,13 +13,15 @@ export default {
   theme: {
     extend: {
       colors: {
+        slate: neutralColors,
+        gray: neutralColors,
+        zinc: neutralColors,
+        neutral: neutralColors,
+        stone: neutralColors,
         // Single source of truth lives in styles/base.css so Tailwind utilities and
         // hand-written CSS cannot drift into two different "primary" colors.
-        //
-        // Because this is an arbitrary `var()` and not a channel triple, Tailwind cannot derive an
-        // alpha channel from it: opacity modifiers like `border-primary/20` do NOT work and silently
-        // render at full strength. For a translucent accent use
-        // `color-mix(in srgb, var(--iot-color-accent) N%, transparent)`.
+        // Tailwind opacity modifiers compile to color-mix; hand-written translucent
+        // roles use color-mix against these same variables.
         primary: "var(--iot-color-accent)",
       },
       borderRadius: {

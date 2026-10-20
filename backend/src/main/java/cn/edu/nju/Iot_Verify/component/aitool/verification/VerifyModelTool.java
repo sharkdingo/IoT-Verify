@@ -2,12 +2,8 @@ package cn.edu.nju.Iot_Verify.component.aitool.verification;
 
 import cn.edu.nju.Iot_Verify.component.ai.model.LlmToolSpec;
 import cn.edu.nju.Iot_Verify.component.aitool.AbstractAiTool;
-import cn.edu.nju.Iot_Verify.util.mapper.BoardDataConverter;
-import cn.edu.nju.Iot_Verify.util.mapper.BoardDataConverter.ModelInputSnapshot;
-import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
 import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
 import cn.edu.nju.Iot_Verify.dto.model.RunPersistenceDto;
-import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import cn.edu.nju.Iot_Verify.dto.trace.TraceDto;
 import cn.edu.nju.Iot_Verify.dto.verification.VerificationRequestDto;
@@ -35,14 +31,11 @@ import java.util.Set;
 @Component
 public class VerifyModelTool extends AbstractAiTool {
 
-    private final BoardDataConverter boardDataConverter;
     private final VerificationService verificationService;
 
-    public VerifyModelTool(BoardDataConverter boardDataConverter,
-                           VerificationService verificationService,
+    public VerifyModelTool(VerificationService verificationService,
                            ObjectMapper objectMapper) {
         super(objectMapper);
-        this.boardDataConverter = boardDataConverter;
         this.verificationService = verificationService;
     }
 
@@ -90,39 +83,19 @@ public class VerifyModelTool extends AbstractAiTool {
             AttackScenarioDto attackScenario = attackScenarioArg(args, true);
             boolean enablePrivacy = booleanArg(args, "enablePrivacy", false);
 
-            ModelInputSnapshot board = boardDataConverter.getModelInputSnapshot(userId);
-            List<DeviceVerificationDto> devices = board.devices();
-            List<RuleDto> rules = board.rules();
-            List<SpecificationDto> specs = board.specifications();
-
-            if (devices.isEmpty()) {
-                return errorJson("No devices found on the board. Please add devices first.",
-                        "VALIDATION_ERROR", 400);
-            }
-            if (specs.isEmpty()) {
-                return errorJson("No specifications found on the board. Please add at least one specification to verify.",
-                        "VALIDATION_ERROR", 400);
-            }
-
-            log.info("Executing verify_model: {} devices, {} rules, {} specs, attackMode={}, attackBudget={}, privacy={}",
-                    devices.size(), rules.size(), specs.size(), attackScenario.getMode(),
-                    attackScenario.effectiveBudget(), enablePrivacy);
-
-            // The service reads the scene from the same board this tool just inspected, so the
-            // request carries only run parameters.
             VerificationRequestDto request = new VerificationRequestDto();
             request.setAttackScenario(attackScenario);
             request.setEnablePrivacy(enablePrivacy);
 
-            VerificationResultDto result = verificationService.verifyWithTemplateSnapshot(
-                    userId, request, board.templateManifests());
+            VerificationResultDto result = verificationService.verify(userId, request);
 
             Map<String, Object> summary = new LinkedHashMap<>();
             summary.put("outcome", result.getOutcome());
             summary.put("modelComplete", result.isModelComplete());
             summary.put("disabledRuleCount", result.getDisabledRuleCount());
             summary.put("skippedSpecCount", result.getSkippedSpecCount());
-            summary.put("requestedSpecCount", specs.size());
+            summary.put("requestedSpecCount", result.getModelSnapshot() != null
+                    ? result.getModelSnapshot().getSpecificationCount() : null);
             summary.put("emittedSpecCount", result.getSpecResults() != null ? result.getSpecResults().size() : 0);
             summary.put("violationCount", countFailedSpecs(result));
             summary.put("specResults", VerificationToolPresenter.specResults(result.getSpecResults()));

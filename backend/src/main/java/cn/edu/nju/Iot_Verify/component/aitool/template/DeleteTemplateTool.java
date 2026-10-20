@@ -112,7 +112,8 @@ public class DeleteTemplateTool extends AbstractAiTool {
             Map<String, Object> bindingSnapshot = bindingSnapshot(previewView, domainImpactToken);
             if (!confirmed || !UserContextHolder.isDestructiveActionConfirmed()) {
                 String confirmationToken = destructiveActionGuard.issue(
-                        userId, getName(), Long.toString(templateId), bindingSnapshot, domainImpactToken);
+                        userId, getName(), Long.toString(templateId),
+                        preview.getTemplate().getName(), bindingSnapshot, domainImpactToken);
                 previewView.put("impactToken", confirmationToken);
                 Map<String, Object> response = new LinkedHashMap<>();
                 response.put("message", "No changes were made. Confirm this exact preview to delete the device type.");
@@ -126,7 +127,8 @@ public class DeleteTemplateTool extends AbstractAiTool {
                     userId, getName(), Long.toString(templateId), impactToken, bindingSnapshot);
             if (!confirmation.approved()) {
                 String freshToken = destructiveActionGuard.issue(
-                        userId, getName(), Long.toString(templateId), bindingSnapshot, domainImpactToken);
+                        userId, getName(), Long.toString(templateId),
+                        preview.getTemplate().getName(), bindingSnapshot, domainImpactToken);
                 previewView.put("impactToken", freshToken);
                 return errorJson(confirmation.message(), confirmation.errorCode(), 409, Map.of(
                         "requiresUserConfirmation", true,
@@ -158,6 +160,7 @@ public class DeleteTemplateTool extends AbstractAiTool {
                             userId,
                             getName(),
                             Long.toString(requestedTemplateId),
+                            currentPreview.getTemplate().getName(),
                             bindingSnapshot(currentView, currentDomainToken),
                             currentDomainToken);
                     currentView.put("impactToken", freshToken);

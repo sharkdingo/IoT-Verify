@@ -106,10 +106,7 @@ describe('dialog surface consistency', () => {
   })
 
   it('paints every blocking surface opaque, in both themes', () => {
-    // `--iot-color-card-bg` is rgba(…, 0.3) and `-strong` is 0.7: tokens for a card resting on an opaque
-    // panel. A dialog is `position: fixed` and has only the scrim behind it, so those values let the board
-    // show through the title, the message, and — on the account-deletion form — the password field. Both the
-    // shared card and the MessageBox had this; a blur was masking it.
+    // Blocking surfaces own an opaque elevated ground, independent of decorative card tokens.
     const base = readFileSync(join(SRC, 'styles/base.css'), 'utf8')
     const box = base.slice(base.indexOf('.el-message-box {'))
     const boxBody = box.slice(0, box.indexOf('}'))
@@ -224,17 +221,14 @@ describe('dialog surface consistency', () => {
     // Element Plus owns those elements, so they cannot carry `.iot-dialog-btn` and base.css must declare the
     // height itself. Both therefore reference one custom property rather than repeating a literal — comparing
     // two literals is what let five button heights coexist here before, each plausible on its own.
-    const declared = SHEET.match(/--dialog-action-height:\s*([\d.]+rem)/)?.[1]
-    expect(declared, 'the action height should be declared once as a token').toBeTruthy()
-
     const heightOf = (css: string, selector: string) => {
       const i = css.indexOf(selector)
       expect(i, `${selector} should exist`).toBeGreaterThan(-1)
       return css.slice(i, css.indexOf('}', i)).match(/min-height:\s*([^;]+)/)?.[1]?.trim()
     }
-    expect(heightOf(SHEET, '.iot-dialog-btn {')).toBe('var(--dialog-action-height)')
+    expect(heightOf(SHEET, '.iot-dialog-btn {')).toBe('var(--iot-target-min)')
     expect(heightOf(readFileSync(join(SRC, 'styles/base.css'), 'utf8'),
-      '.el-message-box__btns .el-button {')).toBe('var(--dialog-action-height)')
+      '.el-message-box__btns .el-button {')).toBe('var(--iot-target-min)')
   })
 
   it('offers a non-destructive confirm, so a red button still means removal', () => {

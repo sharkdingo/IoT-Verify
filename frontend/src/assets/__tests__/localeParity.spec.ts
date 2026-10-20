@@ -1,86 +1,39 @@
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { i18n } from '@/assets/i18n'
 
-/**
- * The two locales must say the same thing, and neither may claim more than the engine proved.
- *
- * A key present in one locale and missing from the other does not fail loudly — it renders its own key path on
- * screen for half the users, and vue-i18n logs a warning nobody reads in production. In a formal verification
- * tool the worse case is semantic: if a verdict string softens or strengthens across languages, two users looking
- * at the same model get different claims about it.
- *
- * Measured at the time of writing: **2343 keys in each locale, zero structural gaps**, placeholders consistent,
- * and no outcome string over- or under-claiming.
- *
- * Two of the three rules here were wrong on their first attempt, both in the direction of a false alarm, and both
- * corrections are the interesting part:
- *
- * 1. **Placeholder counting.** vue-i18n pluralization writes `{count} result | {count} results`, so English
- *    repeats a placeholder once per plural form while Chinese has no plural inflection. Comparing occurrence
- *    lists flagged three correct messages; comparing the distinct set is the right test.
- * 2. **Hedged violations.** `violationMayBeDeviceTransitions` reads "The violation *may be caused by* device
- *    transitions", which my first rule called a softened verdict. It is the opposite: the violation is proven and
- *    its *attribution* is a hypothesis. Acting on that finding would have pushed someone toward asserting a cause
- *    NuSMV never established — the exact dishonesty this product is built to avoid.
- */
-
-const i18nSource = () => readFileSync(join(__dirname, '../i18n.ts'), 'utf8')
-
-/**
- * Extract a locale block by brace matching.
- *
- * `occurrence` matters: the file holds two locale pairs — a small spec-template block first, then the main
- * message catalogue. Taking the first gave 14 keys and a vacuously clean result.
- */
-const extractLocale = (source: string, name: string, occurrence: number): string | null => {
-  let start = -1
-  for (let n = 0; n <= occurrence; n++) {
-    start = source.indexOf(`${name}: {`, start + 1)
-    if (start < 0) return null
-  }
-  let depth = 0
-  let i = source.indexOf('{', start)
-  const from = i
-  for (; i < source.length; i++) {
-    if (source[i] === '{') depth++
-    else if (source[i] === '}') { depth--; if (depth === 0) break }
-  }
-  return source.slice(from, i + 1)
-}
-
-const flatten = (block: string): Map<string, string> => {
-  const out = new Map<string, string>()
-  const path: string[] = []
-  for (const raw of block.split('\n')) {
-    const line = raw.trim()
-    if (!line || line.startsWith('//') || line.startsWith('*') || line.startsWith('/*')) continue
-    const open = /^([a-zA-Z_$][\w$]*)\s*:\s*\{$/.exec(line)
-    if (open) { path.push(open[1]); continue }
-    if (/^\}[,]?$/.test(line)) { path.pop(); continue }
-    const leaf = /^([a-zA-Z_$][\w$]*)\s*:\s*(['"`])([\s\S]*)$/.exec(line)
-    if (leaf) {
-      const rest = leaf[3]
-      const end = rest.lastIndexOf(leaf[2])
-      out.set([...path, leaf[1]].join('.'), end > -1 ? rest.slice(0, end) : rest)
-    }
-  }
-  return out
-}
+const flatten = (value: unknown, path = ''): [string, string][] =>
+  typeof value === 'string' ? [[path, value]]
+    : Object.entries(value as Record<string, unknown>)
+      .flatMap(([key, child]) => flatten(child, path ? `${path}.${key}` : key))
 
 describe('locale parity', () => {
+  it.each(['zh-CN', 'en'] as const)('uses the same specification term in navigation and lists in %s', locale => {
+    const table = new Map(flatten(i18n.global.messages.value[locale]))
+    expect(table.get('app.specificationsTool')).toBe(table.get('app.specifications'))
+  })
+
+  it('uses one English name for counterexample exploration throughout the catalogue', () => {
+    const { en } = locales()
+    expect(en.get('app.fuzzSearch')).toBe('Counterexample Exploration')
+    expect([...en].filter(([, value]) => /counterexample[- ]search/i.test(value))).toEqual([])
+  })
+
+  it('renders history counterexample counts with the appropriate English number form', () => {
+    const previousLocale = i18n.global.locale.value
+    i18n.global.locale.value = 'en'
+    try {
+      expect(i18n.global.t('app.historyCounterexamples', { count: 1 })).toBe('1 counterexample')
+      expect(i18n.global.t('app.historyCounterexamples', { count: 2 })).toBe('2 counterexamples')
+    } finally { i18n.global.locale.value = previousLocale }
+  })
+
   const locales = () => {
-    const source = i18nSource()
-    const zh = extractLocale(source, "'zh-CN'", 1)
-    const en = extractLocale(source, 'en', 1)
-    expect(zh, 'the zh-CN message catalogue should be readable').toBeTruthy()
-    expect(en, 'the en message catalogue should be readable').toBeTruthy()
-    return { zh: flatten(zh as string), en: flatten(en as string) }
+    const messages = i18n.global.messages.value as Record<string, unknown>
+    return { zh: new Map(flatten(messages['zh-CN'])), en: new Map(flatten(messages.en)) }
   }
 
-  it('parses a realistic number of keys, so a clean result is not vacuous', () => {
-    // The guard that caught my own broken extraction: 14 keys parsed, both "no gaps" rules passing, nothing
-    // actually checked. Without this the spec would certify whatever it managed to read.
+  it('walks the complete catalogues rather than a small subset', () => {
+    // A partial catalogue cannot certify locale parity.
     const { zh, en } = locales()
     expect(zh.size, 'zh-CN key count').toBeGreaterThan(800)
     expect(en.size, 'en key count').toBeGreaterThan(800)
@@ -104,8 +57,10 @@ describe('locale parity', () => {
     for (const [key, value] of zh) {
       const other = en.get(key)
       if (other === undefined) continue
-      if (setOf(value) !== setOf(other)) {
-        mismatched.push(`${key} [zh:${setOf(value) || 'none'} vs en:${setOf(other) || 'none'}]`)
+      for (const branch of other.split('|')) {
+        if (setOf(value) !== setOf(branch)) {
+          mismatched.push(`${key} [zh:${setOf(value) || 'none'} vs en:${setOf(branch) || 'none'}]`)
+        }
       }
     }
     // A dropped placeholder means the number the sentence is about silently disappears for those users.
@@ -126,36 +81,38 @@ describe('locale parity', () => {
   })
 
   it('makes every history-boundary notice say why the undo history goes, in both locales', () => {
-    /*
-     * The four confirmations that clear the undo journal must name the *cause*, not only the count.
-     *
-     * Stating "this discards {historyEntries} entries" and stopping is what made losing undo read as an
-     * unrelated side effect of clearing the scene — it was reported as a bug when it is the design. The reason
-     * differs by boundary: a scene boundary leaves each entry with nothing to return to, a template boundary
-     * removes the manifest an entry's device snapshot needs. Both are expressed as an em-dash aside, which is
-     * what this checks for; without it a future edit can drop the explanation in one locale silently.
-     */
     const { en, zh } = locales()
-    // `flatten` returns dotted paths, so these carry their `app.` namespace.
-    const boundaryKeys = [
-      'app.sceneClearConfirmMessage',
-      'app.sceneImportConfirmMessage',
-      'app.resetDefaultTemplatesNotice',
-      'app.templateDeleteNoReferences'
+    const boundaries = [
+      { key: 'app.sceneClearConfirmMessage', en: /because.*old scene/, zh: /因为.*旧场景/ },
+      { key: 'app.sceneImportConfirmMessage', en: /because.*old scene/i, zh: /因为.*旧场景/ },
+      { key: 'app.resetDefaultTemplatesNotice', en: /because.*original templates/, zh: /因为.*原模板/ },
+      { key: 'app.templateDeleteNoReferences', en: /because.*this template/, zh: /因为.*此模板/ }
     ]
     const offenders: string[] = []
     for (const [label, table] of [['en', en], ['zh', zh]] as const) {
-      for (const key of boundaryKeys) {
+      for (const boundary of boundaries) {
+        const { key } = boundary
         const value = table.get(key)
         if (!value) {
           offenders.push(`${label}.${key} is missing`)
           continue
         }
         if (!value.includes('{historyEntries}')) offenders.push(`${label}.${key} omits the entry count`)
-        // `—` (en) and `——` (zh) both contain U+2014.
-        if (!value.includes('—')) offenders.push(`${label}.${key} states the count but not the reason`)
+        if (!boundary[label].test(value)) offenders.push(`${label}.${key} states the count but not the reason`)
       }
     }
     expect(offenders, offenders.join('\n')).toEqual([])
+  })
+
+  it.each(['en', 'zh-CN'] as const)('scopes recovery promises to saved data and keeps rule removal reversible in %s', locale => {
+    const { en, zh } = locales()
+    const table = locale === 'en' ? en : zh
+    for (const key of ['app.rulesToRemove', 'app.removeRulesFixTitle', 'app.confirmRemoveRulesFix']) {
+      expect(table.get(key), `${locale}.${key}`).not.toMatch(/permanent|cannot be undone|永久|不可撤销/i)
+    }
+    expect(table.get('app.confirmRemoveRulesFix'), locale).toMatch(/undo|撤销/i)
+    expect(table.get('auth.sessionExpiredNotice'), locale).toMatch(/unsaved|未保存/i)
+    expect(table.get('auth.sessionExpiredNotice'), locale).not.toMatch(/nothing.*lost|内容没有丢失/i)
+    expect(table.get('app.deleteAccountDataWarning'), locale).toMatch(/cannot.*recover|cannot.*undone|无法恢复/i)
   })
 })

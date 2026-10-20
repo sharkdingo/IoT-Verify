@@ -1,5 +1,24 @@
 export type RuleSourceItemType = 'api' | 'variable' | 'mode' | 'state'
 
+/** Rule wire shape shared by live board responses and frozen playback scenes. */
+export interface RuleDto {
+    id: number | null
+    conditions: Array<{
+        deviceName: string
+        attribute: string
+        targetType: RuleSourceItemType
+        relation?: string
+        value?: string
+    }>
+    command: {
+        deviceName: string
+        action: string
+        contentDevice?: string | null
+        content?: string | null
+    }
+    ruleString?: string | null
+}
+
 export type DuplicateRuleReasonCode =
     | 'NO_EXISTING_RULES'
     | 'EXACT_MATCH'

@@ -27,6 +27,9 @@ public class SpecResultDto {
     /** Descriptive formula rebuilt from submitted structured conditions and device labels. */
     private String formulaPreview;
 
+    /** Null when a stored result has no structured interpretation evidence. */
+    private SpecificationSnapshotDto specificationSnapshot;
+
     /** Actual emitted property language: CTL or LTL. */
     private String formulaKind;
 

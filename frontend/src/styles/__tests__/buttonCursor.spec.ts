@@ -73,10 +73,10 @@ describe('button cursor affordance', () => {
      * produced two unrelated-looking bugs. Anything added for `.iot-board` needs asking of the hosts too.
      */
     const css = boardCss()
-    const board = readFileSync(join(__dirname, '../../views/Board.vue'), 'utf8')
+    const terminal = readFileSync(join(__dirname, '../../components/PlaybackTerminal.vue'), 'utf8')
 
     // The host class must really be outside the board, or this test is guarding a non-problem.
-    expect(board, 'the replay bars render through board-timeline-host')
+    expect(terminal, 'the replay bars render through board-timeline-host')
       .toContain('board-timeline-host')
 
     const pointerSelectors = [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)]

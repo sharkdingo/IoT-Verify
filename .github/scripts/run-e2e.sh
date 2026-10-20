@@ -76,10 +76,11 @@ case "$tier" in
     # Everything except the live-AI suite, which needs a real external endpoint and has its own gate.
     # --workers=1 and --fail-on-flaky-tests are the standing contract for the complete run: a flake
     # here is a defect report, not noise to be retried away.
+    # The expanded suite must finish before the global deadline; per-test deadlines stay unchanged.
     npx playwright test \
       --grep-invert='live AI' \
       "${common[@]}" --workers=1 --retries=1 \
-      --fail-on-flaky-tests --global-timeout=900000 --reporter=line,html
+      --fail-on-flaky-tests --global-timeout=1800000 --reporter=line,html
     ;;
   live-ai)
     # Only the external-endpoint tests. No --fail-on-flaky-tests: a provider transport failure is not

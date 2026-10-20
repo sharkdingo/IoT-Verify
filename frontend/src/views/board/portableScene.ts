@@ -214,6 +214,9 @@ export const createSceneCodec = (t: Translate) => {
       'currentStateTrust', 'currentStatePrivacy', 'variables', 'privacies'
     ], `devices[${index}]`)
     const id = normalizeSceneString(row.id, `devices[${index}].id`)
+    if (typeof row.id === 'string' && (row.id !== id || /^\p{White_Space}|\p{White_Space}$/u.test(row.id))) {
+      throw new Error(t('app.sceneImportIdentifierWhitespace', { field: `devices[${index}].id` }))
+    }
     const templateName = normalizeSceneString(row.templateName, `devices[${index}].templateName`)
     const label = normalizeSceneString(row.label, `devices[${index}].label`)
     if (!id) throw new Error(t('app.sceneImportMissingField', { field: `devices[${index}].id` }))
@@ -781,16 +784,16 @@ export const createSceneCodec = (t: Translate) => {
     templates: DeviceTemplate[]
   ): PortableSceneDevice => {
     const normalized = normalizeSceneDevice(device, index)
-    const variables = sortSceneItems((normalized.variables || []).map(variable => ({
+    const variables = (normalized.variables || []).map(variable => ({
       name: variable.name,
       value: variable.value,
       ...(variable.trust ? { trust: variable.trust } : {})
-    })), variable => variable.name)
+    }))
 
-    const privacies = sortSceneItems((normalized.privacies || []).map(privacy => ({
+    const privacies = (normalized.privacies || []).map(privacy => ({
       name: privacy.name,
       privacy: privacy.privacy
-    })), privacy => privacy.name)
+    }))
 
     const { state, currentStateTrust, currentStatePrivacy, ...portable } = normalized
     const hasStateMachine = sceneTemplateHasStateMachine(sceneTemplateForDevice(normalized, templates))
@@ -942,18 +945,30 @@ export const createSceneCodec = (t: Translate) => {
     }
   }
 
-  const canonicalizeSceneFile = (scene: BoardSceneModel): PortableSceneFile => ({
+  // Import diagnostics refer to authored array indexes, so serialization must keep their order.
+  const serializeSceneFile = (scene: BoardSceneModel): PortableSceneFile => ({
     schema: SCENE_FILE_SCHEMA,
     version: SCENE_FILE_VERSION,
-    templates: sortSceneItems((scene.templates || []).map(canonicalSceneTemplate), template => template.name),
-    devices: sortSceneItems(
-      scene.devices.map((device, index) => canonicalSceneDevice(device, index, scene.templates)),
-      device => device.id
-    ),
-    environmentVariables: sortSceneItems(scene.environmentVariables.map(canonicalSceneEnvironmentVariable), variable => variable.name),
+    templates: (scene.templates || []).map(canonicalSceneTemplate),
+    devices: scene.devices.map((device, index) => canonicalSceneDevice(device, index, scene.templates)),
+    environmentVariables: scene.environmentVariables.map(canonicalSceneEnvironmentVariable),
     rules: scene.rules.map(canonicalSceneRule),
     specs: scene.specs.map(canonicalSceneSpec)
   })
+
+  const canonicalizeSceneFile = (scene: BoardSceneModel): PortableSceneFile => {
+    const portable = serializeSceneFile(scene)
+    return {
+      ...portable,
+      templates: sortSceneItems(portable.templates, template => template.name),
+      devices: sortSceneItems(portable.devices.map(device => ({
+        ...device,
+        ...(device.variables ? { variables: sortSceneItems(device.variables, variable => variable.name) } : {}),
+        ...(device.privacies ? { privacies: sortSceneItems(device.privacies, privacy => privacy.name) } : {})
+      })), device => device.id),
+      environmentVariables: sortSceneItems(portable.environmentVariables, variable => variable.name)
+    }
+  }
 
   const normalizeSceneFile = (raw: unknown): BoardSceneModel => {
     const payload = raw as any
@@ -1033,6 +1048,7 @@ export const createSceneCodec = (t: Translate) => {
     assertSceneEnvironmentCoverage,
     assertUniqueSceneDeviceIds,
     assertSceneReferences,
+    serializeSceneFile,
     canonicalizeSceneFile,
     normalizeSceneFile
   }

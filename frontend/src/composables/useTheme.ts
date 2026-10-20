@@ -1,9 +1,12 @@
 import { computed, ref } from 'vue'
 
 export type ThemeMode = 'light' | 'dark'
+export type ColorPalette = 'copper' | 'monochrome'
 
 const THEME_STORAGE_KEY = 'iot_verify_theme'
+const PALETTE_STORAGE_KEY = 'iot_verify_palette'
 const theme = ref<ThemeMode>('light')
+const palette = ref<ColorPalette>('copper')
 const followsSystem = ref(false)
 let initialized = false
 
@@ -22,6 +25,7 @@ const applyTheme = (mode: ThemeMode) => {
   if (typeof document === 'undefined') return
   const root = document.documentElement
   root.dataset.theme = mode
+  root.dataset.palette = palette.value
   root.classList.toggle('dark', mode === 'dark')
   root.classList.toggle('light', mode === 'light')
   root.style.colorScheme = mode
@@ -40,6 +44,8 @@ export const initializeTheme = () => {
   // No stored preference means "follow the OS", which is also the first-run default.
   // A stored value is an explicit user choice and wins until it is reset.
   const storedTheme = readStoredTheme()
+  palette.value = typeof localStorage !== 'undefined' && localStorage.getItem(PALETTE_STORAGE_KEY) === 'monochrome'
+    ? 'monochrome' : 'copper'
   followsSystem.value = storedTheme === null
   theme.value = storedTheme ?? getSystemTheme()
   applyTheme(theme.value)
@@ -67,28 +73,19 @@ export const useTheme = () => {
     applyTheme(theme.value)
   }
 
-  /**
-   * User-facing cycle: light -> dark -> follow system -> light.
-   * Keeps "follow system" reachable instead of leaving it write-only.
-   */
-  const cycleThemeMode = () => {
-    if (followsSystem.value) {
-      setTheme('light')
-      return
-    }
-    if (theme.value === 'light') {
-      setTheme('dark')
-      return
-    }
-    resetThemeToSystem()
+  const setPalette = (value: ColorPalette) => {
+    palette.value = value
+    localStorage.setItem(PALETTE_STORAGE_KEY, value)
+    applyTheme(theme.value)
   }
 
   return {
     theme,
+    palette,
     followsSystem,
     isDark: computed(() => theme.value === 'dark'),
     setTheme,
-    cycleThemeMode,
+    setPalette,
     resetThemeToSystem
   }
 }

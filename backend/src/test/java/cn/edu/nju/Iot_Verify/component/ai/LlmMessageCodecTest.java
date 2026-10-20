@@ -1,6 +1,7 @@
 package cn.edu.nju.Iot_Verify.component.ai;
 
 import cn.edu.nju.Iot_Verify.component.ai.model.LlmMessage;
+import cn.edu.nju.Iot_Verify.component.ai.model.LlmChatResponse;
 import cn.edu.nju.Iot_Verify.component.ai.model.LlmRole;
 import cn.edu.nju.Iot_Verify.component.ai.model.LlmToolCall;
 import cn.edu.nju.Iot_Verify.exception.PersistedDataIntegrityException;
@@ -12,6 +13,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -24,6 +26,26 @@ class LlmMessageCodecTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final LlmMessageCodec codec = new LlmMessageCodec(objectMapper);
+
+    @Test
+    void opaqueContinuationRemainsInMemoryAndNeverEntersHistoryOrJson() throws Exception {
+        var calls = List.of(new LlmToolCall("call-opaque", "board_overview", "{}"));
+        var response = new LlmChatResponse("visible", calls, "safe summary", List.of("encrypted-private-state"));
+        var message = LlmMessage.assistantToolCalls(response.toolCalls(), response.continuationItems());
+        assertEquals(List.of("encrypted-private-state"), message.continuationItems());
+        assertFalse(objectMapper.writeValueAsString(response).contains("encrypted-private-state"));
+        assertFalse(objectMapper.writeValueAsString(message).contains("encrypted-private-state"));
+        assertFalse(response.toString().contains("encrypted-private-state"));
+        assertFalse(message.toString().contains("encrypted-private-state"));
+
+        ChatMessagePo po = new ChatMessagePo();
+        po.setRole("assistant");
+        po.setContent(codec.serializeToolCalls(message.toolCalls()));
+        assertFalse(po.getContent().contains("encrypted-private-state"));
+        var restored = codec.toMessage(po);
+        assertEquals(calls, restored.toolCalls());
+        assertTrue(restored.continuationItems().isEmpty());
+    }
 
     @Test
     void toMessages_shouldParseStructuredToolResult() {
@@ -126,5 +148,41 @@ class LlmMessageCodecTest {
         assertEquals("id_9", msg.toolCalls().get(0).id());
         assertEquals("add_device", msg.toolCalls().get(0).name());
         assertEquals("{\"x\":1}", msg.toolCalls().get(0).argumentsJson());
+    }
+
+    @Test
+    void formalFixSuggestionsUseStableReferencesWithoutExposingTheirSignatureToTheModel() throws Exception {
+        String signature = "signed-proposal-" + "x".repeat(390);
+        String result = objectMapper.writeValueAsString(Map.of(
+                "traceId", 31,
+                "suggestions", List.of(
+                        Map.of("strategy", "parameter", "description", "Lower the threshold",
+                                "suggestionToken", signature),
+                        Map.of("strategy", "remove", "description", "Remove the conflicting rule",
+                                "suggestionToken", "second-signature"))));
+        ChatMessagePo po = new ChatMessagePo();
+        po.setId(521L);
+        po.setRole("tool");
+        po.setContent(codec.serializeToolResult("fix-call", result));
+
+        var projected = objectMapper.readTree(codec.toMessage(po).content());
+
+        assertEquals("521:1", projected.path("suggestions").get(0).path("suggestionId").asText());
+        assertEquals("521:2", projected.path("suggestions").get(1).path("suggestionId").asText());
+        assertEquals("Lower the threshold", projected.path("suggestions").get(0).path("description").asText());
+        assertFalse(projected.path("suggestions").get(0).has("suggestionToken"));
+        assertFalse(projected.path("suggestions").get(1).has("suggestionToken"));
+        assertTrue(po.getContent().contains(signature));
+        assertEquals(projected, objectMapper.readTree(codec.toMessage(po).content()));
+    }
+
+    @Test
+    void signedRepairOptionsWithoutAPersistedIdentityCannotBecomeSelectable() {
+        ChatMessagePo po = new ChatMessagePo();
+        po.setRole("tool");
+        po.setContent(codec.serializeToolResult("fix-call",
+                "{\"suggestions\":[{\"suggestionToken\":\"signature\"}]}"));
+
+        assertThrows(PersistedDataIntegrityException.class, () -> codec.toMessage(po));
     }
 }

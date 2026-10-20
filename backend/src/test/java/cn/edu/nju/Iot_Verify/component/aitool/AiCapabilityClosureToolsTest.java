@@ -129,6 +129,28 @@ class AiCapabilityClosureToolsTest {
     }
 
     @Test
+    void verificationDetailCarriesExactAvailableAndUnavailableTraceReferences() throws Exception {
+        var available = cn.edu.nju.Iot_Verify.dto.trace.TraceSummaryDto.builder()
+                .id(91L).verificationTaskId(21L).stateCount(4).dataAvailable(true).build();
+        var unavailable = cn.edu.nju.Iot_Verify.dto.trace.TraceSummaryDto.builder()
+                .id(92L).verificationTaskId(21L).dataAvailable(false).build();
+        when(verificationService.getRun(7L, 21L)).thenReturn(VerificationRunDto.builder()
+                .id(21L).counterexampleCount(1).counterexamples(List.of(available, unavailable)).build());
+
+        JsonNode loaded = objectMapper.readTree(new GetVerificationRunTool(verificationService, objectMapper)
+                .execute("{\"runId\":21}"));
+
+        assertEquals(21L, loaded.path("runId").asLong());
+        assertEquals(91L, loaded.path("counterexamples").get(0).path("traceId").asLong());
+        assertEquals(21L, loaded.path("counterexamples").get(0).path("runId").asLong());
+        assertEquals(4, loaded.path("counterexamples").get(0).path("stateCount").asInt());
+        assertEquals(92L, loaded.path("counterexamples").get(1).path("traceId").asLong());
+        assertFalse(loaded.path("counterexamples").get(1).path("dataAvailable").asBoolean());
+        assertFalse(loaded.path("counterexamples").get(1).has("stateCount"));
+        assertFalse(loaded.path("counterexamples").get(1).has("violatedSpecification"));
+    }
+
+    @Test
     void manageBoardHistory_returnsExactAppliedEditAndAvailability() throws Exception {
         when(boardStorageService.undoLastEdit(7L)).thenReturn(new BoardUndoResultDto(
                 true, "RULE", "CREATE", "UNDO_CREATE", List.of(), List.of(),
@@ -158,6 +180,7 @@ class AiCapabilityClosureToolsTest {
                 org.mockito.ArgumentMatchers.eq(7L),
                 org.mockito.ArgumentMatchers.eq("manage_board_history"),
                 org.mockito.ArgumentMatchers.eq("board-edit-history"),
+                org.mockito.ArgumentMatchers.eq("Undo/redo history"),
                 org.mockito.ArgumentMatchers.anyMap(),
                 org.mockito.ArgumentMatchers.eq("domain-history-token")))
                 .thenReturn("history-confirmation-token");
@@ -173,7 +196,7 @@ class AiCapabilityClosureToolsTest {
         verify(boardStorageService, never()).clearBoardEditHistory(
                 org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyString());
 
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", "history-confirmation-token");
         when(destructiveActionGuard.consume(
                 org.mockito.ArgumentMatchers.eq(7L),
                 org.mockito.ArgumentMatchers.eq("manage_board_history"),
@@ -208,6 +231,7 @@ class AiCapabilityClosureToolsTest {
                 org.mockito.ArgumentMatchers.eq(7L),
                 org.mockito.ArgumentMatchers.eq("clear_board"),
                 org.mockito.ArgumentMatchers.eq("current-board"),
+                org.mockito.ArgumentMatchers.eq("Whole Board"),
                 org.mockito.ArgumentMatchers.anyMap(),
                 org.mockito.ArgumentMatchers.eq("domain-token")))
                 .thenReturn("confirmation-token");
@@ -222,7 +246,7 @@ class AiCapabilityClosureToolsTest {
         verify(boardStorageService, never()).saveBoardBatch(
                 org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any());
 
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", "confirmation-token");
         when(destructiveActionGuard.consume(
                 org.mockito.ArgumentMatchers.eq(7L),
                 org.mockito.ArgumentMatchers.eq("clear_board"),

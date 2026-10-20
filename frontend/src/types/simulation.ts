@@ -3,10 +3,9 @@
 import type { ModelPlaybackScene, RunInitiator } from './model'
 import type { ModelRunSnapshot, ModelSemantics } from './modelSemantics'
 import type { AsyncTaskStatus, TaskProgressStage } from './task'
-import type { ModelGenerationIssue, TraceTriggeredRule } from './verify'
+import type { ModelGenerationIssue, TraceState } from './verify'
 import type { RunPersistence } from './runPersistence'
 import type { AttackScenario } from './attackScenario'
-import type { ModelTokenSource } from './modelToken'
 
 // 模拟请求 DTO
 // Run parameters only; the scene comes from the caller's persisted board server-side.
@@ -28,7 +27,7 @@ export interface SimulationResult {
   modelComplete: boolean
   disabledRuleCount: number
   generationIssues: ModelGenerationIssue[]
-  states: SimulationState[]
+  states: TraceState[]
   steps: number
   requestedSteps: number
   nusmvOutput: string
@@ -40,53 +39,10 @@ export interface SimulationResult {
    */
   traceId?: number
   /**
-   * Whether that saved trajectory still holds its SMV model. An id alone was the wrong gate for the
-   * download: every saved run has one, but a run saved before the model was persisted has no model,
-   * so the button appeared and the download failed. Both must hold.
+   * Whether the saved trajectory's SMV model is available. Downloads require both a saved identity
+   * and the server-reported model availability.
    */
   hasSmvModel?: boolean
-}
-
-// 模拟状态
-export interface SimulationState {
-  stateIndex: number
-  devices: SimulationDevice[]
-  triggeredRules: TraceTriggeredRule[]          // rules that drove the transition into this state
-  compromisedAutomationLinks: TraceTriggeredRule[] // rule delivery links selected as compromised
-  trustPrivacies?: SimulationTrustPrivacy[]     // state-level trust/privacy (backend TraceStateDto.trustPrivacies)
-  envVariables?: SimulationVariable[]           // board environment variables using user-facing names
-  globalVariables?: SimulationVariable[]        // NuSMV runtime/global variables, e.g. attack count
-}
-
-// 模拟中的设备
-export interface SimulationDevice {
-  deviceId: string
-  deviceLabel: string
-  templateName: string
-  modelTokenSource: ModelTokenSource
-  state?: string
-  mode?: string
-  compromised?: boolean
-  variables: SimulationVariable[]
-  trustPrivacy?: SimulationTrustPrivacy[]
-  privacies?: SimulationTrustPrivacy[]
-}
-
-// 模拟变量
-export interface SimulationVariable {
-  name: string
-  value: string
-  trust?: string | null
-  modelTokenSource: ModelTokenSource
-}
-
-// 可信度/隐私
-export interface SimulationTrustPrivacy {
-  name: string
-  propertyScope: 'state' | 'variable' | 'content'
-  mode?: string | null
-  trust?: boolean | null
-  privacy?: string | null
 }
 
 // 模拟记录摘要 (列表用) — SimulationTraceSummaryDto 不返回 userId
@@ -121,7 +77,7 @@ export type SimulationTraceSummary = AvailableSimulationTraceSummary | Unavailab
 export interface SimulationTrace extends Omit<AvailableSimulationTraceSummary, 'dataAvailable' | 'id'> {
   id?: number
   playbackScene: ModelPlaybackScene
-  states: SimulationState[]
+  states: TraceState[]
   logs: string[]
   nusmvOutput: string
   modelSemantics: ModelSemantics

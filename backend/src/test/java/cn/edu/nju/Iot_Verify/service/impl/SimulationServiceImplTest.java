@@ -92,6 +92,22 @@ import static org.mockito.Mockito.*;
  */
 @ExtendWith(MockitoExtension.class)
 class SimulationServiceImplTest {
+    @Test
+    void progressUsesOnlyOwnedScalarsAndPreservesTerminalFallbacks() {
+        var progress = mock(cn.edu.nju.Iot_Verify.repository.projection.SimulationTaskProgressProjection.class);
+        when(progress.getProgress()).thenReturn(null);
+        when(simulationTaskRepository.findProgressByIdAndUserId(7L, 1L)).thenReturn(Optional.of(progress));
+        for (var status : SimulationTaskPo.TaskStatus.values()) {
+            when(progress.getStatus()).thenReturn(status);
+            assertEquals(status == SimulationTaskPo.TaskStatus.PENDING || status == SimulationTaskPo.TaskStatus.RUNNING
+                    ? 0 : 100, service.getTaskProgress(1L, 7L));
+        }
+        when(progress.getProgress()).thenReturn(23);
+        assertEquals(23, service.getTaskProgress(1L, 7L));
+        assertThrows(cn.edu.nju.Iot_Verify.exception.ResourceNotFoundException.class,
+                () -> service.getTaskProgress(2L, 7L));
+        verify(simulationTaskRepository, never()).findByIdAndUserId(any(), any());
+    }
 
     @Mock private SmvGenerator smvGenerator;
     @Mock private EnvironmentProvenanceCollector provenanceCollector;
@@ -192,7 +208,7 @@ class SimulationServiceImplTest {
         lenient().when(userRepository.findByIdForUpdate(anyLong())).thenReturn(Optional.of(new UserPo()));
         lenient().when(userRepository.existsById(anyLong())).thenReturn(true);
         DeviceManifest templateSnapshot = DeviceManifest.builder().name("light").build();
-        lenient().when(smvGenerator.captureDeviceModel(anyLong(), anyList()))
+        lenient().when(smvGenerator.captureDeviceModelFromTemplateSnapshots(anyList(), anyMap()))
                 .thenReturn(new SmvGenerator.CapturedDeviceModel(
                         Map.of("light", templateSnapshot), Map.of()));
         lenient().when(smvGenerator.buildDeviceSmvMapFromTemplateSnapshots(anyList(), anyMap()))
@@ -1064,17 +1080,55 @@ class SimulationServiceImplTest {
     }
 
     @Test
-    void simulateWithTemplateSnapshot_neverReloadsMutableTemplateRepository() {
-        Map<String, DeviceManifest> supplied = Map.of(
+    void simulate_usesOneBoardCaptureAndNeverReloadsMutableTemplates() {
+        var request = simRequest(singleDevice(), List.of(), 10, false, 0, false);
+        var initial = boardDataConverter.getModelInputSnapshot(1L);
+        Map<String, DeviceManifest> templates = Map.of(
                 "light", DeviceManifest.builder().name("light").build());
-        when(smvGenerator.captureDeviceModelFromTemplateSnapshots(anyList(), same(supplied)))
-                .thenReturn(new SmvGenerator.CapturedDeviceModel(supplied, Map.of()));
+        var board = new BoardDataConverter.ModelInputSnapshot(initial.nodes(), initial.devices(),
+                initial.environmentVariables(), initial.rules(), initial.specifications(), templates);
+        when(boardDataConverter.getModelInputSnapshot(1L)).thenReturn(board);
+        org.mockito.Mockito.clearInvocations(boardDataConverter);
+        when(smvGenerator.captureDeviceModelFromTemplateSnapshots(anyList(), same(board.templateManifests())))
+                .thenReturn(new SmvGenerator.CapturedDeviceModel(board.templateManifests(), Map.of()));
         syncSimulationExecutor.shutdown();
 
-        assertThrows(ServiceUnavailableException.class, () -> service.simulateWithTemplateSnapshot(
-                1L, simRequest(singleDevice(), List.of(), 10, false, 0, false), supplied));
+        assertThrows(ServiceUnavailableException.class, () -> service.simulate(1L, request));
 
-        verify(smvGenerator).captureDeviceModelFromTemplateSnapshots(anyList(), same(supplied));
+        verify(boardDataConverter).getModelInputSnapshot(1L);
+        verify(smvGenerator).captureDeviceModelFromTemplateSnapshots(anyList(), same(board.templateManifests()));
+        verify(smvGenerator, never()).captureDeviceModel(anyLong(), anyList());
+    }
+
+    @Test
+    void acceptedSimulationFreezesItsBoardIdentityWithoutSpecifications() {
+        var request = simRequest(singleDevice(), List.of(), 10, false, 0, false);
+        var initial = boardDataConverter.getModelInputSnapshot(1L);
+        var templates = Map.of("light", DeviceManifest.builder().name("light").build());
+        var spec = new cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto();
+        spec.setId("irrelevant-to-simulation");
+        var board = new BoardDataConverter.ModelInputSnapshot(initial.nodes(), initial.devices(),
+                initial.environmentVariables(), initial.rules(), List.of(spec), templates);
+        when(boardDataConverter.getModelInputSnapshot(1L)).thenReturn(board);
+        when(smvGenerator.captureDeviceModelFromTemplateSnapshots(anyList(), eq(templates)))
+                .thenReturn(new SmvGenerator.CapturedDeviceModel(templates, Map.of()));
+        when(simulationTaskRepository.save(any(SimulationTaskPo.class))).thenAnswer(invocation -> {
+            SimulationTaskPo task = invocation.getArgument(0);
+            task.setId(1000L);
+            return task;
+        });
+
+        serviceWithSimulationExecutor(new CapturingThreadPoolTaskExecutor()).submitSimulation(1L, request);
+
+        var saved = ArgumentCaptor.forClass(SimulationTaskPo.class);
+        verify(simulationTaskRepository).save(saved.capture());
+        var captured = cn.edu.nju.Iot_Verify.util.JsonUtils.fromJson(saved.getValue().getModelSnapshotJson(), ModelRunSnapshotDto.class);
+        var canonical = new cn.edu.nju.Iot_Verify.util.ModelFingerprint(new ObjectMapper().findAndRegisterModules());
+        assertEquals(canonical.simulationFingerprint(board), captured.getModelFingerprint());
+        spec.setId("changed-specification");
+        assertEquals(canonical.simulationFingerprint(board), captured.getModelFingerprint());
+        board.devices().get(0).setState("changed-after-submission");
+        assertNotEquals(canonical.simulationFingerprint(board), captured.getModelFingerprint());
         verify(smvGenerator, never()).captureDeviceModel(anyLong(), anyList());
     }
 
@@ -1465,7 +1519,7 @@ class SimulationServiceImplTest {
                 .id(60L).userId(1L).status(SimulationTaskPo.TaskStatus.PENDING)
                 .requestedSteps(10).createdAt(LocalDateTime.now()).build();
 
-        when(simulationTaskRepository.findByIdAndUserId(60L, 1L))
+        when(simulationTaskRepository.findByIdAndUserIdForUpdate(60L, 1L))
                 .thenReturn(Optional.of(task));
         when(simulationTaskRepository.cancelTaskIfStillActive(
                 eq(60L), eq(SimulationTaskPo.TaskStatus.CANCELLED), any(LocalDateTime.class), anyList()))

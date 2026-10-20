@@ -38,6 +38,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Shared utilities for fix strategy implementations.
@@ -46,6 +48,17 @@ import java.util.Set;
 public final class FixStrategyUtils {
 
     private FixStrategyUtils() {}
+
+    /** Direct property devices rank probes; the influence scope still includes indirect effects. */
+    static Set<String> propertyDeviceVariables(
+            SpecificationDto spec, Map<String, DeviceSmvData> deviceSmvMap) {
+        if (spec == null) return Set.of();
+        return Stream.of(spec.getAConditions(), spec.getIfConditions(), spec.getThenConditions())
+                .filter(Objects::nonNull).flatMap(List::stream).filter(Objects::nonNull)
+                .map(SpecConditionDto::getDeviceId)
+                .map(reference -> resolveVarNameSafe(reference, deviceSmvMap))
+                .filter(Objects::nonNull).collect(Collectors.toSet());
+    }
 
     /**
      * How forward verification judged one candidate. Search strategies exclude a candidate that was not

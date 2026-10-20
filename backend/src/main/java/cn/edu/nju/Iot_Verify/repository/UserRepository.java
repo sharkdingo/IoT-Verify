@@ -18,4 +18,8 @@ public interface UserRepository extends JpaRepository<UserPo, Long> {
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select u from UserPo u where u.id = :id")
     Optional<UserPo> findByIdForUpdate(@Param("id") Long id);
+
+    @Lock(LockModeType.PESSIMISTIC_READ)
+    @Query("select u from UserPo u where u.id = :id")
+    Optional<UserPo> findByIdForShare(@Param("id") Long id);
 }

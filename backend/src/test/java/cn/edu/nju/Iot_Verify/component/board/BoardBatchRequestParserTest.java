@@ -68,6 +68,7 @@ class BoardBatchRequestParserTest {
         assertThat(exception.getMessage())
                 .contains("backend/device-template-schema.json")
                 .contains("UnknownBehavior");
+        assertThat(exception.getErrors()).containsKey("templateSnapshots[0].manifest.UnknownBehavior");
     }
 
     @Test

@@ -9,13 +9,15 @@ Backend options are read from `backend/src/main/resources/application.yaml` usin
 variable without editing the file. Frontend options are Vite build-time variables (see
 the [Frontend](#frontend-vite) section at the end).
 
-Verified against code on 2026-07-31. Source:
+Verified against code on 2026-10-15. Source:
+`backend/pom.xml`,
 `backend/src/main/resources/application.yaml`, `configure/ThreadPoolConfig`,
 `configure/FuzzAdmissionConfig`, `configure/AsyncTaskAdmissionConfig`,
 `configure/ChatExecutionConfig`, `configure/NusmvConfig`, `configure/OperationAdmissionConfig`,
 `configure/ProductionSafetyCheck`, `configure/ApplicationTimeConfig`,
 `security/RequestBodySizeFilter`, `security/AuthRateLimitGuard`, `service/UserOperationGuard`,
 `service/DistributedInteractiveExecutionStore`,
+`component/ai/provider/OpenAiLlmProvider`,
 `frontend/src/api/`, `frontend/.env.example`.
 
 ---
@@ -52,6 +54,17 @@ so a serialized response can be submitted unchanged.
 
 ## Server
 
+### Development JVM launch
+
+The Spring Boot Maven plugin sets `optimizedLaunch=false` in `backend/pom.xml`. This keeps
+normal tiered compilation when using `mvn spring-boot:run`, rather than the plugin's startup-only
+optimization. On JDK 17 that optimization also reduces the available code cache; long sessions
+that exercise model parsing and verification can exhaust it. Packaged `java -jar` launches do not
+use this Maven setting. Explicit JVM arguments can still override the JVM's normal code-cache
+configuration. See [CodeCache diagnostics](../guides/troubleshooting.md#ai-recommendation-failed).
+
+### HTTP server
+
 | Env var | Default | Notes |
 | :--- | :--- | :--- |
 | `SERVER_PORT` | `8080` | Backend HTTP port |
@@ -71,9 +84,9 @@ through Spring's `logging.level.*` properties instead.
 | :--- | :--- | :--- |
 | `JWT_SECRET` | `iot-verify-secret-key-must-be-at-least-256-bits-long-for-hs256` | HS256 signing key (≥256 bits). **Unsafe default — must be overridden in production.** |
 | `JWT_EXPIRATION` | `86400000` | Token lifetime in ms (24h) |
-| `AUTH_LOGIN_RATE_LIMIT_PER_MINUTE` | `10` | Maximum valid login requests per normalized account identifier and backend instance in a one-minute fixed window. |
+| `AUTH_LOGIN_RATE_LIMIT_PER_MINUTE` | `10` | Maximum valid login requests per normalized identifier and backend instance in a one-minute fixed window; account changes reuse this ceiling in a separate user-id bucket. |
 | `AUTH_REGISTER_RATE_LIMIT_PER_HOUR` | `5` | Maximum valid registration requests per phone number and backend instance in a one-hour fixed window. |
-| `AUTH_SOURCE_LOGIN_RATE_LIMIT_PER_MINUTE` | `120` | Higher source-IP ceiling across account identifiers, preventing identifier rotation without coupling ordinary users behind one NAT to the low account limit. |
+| `AUTH_SOURCE_LOGIN_RATE_LIMIT_PER_MINUTE` | `120` | Higher source-IP ceiling across login identifiers; account changes reuse this ceiling in a separate source bucket. Prevents identifier rotation without coupling ordinary users behind one NAT to the low account limit. |
 | `AUTH_SOURCE_REGISTER_RATE_LIMIT_PER_HOUR` | `60` | Higher source-IP ceiling across phone numbers. |
 | `AUTH_RATE_LIMIT_MAX_WINDOWS` | `65536` | Hard per-instance ceiling across active account and source-IP windows. At capacity the guard rejects new window identities and preserves active counters; it never evicts an active bucket to admit a rotating identifier. Values below `2` are clamped to `2`. |
 
@@ -84,8 +97,9 @@ attempt window and `CAPACITY` when a new identity cannot be tracked without evic
 active window. Capacity retry timing follows the earliest tracked expiry rather than
 claiming that the caller exhausted a fresh full window. The guard is intentionally process-local;
 multi-instance deployments must also enforce a distributed ceiling at the TLS reverse
-proxy or API gateway. New passwords contain 10–64 characters and must encode to at most
-72 UTF-8 bytes, matching BCrypt's input boundary.
+proxy or API gateway. Username and password changes share one account-change budget,
+identified by authenticated user id rather than mutable username. Password rules belong
+to the [auth contract](../api/auth.md#post-apiauthregister).
 
 ## Redis
 
@@ -155,7 +169,32 @@ relay. Point `IOT_VERIFY_OPENAI_BASE_URL` at the endpoint and supply the matchin
 | `IOT_VERIFY_OPENAI_RECOMMENDATION_MODEL` | *(empty; reuses `IOT_VERIFY_OPENAI_MODEL`)* | Optional model dedicated to device/rule/specification/scenario recommendations |
 | `IOT_VERIFY_OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible base URL (official API or relay) |
 | `LLM_PROVIDER` | `openai` | Provider implementation selector (currently only `openai`) |
+| `IOT_VERIFY_OPENAI_API` | `auto` | Upstream protocol: `auto`, `chat-completions`, or `responses`. Auto uses Responses for GPT-6 Luna/Sol/Astra and GPT-6.1 Sol, including dated model ids; other model ids use Chat Completions. Set `responses` for a custom deployment name that needs this protocol. |
+| `IOT_VERIFY_OPENAI_REASONING_EFFORT` | *(empty)* | Optional upstream reasoning effort: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`; supported values depend on the model. Empty selects `medium` for the above GPT-6 families and leaves other models' defaults unchanged. |
 | `LLM_TIMEOUT_MINUTES` | `5` | AI request timeout (minutes) |
+
+GPT-6 reasoning with function calls requires the Responses protocol
+([model reference](https://developers.openai.com/api/docs/models/gpt-6-luna)).
+The adapter keeps every registered action available, sends the original output budget,
+and omits temperature when reasoning is enabled. Explicitly forcing Chat Completions
+for these models with reasoning and tools fails rather than disabling either capability.
+The bounded authorization classifier requests `none` to reserve its small output budget
+for the decision; analysis and recommendations retain the configured reasoning effort.
+An OpenAI-compatible relay must implement and honor the chosen model's protocol and
+parameters; accepting a request or echoing an effort value alone does not prove reasoning ran.
+
+Connection setup has a separate fixed 10-second budget covering TCP/TLS establishment;
+it is cleared when OkHttp acquires the connection. Established model requests retain
+the configured read, write, and total request deadline above. SDK retries and transport
+retries are disabled; the chat workflow owns its single typed interruption continuation
+([streaming contract](../api/chat-sse.md)). The transport retains the SDK's protocol
+selection, dispatcher limits, and managed connection pool. Healthy completed requests
+can reuse a connection rather than establish another one for each tool round. The
+existing SDK runtime transport is also a direct compile dependency so its connection
+lifecycle can be observed without reflection.
+Only a detected HTTP/2 stream reset selects HTTP/1 for subsequent requests in that same
+turn. It does not add another retry or change the configured model; a new turn starts
+with the normal protocol selection.
 
 On Windows, changing a User environment variable does not update already-running
 terminals, IDEs, or backend processes. Restart the process that launches Spring Boot, or
@@ -197,7 +236,7 @@ process that starts it.
 
 | Env var | Default | Notes |
 | :--- | :--- | :--- |
-| `FIX_MAX_ATTEMPTS` | `20` | Max main candidate attempts per fix strategy; a multi-threshold parameter search shares this budget between one-threshold probes and joint solving, refinement is separately bounded by `FIX_MAX_REFINE_ATTEMPTS`, and the whole pipeline by `FIX_TIMEOUT_MS` |
+| `FIX_MAX_ATTEMPTS` | `20` | Nominal main candidate attempts per fix strategy; affordable finite searches may finish beyond it under the [shared search policy](../architecture/auto-fix.md#listing-alternatives-fixalternatives). Parameter probes share this nominal budget with joint solving, refinement is separately bounded by `FIX_MAX_REFINE_ATTEMPTS`, and the whole pipeline by `FIX_TIMEOUT_MS` |
 | `FIX_MAX_CANDIDATES_PER_RULE` | `5` | Max candidate fixes per rule |
 | `FIX_MAX_REFINE_ATTEMPTS` | `10` | Max refinement-loop iterations for each listed parameter alternative |
 | `FIX_TIMEOUT_MS` | `300000` | Overall fix timeout / soft deadline (ms) |
@@ -283,14 +322,9 @@ When `spring.profiles.active` contains `prod` or `production` (case-insensitive)
 their unsafe default: `JWT_SECRET`, `DB_PASSWORD`, `IOT_VERIFY_OPENAI_API_KEY`. Override all
 three before deploying.
 
-The case-insensitive match pins `Locale.ROOT`, and that is load-bearing rather than incidental: with the
-JVM's default locale, a Turkish server folds `PRODUCTION` to `productıon` (dotless ı), which matches
-neither profile name — so this guard would not fire and the application would boot in production with
-every default above still in place. `PRODUCTION_PROFILES` on `ProductionSafetyCheck` is the single owner
-of "which profiles are production"; `JwtUtil`'s insecure-JWT-secret warning reads the same set, so the
-warning and the hard failure cannot disagree about what production means.
-`component/nusmv/LocaleSensitiveComparisonTest` fails if any case fold that decides a keyword drops the
-locale.
+`ProductionSafetyCheck.isProductionProfile` owns the profile decision and uses
+`Locale.ROOT` so case-insensitive matching is independent of the host locale.
+`JwtUtil` uses the same helper for its insecure-secret warning.
 
 ---
 

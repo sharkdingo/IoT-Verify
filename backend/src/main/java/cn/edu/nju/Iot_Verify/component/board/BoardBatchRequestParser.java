@@ -50,14 +50,17 @@ public class BoardBatchRequestParser {
                     .with(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
                     .readValue(objectMapper.treeAsTokens(body));
         } catch (UnrecognizedPropertyException exception) {
+            String path = JsonPointerPath.of(exception);
             throw new BadRequestException("Unknown field '" + exception.getPropertyName() + "' at '"
-                    + JsonPointerPath.of(exception) + "'; importing it would lose data, so no board data was changed.");
+                    + path + "'; importing it would lose data, so no board data was changed.",
+                    Map.of(path, "Unknown field '" + exception.getPropertyName() + "'"));
         } catch (JsonProcessingException exception) {
             String path = exception instanceof JsonMappingException mappingException
                     ? JsonPointerPath.of(mappingException)
                     : "request";
             throw new BadRequestException("Invalid board batch value at '" + path + "': "
-                    + exception.getOriginalMessage() + ". No board data was changed.");
+                    + "Value does not match the declared JSON field type. No board data was changed.",
+                    Map.of(path, "Value does not match the declared JSON field type"));
         } catch (IOException exception) {
             throw new BadRequestException("Board batch JSON could not be read; no board data was changed.");
         }
@@ -89,7 +92,18 @@ public class BoardBatchRequestParser {
                 }
             }
             String name = snapshot.path("name").isTextual() ? snapshot.path("name").asText() : null;
-            templateSchemaValidator.validateRawManifest(name, snapshot.get("manifest"));
+            try {
+                templateSchemaValidator.validateRawManifest(name, snapshot.get("manifest"));
+            } catch (BadRequestException error) {
+                Map<String, String> errors = new LinkedHashMap<>();
+                String prefix = "templateSnapshots[" + index + "].";
+                if (error.getErrors().isEmpty()) {
+                    errors.put(prefix + "manifest", error.getMessage());
+                } else {
+                    error.getErrors().forEach((field, reason) -> errors.put(prefix + field, reason));
+                }
+                throw new BadRequestException(error.getMessage(), errors);
+            }
         }
     }
 

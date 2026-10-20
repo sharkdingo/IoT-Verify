@@ -1,40 +1,25 @@
-import type { SpecResult, VerificationOutcome } from '@/types/verify'
+import type { SpecResult, VerificationOutcome, VerificationResult } from '@/types/verify'
+import { describeSpecification, type ModelPresentationContext } from '@/utils/modelPresentation'
+import { formatModelTokenBySource } from '@/utils/modelTokenDisplay'
+import { verdictVariableSourceKeys } from './verdictVariableSource'
 
-export const normalizeSpecResult = (value: unknown): SpecResult => {
-  const candidate = value as Partial<SpecResult> | undefined
-  const expression = candidate?.expression || ''
+export const presentSpecificationResult = (result: SpecResult, t: ModelPresentationContext['t']) => {
+  const snapshot = result.specificationSnapshot
+  const prefix = `${result.formulaKind} `
   return {
-    specId: candidate?.specId || '',
-    templateId: candidate?.templateId || '',
-    specificationLabel: candidate?.specificationLabel || '',
-    formulaPreview: candidate?.formulaPreview || '',
-    formulaKind: candidate?.formulaKind === 'LTL'
-      || String(expression).trim().toUpperCase().startsWith('LTLSPEC') ? 'LTL' : 'CTL',
-    outcome: candidate?.outcome === 'SATISFIED' || candidate?.outcome === 'VIOLATED'
-      || candidate?.outcome === 'INCONCLUSIVE'
-      ? candidate.outcome
-      : 'INCONCLUSIVE',
-    expression
+    description: snapshot ? describeSpecification(snapshot, {
+      t,
+      resolveDevice: id => snapshot.devices[id],
+      formatToken: (id, value) => formatModelTokenBySource(snapshot.devices[id]?.modelTokenSource ?? 'UNKNOWN', value, t),
+      modeCount: id => snapshot.devices[id]?.modeCount ?? 0
+    }) : null,
+    formula: result.formulaPreview.startsWith(prefix) ? result.formulaPreview.slice(prefix.length) : result.formulaPreview,
+    variableSourceLabels: verdictVariableSourceKeys(snapshot).map(key => ({
+      key, label: t(key), unresolved: key === 'app.specVariableSourceUnresolvedShort'
+    }))
   }
 }
 
-export const normalizeSpecResults = (results?: unknown[]): SpecResult[] =>
-  (results || []).map(result => normalizeSpecResult(result))
-
-export const getVerificationOutcome = (result: any): VerificationOutcome => {
-  if (result?.outcome === 'SATISFIED' || result?.outcome === 'VIOLATED' || result?.outcome === 'INCONCLUSIVE') {
-    return result.outcome
-  }
-  if ((result?.checkLogs || []).some((log: unknown) => String(log).includes('[verification-inconclusive]'))) {
-    return 'INCONCLUSIVE'
-  }
-  if ((result?.traces?.length || 0) > 0) return 'VIOLATED'
-
-  const specResults = normalizeSpecResults(result?.specResults)
-  if (specResults.some(specResult => specResult.outcome === 'VIOLATED')) return 'VIOLATED'
-  if (specResults.some(specResult => specResult.outcome === 'INCONCLUSIVE')) return 'INCONCLUSIVE'
-  if (specResults.length > 0 && specResults.every(specResult => specResult.outcome === 'SATISFIED')) {
-    return 'SATISFIED'
-  }
-  return 'INCONCLUSIVE'
-}
+export const getVerificationOutcome = (
+  result: Pick<VerificationResult, 'outcome'> | null | undefined
+): VerificationOutcome => result?.outcome ?? 'INCONCLUSIVE'

@@ -4,7 +4,6 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 import { i18n } from '@/assets/i18n'
 import ControlCenter from '../ControlCenter.vue'
-import RuleBuilderDialog from '../RuleBuilderDialog.vue'
 
 afterEach(() => {
   i18n.global.locale.value = 'en'
@@ -12,19 +11,6 @@ afterEach(() => {
 })
 
 describe('board modal surfaces', () => {
-  it('keeps the rule builder above the fixed board navigation', () => {
-    const wrapper = mount(RuleBuilderDialog, {
-      props: { modelValue: true, nodes: [], deviceTemplates: [] },
-      global: { plugins: [i18n] }
-    })
-
-    // `--z-modal` now lives on `.iot-dialog-overlay`, so the builder sits above the fixed board nav by
-    // being built from that layer rather than by naming the layer itself.
-    expect(wrapper.classes()).toContain('iot-dialog-overlay')
-    expect(wrapper.get('[role="dialog"]').attributes('aria-modal')).toBe('true')
-    wrapper.unmount()
-  })
-
   it('keeps the specification condition actions reachable in short viewports', async () => {
     const wrapper = mount(ControlCenter, {
       props: { activeSection: 'specs', nodes: [], deviceTemplates: [] },

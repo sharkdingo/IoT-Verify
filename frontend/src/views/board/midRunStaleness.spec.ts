@@ -92,9 +92,9 @@ describe('a run that completes after the board changed', () => {
    * is how a guard stops guarding.
    */
   it.each([
-    ['const handleVerify = ', 'verificationResultStale', null],
+    ['const handleVerify = ', 'verificationResultStale', 'adoptVerificationRunResult'],
     ['const handleSimulate = ', 'simulationResultStale', 'adoptSimulationRunResult'],
-    ['const pollAsyncVerification = ', 'verificationResultStale', null],
+    ['const pollAsyncVerification = ', 'verificationResultStale', 'adoptVerificationRunResult'],
     ['const watchSimulationTask = ', 'simulationResultStale', 'adoptSimulationRunResult']
   ])('%s captures the counter at submission and compares it on arrival', (declaration, flag, adopter) => {
     const body = bodyOf(declaration)
@@ -155,8 +155,8 @@ describe('a run that completes after the board changed', () => {
    *
    * `lastSimulationResult` is what every simulation surface describes — the replay bar reads its
    * attack/privacy chips, step counts and `modelSnapshot` from it while animating `savedSimulationStates`
-   * — so writing it on arrival repainted the *visible* trajectory's header with a different run's
-   * semantics, and pointed `openSimulationRunDetails` at the wrong run. Reachable because
+   * derived from that owner — so writing it on arrival would replace the visible trajectory while its
+   * canvas still owns the opened run's frozen scene. Reachable because
    * `ensureHistoricalPlaybackUiAdmission` does not consider `isSimulating`: starting an async run and then
    * replaying something from history while waiting is ordinary use.
    *
@@ -183,7 +183,7 @@ describe('a run that completes after the board changed', () => {
     // the task is complete, but nothing on screen changed.
     const deferralBody = body.slice(deferralAt, body.indexOf('return', deferralAt))
     expect(deferralBody, 'a deferred run must be reported, not dropped')
-      .toContain('notifyAutomaticPlaybackDeferredForReplay()')
+      .toContain('notifyAutomaticPlaybackDeferredForReplay(result,')
     // And with the reason that applies. The editor notice names the open editor as the cause, so using it
     // for a replay would assert something the client knows to be false — the same defect class as the
     // "saved before model persistence was enabled" 404 in `deletedRunSurfaces.spec.ts`.
@@ -238,11 +238,9 @@ describe('a run that completes after the board changed', () => {
     const guardAt = body.search(/isModelPlaybackActive\.value/)
     expect(guardAt, `${declaration} should check for playback before presenting`).toBeGreaterThan(-1)
 
-    // The ref assignment is the presentation: `showResultDialog` is computed from it, so a write while a
-    // replay runs *is* the defect regardless of any dialog flag. Clearing writes are excluded rather than
-    // the first match taken: `handleVerify` opens with `verificationResult.value = null`, the pre-submission
-    // reset, which legitimately precedes the guard and closes nothing the user is looking at.
-    const presentations = [...body.matchAll(/verificationResult\.value = (?!null)/g)]
+    // Adoption opens the result and owns its URL; every call must remain after playback admission.
+    const presentations = [...body.matchAll(/adoptVerificationRunResult\(/g)]
+    expect(body).not.toMatch(/verificationResult\.value = (?!null)/)
     expect(presentations.length, `${declaration} should present its verdict somewhere`).toBeGreaterThan(0)
     for (const presentation of presentations) {
       expect(presentation.index, 'no presentation may precede the playback check').toBeGreaterThan(guardAt)

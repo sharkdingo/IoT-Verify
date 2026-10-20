@@ -1,0 +1,16 @@
+[
+  {
+    "templateName": "Motion Detector",
+    "label": "entry_motion",
+    "variables": [
+      { "name": "motion", "value": "active", "trust": "trusted" }
+    ],
+    "privacies": [
+      { "name": "motion", "privacy": "private" }
+    ]
+  },
+  {
+    "templateName": "Light",
+    "label": "entry_light"
+  }
+]

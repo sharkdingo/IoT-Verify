@@ -1,24 +1,36 @@
 <script setup lang="ts">
-import { onErrorCaptured, ref, watch } from 'vue'
+import { computed, onErrorCaptured, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import FailureDetails from './FailureDetails.vue'
+import { errorDetails, technicalErrorLines } from '@/utils/userMessage'
 
-const props = defineProps<{ resetKey?: string | number }>()
+const props = defineProps<{ resetKey?: string | number; error?: unknown }>()
 const { t } = useI18n()
 const capturedError = ref<unknown>(null)
+const capturedModuleLoadFailure = ref(false)
 const renderEpoch = ref(0)
+const activeError = computed(() => props.error ?? capturedError.value)
+const technicalDetails = computed(() => technicalErrorLines(errorDetails(activeError.value)))
 
 onErrorCaptured((error, _instance, info) => {
   capturedError.value = error
+  // Vue identifies loader failures in both dev and production; a cached failed import needs a new document.
+  capturedModuleLoadFailure.value = info === 'async component loader' || info.endsWith('#runtime-13')
   console.error('Vue subtree failed to render:', info, error)
   return false
 })
 
 watch(() => props.resetKey, () => {
   capturedError.value = null
+  capturedModuleLoadFailure.value = false
   renderEpoch.value += 1
 })
 
 const retry = () => {
+  if (capturedModuleLoadFailure.value) {
+    reloadPage()
+    return
+  }
   capturedError.value = null
   renderEpoch.value += 1
 }
@@ -27,24 +39,26 @@ const reloadPage = () => window.location.reload()
 </script>
 
 <template>
-  <template v-if="capturedError === null">
+  <template v-if="activeError == null">
     <div :key="renderEpoch" class="error-boundary-content">
       <slot />
     </div>
   </template>
-  <section v-else class="error-boundary-fallback" role="alert">
-    <div class="error-boundary-fallback__icon" aria-hidden="true">error_outline</div>
-    <h2>{{ t('app.viewErrorTitle') }}</h2>
-    <p>{{ t('app.viewErrorDescription') }}</p>
-    <div class="error-boundary-fallback__actions">
-      <button type="button" class="error-boundary-fallback__button error-boundary-fallback__button--primary" @click="retry">
-        {{ t('app.retry') }}
-      </button>
-      <button type="button" class="error-boundary-fallback__button" @click="reloadPage">
-        {{ t('app.reloadPage') }}
-      </button>
-    </div>
-  </section>
+  <slot v-else name="fallback" :error="activeError" :retry="retry">
+    <section class="error-boundary-fallback" role="alert" data-testid="app-error-fallback">
+      <div class="error-boundary-fallback__icon" aria-hidden="true">error_outline</div>
+      <h2 class="board-panel-title">{{ t('app.viewErrorTitle') }}</h2>
+      <FailureDetails class="error-boundary-fallback__details" :details="technicalDetails" suggestion="" />
+      <div class="error-boundary-fallback__actions">
+        <button v-if="error == null && !capturedModuleLoadFailure" type="button" class="error-boundary-fallback__button board-action-inline" @click="retry">
+          {{ t('app.retry') }}
+        </button>
+        <button type="button" class="error-boundary-fallback__button board-action-secondary" @click="reloadPage">
+          {{ t('app.reloadPage') }}
+        </button>
+      </div>
+    </section>
+  </slot>
 </template>
 
 <style scoped>
@@ -58,8 +72,8 @@ const reloadPage = () => window.location.reload()
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 12px;
-  padding: 32px;
+  gap: var(--iot-space-md);
+  padding: var(--iot-space-2xl);
   color: var(--text);
   text-align: center;
   background: var(--surface);
@@ -71,40 +85,23 @@ const reloadPage = () => window.location.reload()
   font-size: 42px;
 }
 
-.error-boundary-fallback h2,
-.error-boundary-fallback p {
+.error-boundary-fallback h2 {
   margin: 0;
 }
 
-.error-boundary-fallback p {
-  max-width: 520px;
-  color: var(--text-muted);
+.error-boundary-fallback__details {
+  width: 100%;
+  min-width: 0;
+  max-width: 48rem;
+  text-align: left;
 }
 
 .error-boundary-fallback__actions {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
-  gap: 10px;
-  margin-top: 8px;
+  gap: var(--iot-space-sm);
+  margin-top: var(--iot-space-sm);
 }
 
-.error-boundary-fallback__button {
-  min-height: 38px;
-  padding: 8px 16px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--iot-radius-control);
-  background: var(--surface-elevated);
-  color: var(--text);
-  cursor: pointer;
-}
-
-.error-boundary-fallback__button--primary {
-  border-color: var(--accent-fill);
-  /* Base state, so the base fill — my first pass mapped `--accent-strong` to the hover half, but this is not
-     a hover. `--accent-strong` is the *text* accent's strong variant, and white ink on it measured 1.80:1 in
-     dark theme. */
-  background: var(--accent-fill);
-  color: #ffffff;
-}
 </style>

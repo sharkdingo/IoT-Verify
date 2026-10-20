@@ -1,30 +1,9 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { readThemeTokens, themeColor, luminance, contrast } from './themeTokens'
 
-/**
- * A neutral control's hover must actually change something, and stay readable while it does.
- *
- * Tailwind emits its utilities into `@layer utilities`, and **an unlayered rule beats a layered one at any
- * specificity**. Every rule in `board.css` is unlayered, so `hover:bg-slate-100` on a board surface could
- * never win. Measured in a browser against the built bundle, in dark mode, both outcomes were wrong:
- *
- *   - where the element also carried a bare `bg-slate-*`, an `!important` theme remap owned the background
- *     and the hover did **nothing** — 11.82:1 at rest and 11.82:1 hovered, so the replay bar's Play button
- *     and the history panel's Dismiss button gave no feedback at all;
- *   - where nothing competed, the layered utility did apply and painted Tailwind's `oklch(0.968 …)` =
- *     rgb(241,245,249) — near-white — under light ink: **1.13:1**. The label effectively disappeared.
- *
- * Both are invisible to a light-theme review and to every existing guard: `roleClassVariants` checks
- * variants of *hand-written* classes (`hover:board-*`), and these are Tailwind's own, which do get emitted.
- * `neutralTextContrast` scans resting ink, not hover grounds. So this file owns the third case.
- *
- * The fix is `hover:board-control-hover`, backed by `--surface-control-hover`. Its light value leaves
- * `--text-muted` at 4.23:1 — under AA — because that token is itself tuned to sit at 4.55 on
- * `--surface-control`, so no light value satisfies both. A muted control therefore has to strengthen its
- * ink on hover too, which is the pair this guard enforces. Verified after migration, both themes, all 26
- * sites: ground changes on hover and the hovered ratio is 10.04:1 (dark) / 15.17:1 (light).
- */
+/* Muted controls need a stronger hover ink because the hover ground is darker in light mode. */
 
 const DIRS = ['components', 'components/common', 'views']
 
@@ -41,7 +20,6 @@ const sources = () => {
 }
 
 const boardCss = () => readFileSync(join(__dirname, '..', 'board.css'), 'utf8')
-const baseCss = () => readFileSync(join(__dirname, '..', 'base.css'), 'utf8')
 
 /** Blank comments in place so reported line numbers stay true (see `neutralTextContrast`). */
 const blankComments = (lines: string[]) => {
@@ -67,10 +45,6 @@ const blankComments = (lines: string[]) => {
 
 describe('neutral hover feedback', () => {
   it('never reaches for a layered slate utility as a board hover ground', () => {
-    // `dark:hover:bg-slate-800` is exempt: it is a *pair* with the light branch, both land in the same
-    // layer, and the three surviving sites (SystemInspector's device rows) carry no competing bare
-    // `bg-slate-*`, so nothing outranks them and both halves apply. The defect is the *unpaired* bare
-    // utility, which has no dark counterpart and loses wherever a remap owns the background.
     const offenders: string[] = []
     for (const { name, text } of sources()) {
       blankComments(text.split('\n')).forEach((line, index) => {
@@ -85,36 +59,33 @@ describe('neutral hover feedback', () => {
     expect(offenders).toEqual([])
   })
 
-  it('defines the hover ground so it can outrank the later theme normalisers', () => {
-    const css = boardCss()
-    // Both forms are required, and neither is decoration. The bare rule serves surfaces inside
-    // `.iot-board`; the `.board-timeline` twin serves the two replay bars, which are **siblings** of
-    // `.iot-board` and therefore unreachable from any `.iot-board`-prefixed rule.
-    expect(css, 'the role class must exist').toMatch(
-      /\.hover\\:board-control-hover:hover\s*\{[^}]*var\(--surface-control-hover\)/)
-    expect(css, 'the replay bars need the unprefixed twin').toMatch(
-      /\.board-timeline \.hover\\:board-control-hover:hover\s*\{[^}]*var\(--surface-control-hover\)/)
-
-    // `!important` is load-bearing: the normalisers it must beat are 0-3-0 AND sit later in the file,
-    // so source order cannot rescue a tie. Dropping it made the history panel's Dismiss button show an
-    // identical ground at rest and hovered (5.71:1 both) — measured, not assumed.
-    for (const selector of ['\\.hover\\\\:board-control-hover:hover', '\\.board-timeline \\.hover\\\\:board-control-hover:hover']) {
-      const rule = new RegExp(`${selector}\\s*\\{([^}]*)\\}`).exec(css)
-      expect(rule, `${selector} should be present`).not.toBeNull()
-      expect(rule![1], `${selector} must win over the later 0-3-0 normalisers`).toContain('!important')
+  it('defines shared hover roles outside workspace-specific scopes without theme patches', () => {
+    const css = boardCss().replace(/\/\*[\s\S]*?\*\//g, '')
+    for (const [selector, token] of [
+      ['hover\\:board-control-hover:hover', '--surface-control-hover'],
+      ['hover\\:board-text-strong:hover', '--text']
+    ]) {
+      const rule = css.split('\n').find(line => line.startsWith('.' + selector + ' {'))
+      expect(rule, selector).toBeDefined()
+      expect(rule).toContain('var(' + token + ')')
+      expect(rule).not.toContain('!important')
     }
   })
 
-  it('gives the hover ground a per-theme value, since one value cannot serve both', () => {
-    const css = baseCss()
-    const values = [...css.matchAll(/--surface-control-hover:\s*(#[0-9a-f]{6})/g)].map(m => m[1])
-    // Three theme blocks: `:root` (light), `:root[data-theme='dark']`, `:root[data-theme='light']`.
-    expect(values, 'every theme block must define it, or one theme falls back to nothing').toHaveLength(3)
-    expect(new Set(values).size, 'a single shared value would mean one theme is wrong').toBe(2)
-    // The dark value must be *lighter* than its resting control (#1e293b) and the light value darker
-    // than its own (#f1f5f9) — a hover that moves the wrong way reads as a different control.
-    const dark = values.find(v => v === '#273548')
-    expect(dark, 'dark lightens toward the viewer; #273548 measured --text 10.04 / --text-muted 4.85').toBe('#273548')
+  it('deepens light hover, brightens dark hover and keeps their text readable', () => {
+    for (const theme of ['light', 'dark'] as const) {
+      const tokens = readThemeTokens(theme)
+      const ground = themeColor(tokens, '--surface-control')
+      const hover = themeColor(tokens, '--surface-control-hover')
+      const ink = themeColor(tokens, '--text')
+      if (theme === 'dark') {
+        expect(luminance(hover)).toBeGreaterThan(luminance(ground))
+        expect(contrast(themeColor(tokens, '--text-muted'), hover)).toBeGreaterThanOrEqual(4.5)
+      } else {
+        expect(luminance(hover)).toBeLessThan(luminance(ground))
+      }
+      expect(contrast(ink, hover)).toBeGreaterThanOrEqual(4.5)
+    }
   })
 
   it('pairs a muted resting ink with a strengthened hover ink', () => {

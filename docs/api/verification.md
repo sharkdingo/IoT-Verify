@@ -8,9 +8,10 @@ Responses are wrapped in the standard `Result<T>` envelope (authoritative defini
 [overview.md](overview.md)). The `data` shapes below are what appears under that
 envelope's `data` field.
 
-Verified against code on 2026-08-01. Source:
+Verified against code on 2026-10-19. Source:
 `controller/VerificationController.java`, `controller/SimulationController.java`,
-and the DTOs under `dto/verification/`, `dto/simulation/`, `dto/device/`,
+`service/InteractiveFixExecutionService.java`, and the DTOs under
+`dto/verification/`, `dto/simulation/`, `dto/device/`,
 `dto/rule/`, `dto/spec/`, `dto/trace/`, `dto/fix/`.
 
 ---
@@ -21,24 +22,14 @@ and the DTOs under `dto/verification/`, `dto/simulation/`, `dto/device/`,
 
 **Request body**: `VerificationRequestDto`
 
-This endpoint consumes the **model-boundary** shape. Device references inside
-`RuleDto` and `SpecificationDto` must already match `devices[].varName` (the
-NuSMV-safe normalized form of the board `DeviceNode.id`). Board storage endpoints use
-raw board node ids for the same DTO fields; the frontend `modelRequest.ts` builder and
-backend `BoardDataConverter` perform the boundary conversion before verification or
-simulation.
-
 The request is strict at every nesting level. Unknown fields and scalar type coercions
-return HTTP `400`; a misspelled `attackScenario`, `enablePrivacy`, device label, rule field, or
-environment override is never ignored and cannot silently weaken the model. DTO shape
+return HTTP `400`; a misspelled run option is never ignored. DTO shape
 constraints also return structured HTTP `400` errors; model/template semantic mismatches
 discovered after parsing return `422`.
 
 **The request carries run parameters only — the scene comes from your saved board.** Sending
 `devices`, `rules`, `specs`, `environmentVariables`, or `playbackNodes` returns HTTP `400`. The
-server reads those from the caller's own persisted board so a run always describes the board the
-user saved; while they were client input, an account with an empty board could post a fabricated
-scene and have the resulting `VIOLATED` verdict stored in its own run history. A board with no
+server reads and normalizes those from the caller's persisted board. A board with no
 devices, or none with a specification, returns `422` naming what to add.
 
 | Field | Type | Required | Default | Notes |
@@ -79,8 +70,8 @@ displayLabel? }`. `deviceId`/`ruleId` remain the stable identities; `displayLabe
 display-only name captured from the submitted device or rule so history does not depend
 on the mutable current Board.
 
-Requests use only the structured `attackScenario`. Obsolete top-level `isAttack` and
-`attackBudget` request fields are unknown fields and return HTTP `400`; callers must state
+Requests use only the structured `attackScenario`. Obsolete top-level `isAttack`, `attack`,
+and `attackBudget` request fields are rejected with HTTP `400`; callers must state
 `NONE`, `EXACT_POINTS`, or verification-only `ANY_UP_TO_BUDGET` explicitly. Run responses
 still expose derived `isAttack` and `attackBudget` summary fields for convenient display.
 
@@ -252,6 +243,11 @@ lock the task row before sampling the microsecond database time and before persi
 verification counterexamples or simulation traces. This prevents a lock-delayed worker from
 publishing stale evidence and keeps creation/completion ordering valid even for sub-second tasks.
 
+Verification and simulation progress reads confirm task ownership through a scalar query selecting
+only persisted progress and status. The response retains local-worker progress precedence, then
+persisted progress, then the terminal-state fallback; missing or foreign tasks still return `404`.
+Progress polling does not hydrate frozen input, model text, or diagnostic payloads.
+
 ### `GET /api/verify/tasks` — verification task status layer
 
 Optional query parameter: `excludeTaskIds=1,2,3`. Use it when the frontend is already
@@ -284,12 +280,21 @@ the run-history endpoint so their counterexamples are removed atomically.
 - `GET /api/verify/runs/{id}` returns `VerificationRunDto`, adding `specResults`,
   `checkLogs`, and `nusmvOutput` without task lifecycle fields such as status/progress.
 - `GET /api/verify/runs/{id}/traces` returns the run's replayable `TraceDto[]`.
-- `GET /api/verify/traces/{id}` returns one replayable `TraceDto` with its frozen request,
-  model snapshot, and playback scene. A selected history row or
+- `GET /api/verify/traces/{id}` returns one replayable `TraceDto` with model context and
+  a playback scene derived from its owning run's frozen request. A selected history row or
   `run=verification:<runId>&trace=<traceId>` link must use this leaf endpoint and verify that
   `verificationTaskId` equals the named `runId`; sibling traces must not be required to decode.
 - `DELETE /api/verify/runs/{id}` deletes the complete result and all linked
   counterexamples in one transaction.
+
+The run list, run detail, and full run-trace collection each capture their related rows in one
+read-only transaction. Trace summaries use immutable constructor projections, avoiding repeated
+dynamic-proxy dispatch for their bounded scalar fields.
+Each read decodes and validates those captured rows after returning its standalone database
+connection; a caller's enclosing transaction retains its ownership. This preserves a consistent
+result without occupying a connection during JSON validation, sorting, and DTO assembly. Decoding
+exceptions that escape the service still mark a joined caller transaction for rollback even when
+that caller catches them.
 
 An `INCONCLUSIVE` run can still have a nonzero `counterexampleCount`: a parsed property
 violation and its trace may be retained before another emitted property is missing or
@@ -311,14 +316,15 @@ for replay or repair only with a clear partial-evidence qualifier.
 | `counterexampleCount` | `Integer` | Persisted traces whose history-summary metadata validates; damaged summary placeholders are excluded and the count may be lower than `violatedSpecCount` or `counterexamples.length` |
 | `disabledRuleCount` / `skippedSpecCount` | `Integer` | Model omissions |
 | `generationIssues` | `ModelGenerationIssueDto[]` | Itemized omission explanations |
-| `counterexamples` | `TraceSummaryDto[]` | Lightweight nested evidence with id, violated-specification snapshot, state count and timestamp — no model flag, because the model is run-level and this run's own `hasSmvModel` answers for all of them; the history query does not read the full states or frozen request, and damaged summary fields remain as `dataAvailable=false` placeholders |
+| `counterexamples` | `TraceSummaryDto[]` | [Lightweight nested evidence](#trace-summaries); no per-trace model flag, because this run's `hasSmvModel` answers for all of them |
 | `hasSmvModel` | `Boolean` | Whether the run still holds the model it checked, gating the per-run download; see [Downloading the SMV model](#downloading-the-smv-model--one-model-per-run-addressed-by-run) |
 | `dataAvailable` | `Boolean` | `true` when the persisted summary fields decoded successfully; full state and frozen-request integrity is checked when detail is opened |
 | `unavailableReasonCode` | `String` | Present for an unavailable row; currently `PERSISTED_SEMANTIC_DATA_INVALID` |
 
 `VerificationRunDto` contains the run metadata and semantic result fields plus
-`specResults`, `checkLogs`, and `nusmvOutput`. It reports `counterexampleCount` but does
-not embed counterexample summaries or full trace states; load those from
+`specResults`, `checkLogs`, and `nusmvOutput`. Its `counterexamples` array carries the same
+lightweight trace references and unavailable placeholders as the run list. These ids belong
+to this run alone; a run id is not a trace id. Full trace states remain separate in
 `GET /api/verify/runs/{id}/traces`.
 
 `violatedSpecCount` and `counterexampleCount` are intentionally separate. NuSMV can
@@ -331,10 +337,26 @@ counterexamples are evidence/actions nested under that result, not independent r
 One malformed run or trace summary does not fail the whole history list. The backend
 returns an unavailable placeholder with its stable id/timestamp where possible. Clients
 may offer deletion, but must disable open, replay, and repair actions for that item.
-Trace summary queries return only ownership, the violated-specification snapshot, persisted
-state count, and timestamps. Mapping validates the owning task id, snapshot, and positive
-count. They deliberately exclude `statesJson` and `requestJson`, so sorting history cannot
-materialize full trajectories.
+
+#### Trace summaries
+
+`TraceSummaryDto` contains `id`, `verificationTaskId`, the frozen `violatedSpecId` and
+`violatedSpec`, positive `stateCount`, and `createdAt`. Available summaries also require
+`modelTokenSourcesByDeviceId`: the frozen device provenance map extracted from the first
+saved state's device entries, following the [trace token-provenance contract](#3-trace-structure).
+This lets history translate built-in condition tokens without consulting current templates.
+Missing, partial, or ambiguous provenance produces a `dataAvailable=false` placeholder
+with `unavailableReasonCode=PERSISTED_SEMANTIC_DATA_INVALID`.
+
+One user-scoped query reads trace summary metadata together with the first state's device-id/source arrays;
+it does not select full `statesJson` or `requestJson`. The service orders the mapped summaries by
+`createdAt` descending, then `id` descending, including unavailable placeholders. Keeping this sort
+outside SQL prevents MySQL filesort from carrying the full trajectory column. Mapping validates
+ownership, the specification snapshot, positive count, and source membership.
+
+Verification-run and simulation-history list queries resolve SMV presence through a scalar
+primary-key subquery. Their outer sorting and pagination operate on summary fields without carrying
+the model text; the existing model-presence predicate and page ordering are unchanged.
 When a user opens, replays, or repairs a trace, the detail path parses the saved states,
 requires a non-empty contiguous one-based sequence, matches the scalar count, validates the
 frozen request's rule count, and binds every triggered-rule or compromised-link entry to
@@ -366,7 +388,7 @@ endpoint or prevents that independently validated evidence from replaying.
 | `specResults` | `SpecResultDto[]` | Per-emitted-spec result objects once completed |
 | `checkLogs` | `String[]` | Generation warnings and NuSMV execution/check logs when available (`COMPLETED` or `FAILED`) |
 | `nusmvOutput` | `String` | The same capped NuSMV diagnostic output as a synchronous result, once completed |
-| `errorMessage` | `String` | Technical failure diagnostic present on `FAILED`; clients show a localized no-result state first and place this text in an advanced/technical disclosure |
+| `errorMessage` | `String` | Technical failure diagnostic present on `FAILED`; clients show a localized no-result state first, followed by the concrete diagnostic labeled as technical details |
 | `progress` | `Integer` | 0–100 |
 | `progressStage` | `TaskProgressStage` | Server-observed active phase. Verification emits exactly five: `QUEUED`, `STARTING`, `GENERATING_MODEL`, `EXECUTING_MODEL_CHECKER`, `PARSING_RESULTS`. It never emits `PERSISTING_RESULT` — that member belongs to simulation and fuzz — so verification stays on `PARSING_RESULTS` from 80% through completion. Do not render a persistence phase for a verification run |
 
@@ -396,9 +418,35 @@ clients do not combine a percentage from one phase with a label from another pha
 | `templateId` | `String` | Submitted specification-template semantics captured for this run |
 | `specificationLabel` | `String` | User-facing template label captured for self-contained result interpretation |
 | `formulaPreview` | `String` | Descriptive formula rebuilt from the submitted structured conditions, submitted device labels, and frozen template semantics; contains user concepts rather than generated NuSMV identifiers |
+| `specificationSnapshot` | `SpecificationSnapshotDto \| null` | Frozen structured interpretation of the emitted property. New emitted results include it; historical rows without it cannot provide a natural-language reconstruction from current Board data. |
 | `formulaKind` | `CTL \| LTL` | Language of the emitted property, derived from the actual emitted expression/template |
 | `outcome` | `SATISFIED \| VIOLATED \| INCONCLUSIVE` | Per-property conclusion. Missing or unreliable parser output is `INCONCLUSIVE`, never a synthetic violation. |
 | `expression` | `String` | Actual NuSMV CTL/LTL expression checked for this emitted specification; technical detail that may contain generated identifiers |
+
+### `SpecificationSnapshotDto`
+
+This snapshot is persisted with each emitted specification result, including inconclusive results.
+It uses the run's submitted conditions and generated device metadata, so subsequent edits to
+specifications, labels, or template definitions cannot alter the meaning shown in history.
+
+| Field | Type | Notes |
+| :--- | :--- | :--- |
+| `id` | `String` | Same identity as the containing result's `specId` |
+| `templateId` | `String` | Same template as the containing result; shapes follow [SpecificationDto](#specificationdto) |
+| `aConditions` / `ifConditions` / `thenConditions` | `SpecConditionDto[]` | Deep copies of the checked structured conditions; field semantics follow [SpecificationDto](#specificationdto) |
+| `devices` | `Map<String, Device>` | Referenced model device ids mapped to their frozen presentation metadata |
+
+Each `Device` entry contains:
+
+| Field | Type | Notes |
+| :--- | :--- | :--- |
+| `label` | `String` | Device label captured for this run |
+| `modelTokenSource` | `BUNDLED \| CUSTOM \| UNKNOWN` | Recorded vocabulary provenance; only bundled tokens may be localized |
+| `modeCount` | `Integer \| null` | Number of modes in the frozen template, used to interpret composite state labels; null means metadata is unavailable |
+
+Clients reject malformed present snapshots, including mismatched identities, invalid condition
+shapes, or missing referenced devices. When the entire snapshot is absent, they show an explicit
+interpretation-unavailable notice and retain the recorded formula and technical expression.
 
 ### `ModelGenerationIssueDto`
 
@@ -461,25 +509,19 @@ tasks, task summaries, and persisted trace detail/summary DTOs.
 | `environmentVariableCount` | `int` | Effective board environment entries after required defaults were merged |
 | `deviceTemplateCount` | `int` | Distinct referenced template manifests captured for the run |
 | `templatesFrozen` | `boolean` | Always `true`; generation reused the captured manifests and did not reload mutable definitions |
-| `modelFingerprint` | `String` | Canonical semantic fingerprint, **exploration-only by contract**. Counterexample-exploration runs populate it for exact current-Board drift checks. On a verification or simulation snapshot it must be `null`: `PersistedModelContextIntegrity` *rejects* a non-null value as a persisted-integrity violation, so this is an enforced invariant rather than an unfinished feature, and populating it would make existing rows unreadable |
+| `modelFingerprint` | `String` | Canonical lowercase SHA-256 of the captured Board input, stored from task acceptance onward and retained in synchronous results and history. Verification includes specifications; simulation excludes them. A missing/null value explicitly means the record has no comparison evidence; a present malformed value is rejected as corrupt persisted data. See [current model fingerprints](board.md#current-model-fingerprints) |
 | `environmentProvenance` | `EnvironmentValueProvenanceDto[]` | Per-shared-value evolution rules frozen for this run, so a stored trace stays explainable after the Board changes. Empty when the run had no shared values. See [`EnvironmentValueProvenanceDto`](#environmentvalueprovenancedto) |
 
-`modelSnapshot` is scope metadata, not a claim that the current Board still matches.
-The Board compares current modelable input with an in-memory submission signature only
-for runs submitted in the same browser tab. It labels changed input explicitly; after a
-reload or when opening historical results, it says the current Board was not compared
-and limits the conclusion to this snapshot.
-
-**A history row can only compare counts, and says so.** With no fingerprint available for verification
-and simulation, a run history row compares device, rule, specification, environment-variable and
-template *counts* against the current canvas. Every semantic edit that preserves those counts is
-invisible to it — inverting a rule's relation operator, changing an environment variable's value, moving
-a specification's threshold, swapping one device's template. (A device rename is deliberately not drift
-anywhere in this product: the exploration fingerprint strips `deviceLabel` as presentation.) So the row
-renders three distinct states, never a bare absence: the drift warning when a count differs, an explicit
-"counts match, contents not compared" notice when they agree, and nothing only when there is no current
-scope to compare against. Rendering nothing for the middle case asserted that the verdict still
-described the canvas, which is the one claim this product never makes.
+`modelSnapshot` describes the accepted run, not the mutable current Board. Both validation
+and generation use the same captured template manifests; task creation stores its fingerprint
+before dispatching a worker. Later edits do not change that input or cancel the task.
+The frontend compares the frozen identity with the authoritative current Board identity,
+including for reopened history and after reload. It distinguishes `UNCHANGED`, `CHANGED`,
+`UNAVAILABLE` (current comparison could not be read), and `NOT_COMPARED` (the record has no
+fingerprint). Older records without recorded evidence remain usable as historical results,
+but the frontend cannot assert that their contents still match the current Board. Item counts
+are scope information only. A specification-only edit changes verification identity without
+making a simulation stale; undoing a semantic edit can restore a known match.
 
 ### `EnvironmentValueProvenanceDto`
 
@@ -552,16 +594,27 @@ outcome, accepted flag, and status agree before updating the task UI.
 
 ---
 
-## 2. Nested request DTOs
+## 2. Internal model snapshot DTOs
+
+These fields describe the server-built frozen scene used by generation, traces, and
+fixes. They are not accepted in verification or simulation REST requests.
+The verification and simulation services capture the saved scene and its referenced
+templates together once for each submission, including submissions from AI tools.
+`BoardDataConverter` converts raw board node ids to normalized `varName` references
+in devices, rules, and specifications. Validation and generation reuse those captured
+templates. Board write contracts live in [board.md](board.md).
 
 ### `DeviceVerificationDto`
 
 | Field | Type | Required | Notes |
 | :--- | :--- | :--- | :--- |
 | `varName` | `String` | yes | Instance identifier used as the SMV variable name |
+| `deviceLabel` | `String` | no | Captured display label; never used for identity resolution |
 | `templateName` | `String` | yes | Resolved from the user's template table by `userId + templateName` |
+| `modelTokenSource` | `ModelTokenSource` | server-only | Template provenance; `@JsonIgnore`, not serialized |
 | `state` | `String` | no | Current state |
 | `currentStateTrust` | `String` | no | Device-level trust override (`trusted` / `untrusted`) |
+| `currentStatePrivacy` | `String` | no | Device-level sensitivity override (`public` / `private`) |
 | `variables` | `VariableStateDto[]` | no | `{ name, value, trust }`; `name` must be a template `InternalVariable.Name` |
 | `privacies` | `PrivacyStateDto[]` | no | Device-local variable sensitivity overrides as `{ name, privacy }` |
 
@@ -604,13 +657,8 @@ contribute semantics. Declarations of the same shared name must agree on literal
 domain/enum order, natural change rate, default trust, and default privacy or the request
 is rejected before NuSMV execution.
 
-When these fields originate from the saved board, `POST /api/board/nodes` has already
-validated the same runtime semantics against the selected template: legal current
-state, legal device-local variable override names and values, `trusted|untrusted`
-trust values, and `public|private` privacy values. `/api/board/environment` has already
-validated the environment pool. Verification/simulation still revalidate the
-model-boundary request because AI tools, scripts, and service callers can construct
-requests without passing through board storage.
+Verification and simulation revalidate the captured scene against the frozen template
+set before generation, even though board storage already validates its writes.
 
 ### `RuleDto`
 
@@ -683,8 +731,9 @@ from `templateId` and the structured condition arrays, so clients must keep
 is present. Controlled UI/AI/scene-import paths regenerate `formula` and `devices[]`
 from those conditions instead of trusting imported/generated cache text.
 User-facing UI should label `formula` as a formula preview/cache. Verification result
-UIs use the run-captured `SpecResultDto.formulaPreview` in the ordinary result row and
-label `SpecResultDto.expression` as the actual checked expression in technical details.
+UIs describe the requirement from the run-captured `SpecResultDto.specificationSnapshot`,
+offer `SpecResultDto.formulaPreview` in a collapsed disclosure, and label
+`SpecResultDto.expression` as the actual checked expression in technical details.
 They must not resolve `specId` against the current Board to reconstruct a historical or
 asynchronous result: the current specification may have changed while the run was active.
 Template shape is strict: `templateId` `1`, `2`, `3`, and `7` require non-empty
@@ -753,29 +802,38 @@ recorded as skipped generation warnings rather than being silently accepted.
 | `modelComplete` | `Boolean` | Whether the verification that produced this trace used the complete generated model |
 | `disabledRuleCount` / `skippedSpecCount` | `Integer` | Generation omissions inherited from the source verification |
 | `generationIssues` | `ModelGenerationIssueDto[]` | Item-level names and reasons for those inherited omissions |
-| `isAttack` | `Boolean` | Attack mode persisted with this trace |
+| `isAttack` | `Boolean` | Attack mode projected from the owning completed verification run |
 | `attackBudget` | `Integer` | Persisted derived run size: exhaustive upper bound, exact selected-point count, or `0` |
-| `enablePrivacy` | `Boolean` | Privacy-modeling flag persisted with this trace |
+| `enablePrivacy` | `Boolean` | Privacy-modeling flag projected from the owning completed verification run |
 | `modelSemantics` | `ModelSemanticsDto` | Required persisted structured policy, exact selected points/display labels, effects, and effective attack-surface counts. A missing or malformed snapshot makes the trace unavailable |
 | `modelSnapshot` | `ModelRunSnapshotDto` | Frozen verification-time item/template counts; this does not assert equality with the current Board |
 | `createdAt` | `LocalDateTime` | |
 
-> The internal trace DTO also carries `requestJson`, exact `templateSnapshotsJson`,
-> `violatedSpecJson`, and `userId`,
-> but they are `@JsonIgnore` — **not serialized to clients**. The raw fields restore
-> server-side fix context. Automatic fix replays the exact saved manifests rather than
-> whichever template versions happen to be current. New verification traces store the manifests
+> The internal trace DTO carries `violatedSpecJson` and `userId` with `@JsonIgnore`.
+> Frozen `requestJson` and `templateSnapshotsJson` belong only to the owning verification
+> run and are not trace DTO fields or serialized to clients. Automatic fix reuses the
+> validated run request and replays the exact saved manifests rather than whichever
+> template versions happen to be current. New verification runs store the manifests
 > in a versioned internal envelope together with one explicit `BUNDLED` or `CUSTOM`
 > model-token source for each canonical request device id. Unversioned, missing, unknown,
 > or request-mismatched snapshot entries are persisted-data integrity failures; the server
 > never infers a source from a template or token name.
 > `TraceMapper` instead returns structured `violatedSpec` and
 > `isAttack` / `attackBudget` / `enablePrivacy` / `modelSemantics`, so clients do not parse persistence JSON.
-> A non-attack request and historical snapshot use `attackBudget=0`. A positive budget
-> with `isAttack=false` is rejected before model generation rather than normalized away.
-> Records without all dedicated run-context columns, including the falsifiable-reading
-> subset count, return no `modelSemantics`; the mapper
-> does not guess a denominator from `devices.length`, which could reintroduce inert points.
+> Non-attack response semantics and historical snapshots use `attackBudget=0`.
+> A persisted positive budget with `isAttack=false` is an integrity failure, not a
+> value normalized away. Public requests express attack selection only through `attackScenario`.
+> Verification run context has one persisted owner: `verification_task`. Trace responses inherit
+> attack/privacy flags, attack-surface counts, model semantics, model snapshot, and generation
+> omissions from that completed run; `trace` stores no copies of those fields. Collection reads
+> fetch owner context once in a batch and decode it once per run; detail/fix reads use a closed
+> projection excluding SMV text and unrelated logs/spec results. A missing owner, a different user, a non-completed owner,
+> or malformed run context is an integrity failure. The mapper never substitutes old trace columns,
+> current Board data, or `devices.length`. Violated-specification context, checked expression,
+> and states remain on the trace. Run completion commits evidence and
+> owner together; cancellation rolls back evidence when completion loses its status transition,
+> and run deletion removes both within one transaction. Development storage follows the
+> [current-schema contract](../architecture/data-authority-model.md#trace).
 
 `TraceStateDto`: `{ stateIndex, devices: TraceDeviceDto[],
 triggeredRules: TraceTriggeredRuleDto[], compromisedAutomationLinks: TraceTriggeredRuleDto[],
@@ -857,19 +915,14 @@ empty `state` and `mode` strings.
 
 ### `POST /api/simulate` — synchronous (not persisted)
 
-**Request body**: `SimulationRequestDto` — same as `VerificationRequestDto` but with
-**no `specs`** field and an added `steps`:
+**Request body**: `SimulationRequestDto` — run parameters only, with an added `steps`.
+The server captures devices, rules, environment values, and replay layout from the
+saved board. Sending any scene field, including `specs`, returns HTTP `400`.
 
-The same strict unknown-field, scalar-type, duplicate-environment, and explicit-blank
-validation applies. A misspelled attack/privacy option is an HTTP `400`, not a simulation
-with that option silently disabled.
+The same strict unknown-field and scalar-type validation applies.
 
 | Field | Type | Required | Default | Notes |
 | :--- | :--- | :--- | :--- | :--- |
-| `devices` | `DeviceVerificationDto[]` | yes (`@NotEmpty`) | — | 1–100 devices; per-device override limits match verification |
-| `playbackNodes` | `DeviceNodeDto[]` | yes (`@NotEmpty`) | — | Same frozen visual replay contract as verification: one layout node for each submitted model device, with matching id/template/label and valid finite layout. It is excluded from NuSMV semantics. |
-| `environmentVariables` | `BoardEnvironmentVariableDto[]` | no | `[]` | At most 200; same unique-name, omitted/null-default, and explicit-blank rejection contract as verification |
-| `rules` | `RuleDto[]` | no | `[]` | At most 100, with at most 50 conditions per rule. The same positive, request-unique non-null id contract as verification applies |
 | `steps` | `int` (1–100) | no | `10` | Number of simulation steps |
 | `attackScenario` | `AttackScenarioDto` | yes | — | Explicit per-run attack selection; `mode` is required. Simulation accepts only `NONE` or `EXACT_POINTS`. It never chooses compromised devices or links randomly, and rejects budget-based exhaustive selection. |
 | `enablePrivacy` | `boolean` | no | `false` | |
@@ -957,7 +1010,7 @@ summary refresh to skip those same tasks. The list accepts at most 100 positive 
 This list excludes `COMPLETED` tasks. It contains active work plus failed/cancelled
 tasks that produced no saved result. Active rows expose progress and frozen run
 context; unsuccessful terminal rows expose a technical `errorMessage`, which clients
-place behind an advanced disclosure rather than using as the primary localized status.
+label as technical details below the localized no-result status, keeping the concrete cause readable.
 Completed simulations are
 listed once through `GET /api/simulate/traces`, where the persisted trajectory is the
 user-facing run result. The ordered inbox query selects only summary context and diagnostics;
@@ -1016,6 +1069,10 @@ requires a history refresh before the UI says whether the trace was saved; the s
 remain valid for immediate animation. A known `FAILED` status means no row was created.
 History list conversion isolates malformed summary rows as `dataAvailable=false`; it never
 silently replaces malformed semantic JSON or inconsistent step/count metadata with defaults.
+Both the list and detail capture their persisted rows in a read-only transaction before JSON
+validation and DTO assembly. Standalone reads return the connection before decoding; reads inside
+an existing transaction retain that transaction and mark it for rollback if a decoding exception
+escapes the service.
 Simulation summary queries validate `stateCount = steps + 1`, run context, model snapshot,
 and generation diagnostics without selecting `statesJson`, `requestJson`, or solver output.
 Opening detail parses the saved state sequence and cross-checks every rule event against the
@@ -1045,24 +1102,9 @@ one per run kind, because a simulation trajectory *is* its own run.
 | `GET /api/verify/runs/{id}/smv` | The model a verification run checked | `verification-run-{id}.smv` |
 | `GET /api/simulate/traces/{id}/smv` | The model executed for one trajectory | `simulation-trace-{id}.smv` |
 
-**A trace-keyed download used to exist and was removed** (`GET /api/verify/traces/{id}/smv`, along with
-the `trace.smv_model_content` column and `TraceDto.hasSmvModel`). It could only ever answer a
-byte-identical copy of the run's model: one model string was generated per run and written to the run
-row *and* to each of its traces, so a run with three violated specifications stored and served the same
-bytes from four addresses — measured at 345 KB of duplication across 30 trace rows on a development
-database, growing with every run.
-
-Its documented justification was that a counterexample must stay self-contained after its run is
-deleted. The code contradicts that: `VerificationServiceImpl.deleteRunInternal` deletes every trace and
-then the run in one transaction, so a trace cannot outlive its run. Nothing called it — no client
-method, no test, no script — and the run-keyed endpoint strictly dominates it, being the only one that
-works for a run where every specification holds and there is no counterexample to key on.
-
-`ddl-auto: update` never drops a column, so an existing database keeps `trace.smv_model_content` as
-dead storage until dropped by hand. It is nullable and unread, so leaving it is harmless.
-
-Frontend placement rules are pinned by `frontend/src/views/board/runArtifactPlacement.spec.ts`; that a
-counterexample carries no model in either mapping direction is pinned by `TraceMapperTest`.
+The model belongs to the run; individual verification counterexamples do not carry
+a model copy or a download flag. Deleting a verification run deletes its linked
+counterexamples in the same transaction.
 
 **Response** (both): `text/plain;charset=UTF-8`, `Content-Disposition: attachment`. The
 filename is emitted as a plain ASCII `filename` parameter; passing a charset would make Spring
@@ -1070,9 +1112,8 @@ encode it as an RFC 2047 encoded-word, which clients save literally.
 
 **Errors** (both):
 - `404 ResourceNotFoundException` — the record does not exist, belongs to another user, or stores
-  no model. A run or trace recorded before the model was persisted has none, and no migration can
-  invent one, so absence is a state rather than a server fault. Never an empty attachment: a
-  zero-byte `.smv` would be mistaken for the checked model.
+  no model. Model absence is explicit; the endpoint never returns an empty attachment that could
+  be mistaken for the checked model.
 
 **Clients decide from the response, not by guessing.** Every DTO a download can be offered from
 carries a `hasSmvModel` boolean; the content itself is `@JsonIgnore` because it runs to tens of
@@ -1173,14 +1214,26 @@ While the search is active, `GET /api/verify/fix-requests/{requestId}` returns
 `InteractiveOperationStatusDto` as `{ requestId, state, stage, elapsedMs }`. The final
 `FINISHED` status is retained briefly so the last polling tick does not race cleanup; an
 unknown request returns 404. The fix workflow reports `QUEUED`, `RUNNING`,
-`PREPARING_CONTEXT`, `PREPARING_MODEL`, `SEARCHING_AND_VERIFYING`, `FINALIZING`, and
+`PREPARING_CONTEXT`, `PREPARING_MODEL`, `SEARCHING_AND_VERIFYING`,
+`COMPARING_VERIFIED_OPTIONS` (at least one candidate has passed full verification), `FINALIZING`, and
 `CANCELLING` as applicable. These are server-observed operational phases, not inferred
-timers or hidden model reasoning.
+timers or hidden model reasoning. The local request is registered before distributed admission
+is confirmed, so a status read during that confirmation can report the observed
+`WAITING`/`QUEUED` phase instead of a registration-race 404. Search execution starts only after
+admission succeeds. Cancellation during confirmation prevents execution; any lease subsequently
+acquired by that cancelled request is abandoned using its owner fence.
 
 Ownership, admission and the `503` contract follow the shared interactive-request rules in
 [overview.md](overview.md#interactive-request-ownership-and-the-503-contract). Specific to the fix
 search: the cancellation record is renewed until the callable actually exits, so an expired worker
 cannot finish over a newer owner that reused the same id.
+Successful completion, cancellation polling and local stops are serialized per search. Once the
+ownership-and-stop fence accepts completion, releasing that owner cannot be interpreted as lease
+loss or revoke the result while its HTTP response is returning. A cancellation accepted before
+completion still stops the search, including a checker that ignores interruption. Terminal
+cleanup temporarily clears the worker interrupt while releasing its owner-fenced Redis admission
+slot and publishing `FINISHED`, then restores it. This prevents cancellation itself from
+interrupting Redis cleanup and delaying a retry until lease maintenance.
 
 The frontend makes five short cancellation attempts to cover POST-registration races and
 aborts the POST transport only after the server accepts cancellation. It pins the initiating
@@ -1196,13 +1249,15 @@ cannot admit another local search or reuse its suggestions for another trace. A 
 status is terminal even when the original POST transport remains hung; stale POST cleanup is fenced
 from a newer request. Fix status and cancellation calls use a 2.5-second client timeout so bounded
 retry and logout reconciliation cannot stall on the ordinary API timeout. Route teardown retries
-cancellation before aborting the POST transport.
+cancellation before aborting the POST transport. A full page reload or departure also sends an
+owner-authenticated cancellation using a fetch keepalive request; page departure alone is never
+interpreted as confirmed cancellation.
 
 **Request body**: `FixRequestDto` — optional; omit or send `null` for defaults.
 
 | Field | Type | Default | Notes |
 | :--- | :--- | :--- | :--- |
-| `strategies` | `String[]` | `["parameter","condition","remove"]` when omitted | Exact, duplicate-free order of 1–3 strategies when supplied. Values are limited to `parameter`, `condition`, and `remove`. An explicit empty/invalid list is rejected rather than replaced by defaults. `remove` permanently deletes suggested automation rules; it is not a reversible enable/disable toggle |
+| `strategies` | `String[]` | `["parameter","condition","remove"]` when omitted | Exact, duplicate-free order of 1–3 strategies when supplied. Values are limited to `parameter`, `condition`, and `remove`. An explicit empty/invalid list is rejected rather than replaced by defaults. `remove` deletes suggested automation rules; it does not toggle rules off |
 | `preferredRangeSelections` | `PreferredRangeSelection[]` | `null` | Optional ranges selected from `FixResultDto.parameterTargets[].targetId`. Each item is `{ targetId, lower, upper }`; all fields are required, `targetId` is an opaque trace-scoped selector copied from a returned target, `lower`/`upper` are integers, and `lower <= upper` |
 
 Clients should build `preferredRangeSelections` from selectable `parameterTargets`
@@ -1239,9 +1294,18 @@ finished. Status is one of
 `VERIFIED`, `NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE`, `ALL_CANDIDATES_REJECTED`, `INCONCLUSIVE`,
 `FAILED_MODEL_GENERATION`, `FAILED_SOLVER_EXECUTION`, `SEARCH_BUDGET_EXHAUSTED`, `TIMED_OUT`,
 `SKIPPED_TIMEOUT`, `SKIPPED_NO_SPEC`, `SKIPPED_NO_PARAMETERIZABLE_VALUES`, `SKIPPED_NO_FAULT_RULES`,
-`SKIPPED_UNSUPPORTED`, or `SKIPPED_INCOMPLETE_SOURCE_MODEL`. This distinguishes "no repair of this
+`SKIPPED_INITIAL_STATE_VIOLATION`, `SKIPPED_UNSUPPORTED`, or `SKIPPED_INCOMPLETE_SOURCE_MODEL`. This distinguishes "no repair of this
 kind exists" from "the strategy started but did not finish" (`TIMED_OUT`) and "the strategy was
 not run" (`SKIPPED_*`).
+
+`SKIPPED_NO_FAULT_RULES` means the trace has no searchable rule scope: no existing rule can
+affect the property, or no usable state was recorded. An empty
+`faultRules` list alone does not skip repair; idle rules that can prevent a violation are searched.
+`SKIPPED_INITIAL_STATE_VIOLATION` identifies a one-state counterexample to a safety property
+(templates `1`, `3`, `7`): the initial state fails before any command can run. Rule edits cannot
+change that initial state. All requested strategies are skipped with that reason; adjust the scene
+or the requirement's response timing and run verification again. A one-state liveness cycle does
+not have this meaning and still searches relevant rules.
 
 Two statuses are proofs over the strategy's searched space, which is the allowed edits against the
 pinned counterexample. Re-running with the same inputs returns the same answer, because the fix
@@ -1270,7 +1334,7 @@ a complete candidate model, for example because the persisted counterexample ini
 could not be replayed. `FAILED_SOLVER_EXECUTION` covers NuSMV execution failure and missing,
 incomplete, or unparseable solver output; a NuSMV run cut off by the fix deadline is not a
 solver failure but part of `TIMED_OUT`. `SEARCH_BUDGET_EXHAUSTED` means the strategy used its
-`FIX_MAX_ATTEMPTS` budget while unchecked candidates remained and listed nothing; a listing cut
+effective [search budget](../architecture/auto-fix.md#listing-alternatives-fixalternatives) while unchecked candidates remained and listed nothing; a listing cut
 short after its first repair is `VERIFIED` with `alternativesComplete=false`. None of these
 incomplete outcomes is evidence that no repair exists.
 
@@ -1294,9 +1358,9 @@ so `/fix/apply` and the AI `apply_fix` tool must receive it unchanged. Clients l
 All collection fields in `FixResultDto` and `FixSuggestionDto` are always serialized as
 JSON arrays. A collection that does not apply to the selected strategy is `[]`, never
 `null`, so clients can distinguish "no such changes" from a malformed response.
-`ParameterAdjustment`: `{ targetId, attribute, relation, originalValue, newValue,
+`ParameterAdjustment`: `{ targetId, rulePosition, deviceLabel, attribute, relation, originalValue, newValue,
 lowerBound, upperBound, description, modelTokenSource }`.
-`ParameterTarget`: `{ targetId, attribute, relation, originalValue, lowerBound,
+`ParameterTarget`: `{ targetId, rulePosition, deviceLabel, attribute, relation, originalValue, lowerBound,
 upperBound, description, modelTokenSource }`.
 `ConditionAdjustment`: `{ action, attribute, targetType, description, ruleDescription,
 deviceLabel, relation, value, modelTokenSource }`. `ruleDescription` and `deviceLabel` are required,
@@ -1310,13 +1374,16 @@ For all three row types, `modelTokenSource` is `BUNDLED`, `CUSTOM`, or `UNKNOWN`
 governs the row's model-facing attribute/value tokens. Clients may localize exact known
 tokens only for `BUNDLED`. `CUSTOM` and `UNKNOWN` must remain
 verbatim. The English `description` is a technical fallback, not the primary localized
-parameter-target label; clients should construct that label from the structured attribute,
-relation, and original value.
+parameter-target label; clients construct it from the frozen `rulePosition`, `deviceLabel`,
+attribute, relation, and original value. `rulePosition` is a positive, one-based display order in
+the trace snapshot, not a selector; `deviceLabel` is the non-blank name from that same snapshot.
+Each listed parameter adjustment must match its catalog target by `targetId` and these display
+fields, including `modelTokenSource`. Preferred ranges may narrow its bounds.
 If a copied target is not available during generation, the response reports it in
 `unusedPreferredRangeSelections`. A target that matched and constrained the search is not
-unused merely because no verified suggestion was found. Rule/condition positions remain server-side
-trace-snapshot locators for verification, drift checks, and patching; they are not part of
-the REST or AI response contract.
+unused merely because no verified suggestion was found. Internal zero-based rule/condition
+indices remain server-side locators for verification, drift checks, and patching; they are not
+serialized. The public `rulePosition` is display metadata only.
 
 ### `POST /api/verify/traces/{id}/fix/apply` — apply a fix suggestion
 
@@ -1397,7 +1464,7 @@ re-applies the saved fixed collection. A later rule change that no longer matche
 returns `409` rather than discarding newer work.
 
 Effect per strategy: `parameter` overwrites the target condition's value (and relation);
-`condition` adds/removes conditions; `remove` permanently deletes the flagged rules. A condition fix
+`condition` adds/removes conditions; `remove` deletes the flagged rules. A condition fix
 that would leave a rule with no trigger conditions is rejected; which conditions are offered at all
 is the candidate filter in [condition adjustment](../architecture/auto-fix.md). During apply, NuSMV-normalized
 device references are mapped back to the current raw board node ids; an unmappable reference fails

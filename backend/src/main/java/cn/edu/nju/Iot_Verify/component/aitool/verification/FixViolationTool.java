@@ -1,6 +1,8 @@
 package cn.edu.nju.Iot_Verify.component.aitool.verification;
 
 import cn.edu.nju.Iot_Verify.component.ai.model.LlmToolSpec;
+import cn.edu.nju.Iot_Verify.component.ai.LlmRequestControl;
+import cn.edu.nju.Iot_Verify.component.ai.LlmRequestControlHolder;
 import cn.edu.nju.Iot_Verify.component.aitool.AbstractAiTool;
 import cn.edu.nju.Iot_Verify.dto.fix.FixResultDto;
 import cn.edu.nju.Iot_Verify.dto.fix.PreferredRange;
@@ -46,7 +48,7 @@ public class FixViolationTool extends AbstractAiTool {
         props.put("strategies", Map.of(
                 "type", "array",
                 "description", "Fix strategies to attempt, in order. Supported: 'parameter' (§5.1 threshold adjustment), "
-                        + "'condition' (§5.2 triggering condition adjustment), 'remove' (permanently remove rules). "
+                        + "'condition' (§5.2 triggering condition adjustment), 'remove' (remove rules). "
                         + "Omit this field for the default ['parameter', 'condition', 'remove']; an explicit array must be non-empty and is attempted exactly as supplied.",
                 "items", Map.of(
                         "type", "string",
@@ -76,7 +78,9 @@ public class FixViolationTool extends AbstractAiTool {
 
         return LlmToolSpec.of(getName(), "Analyze a violation trace to localize fault rules and suggest fixes. " +
                 "Supports 'parameter' (adjust numeric thresholds), 'condition' (add or remove triggering conditions), " +
-                "and 'remove' (permanently remove entire rules) strategies. This tool only analyzes and never applies a change. " +
+                "and 'remove' (remove entire rules) strategies. This tool only analyzes and never applies a change. " +
+                "To preview or apply any returned option, including remove, use apply_fix with its suggestionId; " +
+                "do not recreate the edit with manage_rule or other manual mutation tools. " +
                 "Requires a traceId from a previous verification.", schema);
     }
 
@@ -190,7 +194,19 @@ public class FixViolationTool extends AbstractAiTool {
                 if (preferredRanges.isEmpty()) preferredRanges = null;
             }
 
-            FixResultDto result = fixService.fix(userId, traceId, strategies, preferredRanges);
+            FixResultDto result;
+            // Analysis is read-only. Propagate Stop to the existing interrupted-search and native
+            // process cleanup path; confirmed mutations retain their separate commit boundary.
+            LlmRequestControl control = LlmRequestControlHolder.currentOrNew();
+            try (AutoCloseable cancellation = control.interruptCurrentThreadOnCancellation()) {
+                if (control.isCancellationRequested() || Thread.currentThread().isInterrupted()) {
+                    return cancelledAnalysis();
+                }
+                result = fixService.fix(userId, traceId, strategies, preferredRanges);
+            }
+            if (control.isCancellationRequested() || Thread.currentThread().isInterrupted()) {
+                return cancelledAnalysis();
+            }
 
             Map<String, Object> summary = new LinkedHashMap<>();
             summary.put("traceId", result.getTraceId());
@@ -207,6 +223,11 @@ public class FixViolationTool extends AbstractAiTool {
             summary.put("strategyAttempts", result.getStrategyAttempts() != null
                     ? result.getStrategyAttempts() : List.of());
             summary.put("warnings", result.getWarnings() != null ? result.getWarnings() : List.of());
+            summary.put("preferredRangeSelections", preferredRanges == null ? List.of()
+                    : preferredRanges.entrySet().stream()
+                            .map(entry -> new PreferredRangeSelection(entry.getKey(),
+                                    entry.getValue().getLower(), entry.getValue().getUpper()))
+                            .toList());
 
             if (result.getFaultRules() != null && !result.getFaultRules().isEmpty()) {
                 summary.put("faultRules", result.getFaultRules());
@@ -250,6 +271,11 @@ public class FixViolationTool extends AbstractAiTool {
             log.error("FixViolationTool execution failed", e);
             return errorJson("Fix analysis failed.", "INTERNAL_ERROR", 500);
         }
+    }
+
+    private String cancelledAnalysis() {
+        return errorJson("Repair analysis was stopped before completion; no changes were applied.",
+                "FIX_ANALYSIS_CANCELLED", 499);
     }
 
     private static String missingSelectionField(JsonNode node) {

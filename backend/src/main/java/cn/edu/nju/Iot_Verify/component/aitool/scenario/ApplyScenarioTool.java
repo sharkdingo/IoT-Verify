@@ -3,10 +3,15 @@ package cn.edu.nju.Iot_Verify.component.aitool.scenario;
 import cn.edu.nju.Iot_Verify.component.ai.model.LlmToolSpec;
 import cn.edu.nju.Iot_Verify.component.aitool.AbstractAiTool;
 import cn.edu.nju.Iot_Verify.component.board.PortableSceneBatchMapper;
+import cn.edu.nju.Iot_Verify.component.board.PortableSceneDiagnostics;
 import cn.edu.nju.Iot_Verify.dto.board.BoardBatchDto;
 import cn.edu.nju.Iot_Verify.dto.board.BoardReplacementPreviewDto;
 import cn.edu.nju.Iot_Verify.exception.BaseException;
+import cn.edu.nju.Iot_Verify.exception.BadRequestException;
+import cn.edu.nju.Iot_Verify.exception.BoardContentConflictException;
+import cn.edu.nju.Iot_Verify.exception.ValidationException;
 import cn.edu.nju.Iot_Verify.exception.BoardReplacementStaleException;
+import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
 import cn.edu.nju.Iot_Verify.security.UserContextHolder;
 import cn.edu.nju.Iot_Verify.service.BoardStorageService;
 import cn.edu.nju.Iot_Verify.util.FunctionParameterSchema;
@@ -67,6 +72,7 @@ public class ApplyScenarioTool extends AbstractAiTool {
 
     @Override
     protected String doExecute(Long userId, String argsJson) {
+        boolean replacementStarted = false;
         try {
             JsonNode args = parseArgs(argsJson);
             requireOnlyFields(args, "arguments", Set.of("confirmed"));
@@ -77,8 +83,13 @@ public class ApplyScenarioTool extends AbstractAiTool {
             AiScenarioDraftStore.PendingApplication pending = userConfirmed
                     ? draftStore.pendingApplication(userId, sessionId).orElse(null)
                     : null;
-            if (pending == null) {
+            if (!userConfirmed) {
                 return preview(userId, sessionId);
+            }
+            if (pending == null || !pending.confirmationId().equals(
+                    UserContextHolder.getConfirmedProtectedActionId())) {
+                return errorJson("No changes were made. The confirmed scenario preview is no longer pending; review the current preview.",
+                        "CONFIRMATION_MISMATCH", 409);
             }
             if (!confirmed) {
                 log.info("Applying pending AI scenario from explicit server-side confirmation despite model confirmed=false: userId={}, sessionId={}",
@@ -87,8 +98,13 @@ public class ApplyScenarioTool extends AbstractAiTool {
 
             BoardBatchDto batch = batchMapper.toBatch(
                     pending.scene(), pending.preview().getImpactToken(), CHAT_SPEC_ID_PREFIX);
-            BoardBatchDto saved = boardStorageService.saveBoardBatch(userId, batch);
-            draftStore.completeApplication(userId, sessionId);
+            replacementStarted = true;
+            BoardBatchDto saved = boardStorageService.saveBoardBatch(userId, batch,
+                    () -> draftStore.completeApplication(userId, sessionId, pending.confirmationId()));
+            if (saved == null || saved.getNodes() == null || saved.getEnvironmentVariables() == null
+                    || saved.getRules() == null || saved.getSpecs() == null || saved.getCreatedTemplates() == null) {
+                return mutationResultUnavailable();
+            }
 
             Map<String, Object> response = new LinkedHashMap<>();
             response.put("message", "The scenario draft replaced the current board atomically. Its rules and specifications have not been formally verified.");
@@ -110,16 +126,46 @@ public class ApplyScenarioTool extends AbstractAiTool {
             return e.getErrorResponse();
         } catch (BoardReplacementStaleException e) {
             return stalePreview(userId, e);
+        } catch (ValidationException e) {
+            ValidationException diagnostic = PortableSceneDiagnostics.portable(e);
+            return errorJson(diagnostic.getMessage(), "VALIDATION_ERROR", e.getCode(),
+                    Map.of("errors", diagnostic.getErrors()));
+        } catch (BadRequestException e) {
+            BadRequestException diagnostic = PortableSceneDiagnostics.portable(e);
+            return errorJson(diagnostic.getMessage(), "VALIDATION_ERROR", e.getCode(),
+                    Map.of("errors", diagnostic.getErrors()));
+        } catch (BoardContentConflictException e) {
+            BoardContentConflictException diagnostic = PortableSceneDiagnostics.portable(e);
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("reasonCode", diagnostic.getReasonCode());
+            details.put("errors", diagnostic.getErrors());
+            if (diagnostic.getTemplateName() != null) details.put("templateName", diagnostic.getTemplateName());
+            return errorJson(diagnostic.getMessage(), diagnostic.getReasonCode(), e.getCode(), details);
+        } catch (ServiceUnavailableException e) {
+            if (replacementStarted) return mutationResultUnavailable();
+            return errorJson(e.getMessage(), "SERVICE_UNAVAILABLE", e.getCode());
         } catch (BaseException e) {
             log.warn("apply_scenario business error [{}]: {}", e.getCode(), e.getMessage());
             return errorJson(e.getMessage(), "BUSINESS_ERROR", e.getCode());
         } catch (IllegalArgumentException e) {
+            if (replacementStarted) return mutationResultUnavailable();
             return errorJson(e.getMessage(), "SCENARIO_DRAFT_NOT_FOUND", 404);
         } catch (Exception e) {
             log.error("apply_scenario failed", e);
+            if (replacementStarted) return mutationResultUnavailable();
             return errorJson("Failed to apply the stored scenario draft. No confirmed replacement result is available.",
                     "INTERNAL_ERROR", 500);
         }
+    }
+
+    private String mutationResultUnavailable() {
+        return successJson(Map.of(
+                "resultStatus", "RESULT_UNAVAILABLE",
+                "resultAvailable", false,
+                "mutationMayHaveCommitted", true,
+                "errorCode", "MUTATION_RESULT_INVALID",
+                "message", "The scenario replacement outcome could not be confirmed. Refresh the Board before retrying."),
+                "Scenario replacement result unavailable.");
     }
 
     private String preview(Long userId, String sessionId) {
@@ -162,11 +208,13 @@ public class ApplyScenarioTool extends AbstractAiTool {
         response.put("currentEnvironmentVariableCount", current.getEnvironmentVariableCount());
         response.put("currentRuleCount", current.getRuleCount());
         response.put("currentSpecificationCount", current.getSpecificationCount());
+        response.put("editHistoryEntryCount", current.getEditHistoryEntryCount());
         JsonNode scene = pending.scene();
         response.put("replacementDeviceCount", scene.path("devices").size());
         response.put("replacementEnvironmentVariableCount", scene.path("environmentVariables").size());
         response.put("replacementRuleCount", scene.path("rules").size());
         response.put("replacementSpecificationCount", scene.path("specs").size());
+        response.put("replacementScene", scene);
         putVerificationReadiness(response, scene);
         return response;
     }

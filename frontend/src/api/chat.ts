@@ -14,7 +14,7 @@ import type {
     StreamProgress,
     StreamTerminal
 } from "@/types/chat"
-import { ASSISTANT_ACTIONS, STREAM_REFRESH_TARGETS } from '@/types/chat'
+import { ASSISTANT_ACTIONS, CLAIM_REVIEW_REASONS, STREAM_REFRESH_TARGETS } from '@/types/chat'
 import { useAuth } from '@/stores/auth'
 import { redirectToLogin } from '@/router/loginRedirect'
 import i18n from '@/assets/i18n'
@@ -83,6 +83,7 @@ const STREAM_PROGRESS_STAGES = new Set<StreamProgress['stage']>([
   'TOOL_EXECUTION',
   'TOOL_RESULT',
   'EXECUTION_GUARD',
+  'CLAIM_REVIEW',
   'WRITING_RESPONSE'
 ]);
 const STREAM_PROGRESS_OUTCOMES = new Set<NonNullable<StreamProgress['outcome']>>([
@@ -92,7 +93,9 @@ const STREAM_PROGRESS_OUTCOMES = new Set<NonNullable<StreamProgress['outcome']>>
   'RESULT_UNAVAILABLE',
   'CONFIRMATION_REQUIRED',
   'NO_PROGRESS',
-  'EMERGENCY_LIMIT'
+  'EMERGENCY_LIMIT',
+  'REPLACED',
+  'HIDDEN'
 ]);
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -120,6 +123,7 @@ const EXECUTION_GUARD_OUTCOMES: ReadonlySet<NonNullable<StreamProgress['outcome'
 // here would make the validator reject a frame the server is entitled to send.
 const REFRESH_TARGET_NAMES: ReadonlySet<string> = new Set(STREAM_REFRESH_TARGETS);
 const ASSISTANT_ACTION_NAMES: ReadonlySet<string> = new Set(ASSISTANT_ACTIONS);
+const CLAIM_REVIEW_REASON_NAMES: ReadonlySet<string> = new Set(CLAIM_REVIEW_REASONS);
 
 const isStreamProgress = (value: unknown): value is StreamProgress => {
   if (!isRecord(value)
@@ -139,6 +143,17 @@ const isStreamProgress = (value: unknown): value is StreamProgress => {
         || !STREAM_PROGRESS_OUTCOMES.has(outcome as NonNullable<StreamProgress['outcome']>))) {
     return false;
   }
+  if (value.stage === 'CLAIM_REVIEW') {
+    const review = value.claimReview;
+    return (outcome === 'REPLACED' || outcome === 'HIDDEN')
+      && (value.toolName === undefined || value.toolName === null)
+      && isRecord(review) && Object.keys(review).length === 3
+      && typeof review.reasonCode === 'string' && CLAIM_REVIEW_REASON_NAMES.has(review.reasonCode)
+      && typeof review.originalText === 'string' && Boolean(review.originalText.trim())
+      && typeof review.matchedText === 'string' && Boolean(review.matchedText.trim())
+      && review.originalText.includes(review.matchedText);
+  }
+  if (value.claimReview !== undefined && value.claimReview !== null) return false;
   if (value.stage === 'TOOL_RESULT') {
     return typeof outcome === 'string'
       && TOOL_RESULT_OUTCOMES.has(outcome as NonNullable<StreamProgress['outcome']>);
@@ -156,7 +171,8 @@ export const hasCompletedToolEvidence = (trace: unknown): boolean => {
   let pendingExecution: { toolName: string; round: number } | null = null;
   const unresolvedPartialTools = new Set<string>();
   for (const progress of trace) {
-    if (!isStreamProgress(progress) || progress.stage === 'EXECUTION_GUARD') return false;
+    if (!isStreamProgress(progress) || progress.stage === 'EXECUTION_GUARD'
+        || (progress.stage === 'CLAIM_REVIEW' && progress.outcome === 'HIDDEN')) return false;
     if (progress.stage === 'TOOL_EXECUTION') {
       if (pendingExecution
           || typeof progress.toolName !== 'string'
@@ -400,9 +416,13 @@ export const getPendingConfirmation = async (
   const pending = unpack<ChatPendingConfirmation>(response);
   if (!pending
       || pending.sessionId !== sessionId
-      || !Array.isArray(pending.kinds)
-      || pending.kinds.some(kind => typeof kind !== 'string'
-        || !CHAT_CONFIRMATION_KINDS.has(kind as ChatConfirmationKind))) {
+      || !Array.isArray(pending.actions)
+      || pending.actions.some(action => !action || typeof action !== 'object'
+        || !CHAT_CONFIRMATION_KINDS.has(action.kind)
+        || typeof action.confirmationId !== 'string' || !action.confirmationId.trim()
+        || typeof action.toolName !== 'string' || !action.toolName.trim()
+        || typeof action.target !== 'string' || !action.target.trim())
+      || new Set(pending.actions.map(action => action.kind)).size !== pending.actions.length) {
     throw new Error('Chat pending-confirmation response is incomplete');
   }
   return pending;
@@ -412,6 +432,7 @@ export const sendStreamChat = async (
     sessionId: string,
     content: string,
     callbacks: {
+        isCurrentRequest?: () => boolean;
         onMessage: (text: string) => void
         onCommand?: (cmd: StreamCommand) => void;
         onProgress?: (progress: StreamProgress) => void;
@@ -646,6 +667,9 @@ export const sendStreamChat = async (
         if (error.name === 'AbortError') {
             return;
         }
+        // Stop can close the detached stream before its acknowledgement arrives.
+        // The settlement owner reports that outcome; this transport still rejects.
+        if (callbacks.isCurrentRequest?.() === false) throw error;
         console.error('[Chat] Streaming request error:', error.message);
         if (callbacks.onError) callbacks.onError(error);
         throw error;

@@ -66,96 +66,74 @@ const langLabel = computed(() => props.language?.toUpperCase() || "TEXT");
 
 <style scoped>
 .code-block-container {
-  margin: 16px 0;
+  margin: var(--iot-space-lg) 0;
   border-radius: var(--iot-radius-action);
   overflow: hidden;
-  border: 1px solid #e5e5e5;
-  background: #f8f8f8; /* 默认浅色底 */
-  transition: all 0.3s ease;
+  border: 1px solid var(--border);
+  background: var(--surface-muted);
+  transition: border-color var(--iot-motion-fast);
 }
 
-/* 浅色模式下的 Header */
+/* Header shares the application surface in both themes. */
 .code-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: #eeeeee;
-  padding: 6px 12px;
-  color: #666;
-  border-bottom: 1px solid #e5e5e5;
+  background: var(--surface-control);
+  padding: var(--iot-space-xs) var(--iot-space-md);
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
   user-select: none;
 }
 
 .lang-label {
-  font-size: 12px;
+  font-size: var(--iot-font-caption);
   font-weight: 600;
-  color: #555;
+  color: var(--text-muted);
 }
 
 .copy-btn {
   cursor: pointer;
   display: flex;
   align-items: center;
-  font-size: 12px;
-  color: #666;
-  transition: color 0.2s;
-  padding: 4px;
+  justify-content: center;
+  min-width: var(--iot-target-min);
+  min-height: var(--iot-target-min);
+  font-size: var(--iot-font-caption);
+  color: var(--text-muted);
+  transition: color var(--iot-motion-fast);
+  padding: var(--iot-space-2xs);
   border: 0;
   background: transparent;
 }
 
 .copy-btn:hover {
-  color: #000;
+  color: var(--text);
 }
 
 .copy-btn:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--accent-border);
   outline-offset: 2px;
 }
 
 .copy-text {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--iot-space-2xs);
 }
 
 .code-content {
-  padding: 12px 16px;
   overflow-x: auto;
   font-family: Consolas, Monaco, 'Andale Mono', monospace;
-  font-size: 14px;
+  font-size: var(--iot-font-control);
   line-height: 1.5;
-  /* 浅色模式文字颜色由 shiki 决定，这里设置默认值 */
-  color: #333;
-}
-
-:global(:root[data-theme='dark'] .code-block-container) {
-  border-color: #333;
-  background: #0d1117;
-}
-
-:global(:root[data-theme='dark'] .code-block-container .code-header) {
-  background: #161b22;
-  border-bottom-color: #333;
-  color: var(--text-muted);
-}
-
-:global(:root[data-theme='dark'] .code-block-container .lang-label) {
+  /* Shiki owns syntax colors; unhighlighted text follows the theme. */
   color: var(--text);
 }
 
-:global(:root[data-theme='dark'] .code-block-container .copy-btn) {
-  color: var(--text-muted);
-}
-
-:global(:root[data-theme='dark'] .code-block-container .copy-btn:hover) {
-  color: var(--text);
-}
-
-/* 强制让 Shiki 的 pre 背景透明，以便显示我们容器的背景 */
+/* Shiki's syntax ink and background form a pair; keep the padding on that painted surface. */
 :deep(pre.shiki) {
-  background-color: transparent !important;
   margin: 0;
-  padding: 0;
+  padding: var(--iot-space-md) var(--iot-space-lg);
 }
 </style>

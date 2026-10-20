@@ -41,7 +41,7 @@ describe('replay-bar rules are not scoped to the board', () => {
 
     // The root div is indented two spaces in the template, so its closing tag at that indent ends it.
     const rootClose = board.indexOf('\n  </div>', rootAt)
-    const traceHost = board.indexOf('board-timeline-host board-timeline-host--trace')
+    const traceHost = board.indexOf('<PlaybackTerminal\n')
     expect(traceHost, 'the trace replay bar has a host').toBeGreaterThan(-1)
     expect(traceHost, 'and it is a sibling of the board root, not a descendant').toBeGreaterThan(rootClose)
   })
@@ -65,7 +65,7 @@ describe('replay-bar rules are not scoped to the board', () => {
     const css = boardCss()
     const sim = readFileSync(join(STYLE_DIR, '../components/SimulationTimeline.vue'), 'utf8')
     const board = readFileSync(join(STYLE_DIR, '../views/Board.vue'), 'utf8')
-    const traceBar = board.slice(board.indexOf('board-timeline-host board-timeline-host--trace'))
+    const traceBar = board.slice(board.indexOf('<PlaybackTerminal\n'))
 
     const shared = [...new Set(
       [...sim.matchAll(/board-(?:chip|surface|text|border)-[a-z0-9-]+/g),
@@ -84,21 +84,10 @@ describe('replay-bar rules are not scoped to the board', () => {
     expect(unpaired, 'a board-scoped role class needs a bare arm, or it skips both replay bars').toEqual([])
   })
 
-  it('keeps the 44px close target inside the narrow media query, unprefixed', () => {
+  it('gives terminal icon actions the shared target size at every viewport', () => {
     const css = boardCss()
-    // The floor is only needed where pointers are coarse and the bar is cramped, so it stays inside the
-    // media query rather than becoming unconditional — asserting the value alone would pass for a rule
-    // hoisted out of it.
-    const narrowAt = css.indexOf('@media (max-width: 1023.98px), (max-height: 599.98px)')
-    expect(narrowAt, 'the narrow/short breakpoint block should exist').toBeGreaterThan(-1)
-    // Anchored to the start of its line: `indexOf` on the bare selector also matches inside
-    // `.iot-board .board-timeline […]`, so it passed on exactly the dead form this file exists to reject.
-    const at = css.search(
-      /^\s*\.board-timeline \[data-testid\$="-timeline-close"\]/m
-    )
-    expect(at, 'the close-button floor is declared for the replay bars').toBeGreaterThan(narrowAt)
-    const block = css.slice(at, at + css.slice(at).indexOf('}'))
-    expect(block, 'both axes reach the tap minimum').toMatch(/min-width:\s*2\.75rem/)
-    expect(block, 'both axes reach the tap minimum').toMatch(/min-height:\s*2\.75rem/)
+    expect(css).toMatch(/\.board-timeline \.playback-terminal__icon\s*\{[^}]*width: var\(--iot-target-min\)/)
+    expect(css).toMatch(/\.board-timeline button:where\([^}]+min-height: var\(--iot-target-min\)/)
   })
+
 })

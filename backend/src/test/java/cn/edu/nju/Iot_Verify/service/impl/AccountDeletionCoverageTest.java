@@ -24,9 +24,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * snapshots of a user's rules and specifications, so those survived the account that owned them, and
  * `docs/api/auth.md` claimed a cascade that did not exist for that table.
  *
- * <p>The single source of truth is {@code UserOwnedOrphanCleanup.USER_OWNED_TABLES}: every table
- * listed there is by definition user-owned, so every one must also be explicitly deleted on account
- * deletion and must have a cascade foreign key.
+ * <p>User ownership is derived from the entity's scalar {@code userId}, so forgetting a new entity
+ * in both account deletion and the schema constraints cannot make this check pass.
  */
 class AccountDeletionCoverageTest {
 
@@ -47,14 +46,17 @@ class AccountDeletionCoverageTest {
     }
 
     private static Set<String> userOwnedTables() throws IOException {
-        String source = read("configure", "UserOwnedOrphanCleanup.java");
-        String block = source.substring(
-                source.indexOf("USER_OWNED_TABLES = List.of("),
-                source.indexOf(");", source.indexOf("USER_OWNED_TABLES = List.of(")));
         Set<String> tables = new TreeSet<>();
-        Matcher matcher = Pattern.compile("\"([a-z_]+)\"").matcher(block);
-        while (matcher.find()) {
-            tables.add(matcher.group(1));
+        try (Stream<Path> files = Files.list(BACKEND_SRC.resolve("po"))) {
+            for (Path file : files.filter(path -> path.toString().endsWith(".java")).toList()) {
+                String source = Files.readString(file);
+                if (!Pattern.compile("(?m)^@Entity\\b").matcher(source).find()) continue;
+                if (!Pattern.compile("\\b(?:Long|long)\\s+userId\\s*;").matcher(source).find()) continue;
+                Matcher table = Pattern.compile("@Table\\(\\s*name\\s*=\\s*\"([a-z_]+)\"")
+                        .matcher(source);
+                assertTrue(table.find(), "an entity owner must have a declared table: " + file);
+                tables.add(table.group(1));
+            }
         }
         return tables;
     }
@@ -64,12 +66,12 @@ class AccountDeletionCoverageTest {
         Set<String> tables = userOwnedTables();
         assertTrue(tables.size() > 10, "expected the user-owned table list to be populated: " + tables);
         assertTrue(tables.contains("board_edit_journal"),
-                "the undo journal is user-owned and must be swept for orphans");
+                "the undo journal is user-owned and must be removed with its account");
     }
 
     @Test
     void everyUserOwnedTableGetsACascadeForeignKey() throws IOException {
-        String source = read("configure", "UserOwnedOrphanCleanup.java");
+        String source = read("configure", "DatabaseSchemaConstraints.java");
         String block = source.substring(source.indexOf("FOREIGN_KEYS = List.of("));
 
         for (String table : userOwnedTables()) {

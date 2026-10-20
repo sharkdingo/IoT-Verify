@@ -79,12 +79,12 @@ const declaredRules = () => declaredSelectors().replace(/\/\*[\s\S]*?\*\//g, '')
  */
 const timelineMarkup = () => {
   const src = join(__dirname, '../..')
-  return ['components/SimulationTimeline.vue', 'views/Board.vue'].map(file => {
+  return ['components/PlaybackTerminal.vue', 'components/PlaybackChangesPanel.vue', 'components/SimulationTimeline.vue', 'views/Board.vue'].map(file => {
     const text = readFileSync(join(src, file), 'utf8')
-    const at = text.indexOf('class="board-timeline board-timeline--')
+    const at = file === 'views/Board.vue' ? text.indexOf('<PlaybackTerminal\n') : text.indexOf('<template>')
     if (at < 0) {
       throw new Error(
-        `${file} no longer opens a \`board-timeline board-timeline--*\` element, so this guard would check `
+        `${file} no longer opens its playback template, so this guard would check `
         + 'nothing. Update the marker rather than deleting the case.')
     }
     return {

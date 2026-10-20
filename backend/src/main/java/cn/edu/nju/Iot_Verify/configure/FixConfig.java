@@ -12,6 +12,7 @@ import org.springframework.validation.annotation.Validated;
 @ConfigurationProperties(prefix = "fix")
 public class FixConfig {
 
+    /** Nominal candidate budget; affordable finite searches may finish under the fixer's measured time bound. */
     @Min(1)
     private int maxAttempts = 20;
 

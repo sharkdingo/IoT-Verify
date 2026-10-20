@@ -9,7 +9,6 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.beans.factory.annotation.Autowired;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.nio.charset.StandardCharsets;
@@ -26,7 +25,6 @@ import java.util.List;
 import java.util.Optional;
 
 /** Session-scoped, single-use authorization for destructive AI tool calls. */
-@Slf4j
 @Component
 public class AiDestructiveActionGuard {
 
@@ -56,9 +54,10 @@ public class AiDestructiveActionGuard {
     public String issue(Long userId,
                         String toolName,
                         String targetKey,
+                        String displayTarget,
                         Object previewSnapshot,
                         String domainImpactToken) {
-        return issue(userId, toolName, targetKey, previewSnapshot, domainImpactToken, null);
+        return issue(userId, toolName, targetKey, displayTarget, previewSnapshot, domainImpactToken, null);
     }
 
     /**
@@ -68,16 +67,18 @@ public class AiDestructiveActionGuard {
     public String issueStoredAction(Long userId,
                                     String toolName,
                                     String targetKey,
+                                    String displayTarget,
                                     Object actionPayload) {
         if (actionPayload == null) {
             throw new IllegalArgumentException("actionPayload must not be null");
         }
-        return issue(userId, toolName, targetKey, actionPayload, null, actionPayload);
+        return issue(userId, toolName, targetKey, displayTarget, actionPayload, null, actionPayload);
     }
 
     private String issue(Long userId,
                          String toolName,
                          String targetKey,
+                         String displayTarget,
                          Object previewSnapshot,
                          String domainImpactToken,
                          Object actionPayload) {
@@ -91,6 +92,8 @@ public class AiDestructiveActionGuard {
         payload.put("token", token);
         payload.put("toolName", requireText(toolName, "toolName"));
         payload.put("targetKey", requireText(targetKey, "targetKey"));
+        // Display the previewed target after reload without making its label an authorization key.
+        payload.put("displayTarget", requireText(displayTarget, "displayTarget"));
         payload.put("previewDigest", Base64.getEncoder().encodeToString(digest(previewSnapshot)));
         if (domainImpactToken != null) payload.put("domainImpactToken", domainImpactToken);
         if (actionPayload != null) payload.set("actionPayload", objectMapper.valueToTree(actionPayload));
@@ -151,7 +154,7 @@ public class AiDestructiveActionGuard {
                     "No changes were made. The preview is missing, expired, or already used; request a fresh preview.");
         }
 
-        PendingAction pending = parsePending(scope, snapshot);
+        PendingAction pending = parsePending(snapshot);
         if (pending == null) {
             return ConsumeResult.rejected(
                     "CONFIRMATION_MISSING",
@@ -162,7 +165,8 @@ public class AiDestructiveActionGuard {
         String expectedTarget = requireText(targetKey, "targetKey");
         if (!pending.toolName().equals(expectedTool)
                 || !pending.targetKey().equals(expectedTarget)
-                || !secureEquals(pending.token(), suppliedToken)) {
+                || !secureEquals(pending.token(), suppliedToken)
+                || !secureEquals(pending.token(), UserContextHolder.getConfirmedProtectedActionId())) {
             return ConsumeResult.rejected(
                     "CONFIRMATION_MISMATCH",
                     "No changes were made. The confirmation token does not match this tool and target; review a fresh preview.");
@@ -208,6 +212,16 @@ public class AiDestructiveActionGuard {
         stateStore.remove(userId, sessionId, AiSessionStateStore.Kind.DESTRUCTIVE_ACTION);
     }
 
+    public boolean cancelPending(Long userId, String sessionId, String confirmationId) {
+        AiSessionStateStore.Snapshot snapshot = stateStore.get(userId, sessionId,
+                AiSessionStateStore.Kind.DESTRUCTIVE_ACTION, clock.instant()).orElse(null);
+        if (snapshot == null) return false;
+        PendingAction pending = parsePending(snapshot);
+        return pending != null && secureEquals(pending.token(), confirmationId)
+                && stateStore.remove(userId, sessionId, AiSessionStateStore.Kind.DESTRUCTIVE_ACTION,
+                        snapshot.version());
+    }
+
     public void clearUser(Long userId) {
         if (userId == null) return;
         stateStore.removeUser(userId);
@@ -216,24 +230,24 @@ public class AiDestructiveActionGuard {
     /** Returns compact confirmation context without depending on persisted tool-result history. */
     public Optional<PendingActionContext> pendingContext(Long userId, String sessionId) {
         if (userId == null || sessionId == null || sessionId.isBlank()) return Optional.empty();
-        SessionScope scope = new SessionScope(userId, sessionId);
         AiSessionStateStore.Snapshot snapshot = stateStore.get(
                 userId, sessionId, AiSessionStateStore.Kind.DESTRUCTIVE_ACTION,
                 clock.instant()).orElse(null);
         if (snapshot == null) return Optional.empty();
-        PendingAction pending = parsePending(scope, snapshot);
+        PendingAction pending = parsePending(snapshot);
         if (pending == null) return Optional.empty();
         return Optional.of(new PendingActionContext(
-                pending.toolName(), pending.targetKey(), pending.token()));
+                pending.toolName(), pending.targetKey(), pending.token(), pending.displayTarget()));
     }
 
-    private PendingAction parsePending(SessionScope scope, AiSessionStateStore.Snapshot snapshot) {
+    private PendingAction parsePending(AiSessionStateStore.Snapshot snapshot) {
         try {
             JsonNode payload = snapshot.payload();
             return new PendingAction(
                     requireText(payload.path("token").asText(null), "token"),
                     requireText(payload.path("toolName").asText(null), "toolName"),
                     requireText(payload.path("targetKey").asText(null), "targetKey"),
+                    requireText(payload.path("displayTarget").asText(null), "displayTarget"),
                     Base64.getDecoder().decode(requireText(
                             payload.path("previewDigest").asText(null), "previewDigest")),
                     payload.hasNonNull("domainImpactToken")
@@ -241,20 +255,7 @@ public class AiDestructiveActionGuard {
                     payload.hasNonNull("actionPayload")
                             ? payload.path("actionPayload").deepCopy() : null);
         } catch (RuntimeException e) {
-            // Best-effort cleanup only. `pendingContext` is reached from a read-only query
-            // (`GET /api/chat/sessions/{id}/confirmation`), and `remove` runs with the default
-            // propagation — so enlisting this delete in the caller's read-only transaction turns the
-            // honest "nothing pending" answer into a 500 at flush, leaving the client unable to learn
-            // whether a protected action is outstanding. The row is unreadable either way; the
-            // `purgeExpired` sweep is the backstop, bounded by the TTL. Same reasoning as
-            // `JpaAiSessionStateStore.discardUnusableState` and `AiScenarioDraftStore.active`.
-            try {
-                stateStore.remove(scope.userId(), scope.sessionId(),
-                        AiSessionStateStore.Kind.DESTRUCTIVE_ACTION, snapshot.version());
-            } catch (RuntimeException cleanupFailure) {
-                log.warn("Could not discard an unreadable pending destructive action: exception={}",
-                        cleanupFailure.getClass().getName());
-            }
+            // Do not enlist deletes in a read-only caller; expiry cleanup or the next preview handles this row.
             return null;
         }
     }
@@ -323,12 +324,14 @@ public class AiDestructiveActionGuard {
     private record PendingAction(String token,
                                  String toolName,
                                  String targetKey,
+                                 String displayTarget,
                                  byte[] previewDigest,
                                  String domainImpactToken,
                                  JsonNode actionPayload) {
     }
 
-    public record PendingActionContext(String toolName, String targetKey, String impactToken) {
+    public record PendingActionContext(String toolName, String targetKey, String impactToken,
+                                       String displayTarget) {
     }
 
     public record ConsumeResult(boolean approved,

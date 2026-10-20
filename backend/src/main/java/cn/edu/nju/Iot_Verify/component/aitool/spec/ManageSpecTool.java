@@ -222,14 +222,15 @@ public class ManageSpecTool extends AbstractAiTool {
             return errorJson("Specification not found: " + specId, "NOT_FOUND", 404);
         }
 
-        Object presentedSpecification = SpecificationToolPresenter.present(
+        Map<String, Object> presentedSpecification = SpecificationToolPresenter.present(
                 target, currentPresentationContext(userId));
         Map<String, Object> bindingSnapshot = Map.of(
                 "specification", presentedSpecification);
         boolean confirmed = booleanArg(args, "confirmed", false);
         if (!confirmed || !UserContextHolder.isDestructiveActionConfirmed()) {
             String impactToken = destructiveActionGuard.issue(
-                    userId, getName(), specId, bindingSnapshot, null);
+                    userId, getName(), specId,
+                    (String) presentedSpecification.get("description"), bindingSnapshot, null);
             Map<String, Object> preview = new LinkedHashMap<>();
             preview.put("message", "No changes were made. Explicit user confirmation is required before deleting this specification.");
             preview.put("operation", "preview");
@@ -244,7 +245,8 @@ public class ManageSpecTool extends AbstractAiTool {
                 userId, getName(), specId, impactToken, bindingSnapshot);
         if (!confirmation.approved()) {
             String freshToken = destructiveActionGuard.issue(
-                    userId, getName(), specId, bindingSnapshot, null);
+                    userId, getName(), specId,
+                    (String) presentedSpecification.get("description"), bindingSnapshot, null);
             return errorJson(confirmation.message(), confirmation.errorCode(), 409, Map.of(
                     "requiresUserConfirmation", true,
                     "currentPreview", Map.of(
@@ -264,11 +266,12 @@ public class ManageSpecTool extends AbstractAiTool {
             if (current == null) {
                 return errorJson("Specification not found: " + specId, "NOT_FOUND", 404);
             }
-            Object currentPresentation = SpecificationToolPresenter.present(
+            Map<String, Object> currentPresentation = SpecificationToolPresenter.present(
                     current, currentPresentationContext(userId));
             Map<String, Object> currentBinding = Map.of("specification", currentPresentation);
             String freshToken = destructiveActionGuard.issue(
-                    userId, getName(), specId, currentBinding, null);
+                    userId, getName(), specId,
+                    (String) currentPresentation.get("description"), currentBinding, null);
             return errorJson(conflict.getMessage(), "CONFIRMATION_STALE", 409, Map.of(
                     "requiresUserConfirmation", true,
                     "currentPreview", Map.of(
@@ -309,7 +312,7 @@ public class ManageSpecTool extends AbstractAiTool {
             requireOnlyFields(cn, conditionPath, Set.of(
                     "deviceId", "deviceLabel", "targetType", "key", "propertyScope", "variableSource",
                     "relation", "value"));
-            String inputDeviceId = nullableTextField(cn, "deviceId", conditionPath);
+            String inputDeviceId = nullableDeviceIdField(cn, "deviceId", conditionPath);
             String deviceId = resolveDeviceIdById(inputDeviceId, deviceLookup);
             if (deviceId == null) {
                 throw new IllegalArgumentException(conditionLabel
@@ -437,8 +440,8 @@ public class ManageSpecTool extends AbstractAiTool {
             if (node == null) {
                 continue;
             }
-            String id = trimToNull(node.getId());
-            if (id == null) {
+            String id = node.getId();
+            if (id == null || id.isEmpty()) {
                 continue;
             }
             idsByKey.put(normalizeLookupKey(id), id);
@@ -470,7 +473,7 @@ public class ManageSpecTool extends AbstractAiTool {
     }
 
     private String normalizeLookupKey(String value) {
-        return value.trim().toLowerCase(Locale.ROOT);
+        return value.toLowerCase(Locale.ROOT);
     }
 
     private record DeviceLookup(Map<String, String> idsByKey,

@@ -51,6 +51,19 @@ jobs:
     name: Build and unit test
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      mysql:
+        image: mysql:8.0@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b
+        env:
+          MYSQL_DATABASE: iot_verify_undo_it
+          MYSQL_USER: iot_verify
+          MYSQL_PASSWORD: iot_verify_ci
+          MYSQL_ROOT_PASSWORD: root_ci
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot_ci --silent"
+          --health-interval=10s --health-timeout=5s --health-retries=12
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -78,7 +91,10 @@ jobs:
       # once per run instead of once per job.
       - name: Backend tests and package
         working-directory: backend
-        run: mvn -B package
+        env:
+          DB_USERNAME: iot_verify
+          DB_PASSWORD: iot_verify_ci
+        run: mvn -B package -Diot.verify.mysql.required=true
 
       - name: Frontend typecheck, unit tests, build
         working-directory: frontend
@@ -100,7 +116,7 @@ jobs:
     name: Full-stack E2E
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     services:
       mysql:
         image: mysql:8.0@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b

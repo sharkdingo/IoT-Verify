@@ -16,24 +16,12 @@ npm run dev        # http://localhost:3000, proxies /api → http://localhost:80
 
 Other scripts: `npm run build` (type-check via `vue-tsc` + production build),
 `npm run preview`, `npm run test:unit` (Vitest), `npm run test:e2e` (Playwright).
-The e2e suite starts the Vite frontend automatically when `E2E_BASE_URL` is unset,
-but it exercises real auth/board APIs, so keep the backend running at
-`E2E_API_BASE_URL` (default `http://127.0.0.1:8080`).
+For E2E startup, backend prerequisites, and auth-rate-limit headroom, follow
+[CLAUDE.md](CLAUDE.md#commands).
 
 ## Source layout
 
-```
-src/
-  api/       http.ts (axios) + auth / board / chat / rules / simulation / fuzzing modules
-  types/     TypeScript contracts (auth, device, node, edge, rule, spec, verify, fuzzing, fix, …)
-  stores/    reactive state (auth, chat)
-  router/    routes + auth guard
-  views/     Landing / Board / NotFound
-  components/ CanvasBoard, ChatView, ControlCenter, SystemInspector,
-              TraceHistoryPanel, SimulationTimeline, FixResultDialog,
-              RuleBuilderDialog, DeviceDialog, AccountDeleteDialog, …
-  assets/    static assets + i18n (zh-CN / en)
-```
+See the [frontend layout](../docs/architecture/overview.md#frontend-layout).
 
 ## How the frontend talks to the backend
 
@@ -42,10 +30,7 @@ the axios client, the real `boardApi` / `authApi` shapes, the two response-unwra
 conventions, and the SSE chat streaming. Backend API contracts:
 [docs/api/](../docs/api/rest-endpoints.md).
 
-> Base URL: both `src/api/http.ts` (axios) and `src/api/chat.ts` (SSE) read
-> `VITE_API_BASE_URL`. Leave it empty (default) for same-origin setups — requests use a
-> relative `/api` proxied by Vite in dev and by your reverse proxy in prod. Set an
-> absolute URL only for cross-origin deployments. See the frontend integration guide.
+API origin configuration: [configuration reference](../docs/getting-started/configuration.md#frontend-vite).
 
 ## License
 

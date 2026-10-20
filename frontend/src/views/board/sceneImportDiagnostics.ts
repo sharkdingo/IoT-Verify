@@ -24,12 +24,12 @@ export const getStructuredValidationErrors = (error: unknown): Array<[string, st
  * anything unrecognised is reported as a scene-level problem rather than guessed at.
  */
 const COORDINATE_PATTERNS: Array<[RegExp, string]> = [
-  [/^templates\[(\d+)]/, 'sceneImportValidationTemplate'],
-  [/^devices\[(\d+)]/, 'sceneImportValidationDevice'],
-  [/^nodes\[(\d+)]/, 'sceneImportValidationDevice'],
-  [/^environmentVariables\[(\d+)]/, 'sceneImportValidationEnvironment'],
-  [/^rules\[(\d+)]/, 'sceneImportValidationRule'],
-  [/^specs\[(\d+)]/, 'sceneImportValidationSpecification']
+  [/^templates\[(\d+)]/, 'app.sceneImportValidationTemplate'],
+  [/^devices\[(\d+)]/, 'app.sceneImportValidationDevice'],
+  [/^nodes\[(\d+)]/, 'app.sceneImportValidationDevice'],
+  [/^environmentVariables\[(\d+)]/, 'app.sceneImportValidationEnvironment'],
+  [/^rules\[(\d+)]/, 'app.sceneImportValidationRule'],
+  [/^specs\[(\d+)]/, 'app.sceneImportValidationSpecification']
 ]
 
 export const formatSceneValidationCoordinate = (
@@ -38,7 +38,7 @@ export const formatSceneValidationCoordinate = (
 ): string => {
   for (const [pattern, key] of COORDINATE_PATTERNS) {
     const match = field.match(pattern)
-    if (match) return t(`app.${key}`, { index: Number(match[1]) + 1 })
+    if (match) return t(key, { index: Number(match[1]) + 1 })
   }
   return t('app.sceneImportValidationScene')
 }

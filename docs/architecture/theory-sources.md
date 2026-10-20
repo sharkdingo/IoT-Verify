@@ -9,7 +9,7 @@ different user-facing contract.
 Read the cited section before changing generated-model semantics, then keep the formal checker,
 bounded explorer, API contract, tests, and UI explanation aligned with the chosen product meaning.
 
-Verified against code on 2026-08-12. Source: `backend/src/main/java/cn/edu/nju/Iot_Verify/component/nusmv/`,
+Verified against code on 2026-10-12. Source: `backend/src/main/java/cn/edu/nju/Iot_Verify/component/nusmv/`,
 `component/fuzz/`. Conformance is also pinned by `TheorySourceConformanceTest`, so a claim here that
 the code contradicts fails the build.
 
@@ -107,10 +107,73 @@ their own copy; the citations below are precise enough to check against any copy
   [spec-templates.md](spec-templates.md).
 - **Fault localization and fixes** — Salus §4–§5. Implementation: `FaultLocalizer` and the strategies
   under `component/nusmv/fixer/`; see [auto-fix.md](auto-fix.md).
+  [The authors' paper](https://seg.nju.edu.cn/uploadPublication/copyright/120715743892.pdf)
+  §5.1's kitchen ventilation example is represented by the importable
+  [ventilation scene](../examples/salus-ventilation-repair-scene.json): CO2 starts at 999 ppm,
+  can rise by zero or one per step, and the running fan offsets the maximum rise. The original `>1000` rule is
+  idle until after the limit is crossed; repair must search idle relevant rules and find an
+  earlier threshold. The device action updates its next state, so its physical effect starts
+  on the following step under this project's timing convention; the paper's illustrative
+  `999` recommendation is not imposed on this model. `AcceptanceDemoScenarioNusmvTest`
+  checks the actual repaired threshold with real NuSMV and requires every listed repair to
+  satisfy both the CO2 limit and the response requiring the fan to run at or above 999 ppm.
+  The original rules violate both requirements: a permitted zero-rise path can leave the
+  fan off forever at 999 ppm. The response guards against a repair that merely disables ventilation.
+  Its occupancy/heating case also exercises §5.2's `temp<=18` rule: add a positive occupancy
+  condition, keep the rule, and verify heating remains available when the room is occupied.
 - **Bounded exploration** — HAFuzz's runtime-verification monitor checking LTL violations within finite
   steps, used to guide seed selection. Implementation: `FuzzEngine`, `FuzzModel`, and the
   `component/fuzz/paper/` monitor FSM; see [fuzzing-flow.md](fuzzing-flow.md). HAFuzz findings are
   candidate evidence, never formal conclusions — budget exhaustion is not satisfaction.
+
+## Reproducing the Salus house experiment
+
+The [Microsoft Research publication page](https://www.microsoft.com/en-us/research/publication/systematically-debugging-iot-control-system-correctness-building-automation/)
+and authors' paper describe the experiment, but the checked public pages and GitHub
+repository searches did not expose its complete device profiles, 29 ordered rules, initial
+states, or participant records as of 2026-10-11. The
+[CASAS data portal](https://casas.wsu.edu/datasets/) provides sensor observations. These
+belong to the preference-learning experiment in §8, and are not a substitute for the
+automation and policy inputs of the repair experiment in §7. A complete reproduction of
+the original user study, its Pex comparison, and its Z3 timing measurements therefore
+cannot be claimed from these inputs.
+
+The importable [house reconstruction](../examples/salus-house-repair-scene.json) uses
+§7's reported scale: 41 devices, 29 ordered rules, and six policies. Its six areas include
+bedroom and living-room heating/cooling, indoor lights and daylight blinds, kitchen
+extraction and a gas valve, RFID entrance access, a balcony door, and a kitchen-to-entrance-to-hall
+alarm chain. Every device is referenced by automation or a policy; extra disconnected
+devices do not inflate the scale. Temperature varies by `[-1,1]` per step with heater and
+cooler effects; the open gas valve raises gas and extraction lowers it. Sensors for home
+occupancy, room motion, sleep and RFID keep their selected initial state during each run;
+the regression also tests the occupied, awake branch after repair.
+
+The six policies reconstruct the paper's stated intentions, rather than unpublished
+original formulas: bedroom temperature stays between 21 and 27; sleeping occupants have
+neither indoor lights nor an open daylight blind; away lighting is off throughout the
+house; unknown RFID leaves the entrance locked; absence leaves the balcony locked; and
+kitchen gas stays below the danger threshold. Lighting and lock responses use the
+product's next-state convention. The brightness policy conservatively forbids its active
+sources, rather than inventing a lux calibration absent from the original inputs.
+
+The regression also expands the ten lights into thirty, producing 61 devices and 49 rules.
+The additional lights share their original occupancy inputs, and the sleep/away policies
+include every corresponding actuator.
+
+`AcceptanceDemoScenarioNusmvTest` checks discovery, successive application of parameter,
+condition and removal repairs on the same scene, all listed alternatives, and all earlier satisfied
+requirements after every repair. Additional alarm and monitoring response requirements
+start satisfied and must stay satisfied; changing to home-present/awake inputs after
+repair must still turn on the required lights. The two incorrect unlocking automations are
+explicitly removed through the removal strategy. Every retained rule and submitted specification
+must remain in the generated model. These are model-level reconstructions, not a replication
+of the original hardware deployment or its human acceptance statistics.
+
+The occupied branch also tests gas initially at its limit. With an open valve and stopped
+extractor, the first physical step crosses that limit before a command takes effect; none
+of the three rule strategies may claim a repair for this unavoidable initial transient.
+With extraction already active, the same warning-level input must satisfy every safety
+and response requirement, including the alarm chain and useful lighting.
 
 ## Where this project deliberately differs from or goes beyond a paper
 

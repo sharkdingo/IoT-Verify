@@ -9,6 +9,7 @@ import cn.edu.nju.Iot_Verify.component.ai.LlmRequestControl;
 import cn.edu.nju.Iot_Verify.component.ai.LlmRequestControlHolder;
 import cn.edu.nju.Iot_Verify.component.ai.LlmMessageCodec;
 import cn.edu.nju.Iot_Verify.component.ai.model.LlmChatResponse;
+import cn.edu.nju.Iot_Verify.component.ai.model.LlmStreamInterruptedException;
 import cn.edu.nju.Iot_Verify.component.ai.model.ChatExecutionStatus;
 import cn.edu.nju.Iot_Verify.component.ai.model.LlmMessage;
 import cn.edu.nju.Iot_Verify.component.ai.model.LlmToolCall;
@@ -33,6 +34,7 @@ import cn.edu.nju.Iot_Verify.exception.ChatSessionBusyException;
 import cn.edu.nju.Iot_Verify.exception.ChatHistoryQuotaExceededException;
 import cn.edu.nju.Iot_Verify.exception.ChatAdmissionOutcomeUnknownException;
 import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
+import cn.edu.nju.Iot_Verify.exception.ChatConfirmationConflictException;
 import cn.edu.nju.Iot_Verify.exception.UnauthorizedException;
 import cn.edu.nju.Iot_Verify.dto.RequestLimits;
 import cn.edu.nju.Iot_Verify.po.ChatMessagePo;
@@ -104,10 +106,10 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
             "resultAvailable", "resultStatus", "mutationMayHaveCommitted", "objectiveStatus");
     private static final Set<String> PERSISTED_PROGRESS_FIELDS = Set.of(
             "stage", "toolName", "round", "outcome", "successfulSteps",
-            "failedSteps", "unconfirmedSteps", "detail");
+            "failedSteps", "unconfirmedSteps", "detail", "claimReview");
     private static final Set<String> PERSISTED_PROGRESS_STAGES = Set.of(
             "CONTEXT_READY", "TASK_RESUMED", "PLANNING", "REASONING",
-            "TOOL_EXECUTION", "TOOL_RESULT", "EXECUTION_GUARD", "WRITING_RESPONSE");
+            "TOOL_EXECUTION", "TOOL_RESULT", "EXECUTION_GUARD", "CLAIM_REVIEW", "WRITING_RESPONSE");
     private static final Pattern UNSUPPORTED_TOOL_EVIDENCE_CLAIM = Pattern.compile(
             "(?is)(?:\\b(?:the\\s+)?(?:tool|function|api)(?:\\s+(?:call|execution))?\\s+"
                     + "(?:result|response|output)\\s+"
@@ -150,12 +152,12 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                     + "(?:is|was|has\\s+been)\\s+(?:now\\s+)?(?:complete|completed|successful|finished)\\b"
                     + "|(?:(?:我|本助手|我们)(?:已经|已)?(?:成功)?|(?:已经|已)(?:成功)?)"
                     + "(?:添加|创建|删除|移除|重命名|更新|修改|应用|运行|启动|停止|取消|验证|模拟|保存|重置|"
-                    + "替换|导入|完成)(?:了)?[^.!?。！？]{0,160}?"
+                    + "替换|导入|完成)(?!的)(?:了)?[^.!?。！？]{0,160}?"
                     + "(?:设备|规则|规约|画布|场景|仿真|模拟|验证|轨迹|模板|环境变量)"
                     + "|(?:全部|所有|你的|您的|当前|这些|该)?"
                     + "(?:设备|规则|规约|画布|场景|仿真|模拟|验证|轨迹|模板|环境变量)"
                     + "[^.!?。！？]{0,80}(?:已经|已)(?:成功)?(?:被)?"
-                    + "(?:添加|创建|删除|移除|重命名|更新|修改|应用|保存|重置|替换|导入)"
+                    + "(?:添加|创建|删除|移除|重命名|更新|修改|应用|保存|重置|替换|导入)(?!的)"
                     + "|(?:(?:我|本助手|我们)(?:已经|已)?(?:成功)?)"
                     + "(?:更新|修改|重置|替换)(?:了)?(?:当前|你的|您的)?模型"
                     + "|(?:当前|你的|您的)模型[^.!?。！？]{0,40}(?:已经|已)(?:成功)?(?:被)?"
@@ -170,6 +172,18 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                     + "(?:示例|样例|假设|草案|参考)(?:设备|规则|规约|场景|模型|配置)"
                     + "|(?:已)?(?:删除|移除|重命名|更新|修改|取消)的"
                     + "(?:设备|规则|规约|画布|场景|轨迹|模板|环境变量|模型))");
+    private static final Pattern NON_OPERATIONAL_CLAIM_SPAN = Pattern.compile(
+            "(?is)(?:[零一二三四五六七八九十百千两\\d]+(?:个|条|份|项)|这(?:些|个|条|份|项)|那(?:些|个|条|份|项))"
+                    + "已(?:保存|创建|导入)(?:设备|规则|规约|场景|模板|环境变量)"
+                    + "|(?:没有|暂无|尚无|不存在|(?:尚|暂)?(?:未|没(?:有)?)(?:找到|查到|检索到))(?:任何)?(?:已经|已)(?:完成|保存)(?:的)?(?:正式)?"
+                    + "(?:验证(?:运行|结果|记录)?|仿真(?:运行|结果|记录)?|反例(?:轨迹|记录)?|运行|结果|记录)"
+                    + "|(?:(?:我|本助手|我们)(?:已经|已)?(?:成功)?|(?:已经|已)(?:成功)?)"
+                    + "完成(?:了)?(?:对)?(?:当前|这些|所有|上述|已有|全部|[零一二三四五六七八九十百千两\\d]+(?:个|条|项))?"
+                    + "(?:设备|规则|规约|画布|场景|模型|仿真|验证|轨迹|模板|环境变量)(?:之间|间)?(?:的)?"
+                    + "(?:触发链路|链路|条件|状态|行为|影响)?(?:的)?(?:静态)?(?:分析|梳理|整理|说明|审查)"
+                    + "|\\b(?:I|we)(?:'ve|\\s+have)?\\s+(?:completed|finished)\\s+(?:the\\s+)?"
+                    + "(?:static\\s+)?(?:analysis|review|inspection|explanation|audit)\\s+(?:of|for)\\s+"
+                    + "(?:(?:the|current|these|all|your)\\s+)*(?:devices?|rules?|specs?|specifications?|board|scene|model)\\b");
     private static final Pattern UNSUPPORTED_PLATFORM_READ_CLAIM = Pattern.compile(
             "(?is)(?:\\b(?:your(?:\\s+current)?|the\\s+current|current)\\s+"
                     + "(?:board|scene)\\s+(?:currently\\s+)?(?:contains?|has|includes?|shows?|lists?)\\b"
@@ -210,6 +224,8 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                     + "|(?:全部|所有|你的|您的|这些|该)\\s*)*$");
     private static final Pattern CLAIM_CLAUSE_BOUNDARY = Pattern.compile(
             "(?is)[,，;；:：\\n]|\\b(?:but|however|yet|then|and)\\b|(?:但是|不过|然而|然后|并且|而且|但)");
+    private static final Pattern COORDINATED_CLAIM_SUFFIX = Pattern.compile(
+            "(?is)^\\s*[,，;；]?\\s*(?:并且|而且|同时|并|且|\\b(?:and|then)\\b)\\s*(.+)");
     private static final Set<String> TOOL_RESULT_OUTCOMES = Set.of(
             "USABLE", "PARTIAL", "FAILED", "RESULT_UNAVAILABLE", "CONFIRMATION_REQUIRED");
     private static final Set<String> EXECUTION_GUARD_OUTCOMES = Set.of(
@@ -282,20 +298,12 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
     public ChatPendingConfirmationDto getPendingConfirmation(Long userId, String sessionId) {
         sessionRepo.findByIdAndUserId(sessionId, userId)
                 .orElseThrow(() -> ResourceNotFoundException.session(sessionId));
-        List<ChatConfirmationCommandDto.Kind> kinds = pendingProtectedKinds(userId, sessionId).stream()
-                .map(ChatServiceImpl::toCommandKind)
-                .toList();
         return ChatPendingConfirmationDto.builder()
                 .sessionId(sessionId)
-                .kinds(kinds)
+                .actions(pendingProtectedActions(
+                        destructiveActionGuard.pendingContext(userId, sessionId).orElse(null),
+                        scenarioDraftStore.pendingApplication(userId, sessionId).orElse(null)))
                 .build();
-    }
-
-    @Override
-    @Transactional(readOnly = true)
-    public List<ChatMessageResponseDto> getHistory(Long userId, String sessionId) {
-        return getHistoryPage(userId, sessionId, null, RequestLimits.MAX_CHAT_HISTORY_PAGE_SIZE)
-                .getMessages();
     }
 
     @Override
@@ -998,6 +1006,7 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
             UserContextHolder.setUserId(userId);
             UserContextHolder.setChatSessionId(sessionId);
             UserContextHolder.setChatExecutionId(executionId);
+            UserContextHolder.setChatUserMessage(content);
             LlmRequestControlHolder.set(activeRequest.requestControl());
             destructivePending = destructiveActionGuard.pendingContext(userId, sessionId).orElse(null);
             scenarioPending = scenarioDraftStore.pendingApplication(userId, sessionId).orElse(null);
@@ -1013,14 +1022,17 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                     && continuationContext.pendingToolName() != null) {
                 pendingKinds.add(ConfirmationKind.CHOICE);
             }
-            confirmationDecision = resolveConfirmation(content, confirmation, pendingKinds);
+            confirmationDecision = resolveConfirmation(content, confirmation, pendingKinds,
+                    pendingProtectedActions(destructivePending, scenarioPending));
             if (confirmationDecision.cancelled()) {
-                clearCancelledPendingAction(userId, sessionId, confirmationDecision.kind());
+                clearCancelledPendingAction(userId, sessionId, confirmationDecision.kind(),
+                        confirmation == null ? null : confirmation.getConfirmationId());
             }
-            UserContextHolder.setConfirmedProtectedActionKind(
+            UserContextHolder.setConfirmedProtectedAction(
                     confirmationDecision.confirmed() && confirmationDecision.kind() != ConfirmationKind.CHOICE
                             ? confirmationDecision.kind().name()
-                            : null);
+                            : null,
+                    confirmation == null ? null : confirmation.getConfirmationId());
             executeOwnedSessionWrite(userId, sessionId, executionId,
                     () -> touchSessionTitle(sessionId, userId, content));
             if (shouldStop.getAsBoolean()) {
@@ -1035,8 +1047,9 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
             List<ChatMessagePo> historyPO = getSmartHistory(
                     sessionId, chatExecutionConfig.getHistoryCharLimit());
             List<LlmMessage> messages = new ArrayList<>();
-            messages.add(buildToolPlanningSystemPrompt());
-            messages.addAll(llmChatService.toMessages(historyPO));
+            messages.add(LlmMessage.system(buildToolPlanningSystemPrompt().content() + "\n"
+                    + buildVisibleReplySystemPrompt(true).content()));
+            messages.addAll(messageCodec.toMessages(historyPO));
             LlmMessage pendingTaskContext = buildPendingTaskSystemPrompt(
                     destructivePending,
                     scenarioPending,
@@ -1061,11 +1074,19 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
 
             List<LlmToolSpec> availableTools = aiToolManager.getAllToolDefinitions();
             List<LlmToolSpec> tools = availableTools == null ? List.of() : availableTools;
-            log.debug("Starting model-driven planning with the complete {}-tool catalog", tools.size());
+            log.debug("Starting model-driven planning with {} discoverable tools", tools.size());
+            GuardedReplyStream replyStream = new GuardedReplyStream(finalAnswer, emitter, isDisconnect,
+                    shouldStop, preferChinese, executionTrace, confirmedMutationTools,
+                    activeRequest.requestControl()::cancel);
             loopResult = executeToolLoop(
                     userId, sessionId, messages, tools, commandSet, emitter, isDisconnect,
                     preferChinese, executionTrace, executionId, shouldStop, forceStopCheck,
-                    confirmedMutationTools);
+                    confirmedMutationTools, replyStream,
+                    confirmationDecision.confirmed()
+                            ? confirmationDecision.kind() == ConfirmationKind.SCENE_REPLACEMENT
+                                ? "apply_scenario" : destructivePending == null ? null : destructivePending.toolName()
+                            : null);
+            replyStream.resolveToolRound();
 
             if (forceStopCheck.getAsBoolean()) {
                 return;
@@ -1118,6 +1139,10 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
             // detaches the transport; it must not cancel the durable execution.
             String executionNotice = toolExecutionNotice(loopResult, preferChinese);
             if (!executionNotice.isBlank()) {
+                if (!finalAnswer.isEmpty() && !finalAnswer.toString().endsWith("\n\n")) {
+                    finalAnswer.append("\n\n");
+                    if (!sendSseChunk(emitter, "\n\n")) isDisconnect.set(true);
+                }
                 finalAnswer.append(executionNotice);
                 if (!sendSseChunk(emitter, executionNotice)) isDisconnect.set(true);
             }
@@ -1129,16 +1154,23 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
             }
 
             int replyStart = finalAnswer.length();
-            if (!sendSseProgress(emitter, "WRITING_RESPONSE", null, null,
-                    null, loopResult, null, executionTrace)) {
-                isDisconnect.set(true);
-                return;
+            ReplyGuardOutcome replyGuardOutcome = replyStream.outcome();
+            if (!loopResult.replyComplete() && replyGuardOutcome != ReplyGuardOutcome.HIDDEN_WITHOUT_EVIDENCE) {
+                if (!finalAnswer.isEmpty()) {
+                    finalAnswer.append("\n\n");
+                    if (!sendSseChunk(emitter, "\n\n")) isDisconnect.set(true);
+                }
+                if (!sendSseProgress(emitter, "WRITING_RESPONSE", null, null,
+                        null, loopResult, null, executionTrace)) {
+                    isDisconnect.set(true);
+                    return;
+                }
+                replyGuardOutcome = mergeReplyGuardOutcome(replyGuardOutcome, streamGuardedAssistantReply(
+                        withVisibleReplyPrompt(messages, loopResult), finalAnswer, emitter, isDisconnect, shouldStop,
+                        preferChinese, executionTrace, confirmedMutationTools));
             }
-            List<LlmMessage> visibleReplyMessages = withVisibleReplyPrompt(messages, loopResult);
-            ReplyGuardOutcome replyGuardOutcome = streamGuardedAssistantReply(
-                    visibleReplyMessages, finalAnswer, emitter, isDisconnect, shouldStop,
-                    preferChinese, executionTrace, confirmedMutationTools);
-            boolean finalResponseProduced = finalAnswer.length() > replyStart;
+            boolean finalResponseProduced = loopResult.replyComplete()
+                    ? replyStream.hasText() : finalAnswer.length() > replyStart;
 
             if (!finalResponseProduced && !isDisconnect.get()) {
                 String fallbackText = missingFinalResponseFallback(loopResult, preferChinese);
@@ -1228,6 +1260,7 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                     || !commandSet.isEmpty()
                     || frontendCommandsDeliveryFailed
                     || frontendCommandsDelivered
+                    || !finalAnswer.isEmpty()
                     ? ChatExecutionStatus.PARTIAL
                     : ChatExecutionStatus.FAILED;
             String userStoppedNotice = interruptedAuditNotice(loopResult, preferChinese, true);
@@ -1236,7 +1269,7 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                     sessionId,
                     executionId,
                     effectiveTurnId,
-                    errorMessage,
+                    finalAnswer.isEmpty() ? errorMessage : finalAnswer + "\n\n> " + errorMessage,
                     executionTrace,
                     elapsedSeconds(executionStartedNanos),
                     status,
@@ -1308,7 +1341,8 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
     private ConfirmationDecision resolveConfirmation(
             String content,
             ChatConfirmationCommandDto command,
-            EnumSet<ConfirmationKind> pendingKinds) {
+            EnumSet<ConfirmationKind> pendingKinds,
+            List<ChatPendingConfirmationDto.Action> pendingActions) {
         if (command == null) {
             return pendingKinds.size() == 1 && pendingKinds.contains(ConfirmationKind.CHOICE)
                     ? chatConfirmationDetector.detect(content, pendingKinds)
@@ -1319,34 +1353,31 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
             case DEFAULT_TEMPLATE_RESET -> ConfirmationKind.DEFAULT_TEMPLATE_RESET;
             case SCENE_REPLACEMENT -> ConfirmationKind.SCENE_REPLACEMENT;
         };
-        if (!pendingKinds.contains(requestedKind)) {
-            throw new BadRequestException(
-                    "The selected protected action is no longer pending. Refresh the conversation before confirming.");
+        if (pendingActions.stream().noneMatch(pending -> pending.kind() == command.getKind()
+                && pending.confirmationId().equals(command.getConfirmationId()))) {
+            throw new ChatConfirmationConflictException();
         }
         return command.getAction() == ChatConfirmationCommandDto.Action.CONFIRM
                 ? ConfirmationDecision.confirmed(requestedKind)
                 : ConfirmationDecision.cancelled(requestedKind);
     }
 
-    private EnumSet<ConfirmationKind> pendingProtectedKinds(Long userId, String sessionId) {
-        EnumSet<ConfirmationKind> kinds = EnumSet.noneOf(ConfirmationKind.class);
-        destructiveActionGuard.pendingContext(userId, sessionId).ifPresent(pending ->
-                kinds.add("reset_default_templates".equals(pending.toolName())
-                        ? ConfirmationKind.DEFAULT_TEMPLATE_RESET
-                        : ConfirmationKind.DESTRUCTIVE));
-        if (scenarioDraftStore.pendingApplication(userId, sessionId).isPresent()) {
-            kinds.add(ConfirmationKind.SCENE_REPLACEMENT);
+    private List<ChatPendingConfirmationDto.Action> pendingProtectedActions(
+            AiDestructiveActionGuard.PendingActionContext destructive,
+            AiScenarioDraftStore.PendingApplication scenario) {
+        List<ChatPendingConfirmationDto.Action> actions = new ArrayList<>();
+        if (destructive != null) {
+            actions.add(new ChatPendingConfirmationDto.Action(
+                    "reset_default_templates".equals(destructive.toolName())
+                            ? ChatConfirmationCommandDto.Kind.DEFAULT_TEMPLATE_RESET
+                            : ChatConfirmationCommandDto.Kind.DESTRUCTIVE,
+                    destructive.impactToken(), destructive.toolName(), destructive.displayTarget()));
         }
-        return kinds;
-    }
-
-    private static ChatConfirmationCommandDto.Kind toCommandKind(ConfirmationKind kind) {
-        return switch (kind) {
-            case DESTRUCTIVE -> ChatConfirmationCommandDto.Kind.DESTRUCTIVE;
-            case DEFAULT_TEMPLATE_RESET -> ChatConfirmationCommandDto.Kind.DEFAULT_TEMPLATE_RESET;
-            case SCENE_REPLACEMENT -> ChatConfirmationCommandDto.Kind.SCENE_REPLACEMENT;
-            case CHOICE -> throw new IllegalArgumentException("Non-destructive choices are not protected confirmations");
-        };
+        if (scenario != null) {
+            actions.add(new ChatPendingConfirmationDto.Action(ChatConfirmationCommandDto.Kind.SCENE_REPLACEMENT,
+                    scenario.confirmationId(), "apply_scenario", scenario.scenarioName()));
+        }
+        return actions;
     }
 
     private boolean synchronizeExecutionStop(Long userId,
@@ -1472,13 +1503,46 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
     }
 
     /**
-     * Shared by the planning and visible-reply prompts, which are otherwise deliberately different.
-     * Kept in one place so the platform's self-description cannot drift between the two rounds the
-     * model sees within a single turn.
+     * Shared by the tool-aware prompt and the guarded summary fallback so their platform
+     * self-description cannot drift.
      */
+    private static final String ANSWER_PRESENTATION_RULES = """
+        - Present each chain and inspection priority once, with its evidence and next check together. On a
+          follow-up, use earlier findings without repeating the entire topology. Keep all requested coverage
+          and material limitations, but omit repeated introductions, conclusions and checklists.
+          State shared limitations and evidence scope once instead of repeating them in each table row.
+          For a topology question, group the answer by chain and combine shared chain segments. Put each
+          chain's conditions, missing links and inspection priority in that same section; do not duplicate
+          those paths in separate topology, priority and final-checklist sections. A follow-up should develop
+          the requested distinction or decision, not retell already explained trigger steps.
+          For a multi-device topology request, prefer one compact chain table with complete guards/actions
+          and one short ordered inspection list. Do not add another overall checklist or an unrelated
+          specification inventory. Expand only where the requested analysis needs it, not to repeat coverage.
+          When citing a configured specification, preserve its exact IF and THEN from the tool result;
+          do not replace its IF with a downstream device just because an automation chain connects them.
+          For a full formal cross-check, start with the outcome, then use one compact rule/chain table,
+          one specification/result table, one indexed value table per counterexample, and one prioritized
+          list. Put shared-variable dependencies and gaps beside their relevant chain or check; include
+          a variable inventory only if requested. Do not add separate prose retellings of the topology,
+          rules, counterexamples or final conclusions. Preserve every requested item, complete condition
+          and material limitation in these inventories; explain causes once beside their evidence.
+        """;
+
     private static final String ASSISTANT_IDENTITY_LINE =
             "You are the intelligent expert assistant for the IoT-Verify platform. "
                     + "This is a smart home simulation and formal verification platform based on NuSMV.";
+
+    private static final String CURRENT_EVIDENCE_REPLY_RULES = """
+        Before continuing the analysis, check it against the latest tool results, including after a
+        stream interruption. Earlier assistant prose is not evidence and must not override those results.
+        Under applicable/configured specifications, list only actual specifications returned by tools;
+        label related automation rules separately, and mark suggested properties as not yet configured.
+        When two observed values first change at the same stateIndex, they are observed together;
+        do not say one preceded the other. A trigger condition in an earlier state is not evidence that
+        its resulting action occurred before another change at the action's stateIndex.
+        Keep full-audit inventories and chronological evidence in the requested compact tables;
+        place each cause beside its indexed evidence instead of retelling those chains in prose.
+        """;
 
     private LlmMessage buildToolPlanningSystemPrompt() {
         String systemPromptContent = ASSISTANT_IDENTITY_LINE + "\n" + """
@@ -1495,28 +1559,26 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
            specifications, simulation, verification, and status checks when their schemas and results support it.
            Continue until the objective is complete or a real confirmation, unavailable-result, or safety boundary
            requires a new user turn. Do not stop merely because one successful tool call finished.
-        6. ReAct reasoning (do the thinking here, do not merely narrate the steps):
-          - Whenever you return tool calls, also return user-visible reasoning in the assistant text for that
-            planning round. Its job is to work the problem out, not to announce what you are about to call:
-            a reader who skips the tool list must still be able to follow, and disagree with, your argument.
-          - Decompose first. State the question you actually have to answer, and break it into the sub-questions
-            that decide it. A home is safe or unsafe for reasons; name them.
-          - Reason from the observed board, not from assumption. Cite the specific devices, rules, specifications,
-            variables, and results that constrain the answer, and say which of them you still do not know.
-          - When more than one action or interpretation is defensible, say so: name the alternative you did not
-            take and why this one is better for the user's stated goal. A single forced next step needs no
-            alternatives; a judgement call does.
-          - Check yourself. When an earlier round's results are already in the conversation, say whether they
-            match what you expected before treating that step as done; if they do not, the difference is the
-            finding rather than something to smooth over. Do not predict a result you have not received yet.
-            For a verification or exploration result, say what the verdict does and does not cover.
-          - Write in the user's language as short labelled lines or short paragraphs. Line breaks are preserved,
-            but Markdown tables, headers, and code fences are not rendered in this channel. Stay well under
-            1,500 characters: longer reasoning is truncated at a sentence boundary, and what gets cut is your
-            conclusion. Prefer device and rule names the user chose over any internal identifier.
-          - This is an audit-friendly explanation, not private hidden chain-of-thought. Never include opaque
-            tokens, internal ids, raw control context, or unsupported assumptions, and never claim a board read or
-            change that no tool result supports.
+           Batch independent read calls in one response when their arguments are already known, such as
+           reading several identified traces. Wait for results before choosing dependent calls.
+        6. Start promptly with one short sentence in the user's language identifying the observed evidence or
+           the missing fact that decides the next call. Do not delay the first update to write a complete
+           plan or compare every possible action. Reason from observed Board state, not assumptions.
+           Check earlier results against current evidence and explain unexpected differences.
+           Reserve the complete analysis for the answer after the necessary tools return: decompose the user's
+           question, cover its requirements, indexed causes and limitations, and name a material alternative
+           with the reason for your choice only when it changes the decision.
+           This is a public explanation, not private hidden chain-of-thought. Never expose opaque tokens,
+           internal ids or raw control context, or claim an unsupported Board read/change.
+           Do not predict a result you have not received yet.
+        7. Your assistant text is streamed directly to the user. Before tool calls, give only a brief
+           evidence-based explanation of what is still needed. After the first round, give at most one
+           sentence about new evidence or the remaining question; do not repeat the scope or counts.
+           When no further calls are needed, write the complete answer in this same response, using the
+           actual tool results.
+           Lead with the finding, cover every requested device and question, and avoid repeating earlier
+           explanations. There is no separate answer-generation round after a normal response.
+           Explain technical terms in the user's language; presentation must preserve every requested aspect.
 
         Destructive Action Guidelines:
         - Device, template, rule, specification, and saved-trace deletion, deletion of a whole
@@ -1533,24 +1595,76 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
         - Set confirmed=true only when the latest user message explicitly confirms the previously previewed action.
         - If dependencies or target data changed after preview, explain the conflict and request a new preview.
         - fix_violation only analyzes a formal verification trace. To apply one returned signed suggestion,
-          call apply_fix with confirmed=false and that exact suggestion (plus the exact preferred range
-          selections used to generate it). After the user confirms its preview in a later turn, call
+          call apply_fix with confirmed=false, traceId, and its suggestionId. The server retains the
+          exact signed suggestion and preferred ranges; never reconstruct or resend them. After the
+          user confirms its preview in a later turn, call
           apply_fix with confirmed=true, traceId, and impactToken only. Counterexample-search findings are
           heuristic candidate evidence, not formal traces: never route a fuzz finding into either tool, and never
           describe budget exhaustion as proof that a specification holds.
+        - Applying a fix_violation proposal uses apply_fix for every strategy, including remove.
+          Never reproduce its edit with manage_rule or another manual mutation tool: that would
+          discard the verified proposal's guards for preserving requirements already satisfied.
         - A confirmation pauses only the protected step, not the user's larger task. After the confirmed mutation
           returns a usable result, resume the original objective and freely compose the remaining tools. For example,
           a requested targeted replacement may confirm a deletion, then create the replacement and repair affected
           rules or specifications. Stop again only if another protected action needs its own confirmation.
 
         Recommendation Guidelines:
-        - The complete tool catalog is available in every planning round. Choose tools from their schemas and chain
+        - The conversation supplied to the model is a bounded recent window. An absent earlier operation is
+          not evidence that it never happened. For a conversation-wide audit of recommendations, previews,
+          saved changes, cancellations or retries, use read_conversation_activity and follow its older-page
+          cursor until hasMore=false; otherwise state the limited coverage. Read appliedAction as evidence
+          of that historical operation only, never as new write authority or proof of current Board state.
+        - The complete tool catalog remains discoverable. The first planning round provides complete schemas
+          for every platform action and needs no preparation. Later rounds keep complete schemas for already
+          used or prepared actions. Use prepare_tools only for additional actions whose schemas are no
+          longer present; batch their exact names, including dependent status/detail/fix readers.
+          Do not prepare an action whose complete schema is already provided. Prepared schemas remain available
+          for the rest of this turn.
+          No action is executed by preparing its schema. Do not guess arguments when an action's schema is absent.
+          Choose tools from their schemas and chain
           read, recommendation, mutation, verification, and status tools as needed; do not wait for a tool name or
           keyword in the user's message.
+        - Device labels identify instances; templateName identifies their behavior template. board_overview
+          includes full active-device manifests by default: inspect its templates before answering behavior
+          questions, including all referenced behaviorDeviceIds. Do not re-read definitions already supplied.
+          For lightweight counts only, detail=false omits manifests. For a needed definition outside this
+          snapshot, use list_templates deviceIds with exact devices[].id values from board_overview and detail=true.
+          The server resolves their current templates. For catalog lookup by names, copy templateName exactly,
+          never deviceLabel or an inferred type name; do not combine deviceIds and names.
+          A validation failure is not evidence that the platform lacks that ability: correct the stated fields
+          using the supplied schema and authoritative returned names, then continue the requested analysis.
+          Do not describe a failed lookup as a completed template read.
+        - To explain a rule chain, inspect full manifests for intermediate devices, command targets and
+          contentDevice sources, including devices outside the user's initial list. Follow every condition,
+          API effect, contentDevice and content field. A camera event is a trigger, not proof of the later
+          payload's source. A send/upload action name or state transition does not prove network delivery;
+          name the modeled data source and effects, and explain what the model does not establish.
+          Interpret variable scope, read/effect capability and effective labels using the semantic note
+          returned with either full manifest view. InternalVariables does not mean device-local. Distinguish a reported
+          specification subject from the environment without assuming independent physical values or
+          replacing the current Environment Pool labels with template defaults.
+          Do not ask the user for behavior definitions already readable from those manifests. An indirect
+          chain requires an actual rule/API-effect path; sharing condition inputs does not connect devices.
+          Use board_overview.directRuleTargets as the directed condition-to-command index. Follow arrows
+          forward; two targets of a shared clock/condition are not connected to each other. Check every
+          claimed downstream connection against the actual path before answering. For a complete automation
+          behavior audit, read its behaviorDeviceIds and inspect their included templates; they include every
+          command target and content source.
+          Complete behavior-dependent checks with available tools in this turn rather than leaving them as
+          questions the user must resolve. Attribute model facts to the model, not to observed physical execution.
         - For any question about the current scene, including counts of devices, rules, or specifications, use
           board_overview and answer from its current counts and semantic data rather than chat history. Do not call
           it ritualistically when server-authoritative confirmation context or a fresh tool result already provides
           the exact state needed for the next step.
+          This also applies to follow-ups about current links or specifications: a previous user turn's overview
+          is a historical snapshot, not current-turn evidence. Read-only analysis permits read tools. Before
+          describing current Board facts, obtain board_overview in this turn; when discussing only earlier
+          findings, explicitly attribute them to the earlier snapshot instead of claiming a fresh inspection.
+        - Simulation does not check specifications. Its modelSnapshot.specificationCount describes only the
+          simulation model, not the saved Board's specification count. Read board_overview for current
+          configured specifications and formal verification for their outcomes. A simulation list is only
+          metadata; read get_simulation_trace for the relevant state windows before explaining state changes.
         - To extend or complete the existing scene, inspect current Board state only when the task depends on facts
           not already supplied by the user or a fresh tool result. Then freely compose recommendation, mutation,
           simulation, verification, and status tools. Before add_device, use list_templates only when an exact valid
@@ -1571,6 +1685,19 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
         - Applying one device/rule/specification recommendation is a targeted append. Use recommend_scenario only
           when the user explicitly requests a complete replacement/import draft; it cannot be described as a local
           addition or as already applied.
+          Only change saved Board data when this user turn requests that change. Searching, reviewing or
+          comparing repair candidates is not permission to temporarily edit a saved rule and re-verify it.
+          Use fix_violation for candidate search; use apply_fix only for the verified candidate and its
+          separate user confirmation. A refused write does not remove read/search abilities; correct
+          the workflow instead of claiming the attempted edit or the user's objective completed.
+          When the user specifies the device types, pass their known exact templateNames to recommend_scenario
+          so generation reads complete capabilities only for that selected set. Include every type needed by
+          the requested draft; omit the scope when selection itself is part of the task. Do not guess capabilities
+          or exclude needed current devices merely to shorten a prompt.
+          If a draft is PARTIAL, inspect its filteredItems and objectiveIssues and correct the stated issues
+          through recommend_scenario while the requested goal remains feasible. Keep the original counts,
+          boundaries, devices and source semantics; do not weaken the request or apply a draft to make it pass.
+          Standalone rule/specification recommendations read the saved Board, not an unapplied scene draft.
         - If the user asks to apply the latest recommend_scenario draft, call apply_scenario with confirmed=false.
           Do not call board_overview and do not delete or recreate devices individually. apply_scenario owns the
           authoritative current-board preview and the atomic full-scene replacement.
@@ -1583,11 +1710,37 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
         Rule Recommendation Guidelines:
         - Use recommend_rules when the user asks for suggestions or has not supplied enough rule logic. When the user
           supplies a complete rule and asks to save it, validate it and use manage_rule directly.
+          For edits to an existing rule, read list_rules and use manage_rule action=update with the exact
+          expectedRule and its ruleId. Preserve every condition, command field and label the user did not
+          ask to change. Never add a replacement and delete the original to implement an edit: that changes
+          identity/order and can leave both rules active. A formal repair suggestion still uses apply_fix.
         - Analyze device capabilities (APIs, variables, modes, states) from authoritative tool results as needed.
         - Only recommend rules using APIs, variables, modes, or states that actually exist in the device templates
         - Explain why each suggestion matches the user's goal and the available device capabilities; do not invent a numeric confidence score
 
+        Generated Model Inspection:
+        - When inspecting the current scene's device behavior, call list_templates with its relevant
+          deviceIds and detail=true. Read the full catalog only for catalog exploration
+          or a request for additional templates; unrelated manifests add no evidence to a saved model audit.
+        - For a comparison, inspect saved results before starting a duplicate baseline. Reuse a baseline only
+          when its saved modelFingerprint is non-null and exactly matches the compared run's fingerprint,
+          with the requested attack, privacy, model-semantics and path-length settings. Counts or labels alone
+          do not establish equivalence. Say which historical snapshot is reused; a fresh run is still required
+          when the user asks to rerun, the scene changed, or matching evidence is unavailable.
+        - Template capabilities and run metadata are not the generated NuSMV text. Use read_run_model to inspect
+          the exact model saved with a completed verification or simulation, and read its remaining pages when
+          the requested analysis depends on them. Do not invent a model or claim an unread excerpt was checked.
+        - The saved model belongs to that run's frozen snapshot. Use the matching run result for completeness,
+          attack/privacy assumptions and verdict; do not describe it as the current Board after a scene edit.
+          Reading the model is not formal verification. Simulation is one possible path; bounded exploration
+          findings require formal checking, and no finding within a budget is never proof of satisfaction.
+        - Copy saved identifiers from fresh Board or list results. An automation-link attack needs the rule's
+          persisted id, not its display order or ruleIndex. An exploration target needs the specification's
+          saved id, not its templateId or position. Never guess an id from a numbered user-facing list.
+
         Available tools:
+        - Prepare complete action schemas: prepare_tools
+        - Saved conversation operation history: read_conversation_activity
         - Device: add_device, edit_device, delete_device, search_devices, recommend_related_devices
         - Environment: manage_environment
         - Rule: list_rules, manage_rule, check_duplicate_rule, check_rule_similarity, recommend_rules
@@ -1598,6 +1751,7 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
         - Verification async: verify_model_async, verify_task_status, cancel_verify_task, dismiss_verify_task
         - Cross-run task discovery: list_async_tasks
         - Verification runs, traces, and formal fix: list_verification_runs, get_verification_run, list_traces, get_trace, delete_trace, delete_verification_run, fix_violation, apply_fix
+        - Saved generated-model inspection: read_run_model
         - Simulation sync: simulate_model
         - Simulation async: simulate_model_async, simulate_task_status, cancel_simulate_task, dismiss_simulate_task
         - Simulation traces: list_simulation_traces, get_simulation_trace, delete_simulation_trace
@@ -1605,7 +1759,7 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
         - Board: board_overview, manage_board_history, clear_board
         """;
 
-        return LlmMessage.system(systemPromptContent);
+        return LlmMessage.system(systemPromptContent + "\n" + ANSWER_PRESENTATION_RULES);
     }
 
     private LlmMessage buildPendingTaskSystemPrompt(
@@ -1818,16 +1972,17 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
         };
     }
 
-    private void clearCancelledPendingAction(Long userId, String sessionId, ConfirmationKind kind) {
-        if (kind == null || kind == ConfirmationKind.DESTRUCTIVE
-                || kind == ConfirmationKind.DEFAULT_TEMPLATE_RESET) {
-            destructiveActionGuard.clearSession(userId, sessionId);
-        }
-        if (kind == null || kind == ConfirmationKind.SCENE_REPLACEMENT) {
-            scenarioDraftStore.clearPendingApplication(userId, sessionId);
-        }
-        if (kind == null || kind == ConfirmationKind.CHOICE) {
+    private void clearCancelledPendingAction(Long userId, String sessionId, ConfirmationKind kind,
+                                             String confirmationId) {
+        if (kind == ConfirmationKind.CHOICE) {
             taskContinuationStore.clear(userId, sessionId);
+            return;
+        }
+        boolean cleared = kind == ConfirmationKind.SCENE_REPLACEMENT
+                ? scenarioDraftStore.clearPendingApplication(userId, sessionId, confirmationId)
+                : destructiveActionGuard.cancelPending(userId, sessionId, confirmationId);
+        if (!cleared) {
+            throw new ChatConfirmationConflictException();
         }
     }
 
@@ -1877,8 +2032,10 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
     private LlmMessage buildVisibleReplySystemPrompt(boolean afterToolExecution) {
         String toolContext = afterToolExecution
                 ? """
-                Tool executions may already be present in the conversation history. Use those tool results
-                to summarize what happened and what the user should know next.
+                Use this turn's authoritative tool results to summarize current platform state and actions.
+                Earlier user turns' results support discussion of their historical snapshots only, not claims
+                of a current inspection or a new operation. A follow-up about current Board facts still needs
+                this turn's board_overview; read-only analysis does not prohibit read tools.
                 """
                 : """
                 The planning stage did not execute a tool for this response. Answer as a normal conversational
@@ -1895,6 +2052,17 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
           compact with no blank line between rows.
         - Reply in the language used by the user's latest message. Preserve literal device, template, rule,
           and specification labels even when those labels use another language.
+        - Address every device and question explicitly named in the latest request. If a named device has no
+          observed automation link, say so instead of omitting it. Distinguish existing rules from suggested
+          missing links and explain the evidence behind each inspection priority.
+        """ + ANSWER_PRESENTATION_RULES + """
+        - Before calling opposing commands a rule conflict, check whether their complete conditions can hold
+          in the same state. Mutually exclusive thresholds are not simultaneous conflicts; distinguish
+          changes across steps from concurrent triggering, and label unverified risks as candidates.
+          Different variables or different predicates do not imply mutual exclusion. To say two guards
+          cannot co-trigger, identify their contradictory constraints; otherwise give a joint satisfying
+          assignment as a candidate overlap and inspect rule priority before claiming competing execution.
+          An initial value proves only the initial state, not that other states are unreachable.
         - Do not emit tool-call JSON, XML tags, pseudo-tags, function names, or internal control formats.
         - Do not claim that a platform operation has been performed unless a tool result in the conversation proves it.
         - If a tool result has requiresUserConfirmation=true, state that no change was made, explain the exact reason and any proposed alternative or collateral impact, and ask the user to choose or confirm it.
@@ -1909,12 +2077,30 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
           assistant to apply it; apply_scenario will first show a separate impact preview, then atomically replace
           devices, the shared environment pool, rules, and specifications after explicit confirmation.
         - For verification, only outcome=SATISFIED with modelComplete=true supports a complete checked-scope pass.
+          An automation rule is not a configured specification or a verified property. Describe specification
+          coverage only when its actual conditions and target support that claim; identify a missing direct
+          property as a check gap. A configured requirement is not evidence that verification has run.
+          Preserve every conjunct and temporal operator: AX means the next state, AF means eventually.
+          Describe trace events in their observed state-index order; do not invent intermediate states or
+          place an input change after an action when the trace already shows that input in an earlier state.
+          Read each state's valueSnapshot before explaining its transitions. Include the actual stateIndex
+          beside the relevant device/environment values. Changes observed in different states are not
+          simultaneous, even when they belong to the same trigger chain.
+          Attribute a violation to a rule only when the same counterexample shows that rule's complete
+          guard and the relevant transition. An initial-state prohibition failure is already present
+          before any automation action; do not attribute it to a later competing command or another trace.
+          If modelComplete=true and no rules/specifications were omitted, report no generation omissions.
+          Conservative abstractions, missing desired specifications and violated properties are separate
+          scope or behavior findings, not evidence that the generated model was incomplete.
         - An attack run can reach actuator states the clean run proves impossible, and that is faithful, not a
           leak or a modeling bug. Compromising a device drops matching commands, and priority blocking negates
           the higher rule's whole guard, so cutting one link promotes a rule that a higher-priority one was
           shadowing — MEDIC's undelivered-command semantics. No transition is invented.
         - A pass on an implication template (4, 5, 6) is only informative while its IF condition is still
-          reachable. After an applied fix or a rule removal, say so: the antecedent may have become
+          reachable. SATISFIED alone does not prove antecedent reachability or a non-vacuous response.
+          Claim activation only for the specific antecedent actually witnessed in a trace or checked by a tool;
+          one witnessed antecedent does not establish activation for every passed implication.
+          After an applied fix or a rule removal, say so: the antecedent may have become
           unreachable, which makes the property vacuously true rather than satisfied by the behaviour the
           user asked about. A prohibition template (1, 3, 7) is the opposite case — its condition becoming
           unreachable is the property succeeding, which is exactly what it was written to demand.
@@ -1923,6 +2109,10 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
           Always disclose disabledRuleCount, skippedSpecCount, and generationIssues when present.
         - Simulation is one possible formal-model trajectory, not a prediction of the physical home. If
           modelComplete=false, say which modeled rules were omitted before interpreting the trajectory.
+          Simulation does not check specifications. Its modelSnapshot.specificationCount is the simulation
+          model's scope, not evidence that the Board had no specifications. Current configured specifications
+          come from board_overview; their outcomes require formal verification. List metadata alone does not
+          establish state changes; attribute them only to state windows read from get_simulation_trace.
         - Automatic-fix output is a proposal. fixable=false or an empty suggestions list must include the returned
           summary, strategy-attempt reasons, and warnings. A verified suggestion still is not applied; apply_fix
           first previews it and requires a later explicit confirmation, then checks Board drift and the write fence.
@@ -1945,7 +2135,7 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
         %s
         """.formatted(toolContext);
 
-        return LlmMessage.system(systemPromptContent);
+        return LlmMessage.system(systemPromptContent + "\n" + CURRENT_EVIDENCE_REPLY_RULES);
     }
 
     private List<LlmMessage> withVisibleReplyPrompt(List<LlmMessage> messages, ToolLoopResult loopResult) {
@@ -2038,6 +2228,26 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                                            BooleanSupplier shouldStop,
                                            BooleanSupplier forceStopCheck,
                                            Set<String> confirmedMutationTools) {
+        return executeToolLoop(userId, sessionId, messages, tools, commandSet, emitter, isDisconnect,
+                preferChinese, executionTrace, executionId, shouldStop, forceStopCheck,
+                confirmedMutationTools, null, null);
+    }
+
+    private ToolLoopResult executeToolLoop(Long userId,
+                                           String sessionId,
+                                           List<LlmMessage> messages,
+                                           List<LlmToolSpec> tools,
+                                           Set<StreamResponseDto.CommandDto> commandSet,
+                                           SseEmitter emitter,
+                                           AtomicBoolean isDisconnect,
+                                           boolean preferChinese,
+                                           List<StreamResponseDto.ProgressDto> executionTrace,
+                                           String executionId,
+                                           BooleanSupplier shouldStop,
+                                           BooleanSupplier forceStopCheck,
+                                           Set<String> confirmedMutationTools,
+                                           GuardedReplyStream replyStream,
+                                           String confirmedToolName) {
         boolean hadToolCalls = false;
         int successfulToolCalls = 0;
         int failedToolCalls = 0;
@@ -2047,6 +2257,13 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
         boolean partialObjectiveResult = false;
         String previousRoundFingerprint = null;
         int stagnantRoundCount = 0;
+        boolean streamRecoveryUsed = false;
+        LlmMessage currentEvidenceReminder = LlmMessage.system(CURRENT_EVIDENCE_REPLY_RULES);
+        boolean preparesSchemas = tools.stream().anyMatch(tool -> "prepare_tools".equals(tool.name()));
+        Set<String> preparedToolNames = new LinkedHashSet<>();
+        preparedToolNames.add("prepare_tools");
+        preparedToolNames.add("board_overview");
+        if (confirmedToolName != null) preparedToolNames.add(confirmedToolName);
 
         for (int round = 0; round < chatExecutionConfig.getMaxToolRounds(); round++) {
             if (forceStopCheck.getAsBoolean()) {
@@ -2065,7 +2282,52 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                         failedToolCalls, resultUnavailableToolCalls, uncertainMutationCalls,
                         confirmationPending);
             }
-            LlmChatResponse response = llmChatService.chatWithTools(messages, tools);
+            int planningRound = round + 1;
+            ToolLoopResult planningResult = currentResult;
+            AtomicBoolean textStarted = new AtomicBoolean();
+            if (replyStream != null) replyStream.awaitingToolDecision = !tools.isEmpty();
+            int roundReplyStart = replyStream == null ? 0 : replyStream.finalAnswer.length();
+            LlmChatResponse response;
+            // Preparation is useful only once the complete initial action catalog has been narrowed.
+            List<LlmToolSpec> planningTools = preparesSchemas
+                    ? tools.stream().filter(tool -> planningRound == 1
+                        ? !"prepare_tools".equals(tool.name()) : preparedToolNames.contains(tool.name())).toList()
+                    : tools;
+            while (true) {
+                try {
+                    response = llmChatService.chatWithTools(messages, planningTools, delta -> {
+                        if (replyStream == null) return;
+                        if (textStarted.compareAndSet(false, true) && !sendSseProgress(emitter, "WRITING_RESPONSE",
+                                null, planningRound, null, planningResult, null, executionTrace)) isDisconnect.set(true);
+                        replyStream.accept(delta);
+                    });
+                    break;
+                } catch (LlmStreamInterruptedException failure) {
+                    if (streamRecoveryUsed || replyStream == null || replyStream.shouldStop()
+                            || forceStopCheck.getAsBoolean()) throw failure;
+                    streamRecoveryUsed = true;
+                    // Nothing from the unfinished response was executed. Keep only already guarded text;
+                    // the new response must assemble fresh arguments against the completed tool results.
+                    replyStream.pending.setLength(0);
+                    String delivered = replyStream.finalAnswer.substring(roundReplyStart);
+                    if (!delivered.isBlank()) messages.add(LlmMessage.assistant(delivered));
+                    messages.add(LlmMessage.system("The previous model response stream was interrupted. "
+                            + "Only the assistant text above was delivered; its unfinished tool calls were discarded. "
+                            + "Continue exactly after that text without repeating it. Complete the user's remaining "
+                            + "objective using the existing authoritative tool results. Do not repeat completed "
+                            + "platform actions or infer that an unfinished call ran. If more tools are needed, "
+                            + "return fresh complete calls; otherwise finish the answer. Keep the continuation concise "
+                            + "while preserving every remaining finding and limitation."));
+                    textStarted.set(false);
+                    if (!sendSseProgress(emitter, "PLANNING", null, planningRound, null, currentResult,
+                            preferChinese ? "连接中断，正在续答" : "Connection interrupted; resuming",
+                            executionTrace)) {
+                        isDisconnect.set(true);
+                        throw failure;
+                    }
+                }
+            }
+            if (replyStream != null) replyStream.finish();
             if (forceStopCheck.getAsBoolean()) {
                 log.info("Chat execution stopped after tool planning for session {}", sessionId);
                 return new ToolLoopResult(hadToolCalls, ToolLoopStopReason.DISCONNECTED, successfulToolCalls,
@@ -2080,17 +2342,19 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
             }
 
             List<LlmToolCall> toolCalls = normalizeToolCallIds(response.toolCalls(), messages);
-            if (toolCalls.isEmpty()) {
-                String aiText = response.text();
-                if (!aiText.isBlank()) {
-                    log.debug("Tool planning completed with final text; regenerating visible answer through streaming.");
-                }
+            if (replyStream != null && toolCalls.isEmpty()) replyStream.resolveToolRound();
+            if (toolCalls.isEmpty() || (replyStream != null
+                    && replyStream.outcome() == ReplyGuardOutcome.HIDDEN_WITHOUT_EVIDENCE)) {
+                if (replyStream != null && !textStarted.get() && !sendSseProgress(emitter, "WRITING_RESPONSE", null, null,
+                        null, currentResult, null, executionTrace)) isDisconnect.set(true);
                 ToolLoopStopReason stopReason = partialObjectiveResult
                         ? ToolLoopStopReason.PARTIAL_RESULT
                         : ToolLoopStopReason.COMPLETED;
                 return new ToolLoopResult(hadToolCalls, stopReason, successfulToolCalls,
                         failedToolCalls, resultUnavailableToolCalls, uncertainMutationCalls,
-                        confirmationPending);
+                        confirmationPending, null, null, !response.text().isBlank()
+                                || (replyStream != null
+                                    && replyStream.outcome() == ReplyGuardOutcome.HIDDEN_WITHOUT_EVIDENCE));
             }
             if (toolCalls.size() > chatExecutionConfig.getMaxToolCallsPerRound()) {
                 log.warn("LLM requested too many tools in one round: count={}, limit={}",
@@ -2116,8 +2380,9 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
             hadToolCalls = true;
             executeOwnedSessionWrite(userId, sessionId, executionId, () ->
                     saveAiToolCallRequest(sessionId, toolCalls));
-            messages.add(LlmMessage.assistantToolCalls(toolCalls));
+            messages.add(LlmMessage.assistantToolCalls(toolCalls, response.continuationItems()));
             StringBuilder roundFingerprint = new StringBuilder();
+            boolean awaitingAsyncTasks = true;
 
             for (int toolCallIndex = 0; toolCallIndex < toolCalls.size(); toolCallIndex++) {
                 LlmToolCall toolCall = toolCalls.get(toolCallIndex);
@@ -2155,6 +2420,17 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                     toolResult = aiToolManager.execute(functionName, argsJson);
                     stoppedAfterTool = forceStopCheck.getAsBoolean();
                     executionOutcome = classifyToolExecution(functionName, toolResult);
+                    if (preparesSchemas) {
+                        preparedToolNames.add(functionName);
+                        if (executionOutcome == ToolExecutionOutcome.USABLE && "prepare_tools".equals(functionName)) {
+                            try {
+                                objectMapper.readTree(toolResult).path("loadedTools").forEach(name ->
+                                        preparedToolNames.add(name.textValue()));
+                            } catch (com.fasterxml.jackson.core.JsonProcessingException failure) {
+                                throw new IllegalStateException("Prepared action result could not be decoded", failure);
+                            }
+                        }
+                    }
                     resultMayHaveCommitted = executionOutcome == ToolExecutionOutcome.RESULT_UNAVAILABLE
                             && mutationMayHaveCommitted(toolResult);
                     if ("recommend_scenario".equals(functionName)) {
@@ -2190,10 +2466,8 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                     failedToolCalls++;
                 }
 
-                final String finalToolResult = toolResult;
-                executeOwnedSessionWrite(userId, sessionId, executionId, () ->
-                        saveToolExecutionResult(sessionId, toolCallId, finalToolResult));
-                messages.add(LlmMessage.tool(toolCallId, toolResult));
+                messages.add(saveToolExecutionResult(userId, sessionId, executionId, toolCallId, toolResult));
+                awaitingAsyncTasks &= isAwaitingAsyncTask(functionName, toolResult, executionOutcome);
                 roundFingerprint.append(functionName).append('\u001f')
                         .append(argsJson).append('\u001f')
                         .append(executionOutcome.name()).append('\u001f')
@@ -2246,8 +2520,28 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                 }
             }
 
+            if (replyStream != null) {
+                replyStream.resolveToolRound();
+                if (replyStream.outcome() == ReplyGuardOutcome.HIDDEN_WITHOUT_EVIDENCE) {
+                    return new ToolLoopResult(hadToolCalls, ToolLoopStopReason.COMPLETED,
+                            successfulToolCalls, failedToolCalls, resultUnavailableToolCalls,
+                            uncertainMutationCalls, confirmationPending, null, null, true);
+                }
+                replyStream.separateRound();
+                // Put the current-evidence check after new results, where stale earlier analyses
+                // cannot be mistaken for their interpretation. Keep one reminder across rounds.
+                messages.remove(currentEvidenceReminder);
+                messages.add(currentEvidenceReminder);
+            }
+
             String fingerprint = roundFingerprint.toString();
-            if (fingerprint.equals(previousRoundFingerprint)) {
+            // An owned background task can legitimately stay at one stage across several reads.
+            // Only rounds consisting entirely of usable active-task reads bypass stagnancy;
+            // the emergency round limit and cancellation still bound this wait.
+            if (awaitingAsyncTasks) {
+                previousRoundFingerprint = null;
+                stagnantRoundCount = 0;
+            } else if (fingerprint.equals(previousRoundFingerprint)) {
                 stagnantRoundCount++;
             } else {
                 previousRoundFingerprint = fingerprint;
@@ -2332,9 +2626,7 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                 continue;
             }
             String toolCallId = safeString(skippedCall.id());
-            executeOwnedSessionWrite(userId, sessionId, executionId, () ->
-                    saveToolExecutionResult(sessionId, toolCallId, skippedResult));
-            messages.add(LlmMessage.tool(toolCallId, skippedResult));
+            messages.add(saveToolExecutionResult(userId, sessionId, executionId, toolCallId, skippedResult));
         }
     }
 
@@ -2347,29 +2639,100 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
             boolean preferChinese,
             List<StreamResponseDto.ProgressDto> executionTrace,
             Set<String> confirmedMutationTools) {
-        StringBuilder pending = new StringBuilder();
-        AtomicReference<ReplyGuardOutcome> guardOutcome =
+        GuardedReplyStream reply = new GuardedReplyStream(finalAnswer, emitter, isDisconnect,
+                shouldStop, preferChinese, executionTrace, confirmedMutationTools, () -> { });
+        llmChatService.streamReply(messages, reply, reply::shouldStop);
+        reply.finish();
+        return reply.outcome();
+    }
+
+    /** Both tool-aware text and a guard-stop summary pass through the same evidence checks. */
+    private final class GuardedReplyStream implements java.util.function.Consumer<String> {
+        private final StringBuilder pending = new StringBuilder();
+        private final List<String> evidenceNotices = new ArrayList<>();
+        private final AtomicReference<ReplyGuardOutcome> guardOutcome =
                 new AtomicReference<>(ReplyGuardOutcome.NONE);
-        BooleanSupplier replyShouldStop = () -> shouldStop.getAsBoolean()
-                || isDisconnect.get()
-                || guardOutcome.get() == ReplyGuardOutcome.HIDDEN_WITHOUT_EVIDENCE;
-        llmChatService.streamReply(messages, delta -> {
-            if (replyShouldStop.getAsBoolean() || delta == null || delta.isEmpty()) return;
-            pending.append(delta);
-            int boundary;
-            while (guardOutcome.get() != ReplyGuardOutcome.HIDDEN_WITHOUT_EVIDENCE
-                    && (boundary = firstReplySegmentBoundary(pending)) >= 0) {
-                String segment = pending.substring(0, boundary + 1);
-                pending.delete(0, boundary + 1);
-                sendGuardedReplySegment(segment, finalAnswer, emitter, isDisconnect, guardOutcome,
-                        preferChinese, executionTrace, confirmedMutationTools);
-            }
-        }, replyShouldStop);
-        if (!replyShouldStop.getAsBoolean() && !pending.isEmpty()) {
-            sendGuardedReplySegment(pending.toString(), finalAnswer, emitter, isDisconnect, guardOutcome,
-                    preferChinese, executionTrace, confirmedMutationTools);
+        private final StringBuilder finalAnswer;
+        private final SseEmitter emitter;
+        private final AtomicBoolean isDisconnect;
+        private final BooleanSupplier stopRequested;
+        private final boolean preferChinese;
+        private final List<StreamResponseDto.ProgressDto> executionTrace;
+        private final Set<String> confirmedMutationTools;
+        private final Runnable stopInference;
+        private boolean hasText;
+        private boolean awaitingToolDecision;
+
+        private GuardedReplyStream(StringBuilder finalAnswer, SseEmitter emitter, AtomicBoolean isDisconnect,
+                                   BooleanSupplier stopRequested, boolean preferChinese,
+                                   List<StreamResponseDto.ProgressDto> executionTrace,
+                                   Set<String> confirmedMutationTools, Runnable stopInference) {
+            this.finalAnswer = finalAnswer;
+            this.emitter = emitter;
+            this.isDisconnect = isDisconnect;
+            this.stopRequested = stopRequested;
+            this.preferChinese = preferChinese;
+            this.executionTrace = executionTrace;
+            this.confirmedMutationTools = confirmedMutationTools;
+            this.stopInference = stopInference;
         }
-        return guardOutcome.get();
+
+        private boolean shouldStop() {
+            return stopRequested.getAsBoolean() || isDisconnect.get()
+                    || outcome() == ReplyGuardOutcome.HIDDEN_WITHOUT_EVIDENCE;
+        }
+
+        @Override
+        public void accept(String delta) {
+            if (shouldStop() || delta == null || delta.isEmpty()) return;
+            hasText = true;
+            pending.append(delta);
+            releasePendingSegments();
+        }
+
+        private void releasePendingSegments() {
+            int boundary;
+            while (!shouldStop() && (boundary = firstReplySegmentBoundary(pending)) >= 0) {
+                String segment = pending.substring(0, boundary + 1);
+                // The tool-aware response can announce a read before its calls arrive. Hold claims
+                // until complete calls have run; cancelling here would prevent their evidence.
+                if (awaitingToolDecision && containsUnsupportedPlatformClaim(
+                        segment, executionTrace, confirmedMutationTools)) return;
+                pending.delete(0, boundary + 1);
+                send(segment);
+            }
+        }
+
+        private void finish() {
+            if (awaitingToolDecision && containsUnsupportedPlatformClaim(
+                    pending.toString(), executionTrace, confirmedMutationTools)) return;
+            if (!shouldStop() && !pending.isEmpty()) send(pending.toString());
+            pending.setLength(0);
+            if (!evidenceNotices.isEmpty() && !isDisconnect.get() && !stopRequested.getAsBoolean()) {
+                String notice = (finalAnswer.isEmpty() ? "" : "\n\n") + String.join("\n\n", evidenceNotices);
+                sendVisibleReplySegment(notice, finalAnswer, emitter, isDisconnect);
+                evidenceNotices.clear();
+            }
+        }
+
+        private void resolveToolRound() {
+            awaitingToolDecision = false;
+            releasePendingSegments();
+            finish();
+        }
+
+        private void separateRound() {
+            if (hasText && !shouldStop()) send("\n\n");
+        }
+
+        private void send(String segment) {
+            sendGuardedReplySegment(segment, finalAnswer, emitter, isDisconnect, guardOutcome,
+                    preferChinese, executionTrace, confirmedMutationTools, evidenceNotices);
+            if (outcome() == ReplyGuardOutcome.HIDDEN_WITHOUT_EVIDENCE) stopInference.run();
+        }
+
+        private ReplyGuardOutcome outcome() { return guardOutcome.get(); }
+        private boolean hasText() { return hasText; }
     }
 
     private int firstReplySegmentBoundary(CharSequence text) {
@@ -2388,20 +2751,43 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                                          AtomicReference<ReplyGuardOutcome> guardOutcome,
                                          boolean preferChinese,
                                          List<StreamResponseDto.ProgressDto> executionTrace,
-                                         Set<String> confirmedMutationTools) {
-        GuardedClaimReplacement replacement = containsUnsupportedPlatformClaim(
-                segment, executionTrace, confirmedMutationTools)
-                ? authoritativeClaimReplacement(preferChinese, executionTrace)
+                                         Set<String> confirmedMutationTools,
+                                         List<String> evidenceNotices) {
+        StreamResponseDto.ClaimReviewDto review = unsupportedPlatformClaim(
+                segment, executionTrace, confirmedMutationTools);
+        GuardedClaimReplacement replacement = review != null
+                ? authoritativeClaimReplacement(preferChinese, executionTrace, review.getReasonCode())
                 : new GuardedClaimReplacement(segment, ReplyGuardOutcome.NONE);
-        String visible = replacement.content();
-        if (sendSseChunk(emitter, visible)) {
-            finalAnswer.append(visible);
+        if (review != null) {
+            StreamResponseDto packet = StreamResponseDto.progress("CLAIM_REVIEW", null, null,
+                    replacement.outcome() == ReplyGuardOutcome.HIDDEN_WITHOUT_EVIDENCE ? "HIDDEN" : "REPLACED",
+                    null, null, null, claimReviewReason(review.getReasonCode(), preferChinese));
+            packet.getProgress().setClaimReview(review);
+            sendSseProgress(emitter, packet, executionTrace);
+        }
+        if (replacement.outcome() == ReplyGuardOutcome.REPLACED_WITH_AUTHORITATIVE_EVIDENCE) {
+            // Inserting a notice mid-sentence can put it inside an open Markdown table cell.
+            if (!evidenceNotices.contains(replacement.content())) evidenceNotices.add(replacement.content());
             guardOutcome.updateAndGet(current -> mergeReplyGuardOutcome(
                     current, replacement.outcome()));
-        } else {
-            log.debug("SSE transport could not receive the response segment; execution continues");
-            isDisconnect.set(true);
+            return;
         }
+        String visible = replacement.outcome() == ReplyGuardOutcome.NONE || finalAnswer.isEmpty()
+                ? replacement.content() : "\n\n" + replacement.content();
+        if (sendVisibleReplySegment(visible, finalAnswer, emitter, isDisconnect)) {
+            guardOutcome.updateAndGet(current -> mergeReplyGuardOutcome(current, replacement.outcome()));
+        }
+    }
+
+    private boolean sendVisibleReplySegment(String visible, StringBuilder finalAnswer,
+                                            SseEmitter emitter, AtomicBoolean isDisconnect) {
+        if (sendSseChunk(emitter, visible)) {
+            finalAnswer.append(visible);
+            return true;
+        }
+        log.debug("SSE transport could not receive the response segment; execution continues");
+        isDisconnect.set(true);
+        return false;
     }
 
     private ReplyGuardOutcome mergeReplyGuardOutcome(
@@ -2429,19 +2815,51 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
             String reply,
             List<StreamResponseDto.ProgressDto> executionTrace,
             Set<String> confirmedMutationTools) {
-        if (reply == null || reply.isBlank()) return false;
+        return unsupportedPlatformClaim(reply, executionTrace, confirmedMutationTools) != null;
+    }
+
+    private StreamResponseDto.ClaimReviewDto unsupportedPlatformClaim(
+            String reply,
+            List<StreamResponseDto.ProgressDto> executionTrace,
+            Set<String> confirmedMutationTools) {
+        if (reply == null || reply.isBlank()) return null;
         String checkableReply = maskLiteralContent(reply);
-        if (hasUnsupportedClaim(checkableReply, UNSUPPORTED_TOOL_EVIDENCE_CLAIM, false, false)
-                && !hasUsableToolEvidence(executionTrace, null)) {
-            return true;
+        java.util.regex.MatchResult match;
+        if (!hasUsableToolEvidence(executionTrace, null)
+                && (match = findUnsupportedClaim(checkableReply, UNSUPPORTED_TOOL_EVIDENCE_CLAIM, false, false)) != null) {
+            return claimReview(reply, match, StreamResponseDto.ClaimReviewReason.MISSING_TOOL_EVIDENCE);
         }
-        if (hasUnsupportedClaim(checkableReply, UNSUPPORTED_PLATFORM_READ_CLAIM, false, true)
-                && !hasUsableToolEvidence(executionTrace, Set.of("board_overview"))) {
-            return true;
+        if (!hasUsableToolEvidence(executionTrace, Set.of("board_overview"))
+                && (match = findUnsupportedClaim(checkableReply, UNSUPPORTED_PLATFORM_READ_CLAIM, false, true)) != null) {
+            return claimReview(reply, match, StreamResponseDto.ClaimReviewReason.MISSING_BOARD_SNAPSHOT);
         }
-        return hasUnsupportedClaim(checkableReply, UNSUPPORTED_PLATFORM_MUTATION_CLAIM, true, false)
-                && (confirmedMutationTools == null || confirmedMutationTools.stream()
-                .noneMatch(AiToolResultContract.mutationCapableTools()::contains));
+        if ((confirmedMutationTools == null || confirmedMutationTools.stream()
+                .noneMatch(AiToolResultContract.mutationCapableTools()::contains))
+                && (match = findUnsupportedClaim(checkableReply, UNSUPPORTED_PLATFORM_MUTATION_CLAIM, true, false)) != null) {
+            return claimReview(reply, match, StreamResponseDto.ClaimReviewReason.MISSING_OPERATION_RECEIPT);
+        }
+        return null;
+    }
+
+    private StreamResponseDto.ClaimReviewDto claimReview(
+            String reply, java.util.regex.MatchResult match, StreamResponseDto.ClaimReviewReason reason) {
+        // Offsets survive literal masking. Keep the exact public segment under the same ownership
+        // as its chat history; do not put user content or provider reasoning in server logs.
+        return new StreamResponseDto.ClaimReviewDto(reason, reply, reply.substring(match.start(), match.end()));
+    }
+
+    private String claimReviewReason(StreamResponseDto.ClaimReviewReason reason, boolean preferChinese) {
+        return switch (reason) {
+            case MISSING_TOOL_EVIDENCE -> preferChinese
+                    ? "这句话引用了工具结果，但本轮没有可确认的工具结果，因此隐藏了原句。"
+                    : "This sentence cites a tool result, but this turn has no confirmed tool result. The sentence was hidden.";
+            case MISSING_BOARD_SNAPSHOT -> preferChinese
+                    ? "这句话声称已查看当前画布，但本轮没有成功读取画布的记录，因此隐藏了原句。"
+                    : "This sentence claims to have inspected the current Board, but this turn has no successful Board read. The sentence was hidden.";
+            case MISSING_OPERATION_RECEIPT -> preferChinese
+                    ? "这句话声称已完成一项操作，但本轮没有相应的完成记录，因此隐藏了原句。"
+                    : "This sentence claims an operation completed, but this turn has no corresponding completion record. The sentence was hidden.";
+        };
     }
 
     private boolean hasUsableToolEvidence(
@@ -2609,6 +3027,14 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
             Pattern pattern,
             boolean allowNonOperationalContent,
             boolean leadingHistoryOverridesCurrentContext) {
+        return findUnsupportedClaim(reply, pattern, allowNonOperationalContent, leadingHistoryOverridesCurrentContext) != null;
+    }
+
+    private static java.util.regex.MatchResult findUnsupportedClaim(
+            String reply,
+            Pattern pattern,
+            boolean allowNonOperationalContent,
+            boolean leadingHistoryOverridesCurrentContext) {
         Matcher matcher = pattern.matcher(reply);
         while (matcher.find()) {
             String claimClause = claimClause(reply, matcher.start(), matcher.end());
@@ -2622,9 +3048,27 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                         && !CURRENT_CLAIM_CONTEXT.matcher(claimClause).find())) continue;
             if (allowNonOperationalContent
                     && NON_OPERATIONAL_PLATFORM_CONTENT.matcher(matcher.group()).find()) continue;
-            return true;
+            if (allowNonOperationalContent) {
+                // Empty/completed records and completed analysis describe information or work,
+                // not a platform action. A later actual operation must still be checked.
+                Matcher noun = NON_OPERATIONAL_CLAIM_SPAN.matcher(reply);
+                boolean nounModifier = false;
+                while (noun.find()) {
+                    if (noun.start() < matcher.end() && noun.end() >= matcher.end()) {
+                        // "Completed analysis and deleted devices" shares its completed subject.
+                        // Check that continuation with the same operation pattern before exempting the analysis.
+                        Matcher coordinated = COORDINATED_CLAIM_SUFFIX.matcher(reply.substring(noun.end()));
+                        if (coordinated.find() && (hasUnsupportedClaim("我已经" + coordinated.group(1), pattern, false, false)
+                                || hasUnsupportedClaim("I " + coordinated.group(1), pattern, false, false))) continue;
+                        nounModifier = true;
+                        break;
+                    }
+                }
+                if (nounModifier) continue;
+            }
+            return matcher.toMatchResult();
         }
-        return false;
+        return null;
     }
 
     private static boolean hasLeadingHistoricalClaimContext(String reply, int claimStart) {
@@ -2656,30 +3100,33 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
     }
 
     private GuardedClaimReplacement authoritativeClaimReplacement(
-            boolean preferChinese, List<StreamResponseDto.ProgressDto> executionTrace) {
+            boolean preferChinese, List<StreamResponseDto.ProgressDto> executionTrace,
+            StreamResponseDto.ClaimReviewReason reasonCode) {
+        String reason = claimReviewReason(reasonCode, preferChinese);
         List<String> authoritativeDetails = executionTrace == null ? List.of() : executionTrace.stream()
                 .filter(progress -> progress != null
                         && "TOOL_RESULT".equals(progress.getStage())
-                        && "USABLE".equals(progress.getOutcome())
+                        && ("USABLE".equals(progress.getOutcome())
+                            || "CONFIRMATION_REQUIRED".equals(progress.getOutcome()))
                         && progress.getDetail() != null
                         && !progress.getDetail().isBlank())
                 .map(StreamResponseDto.ProgressDto::getDetail)
                 .distinct()
-                .limit(4)
                 .toList();
+        if (authoritativeDetails.size() > 4) {
+            authoritativeDetails = authoritativeDetails.subList(authoritativeDetails.size() - 4, authoritativeDetails.size());
+        }
         if (!authoritativeDetails.isEmpty()) {
             return new GuardedClaimReplacement(preferChinese
-                    ? "系统已用权威工具记录替换一段未经证据支持的模型说法："
+                    ? "这项说法尚未核实。" + reason + "本轮可确认的信息是："
                         + String.join("；", authoritativeDetails)
-                    : "The system replaced an unsupported model claim with the authoritative tool record: "
+                    : "That claim has not been verified. " + reason + " This turn confirms: "
                         + String.join("; ", authoritativeDetails),
                     ReplyGuardOutcome.REPLACED_WITH_AUTHORITATIVE_EVIDENCE);
         }
         return new GuardedClaimReplacement(preferChinese
-                ? "系统已隐藏一段声称读取或修改当前画布的未验证回复。"
-                    + "本轮没有支持该说法的完整权威工具结果；请重试，并在看到明确的成功记录前不要假定数据已经改变。"
-                : "The system hid an unverified reply that claimed to read or change the current Board. "
-                    + "This turn has no complete authoritative tool result supporting that claim; retry, and "
+                ? "系统已隐藏一段未核实的回复。" + reason + "可展开“回答核对”查看原句；请核对实际执行记录，再决定是否重试，不要假定数据已经改变。"
+                : "The system hid an unverified reply. " + reason + " Expand Reply check to inspect the original. Check the execution record before retrying, and "
                     + "do not assume data changed until an explicit successful record is shown.",
                 ReplyGuardOutcome.HIDDEN_WITHOUT_EVIDENCE);
     }
@@ -2717,6 +3164,29 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
             return hasSemanticPayload ? ToolExecutionOutcome.USABLE : ToolExecutionOutcome.FAILED;
         } catch (Exception ignore) {
             return ToolExecutionOutcome.FAILED;
+        }
+    }
+
+    private boolean isAwaitingAsyncTask(String functionName, String toolResult,
+                                       ToolExecutionOutcome outcome) {
+        if (outcome != ToolExecutionOutcome.USABLE
+                || !("verify_task_status".equals(functionName)
+                || "simulate_task_status".equals(functionName)
+                || "fuzz_task_status".equals(functionName))) {
+            return false;
+        }
+        try {
+            JsonNode root = objectMapper.readTree(toolResult);
+            JsonNode taskId = root.path("taskId");
+            JsonNode task = root.path("task");
+            JsonNode id = task.path("id");
+            JsonNode status = task.path("status");
+            return taskId.isIntegralNumber() && taskId.canConvertToLong() && taskId.longValue() > 0
+                    && id.isIntegralNumber() && id.canConvertToLong() && id.longValue() == taskId.longValue()
+                    && status.isTextual()
+                    && ("PENDING".equals(status.textValue()) || "RUNNING".equals(status.textValue()));
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            return false;
         }
     }
 
@@ -2832,6 +3302,11 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                         + (result.confirmationPending() ? 1 : 0),
                 detail
         );
+        return sendSseProgress(emitter, packet, executionTrace);
+    }
+
+    private boolean sendSseProgress(SseEmitter emitter, StreamResponseDto packet,
+                                    List<StreamResponseDto.ProgressDto> executionTrace) {
         if (executionTrace != null && packet.getProgress() != null) {
             executionTrace.add(packet.getProgress());
         }
@@ -2840,7 +3315,7 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                     .data(packet, MediaType.APPLICATION_JSON));
             return true;
         } catch (IOException | IllegalStateException e) {
-            log.debug("Failed to send chat progress stage {}: {}", stage, e.toString());
+            log.debug("Failed to send chat progress stage {}: {}", packet.getProgress().getStage(), e.toString());
             // SSE is only the live view. The session execution and its terminal audit remain
             // authoritative, so a detached browser must not cancel background work.
             return true;
@@ -2930,6 +3405,11 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                     ? "提示：当前只是未写入的影响预览或备选方案，尚未应用；请明确确认后再继续。"
                     : "A no-write preview or proposed alternative still requires explicit confirmation. "
                         + "The pending action was not applied.");
+            if ("apply_scenario".equals(result.pendingToolName())) {
+                String assumptions = toolProgressPresenter.scenarioEnvironmentAssumptions(
+                        result.pendingToolResult(), preferChinese);
+                if (assumptions != null) notices.add(assumptions);
+            }
         }
         return notices.isEmpty() ? "" : String.join(" ", notices) + "\n\n";
     }
@@ -3141,12 +3621,14 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
         messageRepo.saveAndFlush(po);
     }
 
-    private void saveToolExecutionResult(String sid, String toolCallId, String result) {
+    private LlmMessage saveToolExecutionResult(Long userId, String sid, String executionId,
+                                              String toolCallId, String result) {
         ChatMessagePo po = new ChatMessagePo();
         po.setSessionId(sid);
         po.setRole("tool");
         po.setContent(messageCodec.serializeToolResult(toolCallId, result));
-        messageRepo.saveAndFlush(po);
+        executeOwnedSessionWrite(userId, sid, executionId, () -> messageRepo.saveAndFlush(po));
+        return messageCodec.toMessage(po);
     }
 
     private void executeOwnedSessionWrite(Long userId,
@@ -3448,6 +3930,19 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
             return false;
         }
         JsonNode outcome = progress.get("outcome");
+        if ("CLAIM_REVIEW".equals(stage.textValue())) {
+            JsonNode review = progress.get("claimReview");
+            return outcome != null && outcome.isTextual() && Set.of("HIDDEN", "REPLACED").contains(outcome.textValue())
+                    && (progress.get("toolName") == null || progress.get("toolName").isNull())
+                    && review != null && review.isObject() && review.size() == 3
+                    && review.path("originalText").isTextual() && !review.path("originalText").textValue().isBlank()
+                    && review.path("matchedText").isTextual() && !review.path("matchedText").textValue().isBlank()
+                    && review.path("originalText").textValue().contains(review.path("matchedText").textValue())
+                    && review.path("reasonCode").isTextual()
+                    && java.util.Arrays.stream(StreamResponseDto.ClaimReviewReason.values())
+                        .anyMatch(reason -> reason.name().equals(review.path("reasonCode").textValue()));
+        }
+        if (progress.hasNonNull("claimReview")) return false;
         if ("TOOL_RESULT".equals(stage.textValue())) {
             return outcome != null && outcome.isTextual()
                     && TOOL_RESULT_OUTCOMES.contains(outcome.textValue());
@@ -3481,7 +3976,8 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
             if (progress == null) {
                 return false;
             }
-            if ("EXECUTION_GUARD".equals(progress.getStage())) {
+            if ("EXECUTION_GUARD".equals(progress.getStage())
+                    || ("CLAIM_REVIEW".equals(progress.getStage()) && "HIDDEN".equals(progress.getOutcome()))) {
                 return false;
             }
             if ("TOOL_EXECUTION".equals(progress.getStage())) {
@@ -3617,10 +4113,22 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
     }
 
     private String errorMessageFor(Exception e, boolean preferChinese) {
+        if (e instanceof ChatConfirmationConflictException) {
+            return preferChinese
+                    ? "此确认已失效，未执行任何操作。请刷新会话，重新查看当前操作的影响预览后再确认。"
+                    : "This confirmation is no longer valid. No operation was performed. Refresh the conversation "
+                        + "and review the current action preview before confirming again.";
+        }
+        if (e instanceof LlmStreamInterruptedException) {
+            return preferChinese
+                    ? "模型连接中断，本轮未能完整完成。请查看会话中已完成的步骤，再重试继续。"
+                    : "The model connection was interrupted and this turn could not finish. Review the completed "
+                        + "steps in this conversation, then retry to continue.";
+        }
         if (e instanceof ServiceUnavailableException) {
             return preferChinese
-                    ? "AI 服务暂时不可用，请检查模型服务地址后重试。"
-                    : "AI service is temporarily unavailable. Please check the model endpoint and try again.";
+                    ? "AI 服务暂时不可用，请稍后重试；如果持续失败，请检查模型服务日志。"
+                    : "AI service is temporarily unavailable. Try again later; if the failure persists, check the model service logs.";
         }
         if (e instanceof ResourceNotFoundException) {
             return preferChinese
@@ -3678,7 +4186,16 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                                   int uncertainMutationCalls,
                                   boolean confirmationPending,
                                   String pendingToolName,
-                                  String pendingToolResult) {
+                                  String pendingToolResult,
+                                  boolean replyComplete) {
+        private ToolLoopResult(boolean hadToolCalls, ToolLoopStopReason stopReason,
+                               int successfulToolCalls, int failedToolCalls, int resultUnavailableToolCalls,
+                               int uncertainMutationCalls, boolean confirmationPending,
+                               String pendingToolName, String pendingToolResult) {
+            this(hadToolCalls, stopReason, successfulToolCalls, failedToolCalls,
+                    resultUnavailableToolCalls, uncertainMutationCalls, confirmationPending,
+                    pendingToolName, pendingToolResult, false);
+        }
         private ToolLoopResult(boolean hadToolCalls,
                                ToolLoopStopReason stopReason,
                                int successfulToolCalls,

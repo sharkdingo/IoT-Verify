@@ -329,7 +329,7 @@ describe('surfaces for a deleted simulation trajectory', () => {
     // id" implies "is on screen"; `lastSimulationResult` deliberately outlives every surface, so without
     // this the user would be told a panel closed while nothing was showing.
     expect(body, 'it must act only while a simulation surface is actually up')
-      .toMatch(/!simulationAnimationState\.value\.visible && !simulationResult\.value/)
+      .toMatch(/if \(!simulationAnimationState\.value\.visible\) return/)
   })
 
   it('closes the bar, the details dialog and the deep link exactly once', () => {
@@ -345,14 +345,12 @@ describe('surfaces for a deleted simulation trajectory', () => {
     expect(body, 'and with the bar gone the dialog must not clear the link a second time')
       .toContain('closeSimulationResultDialog()')
     expect(body, 'while a dialog open without a bar takes the URL-clearing closer')
-      .toContain('dismissSimulationResultDialog()')
+      .toContain('dismissSimulationResultDialog(lastSimulationResult.value?.historyPersistence.runId)')
 
-    // The bar renders `savedSimulationStates` and reads every other prop through
-    // `lastSimulationResult`, so leaving either would keep the deleted run replayable — and
-    // `openSimulationRunDetails` reads that same ref.
-    expect(body, 'the replayed states must not survive their run')
-      .toContain('savedSimulationStates.value = []')
-    expect(body, 'nor the run manifest the bar and the details dialog read')
+    // The replay states are derived from this owner, so clearing it drops the whole run.
+    expect(board, 'states must have no separately writable copy')
+      .not.toMatch(/savedSimulationStates\.value\s*=/)
+    expect(body, 'the run manifest must not survive deletion')
       .toContain('lastSimulationResult.value = null')
   })
 

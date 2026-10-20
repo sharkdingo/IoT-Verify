@@ -59,7 +59,7 @@ public class RuleDto {
          *
          * <p>Boundary-specific value:
          * board storage uses the raw DeviceNode.id; verification/simulation use the
-         * normalized model varName produced by modelRequest.ts or BoardDataConverter.</p>
+         * normalized model varName captured by the server's BoardDataConverter.</p>
          */
         @NotBlank(message = "Condition device name is required")
         @Size(max = RequestLimits.MAX_IDENTIFIER_LENGTH, message = "Condition device name must be at most 200 characters")
@@ -139,7 +139,7 @@ public class RuleDto {
          *
          * <p>Boundary-specific value:
          * board storage uses the raw DeviceNode.id; verification/simulation use the
-         * normalized model varName produced by modelRequest.ts or BoardDataConverter.</p>
+         * normalized model varName captured by the server's BoardDataConverter.</p>
          */
         @NotBlank(message = "Command device name is required")
         @Size(max = RequestLimits.MAX_IDENTIFIER_LENGTH, message = "Command device name must be at most 200 characters")

@@ -64,7 +64,7 @@ test('a successful Board mutation actively refreshes another visible tab', async
           && new URL(response.url()).pathname === '/api/board/snapshot'),
       observer.waitForResponse(response =>
         response.request().method() === 'GET'
-          && new URL(response.url()).pathname === '/api/fuzz/model-fingerprint')
+          && new URL(response.url()).pathname === '/api/board/model-fingerprints')
     ])
     await createDevice(writer, label)
     await observerRefresh
@@ -88,7 +88,7 @@ test('a deletion preview is single-flight and closes when another tab deletes th
   let previewRequestCount = 0
   let releaseObserverPreview!: () => void
   const observerPreviewRelease = new Promise<void>(resolve => { releaseObserverPreview = resolve })
-  await observer.route('**/api/board/nodes/*/deletion-preview', async route => {
+  await observer.route('**/api/board/nodes/deletion-preview?*', async route => {
     await observerPreviewRelease
     await route.continue()
   })
@@ -231,7 +231,7 @@ test('a delayed initial snapshot cannot suppress a newer cross-tab invalidation'
   })
   observer.on('request', request => {
     if (request.method() === 'GET'
-      && new URL(request.url()).pathname === '/api/fuzz/model-fingerprint') {
+      && new URL(request.url()).pathname === '/api/board/model-fingerprints') {
       fingerprintRequestCount += 1
     }
   })
@@ -377,8 +377,8 @@ test('a cross-tab board change marks an open verification verdict stale', async 
     await viewer.bringToFront()
     const scenePath = path.resolve(process.cwd(), '..', 'docs', 'examples', 'acceptance-demo-scene.json')
     await viewer.getByTestId('scene-import-file').setInputFiles(scenePath)
-    await viewer.getByRole('dialog', { name: 'Confirm Full Scene Replacement' })
-      .getByRole('button', { name: 'Replace in full' })
+    await viewer.getByRole('dialog', { name: 'Replace the current scene?' })
+      .getByRole('button', { name: 'Replace scene' })
       .click()
     await expect(viewer.getByTestId('scene-import')).toBeEnabled({ timeout: 30_000 })
 
@@ -422,8 +422,8 @@ test('an undo refreshes another visible tab like any other board mutation', asyn
       process.cwd(), '..', 'docs', 'examples', 'default-climate-conflict-scene.json'
     )
     await writer.getByTestId('scene-import-file').setInputFiles(scenePath)
-    await writer.getByRole('dialog', { name: 'Confirm Full Scene Replacement' })
-      .getByRole('button', { name: 'Replace in full' })
+    await writer.getByRole('dialog', { name: 'Replace the current scene?' })
+      .getByRole('button', { name: 'Replace scene' })
       .click()
     await writer.getByTestId('inspector-tab-rules').click()
     const deleteRule = writer.getByRole('button', { name: 'Delete Rule' }).first()

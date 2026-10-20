@@ -145,6 +145,31 @@ class SimulationTraceToolsTest {
     }
 
     @Test
+    void simulationScope_doesNotClaimTheBoardHasNoSpecifications() throws Exception {
+        UserContextHolder.setUserId(1L);
+        var snapshot = cn.edu.nju.Iot_Verify.dto.model.ModelRunSnapshotDto.builder()
+                .deviceCount(2).ruleCount(2).specificationCount(0).build();
+        when(simulationService.getUserSimulations(1L)).thenReturn(List.of(
+                SimulationTraceSummaryDto.builder().id(11L).modelComplete(true)
+                        .modelSnapshot(snapshot).build()));
+        when(simulationService.getSimulation(1L, 11L)).thenReturn(
+                SimulationTraceDto.builder().id(11L).modelComplete(true)
+                        .modelSnapshot(snapshot).states(List.of()).build());
+
+        JsonNode list = objectMapper.readTree(listTool.execute("{}"));
+        JsonNode detail = objectMapper.readTree(getTool.execute("{\"simulationId\":11}"));
+
+        for (JsonNode result : List.of(list, detail)) {
+            assertTrue(result.path("message").asText().contains("Simulation does not check specifications"));
+            assertTrue(result.path("message").asText().contains("not whether the saved Board has specifications"));
+        }
+        assertEquals(0, list.path("traces").get(0).path("modelSnapshot").path("specificationCount").asInt());
+        assertEquals(0, detail.path("modelSnapshot").path("specificationCount").asInt());
+        assertTrue(list.path("message").asText().contains("read get_simulation_trace before explaining state changes"));
+        assertTrue(detail.path("message").asText().contains("Use formal verification for specification outcomes"));
+    }
+
+    @Test
     void getSimulationTrace_withInvalidJson_shouldReturnValidationError() throws Exception {
         UserContextHolder.setUserId(1L);
         String result = getTool.execute("{invalid");
@@ -282,7 +307,7 @@ class SimulationTraceToolsTest {
         assertTrue(previewJson.path("requiresUserConfirmation").asBoolean());
         verify(simulationService, never()).deleteSimulation(1L, 13L);
 
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", previewJson.path("impactToken").asText());
         String result = deleteTool.execute("{\"simulationId\":13,\"confirmed\":true,\"impactToken\":\""
                 + previewJson.path("impactToken").asText() + "\"}");
         JsonNode json = objectMapper.readTree(result);

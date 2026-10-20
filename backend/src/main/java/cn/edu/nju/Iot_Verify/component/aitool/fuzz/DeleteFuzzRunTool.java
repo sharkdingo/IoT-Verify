@@ -73,10 +73,13 @@ public class DeleteFuzzRunTool extends AbstractAiTool {
 
             RunDeletionImpactDto impact = fuzzService.getRunDeletionImpact(userId, runId);
             Map<String, Object> previewSummary = previewSummary(impact);
+            String displayTarget = "Counterexample search: " + impact.getCompletedAt() + " · "
+                    + impact.getEvidenceCount() + " stored findings";
             boolean confirmed = booleanArg(args, "confirmed", false);
             if (!confirmed || !UserContextHolder.isDestructiveActionConfirmed()) {
                 String impactToken = destructiveActionGuard.issue(
-                        userId, getName(), Long.toString(runId), previewSummary, null);
+                        userId, getName(), Long.toString(runId),
+                        displayTarget, previewSummary, null);
                 return readOnlySuccessJson(previewResponse(previewSummary, impactToken),
                         "Counterexample-search run deletion preview prepared; no changes were made.");
             }
@@ -86,7 +89,8 @@ public class DeleteFuzzRunTool extends AbstractAiTool {
                     userId, getName(), Long.toString(runId), impactToken, previewSummary);
             if (!confirmation.approved()) {
                 String freshToken = destructiveActionGuard.issue(
-                        userId, getName(), Long.toString(runId), previewSummary, null);
+                        userId, getName(), Long.toString(runId),
+                        displayTarget, previewSummary, null);
                 return errorJson(confirmation.message(), confirmation.errorCode(), 409, Map.of(
                         "requiresUserConfirmation", true,
                         "currentPreview", previewResponse(previewSummary, freshToken)));

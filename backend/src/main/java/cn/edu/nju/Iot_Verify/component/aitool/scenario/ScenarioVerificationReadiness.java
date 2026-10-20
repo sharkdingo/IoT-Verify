@@ -109,8 +109,8 @@ public final class ScenarioVerificationReadiness {
             warnings.add(new Issue(
                     "NO_AUTOMATION_RULES",
                     chinese
-                            ? "最终草案不包含保留的自动化规则。它仍可包含规约，但不能据此宣称已形成自动化闭环。"
-                            : "The final draft contains no retained automation rules. It may still contain specifications, but it does not establish an automation closed loop."));
+                            ? "草案没有自动化规则。请核对设备自身行为是否已满足需求，或补充联动规则。"
+                            : "The draft has no automation rules. Check whether device behavior alone meets your needs, or add automation rules."));
         }
 
         Set<String> referencedDeviceIds = referencedDeviceIds(scene);

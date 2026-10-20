@@ -4,6 +4,8 @@
 
 import type { Trace } from '@/types/verify'
 import { normalizeModelRelation, normalizeNuSmvDeviceName } from './modelRequest'
+import { formatModelTokenBySource } from './modelTokenDisplay'
+import type { ModelTokenSource } from '@/types/modelToken'
 
 export interface PlaybackPanelState {
   simulationVisible: boolean
@@ -127,18 +129,27 @@ const splitPlaybackParts = (value: string | null | undefined): string[] =>
     .map(part => part.trim())
     .filter(Boolean)
 
+/** Mode names and state values occupy corresponding positions in a saved device snapshot. */
+export const playbackDeviceStateEntries = (device: PlaybackDevice): Array<{ mode: string; value: string }> => {
+  const modes = splitPlaybackParts(device.mode)
+  const states = splitPlaybackParts(device.state)
+  return Array.from({ length: Math.max(modes.length, states.length) }, (_, index) => ({
+    mode: modes[index] || '',
+    value: states[index] || ''
+  }))
+}
+
 const isActiveStateProperty = (
   entry: { name: string; propertyScope: 'state' | 'variable' | 'content'; mode?: string | null },
   device: PlaybackDevice
 ): boolean => {
   if (entry.propertyScope !== 'state') return true
-  const modes = splitPlaybackParts(device.mode)
-  const states = splitPlaybackParts(device.state)
-  const modeIndex = entry.mode
-    ? modes.findIndex(mode => mode.toLowerCase() === entry.mode?.toLowerCase())
-    : -1
-  if (modeIndex >= 0) return states[modeIndex]?.toLowerCase() === entry.name.toLowerCase()
-  return states.some(state => state.toLowerCase() === entry.name.toLowerCase())
+  const states = playbackDeviceStateEntries(device)
+  const selectedMode = entry.mode
+    ? states.find(state => state.mode.toLowerCase() === entry.mode?.toLowerCase())
+    : undefined
+  if (selectedMode) return selectedMode.value.toLowerCase() === entry.name.toLowerCase()
+  return states.some(state => state.value.toLowerCase() === entry.name.toLowerCase())
 }
 
 const securityPropertyLabel = (entry: { name: string; propertyScope: string; mode?: string | null }): string =>
@@ -322,16 +333,28 @@ export const playbackDeviceChangeDetails = (
 
   const details: PlaybackDeviceChangeDetail[] = []
   if ((previous.state || '') !== (current.state || '')) {
-    details.push({
-      kind: 'state',
-      previousValue: playbackValue(previous.state),
-      currentValue: playbackValue(current.state)
-    })
+    const states = playbackDeviceStateEntries(current)
+    const previousStates = playbackDeviceStateEntries(previous)
+    if (states.length > 1 && current.mode === previous.mode) {
+      states.forEach((state, index) => {
+        const before = playbackValue(previousStates[index]?.value)
+        const after = playbackValue(state.value)
+        if (before !== after) {
+          details.push({ kind: 'state', name: state.mode, previousValue: before, currentValue: after })
+        }
+      })
+    } else {
+      details.push({
+        kind: 'state',
+        previousValue: playbackValue(previous.state),
+        currentValue: playbackValue(current.state)
+      })
+    }
   }
   // `mode` holds state-machine NAMES, not values — `SmvTraceParser` sets `state` to the mode *values*
   // (joined with `;` for a multi-mode device) and `mode` to the matching names. The name set comes from
   // the frozen manifest, so within one trace this row is effectively unreachable: any real mode change
-  // moves `state`, which the row above already reports and the canvas pill's title already shows.
+  // moves `state`, which the rows above already report and the canvas pill's title already shows.
   //
   // Kept rather than deleted because it is the honest comparison for the field, and an audit read the
   // canvas as "silently dropping mode changes" on the assumption that mode carried values. It does not.
@@ -460,7 +483,7 @@ const formatVariableTarget = (
   const source = String(condition?.variableSource || '').trim().toLowerCase()
   if (source === 'environment') {
     return translateTraceText(translate, 'app.traceVariableInHome', { key },
-      `the actual ${key} in the home`)
+      `environment ${key}`)
   }
   if (source === 'reported') {
     return translateTraceText(translate, 'app.traceVariableReported', { device, key },
@@ -470,14 +493,17 @@ const formatVariableTarget = (
     `${device} ${key} (which value it means was not recorded)`)
 }
 
-const formatCondition = (condition: any, translate?: TraceTranslator): string => {
+type TraceTokenFormatter = (deviceId: string, value: unknown) => string
+
+const formatCondition = (condition: any, translate?: TraceTranslator, formatToken?: TraceTokenFormatter): string => {
   const device = condition?.deviceLabel || condition?.deviceId
     || (translate ? translate('app.unknownDevice') : 'device')
   const key = condition?.targetType === 'state'
     ? (translate ? translate('app.state') : 'state')
-    : condition?.key || condition?.attribute || (translate ? translate('app.value') : 'value')
+    : formatToken?.(condition?.deviceId, condition?.key || condition?.attribute)
+      || condition?.key || condition?.attribute || (translate ? translate('app.value') : 'value')
   const relation = formatTraceRelation(condition?.relation, translate)
-  const value = quoteConditionValue(condition?.value)
+  const value = quoteConditionValue(formatToken?.(condition?.deviceId, condition?.value) ?? condition?.value)
   // A trust or privacy condition is about a *label* on a target, not the target's own value, and
   // `utils/spec.ts` renders it that way (`sensitivity(...)`, `controlSource(...) = untrusted`). This
   // renderer branched only on `state` and dropped the wrapper, so the label value landed in the slot a
@@ -485,11 +511,10 @@ const formatCondition = (condition: any, translate?: TraceTranslator): string =>
   // domain-impossible, since LockState's own values are locked/unlocked. A user comparing that against
   // the correct formula preview cannot tell which one is their actual property.
   // A variable condition answers one of two different questions, and a verdict is unreadable
-  // without knowing which: `environment` is the value in the home (no device participates),
-  // `reported` is what this device said. They diverge exactly when the device is compromised, which
-  // is the case a counterexample is most often about, so the distinction is rendered rather than
-  // collapsed into `device.key`. A condition that never recorded a source is marked unresolved
-  // instead of being shown as either one.
+  // without knowing which: `environment` is the shared model value (no device participates),
+  // `reported` is what this device said. They may diverge when its template allows falsification
+  // after compromise, so preserve the distinction rather than collapsing it into `device.key`.
+  // A condition that never recorded a source is marked unresolved rather than shown as either one.
   const target = condition?.targetType === 'variable'
     ? formatVariableTarget(condition, device, key, translate)
     : `${device}.${key}`
@@ -504,30 +529,35 @@ const formatCondition = (condition: any, translate?: TraceTranslator): string =>
     : target
 }
 
-const joinConditions = (conditions?: any[], translate?: TraceTranslator): string =>
+const joinConditions = (conditions?: any[], translate?: TraceTranslator, formatToken?: TraceTokenFormatter): string =>
   Array.isArray(conditions) && conditions.length > 0
-    ? conditions.map(condition => formatCondition(condition, translate))
+    ? conditions.map(condition => formatCondition(condition, translate, formatToken))
       .join(translate ? translate('app.traceConditionAnd') : ' AND ')
     : ''
 
 export const formatTraceSpec = (
   specValue: string | Record<string, any>,
-  translate?: TraceTranslator
+  translate?: TraceTranslator,
+  tokenSources: Readonly<Record<string, ModelTokenSource>> = {}
 ): string => {
   try {
     const spec = typeof specValue === 'string' ? JSON.parse(specValue) : specValue
+    const sources = new Map(Object.entries(tokenSources).map(([id, source]) => [normalizeNuSmvDeviceName(id), source]))
+    const formatToken: TraceTokenFormatter = (deviceId, value) => translate
+      ? formatModelTokenBySource(sources.get(normalizeNuSmvDeviceName(deviceId || '')) || 'UNKNOWN', value, translate)
+      : String(value ?? '')
     const label = spec.templateLabel || (translate ? translate('app.unknownSpecification') : 'Specification')
-    const aPart = joinConditions(spec.aConditions, translate)
-    const ifPart = joinConditions(spec.ifConditions, translate)
-    const thenPart = joinConditions(spec.thenConditions, translate)
+    const aPart = joinConditions(spec.aConditions, translate, formatToken)
+    const ifPart = joinConditions(spec.ifConditions, translate, formatToken)
+    const thenPart = joinConditions(spec.thenConditions, translate, formatToken)
 
     switch (String(spec.templateId || '')) {
       case '1':
-        return aPart ? translateTraceText(translate, 'app.traceSpecAlways', { condition: aPart }, `Always: ${aPart}`) : label
+        return aPart ? translateTraceText(translate, 'app.traceSpecAlways', { condition: aPart }, `Must always hold: ${aPart}`) : label
       case '2':
-        return aPart ? translateTraceText(translate, 'app.traceSpecEventually', { condition: aPart }, `Eventually: ${aPart}`) : label
+        return aPart ? translateTraceText(translate, 'app.traceSpecEventually', { condition: aPart }, `Must eventually hold: ${aPart}`) : label
       case '3':
-        return aPart ? translateTraceText(translate, 'app.traceSpecNever', { condition: aPart }, `Never: ${aPart}`) : label
+        return aPart ? translateTraceText(translate, 'app.traceSpecNever', { condition: aPart }, `Must never hold: ${aPart}`) : label
       case '4':
         return ifPart && thenPart
           ? translateTraceText(translate, 'app.traceSpecImmediate', { ifPart, thenPart }, `Immediately: IF ${ifPart}, THEN ${thenPart}`)

@@ -26,7 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * {@code backend/CLAUDE.md} is what an agent or a new contributor reads before touching persistence, and it makes
  * specific, checkable claims: how many tables exist, which carry composite primary keys for user isolation, which
- * are maintained by orphan cleanup. Acting on a stale claim here produces a query or a migration that is wrong in
+ * require ownership constraints. Acting on a stale claim here produces a query or a migration that is wrong in
  * a way ordinary tests will not catch — and the repo's own rule is that code wins and the doc is fixed in the same
  * change. This test is what makes that rule enforceable rather than aspirational.
  *
@@ -119,12 +119,9 @@ class SchemaDocumentationTruthTest {
     }
 
     @Test
-    @DisplayName("the AI tool count in CLAUDE.md matches the concrete tool classes")
+    @DisplayName("the AI tool count in its owning API document matches the concrete tool classes")
     void documentedAiToolCountIsTruthful() throws IOException {
-        // The doc says "53 AI tools". Counting *Tool.java gives 55 — and my first reading called that drift. It is
-        // not: AbstractAiTool is the base class and AiTool is the interface, so 55 - 2 = 53 and the doc is right.
-        // Pinning the arithmetic is what keeps a future reader from repeating that mistake in either direction:
-        // adding a tool without updating the doc, or "correcting" a correct doc after a naive count.
+        // The interface and abstract base are not registered capabilities. The API document owns their count.
         Path toolRoot = MAIN_ROOT.resolve("component").resolve("aitool");
         List<String> concrete = new ArrayList<>();
         try (Stream<Path> paths = Files.walk(toolRoot)) {
@@ -140,11 +137,11 @@ class SchemaDocumentationTruthTest {
                 "expected at least 40 concrete AI tools, found " + concrete.size()
                         + " — the package probably moved, so a count comparison proves nothing");
 
-        String doc = Files.readString(DOC, StandardCharsets.UTF_8);
-        Matcher claim = Pattern.compile("(\\d+) AI tools").matcher(doc);
-        assertTrue(claim.find(), "CLAUDE.md should state an AI tool count");
+        String doc = Files.readString(Paths.get("../docs/api/ai-tools.md"), StandardCharsets.UTF_8);
+        Matcher claim = Pattern.compile("All (\\d+) tools").matcher(doc);
+        assertTrue(claim.find(), "ai-tools.md should state the registered tool count");
         assertEquals(Integer.parseInt(claim.group(1)), concrete.size(),
-                "CLAUDE.md states an AI tool count that no longer matches the concrete tool classes");
+                "ai-tools.md states a tool count that no longer matches the concrete tool classes");
     }
 
     @Test

@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Method;
@@ -28,7 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * collections — zero breaches. But that probe is an audit artifact: it is not in the suite, it needs a running
  * backend and NuSMV, and it can only test the endpoints that existed when it was written.
  *
- * <p>What actually keeps the boundary closed is a habit: a path variable never selects a row on its own, only
+ * <p>What actually keeps the boundary closed is a habit: a path or query parameter never selects a row on its own, only
  * ever in combination with the authenticated user. A new endpoint that forgets {@code @CurrentUser} is one line
  * of plausible-looking code, it compiles, it works perfectly in manual testing with one account, and nothing
  * fails. This test is what fails.
@@ -81,9 +82,13 @@ class OwnershipBoundaryContractTest {
             for (Method method : controller.getDeclaredMethods()) {
                 String route = routeOf(method, prefix);
                 if (route == null) continue;
-                // Only endpoints whose path carries a client-supplied identifier. A collection endpoint scoped
-                // solely by the caller cannot be addressed across accounts in the first place.
-                if (!route.contains("{")) continue;
+                // Query parameters can select owned records too; moving an id out of the path must not
+                // remove the endpoint from this boundary check. Query filters are included conservatively.
+                boolean addressedByClient = route.contains("{");
+                for (Parameter parameter : method.getParameters()) {
+                    addressedByClient |= parameter.isAnnotationPresent(RequestParam.class);
+                }
+                if (!addressedByClient) continue;
                 idAddressed++;
                 if (INTENTIONALLY_PUBLIC.contains(route)) continue;
                 if (!receivesCaller(method)) {

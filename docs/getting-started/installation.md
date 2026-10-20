@@ -1,6 +1,6 @@
 # Installation
 
-> Verified against code on 2026-07-25. Source: root `README.md`, `backend/README.md`,
+> Verified against code on 2026-09-30. Source: root `README.md`, `backend/README.md`,
 > `backend/pom.xml`, `frontend/package.json`, `frontend/.npmrc`, `frontend/vite.config.ts`,
 > `frontend/playwright.config.ts`.
 
@@ -99,7 +99,8 @@ npm install
 npm run dev
 ```
 
-The dev server listens on `http://localhost:3000` and proxies `/api` to `http://localhost:8080` (configured in `frontend/vite.config.ts`). npm scripts: `dev` (Vite dev server), `build` (`vue-tsc` type-check + production build), `preview` (serve the build), `test:unit` (Vitest), and `test:e2e` (Playwright). The Playwright suite starts Vite automatically when `E2E_BASE_URL` is unset, but it uses real backend APIs; keep the backend running at `E2E_API_BASE_URL` (default `http://127.0.0.1:8080`).
+The dev server listens on `http://127.0.0.1:3000` and proxies `/api` to the backend.
+Scripts and E2E prerequisites: [frontend README](../../frontend/README.md#run-locally).
 
 For the frontend source layout see [../architecture/overview.md](../architecture/overview.md#frontend-layout); for how the frontend calls the backend see [../guides/frontend-integration.md](../guides/frontend-integration.md).
 
@@ -119,7 +120,8 @@ curl -X POST http://localhost:8080/api/auth/login \
   -d '{"identifier":"testuser","password":"password123"}'
 ```
 
-A successful call returns the standard envelope `{"code": 200, "message": "success", "data": {...}}`. If either call fails, see [../guides/troubleshooting.md](../guides/troubleshooting.md).
+Responses follow the [API conventions](../api/overview.md). If either call fails,
+see [troubleshooting](../guides/troubleshooting.md).
 
 ## Next steps
 

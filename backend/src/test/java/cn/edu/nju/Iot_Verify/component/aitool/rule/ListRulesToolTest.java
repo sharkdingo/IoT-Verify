@@ -1,6 +1,7 @@
 package cn.edu.nju.Iot_Verify.component.aitool.rule;
 
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
+import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.security.UserContextHolder;
 import cn.edu.nju.Iot_Verify.service.BoardStorageService;
@@ -16,6 +17,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 class ListRulesToolTest {
@@ -43,12 +45,15 @@ class ListRulesToolTest {
                         .action("turnOn")
                         .build())
                 .build();
-        when(storage.getRules(1L)).thenReturn(List.of(rule));
-        when(storage.getNodes(1L)).thenReturn(List.of(sensor, light));
+        when(storage.getSemanticSnapshot(1L)).thenReturn(new BoardSemanticSnapshotDto(
+                List.of(sensor, light), List.of(), List.of(rule), List.of(), List.of()));
         UserContextHolder.setUserId(1L);
 
         JsonNode response = new ObjectMapper().readTree(
                 new ListRulesTool(storage, new ObjectMapper()).execute("{\"keyword\":\"Living room\"}"));
+
+        verify(storage).getSemanticSnapshot(1L);
+        verifyNoMoreInteractions(storage);
 
         assertEquals(1, response.path("count").asInt());
         JsonNode presented = response.path("rules").get(0);
@@ -69,7 +74,7 @@ class ListRulesToolTest {
                 new ListRulesTool(storage, new ObjectMapper()).execute("{\"query\":\"light\"}"));
 
         assertEquals("VALIDATION_ERROR", response.path("errorCode").asText());
-        verify(storage, never()).getRules(1L);
+        verify(storage, never()).getSemanticSnapshot(1L);
     }
 
     private DeviceNodeDto node(String id, String label) {

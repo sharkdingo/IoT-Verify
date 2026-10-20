@@ -1,3 +1,5 @@
+import { isModelFingerprint } from '@/utils/modelComparison'
+import { INTERACTIVE_OPERATION_STAGES as INTERACTIVE_OPERATION_STAGE_VALUES } from '@/types/task'
 import type {
   SimulationResult,
   SimulationTask,
@@ -29,8 +31,10 @@ import type {
 import { isModelSemanticsConsistent } from './modelSemantics'
 import type { RunPersistence, RunPersistenceStatus } from '@/types/runPersistence'
 import { validateTraceStatePayload } from './traceStateResponse'
+import { MODEL_TOKEN_SOURCE_SET } from '@/types/modelToken'
 import { isRunInitiator } from '@/types/model'
 import { validateModelPlaybackScene } from './playbackSceneResponse'
+import { normalizeModelRelation } from './modelRequest'
 
 export const RUN_RESPONSE_INCOMPLETE_CODE = 'RUN_RESPONSE_INCOMPLETE'
 
@@ -173,6 +177,9 @@ const validateModelSnapshot = (result: Record<string, any>, context: string) => 
   if (snapshot.templatesFrozen !== true) {
     throw new RunResponseContractError(context, 'modelSnapshot.templatesFrozen must be true')
   }
+  if (snapshot.modelFingerprint != null && !isModelFingerprint(snapshot.modelFingerprint)) {
+    throw new RunResponseContractError(context, 'modelSnapshot.modelFingerprint must be a SHA-256 value')
+  }
 }
 
 const validateGenerationIssues = (
@@ -220,6 +227,40 @@ const validateSpecResults = (result: Record<string, any>, context: string): Spec
     requireString(row, 'templateId', context, false)
     requireString(row, 'specificationLabel', context, false)
     requireString(row, 'formulaPreview', context, false)
+    if (row.specificationSnapshot !== null && row.specificationSnapshot !== undefined) {
+      const snapshot = requireRecord(row.specificationSnapshot, context, 'specificationSnapshot')
+      if (snapshot.id !== row.specId || snapshot.templateId !== row.templateId || !/^[1-7]$/.test(snapshot.templateId)) {
+        throw new RunResponseContractError(context, 'specificationSnapshot identity must match its verdict')
+      }
+      const devices = requireRecord(snapshot.devices, context, 'specificationSnapshot.devices')
+      Object.entries(devices).forEach(([id, item]) => {
+        const device = requireRecord(item, context, `specificationSnapshot.devices.${id}`)
+        requireString(device, 'label', context, false)
+        if (!id.trim() || !MODEL_TOKEN_SOURCE_SET.has(device.modelTokenSource)) {
+          throw new RunResponseContractError(context, 'specificationSnapshot device identity or provenance is invalid')
+        }
+        if (device.modeCount !== null) requireInteger(device, 'modeCount', context)
+      })
+      for (const [field, side] of [['aConditions', 'a'], ['ifConditions', 'if'], ['thenConditions', 'then']]) {
+        requireArray(snapshot, field, context).forEach(item => {
+          const condition = requireRecord(item, context, `specificationSnapshot.${field}`)
+          for (const key of ['deviceId', 'targetType', 'key', 'relation', 'value']) requireString(condition, key, context, false)
+          if (!Object.prototype.hasOwnProperty.call(devices, condition.deviceId)
+              || !['state', 'mode', 'api', 'variable', 'trust', 'privacy'].includes(condition.targetType)
+              || !normalizeModelRelation(condition.relation)
+              || (condition.side != null && condition.side !== side)
+              || (condition.targetType === 'variable' && !['environment', 'reported'].includes(condition.variableSource))
+              || (['trust', 'privacy'].includes(condition.targetType) && !['state', 'variable'].includes(condition.propertyScope))) {
+            throw new RunResponseContractError(context, `specificationSnapshot.${field} contains an invalid condition`)
+          }
+        })
+      }
+      const singleSide = ['1', '2', '3', '7'].includes(snapshot.templateId)
+      if (singleSide ? snapshot.aConditions.length === 0 || snapshot.ifConditions.length !== 0 || snapshot.thenConditions.length !== 0
+          : snapshot.aConditions.length !== 0 || snapshot.ifConditions.length === 0 || snapshot.thenConditions.length === 0) {
+        throw new RunResponseContractError(context, 'specificationSnapshot conditions must match its template')
+      }
+    }
     if (row.formulaKind !== 'CTL' && row.formulaKind !== 'LTL') {
       throw new RunResponseContractError(context, `specResults[${index}].formulaKind is invalid`)
     }
@@ -259,17 +300,7 @@ const TASK_PROGRESS_STAGES = new Set<TaskProgressStage>([
   'PERSISTING_RESULT'
 ])
 
-const INTERACTIVE_OPERATION_STAGES = new Set([
-  'QUEUED',
-  'RUNNING',
-  'PREPARING_CONTEXT',
-  'REQUESTING_MODEL',
-  'VALIDATING_RESULT',
-  'PREPARING_MODEL',
-  'SEARCHING_AND_VERIFYING',
-  'FINALIZING',
-  'CANCELLING'
-])
+const INTERACTIVE_OPERATION_STAGES = new Set<string>(INTERACTIVE_OPERATION_STAGE_VALUES)
 
 const TERMINAL_TASK_STATUSES = new Set<AsyncTaskStatus>(['COMPLETED', 'FAILED', 'CANCELLED'])
 
@@ -685,6 +716,11 @@ const validateTraceSummary = (value: unknown, context: string): TraceSummary => 
   }
   requireString(trace, 'violatedSpecId', context, false)
   requireRecord(trace.violatedSpec, context, 'violatedSpec')
+  const sources = requireRecord(trace.modelTokenSourcesByDeviceId, context, 'modelTokenSourcesByDeviceId')
+  if (Object.keys(sources).length > 100
+    || Object.entries(sources).some(([id, source]) => !id.trim() || !MODEL_TOKEN_SOURCE_SET.has(String(source)))) {
+    throw new RunResponseContractError(context, 'modelTokenSourcesByDeviceId is invalid')
+  }
   requireInteger(trace, 'stateCount', context, 1)
   requireString(trace, 'createdAt', context, false)
   return trace as TraceSummary
@@ -699,8 +735,20 @@ export const validateVerificationRunSummary = (value: unknown): VerificationRunS
   requireOptionalTimestamp(candidate, 'createdAt', context)
   requireOptionalTimestamp(candidate, 'startedAt', context)
   requireOptionalTimestamp(candidate, 'completedAt', context)
+  validateRunCounterexamples(candidate, context)
+  if (!dataAvailable) {
+    requireString(candidate, 'unavailableReasonCode', context, false)
+    return candidate as VerificationRunSummary
+  }
+  return validateVerificationRunBase(candidate, context, false) as VerificationRunSummary
+}
+
+const validateRunCounterexamples = (candidate: Record<string, any>, context: string): void => {
   const counterexamples = requireArray(candidate, 'counterexamples', context)
     .map((trace, index) => validateTraceSummary(trace, `${context} counterexamples[${index}]`))
+  if (counterexamples.some(trace => trace.verificationTaskId !== candidate.id)) {
+    throw new RunResponseContractError(context, 'counterexamples must belong to this verification run')
+  }
   const counterexampleCount = requireInteger(candidate, 'counterexampleCount', context)
   const availableCounterexampleCount = counterexamples
     .filter(trace => trace.dataAvailable !== false).length
@@ -710,11 +758,6 @@ export const validateVerificationRunSummary = (value: unknown): VerificationRunS
       'counterexampleCount must match available counterexamples'
     )
   }
-  if (!dataAvailable) {
-    requireString(candidate, 'unavailableReasonCode', context, false)
-    return candidate as VerificationRunSummary
-  }
-  return validateVerificationRunBase(candidate, context, false) as VerificationRunSummary
 }
 
 export const validateVerificationRunSummaryList = (value: unknown): VerificationRunSummary[] => {
@@ -724,8 +767,12 @@ export const validateVerificationRunSummaryList = (value: unknown): Verification
   return value.map(validateVerificationRunSummary)
 }
 
-export const validateVerificationRun = (value: unknown): VerificationRun =>
-  validateVerificationRunBase(value, 'Verification run', true) as VerificationRun
+export const validateVerificationRun = (value: unknown): VerificationRun => {
+  const context = 'Verification run'
+  const run = validateVerificationRunBase(value, context, true)
+  validateRunCounterexamples(run, context)
+  return run as VerificationRun
+}
 
 export const validateCompletedVerificationTask = (
   value: VerificationTask

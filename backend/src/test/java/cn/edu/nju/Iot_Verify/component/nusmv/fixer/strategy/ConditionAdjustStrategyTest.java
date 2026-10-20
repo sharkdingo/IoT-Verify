@@ -10,15 +10,20 @@ import cn.edu.nju.Iot_Verify.component.nusmv.executor.NusmvExecutor.SpecCheckRes
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.GuardProbe;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvGenerationContext.EmittedSpec;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvGenerator;
+import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvData;
 import cn.edu.nju.Iot_Verify.configure.FixConfig;
+import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.fix.FaultRuleDto;
 import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
 import cn.edu.nju.Iot_Verify.dto.fix.FixSuggestionDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
+import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import cn.edu.nju.Iot_Verify.util.SmvConstants;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
@@ -29,6 +34,12 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.util.List;
 import java.util.Map;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.stream.IntStream;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -74,6 +85,206 @@ class ConditionAdjustStrategyTest {
                 .build();
     }
 
+    @ParameterizedTest
+    @ValueSource(ints = {0, 3, 6})
+    void tryFix_redundantTriggersTestsTargetPairBeforeGuardingRequiredResponse(int targetRule) throws Exception {
+        List<Integer> values = List.of(30, 31, 40);
+        List<RuleDto> rules = IntStream.range(0, 9).mapToObj(index -> RuleDto.builder()
+                .conditions(List.of(RuleDto.Condition.builder()
+                        .deviceName("sensor_1").attribute("temperature").targetType("variable")
+                        .relation(">=").value(values.get(index % 3).toString()).build()))
+                .command(RuleDto.Command.builder().deviceName("ac_" + (index / 3 + 1)).action("turnOn").build())
+                .build()).toList();
+        DeviceSmvData sensor =
+                new DeviceSmvData();
+        sensor.setVarName("sensor_1");
+        sensor.setVariables(List.of(DeviceManifest.InternalVariable
+                .builder().name("temperature").lowerBound(0).upperBound(50).build()));
+        DeviceSmvData occupancy =
+                new DeviceSmvData();
+        occupancy.setVarName("occupancy_1");
+        occupancy.setVariables(List.of(DeviceManifest.InternalVariable
+                .builder().name("occupied").lowerBound(0).upperBound(1).build()));
+        Map<String, DeviceSmvData> deviceMap = new LinkedHashMap<>();
+        deviceMap.put("sensor_1", sensor);
+        deviceMap.put("occupancy_1", occupancy);
+        for (int index = 1; index <= 3; index++) {
+            DeviceSmvData actuator = new DeviceSmvData();
+            actuator.setVarName("ac_" + index);
+            actuator.setVariables(List.of(DeviceManifest.InternalVariable.builder()
+                    .name("requested").lowerBound(0).upperBound(1).build()));
+            deviceMap.put(actuator.getVarName(), actuator);
+        }
+        SpecConditionDto clause = new SpecConditionDto();
+        clause.setDeviceId("occupancy_1");
+        clause.setTargetType("variable");
+        clause.setKey("occupied");
+        clause.setRelation("=");
+        clause.setValue("0");
+        SpecificationDto spec = new SpecificationDto();
+        spec.setId("s1");
+        spec.setTemplateId("3");
+        SpecConditionDto targetClause = new SpecConditionDto();
+        targetClause.setDeviceId("ac_" + (targetRule / 3 + 1));
+        targetClause.setTargetType("variable");
+        targetClause.setKey("requested");
+        targetClause.setRelation("=");
+        targetClause.setValue("0");
+        spec.setAConditions(List.of(clause, targetClause));
+        FixContext context = FixContext.builder()
+                .faultRules(List.of(0, 3, 6).stream()
+                        .map(index -> FaultRuleDto.builder().ruleIndex(index).build()).toList())
+                .repairRuleIndices(List.of(0, 3, 6, 1, 2, 4, 5, 7, 8)).allRules(rules).devices(List.of()).specs(List.of(spec))
+                .deviceSmvMap(deviceMap)
+                .violatedSpecIndex(0).userId(1L).attackScenario(AttackScenarioDto.none()).maxAttempts(20).build();
+        AtomicReference<ParameterizationConfig> active =
+                new AtomicReference<>();
+        List<Set<String>> searched = new ArrayList<>();
+        when(smvGenerator.generateParameterizedWithResolvedDeviceModel(
+                anyLong(), anyList(), anyList(), anyList(), anyList(), any(), anyBoolean(),
+                any(ParameterizationConfig.class), any(SmvGenerator.TempModelContext.class), anyMap()))
+                .thenAnswer(invocation -> {
+                    ParameterizationConfig config = invocation.getArgument(7);
+                    active.set(config);
+                    searched.add(config.getFixedConditionLambdas().entrySet().stream()
+                            .filter(entry -> entry.getKey().endsWith("_c1") && entry.getValue())
+                            .map(Map.Entry::getKey).collect(Collectors.toSet()));
+                    return createGenResult();
+                });
+        lenient().when(smvGenerator.generateWithResolvedDeviceModel(
+                anyLong(), anyList(), anyList(), anyList(), anyList(), any(), anyBoolean(),
+                any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class), anyMap(), anyList()))
+                .thenAnswer(invocation -> { active.set(null); return createGenResult(); });
+        Set<String> pair = Set.of("r" + targetRule + "_c1", "r" + (targetRule + 1) + "_c1");
+        when(nusmvExecutor.executeRepairSearch(any(File.class), anyLong())).thenAnswer(invocation -> {
+            ParameterizationConfig config = active.get();
+            if (config == null || !searched.get(searched.size() - 1).equals(pair)) {
+                return NusmvResult.success("", List.of(new SpecCheckResult("AG safe", true, null)));
+            }
+            StringBuilder witness = new StringBuilder("  -> State: 1.1 <-\n");
+            config.getFixedConditionLambdas().forEach((key, value) -> witness.append("    ")
+                    .append(config.getConditionLambdas().get(key)).append(" = ")
+                    .append(value ? "TRUE" : "FALSE").append('\n'));
+            config.getCandidateConditionValues().values().forEach(info -> witness.append("    ")
+                    .append(info.getFrozenVarName()).append(" = 1\n"));
+            return NusmvResult.success(witness.toString(), List.of(new SpecCheckResult("AG safe", false, null)));
+        });
+
+        FixStrategy.StrategyOutcome outcome = strategy.tryFix(context);
+
+        assertEquals(1, outcome.suggestions().size(), "The primary/backup guards must be tested before the full group");
+        assertEquals(List.of(targetRule, targetRule + 1), outcome.suggestions().get(0).getConditionAdjustments().stream()
+                .map(adjustment -> adjustment.getRuleIndex()).toList());
+        assertTrue(outcome.alternativesComplete(), "The unrestricted UNSAT must remain the final proof");
+    }
+
+    @Test
+    void tryFix_aNewlyBrokenPropertyGuidesACombinedProbeBeforeJointSearch() throws Exception {
+        List<RuleDto> rules = IntStream.range(0, 6).mapToObj(index -> RuleDto.builder()
+                .conditions(List.of(RuleDto.Condition.builder()
+                        .deviceName("sensor_1").attribute("temperature").targetType("variable")
+                        .relation(">=").value(List.of("30", "31", "40").get(index % 3)).build()))
+                .command(RuleDto.Command.builder().deviceName("ac_" + (index / 3 + 1)).action("turnOn").build())
+                .build()).toList();
+        Map<String, DeviceSmvData> deviceMap = new LinkedHashMap<>();
+        for (String name : List.of("sensor_1", "occupancy_1", "ac_1", "ac_2")) {
+            DeviceSmvData device = new DeviceSmvData();
+            device.setVarName(name);
+            String variable = name.equals("sensor_1") ? "temperature"
+                    : name.equals("occupancy_1") ? "occupied" : "requested";
+            device.setVariables(List.of(DeviceManifest.InternalVariable.builder()
+                    .name(variable).lowerBound(0).upperBound(name.equals("sensor_1") ? 50 : 1).build()));
+            deviceMap.put(name, device);
+        }
+        SpecConditionDto occupied = new SpecConditionDto();
+        occupied.setDeviceId("occupancy_1");
+        occupied.setTargetType("variable");
+        occupied.setKey("occupied");
+        occupied.setRelation("=");
+        occupied.setValue("0");
+        List<SpecificationDto> specs = new ArrayList<>();
+        for (int index = 0; index < 2; index++) {
+            SpecConditionDto actuator = new SpecConditionDto();
+            actuator.setDeviceId(index == 0 ? "ac_2" : "ac_1");
+            actuator.setTargetType("variable");
+            actuator.setKey("requested");
+            actuator.setRelation("=");
+            actuator.setValue("1");
+            SpecificationDto spec = new SpecificationDto();
+            spec.setId(index == 0 ? "s1" : "protected");
+            spec.setTemplateId("3");
+            spec.setAConditions(List.of(occupied, actuator));
+            specs.add(spec);
+        }
+        FixContext context = FixContext.builder()
+                .faultRules(List.of(FaultRuleDto.builder().ruleIndex(3).build()))
+                .repairRuleIndices(List.of(3, 0, 4, 5, 1, 2)).allRules(rules).devices(List.of()).specs(specs)
+                .deviceSmvMap(deviceMap).violatedSpecIndex(0).userId(1L)
+                .attackScenario(AttackScenarioDto.none()).maxAttempts(20).build();
+        context.recordBaselineVerdict(new FixContext.BaselineVerdict(Set.of("s1")));
+        Set<String> targetPair = Set.of("r3_c1", "r4_c1");
+        Set<String> combined = Set.of("r0_c1", "r1_c1", "r3_c1", "r4_c1");
+        AtomicReference<ParameterizationConfig> active = new AtomicReference<>();
+        AtomicReference<Set<String>> selected = new AtomicReference<>();
+        List<Set<String>> searched = new ArrayList<>();
+        Set<Set<String>> witnessed = new java.util.HashSet<>();
+        when(smvGenerator.generateParameterizedWithResolvedDeviceModel(
+                anyLong(), anyList(), anyList(), anyList(), anyList(), any(), anyBoolean(),
+                any(ParameterizationConfig.class), any(SmvGenerator.TempModelContext.class), anyMap()))
+                .thenAnswer(invocation -> {
+                    ParameterizationConfig config = invocation.getArgument(7);
+                    active.set(config);
+                    Set<String> changes = config.getFixedConditionLambdas().entrySet().stream()
+                            .filter(entry -> !entry.getKey().endsWith("_c0") && entry.getValue())
+                            .map(Map.Entry::getKey).collect(Collectors.toSet());
+                    selected.set(changes);
+                    searched.add(changes);
+                    return createGenResult();
+                });
+        when(smvGenerator.generateWithResolvedDeviceModel(
+                anyLong(), anyList(), anyList(), anyList(), anyList(), any(), anyBoolean(),
+                any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class), anyMap(), anyList()))
+                .thenAnswer(invocation -> {
+                    active.set(null);
+                    return new SmvGenerator.GenerateResult(createGenResult().smvFile(), Map.of(), List.of(), 0, 0,
+                            List.of(new EmittedSpec(null, "s1", "CTLSPEC AG(safe_b)"),
+                                    new EmittedSpec(null, "protected", "CTLSPEC AG(safe_a)")));
+                });
+        when(nusmvExecutor.executeRepairSearch(any(File.class), anyLong())).thenAnswer(invocation -> {
+            ParameterizationConfig config = active.get();
+            if (config == null) {
+                boolean protectsBoth = combined.equals(selected.get());
+                return NusmvResult.success("", List.of(new SpecCheckResult("AG(safe_b)", true, null),
+                        new SpecCheckResult("AG(safe_a)", protectsBoth,
+                                protectsBoth ? null : "  -> State: 1.1 <-\n    sensor_1.temperature = 34\n")));
+            }
+            if ((!targetPair.equals(selected.get()) && !combined.equals(selected.get()))
+                    || !witnessed.add(selected.get())) {
+                return NusmvResult.success("", List.of(new SpecCheckResult("AG safe", true, null)));
+            }
+            StringBuilder witness = new StringBuilder("  -> State: 1.1 <-\n");
+            config.getFixedConditionLambdas().forEach((key, value) -> witness.append("    ")
+                    .append(config.getConditionLambdas().get(key)).append(" = ")
+                    .append(value ? "TRUE" : "FALSE").append('\n'));
+            config.getCandidateConditionValues().values().forEach(info -> witness.append("    ")
+                    .append(info.getFrozenVarName()).append(" = 1\n"));
+            return NusmvResult.success(witness.toString(), List.of(new SpecCheckResult("AG safe", false, null)));
+        });
+
+        FixStrategy.StrategyOutcome outcome = strategy.tryFix(context);
+
+        assertEquals(1, outcome.suggestions().size(),
+                "A rejected target-only repair must guide a joint edit that preserves the earlier property");
+        assertEquals(searched.indexOf(targetPair) + 1, searched.indexOf(combined),
+                "The protected-property pair must be combined before unrelated probes consume the budget");
+        assertTrue(searched.indexOf(combined) < 10);
+        assertEquals(List.of(0, 1, 3, 4), outcome.suggestions().get(0).getConditionAdjustments().stream()
+                .map(adjustment -> adjustment.getRuleIndex()).sorted().toList());
+        assertTrue(outcome.suggestions().get(0).getPreexistingViolations().isEmpty());
+        assertTrue(searched.size() <= 20);
+        assertTrue(outcome.alternativesComplete(), "The final unrestricted proof must remain available");
+    }
+
     @Test
     void tryFix_nullFaultRules_findsNothing() {
         assertTrue(strategy.tryFix(ctx(null, List.of(), List.of())).suggestions().isEmpty());
@@ -91,7 +302,7 @@ class ConditionAdjustStrategyTest {
                         .frozenVarName("condition_value_r0_c1")
                         .values(List.of("off", "on"))
                         .build();
-        Map<String, String> lambdas = new java.util.LinkedHashMap<>();
+        Map<String, String> lambdas = new LinkedHashMap<>();
         lambdas.put("r0_c0", "lambda_r0_c0");
         lambdas.put("r0_c1", "lambda_r0_c1");
         Map<String, ParameterizationConfig.ConditionValueInfo> values =
@@ -147,6 +358,14 @@ class ConditionAdjustStrategyTest {
         assertTrue(outcome.suggestions().isEmpty());
         assertTrue(outcome.alternativesComplete(), "¬ρ holding under every assignment proves no repair exists");
         assertEquals("NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE", context.strategyNoResult("condition").status());
+        ArgumentCaptor<ParameterizationConfig> configs = ArgumentCaptor.forClass(ParameterizationConfig.class);
+        verify(smvGenerator, atLeast(2)).generateParameterizedWithResolvedDeviceModel(
+                anyLong(), anyList(), anyList(), anyList(), anyList(), any(), anyBoolean(),
+                configs.capture(), any(SmvGenerator.TempModelContext.class), anyMap());
+        assertEquals(Map.of("r0_c0", false, "r0_c1", true),
+                configs.getAllValues().get(0).getFixedConditionLambdas());
+        assertTrue(configs.getAllValues().get(configs.getAllValues().size() - 1)
+                .getFixedConditionLambdas().isEmpty(), "Joint search must retain all lambda assignments");
     }
 
     @Test
@@ -435,7 +654,7 @@ class ConditionAdjustStrategyTest {
         assertTrue(outcome.alternativesComplete(), "the joint search covers the configuration that failed");
         List<ParameterizationConfig> configs = configCaptor.getAllValues();
         assertEquals(3, configs.size());
-        assertEquals(List.of("(lambda_r0_c0=TRUE & lambda_r0_c1=FALSE)"), configs.get(1).getExclusionInvars(),
+        assertEquals(Map.of("r0_c0", true, "r0_c1", false), configs.get(1).getFixedConditionLambdas(),
                 "the failed configuration must not be pinned again");
     }
 
@@ -532,12 +751,10 @@ class ConditionAdjustStrategyTest {
 
         assertTrue(strategy.tryFix(context).suggestions().isEmpty());
         assertNotNull(context.strategySolverFailure("condition"));
-        List<List<String>> runs = configCaptor.getAllValues().stream()
-                .map(captured -> captured.getExclusionInvars() == null ? List.<String>of() : captured.getExclusionInvars())
-                .toList();
+        List<ParameterizationConfig> runs = configCaptor.getAllValues();
         assertEquals(new java.util.HashSet<>(runs).size(), runs.size(), "an identical model was rerun: " + runs);
 
-        // The prioritized single-change invariant may be present, but a partial witness must
+        // A prioritized fixed configuration may be present, but a partial witness must
         // never add a semantic assignment exclusion beginning with "!(".
         for (ParameterizationConfig captured : configCaptor.getAllValues()) {
             assertTrue(captured.getExclusionInvars() == null
@@ -676,7 +893,8 @@ class ConditionAdjustStrategyTest {
         assertEquals(3, configs.size());
         // A listed repair excludes every assignment that removes at least its condition, not only
         // the assignment that produced it.
-        assertEquals(List.of("!(lambda_r0_c0=FALSE)", "(lambda_r0_c0=TRUE & lambda_r0_c1=FALSE)"),
+        assertEquals(Map.of("r0_c0", true, "r0_c1", false), configs.get(1).getFixedConditionLambdas());
+        assertEquals(List.of("!(lambda_r0_c0=FALSE)"),
                 configs.get(1).getExclusionInvars());
         assertEquals(List.of("!(lambda_r0_c0=FALSE)", "!(lambda_r0_c1=FALSE)"),
                 configs.get(2).getExclusionInvars());
@@ -738,8 +956,8 @@ class ConditionAdjustStrategyTest {
                 probesCaptor.getAllValues().get(0).stream().map(GuardProbe::kind).toList());
         List<ParameterizationConfig> configs = configCaptor.getAllValues();
         assertEquals(4, configs.size());
-        assertEquals(List.of("!(lambda_r0_c0=FALSE & lambda_r0_c1=TRUE)", "((!lambda_r0_c1))",
-                        "(lambda_r0_c0=FALSE & lambda_r0_c1=TRUE)"),
+        assertEquals(Map.of("r0_c0", false, "r0_c1", true), configs.get(1).getFixedConditionLambdas());
+        assertEquals(List.of("!(lambda_r0_c0=FALSE & lambda_r0_c1=TRUE)", "((!lambda_r0_c1))"),
                 configs.get(1).getExclusionInvars());
         assertTrue(configs.get(3).getExclusionInvars().contains("((!lambda_r0_c1))"),
                 "the joint search keeps what the rejection taught");

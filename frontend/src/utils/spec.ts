@@ -204,6 +204,13 @@ export const specFormulaKindFromTemplate = (templateId?: string | null): 'CTL' |
     return template.type === 'persistence' ? 'LTL' : 'CTL'
 }
 
+/** Keep the language badge separate from the expression without changing saved formula previews. */
+export const buildSpecFormulaPreview = (spec: Parameters<typeof buildSpecFormula>[0], context?: SpecFormulaContext) => {
+    const kind = specFormulaKindFromTemplate(spec.templateId)
+    const formula = buildSpecFormula(spec, context)
+    return { kind, expression: kind && formula.startsWith(`${kind} `) ? formula.slice(kind.length + 1) : formula }
+}
+
 const normalizeSpecificationSetValue = (
     value: unknown,
     relation: string,

@@ -1,5 +1,6 @@
 package cn.edu.nju.Iot_Verify.component.ai.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import java.util.List;
 
 /**
@@ -22,31 +23,44 @@ import java.util.List;
 public record LlmMessage(LlmRole role,
                          String content,
                          String toolCallId,
-                         List<LlmToolCall> toolCalls) {
+                         List<LlmToolCall> toolCalls,
+                         @JsonIgnore List<?> continuationItems) {
 
     public LlmMessage {
         content = content == null ? "" : content;
         toolCalls = toolCalls == null ? List.of() : List.copyOf(toolCalls);
+        continuationItems = continuationItems == null ? List.of() : List.copyOf(continuationItems);
     }
 
     public static LlmMessage system(String content) {
-        return new LlmMessage(LlmRole.SYSTEM, content, null, List.of());
+        return new LlmMessage(LlmRole.SYSTEM, content, null, List.of(), List.of());
     }
 
     public static LlmMessage user(String content) {
-        return new LlmMessage(LlmRole.USER, content, null, List.of());
+        return new LlmMessage(LlmRole.USER, content, null, List.of(), List.of());
     }
 
     public static LlmMessage assistant(String content) {
-        return new LlmMessage(LlmRole.ASSISTANT, content, null, List.of());
+        return new LlmMessage(LlmRole.ASSISTANT, content, null, List.of(), List.of());
     }
 
     public static LlmMessage assistantToolCalls(List<LlmToolCall> toolCalls) {
-        return new LlmMessage(LlmRole.ASSISTANT, "", null, toolCalls);
+        return assistantToolCalls(toolCalls, List.of());
+    }
+
+    /** Completed provider items stay together for in-turn reasoning; they are not chat history. */
+    public static LlmMessage assistantToolCalls(List<LlmToolCall> toolCalls, List<?> continuationItems) {
+        return new LlmMessage(LlmRole.ASSISTANT, "", null, toolCalls, continuationItems);
     }
 
     public static LlmMessage tool(String toolCallId, String content) {
-        return new LlmMessage(LlmRole.TOOL, content, toolCallId, List.of());
+        return new LlmMessage(LlmRole.TOOL, content, toolCallId, List.of(), List.of());
+    }
+
+    @Override
+    public String toString() {
+        return "LlmMessage[role=" + role + ", content=" + content + ", toolCallId=" + toolCallId
+                + ", toolCalls=" + toolCalls + "]";
     }
 
     /** True when this is an assistant message carrying one or more tool-call requests. */

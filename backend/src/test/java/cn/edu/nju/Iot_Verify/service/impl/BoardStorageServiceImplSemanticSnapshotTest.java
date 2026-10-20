@@ -11,6 +11,8 @@ import cn.edu.nju.Iot_Verify.po.DeviceTemplatePo;
 import cn.edu.nju.Iot_Verify.po.RulePo;
 import cn.edu.nju.Iot_Verify.po.SpecificationPo;
 import cn.edu.nju.Iot_Verify.po.UserPo;
+import cn.edu.nju.Iot_Verify.exception.UnauthorizedException;
+import cn.edu.nju.Iot_Verify.service.ChatExecutionLeaseGuard;
 import cn.edu.nju.Iot_Verify.repository.BoardEnvironmentVariableRepository;
 import cn.edu.nju.Iot_Verify.repository.BoardLayoutRepository;
 import cn.edu.nju.Iot_Verify.repository.DeviceNodeRepository;
@@ -33,12 +35,22 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 @ExtendWith(MockitoExtension.class)
 class BoardStorageServiceImplSemanticSnapshotTest {
@@ -58,6 +70,7 @@ class BoardStorageServiceImplSemanticSnapshotTest {
     @Mock private UserRepository userRepository;
 
     private BoardStorageServiceImpl service;
+    private final ThreadLocal<Boolean> transactionActive = ThreadLocal.withInitial(() -> false);
 
     @BeforeEach
     void setUp() {
@@ -65,9 +78,15 @@ class BoardStorageServiceImplSemanticSnapshotTest {
                 nodeRepo, environmentRepo, specRepo, ruleRepo, layoutRepo, templateRepo, null,
                 transactionTemplate, null, specificationMapper, ruleMapper, deviceNodeMapper,
                 boardLayoutMapper, deviceTemplateMapper, null, userRepository, null);
-        when(transactionTemplate.execute(any())).thenAnswer(invocation ->
-                ((TransactionCallback<?>) invocation.getArgument(0)).doInTransaction(null));
-        when(userRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(new UserPo()));
+        when(transactionTemplate.execute(any())).thenAnswer(invocation -> {
+            transactionActive.set(true);
+            try {
+                return ((TransactionCallback<?>) invocation.getArgument(0)).doInTransaction(null);
+            } finally {
+                transactionActive.remove();
+            }
+        });
+        when(userRepository.findByIdForShare(1L)).thenReturn(Optional.of(new UserPo()));
     }
 
     @Test
@@ -101,11 +120,63 @@ class BoardStorageServiceImplSemanticSnapshotTest {
         assertSame(spec, snapshot.specifications().get(0));
         assertSame(template, snapshot.deviceTemplates().get(0));
         verify(transactionTemplate).execute(any());
-        verify(userRepository).findByIdForUpdate(1L);
+        verify(userRepository).findByIdForShare(1L);
+        verify(userRepository, never()).findByIdForUpdate(1L);
         verify(nodeRepo).findByUserId(1L);
         verify(environmentRepo).findByUserIdOrderByNameAsc(1L);
         verify(ruleRepo).findByUserIdOrderByExecutionOrderAscIdAsc(1L);
         verify(specRepo).findByUserId(1L);
         verify(templateRepo).findByUserId(1L);
+    }
+
+    @Test
+    void missingAccountCannotBecomeAnEmptySuccessfulSnapshot() {
+        when(userRepository.findByIdForShare(1L)).thenReturn(Optional.empty());
+
+        assertThrows(UnauthorizedException.class, () -> service.getSemanticSnapshot(1L));
+
+        verifyNoInteractions(nodeRepo, environmentRepo, ruleRepo, specRepo, templateRepo);
+    }
+
+    @Test
+    void sharedCaptureStillRejectsALostChatExecutionLeaseBeforeReadingModelRows() {
+        var guard = mock(ChatExecutionLeaseGuard.class);
+        service.setChatExecutionLeaseGuard(guard);
+        var lostLease = new IllegalStateException("execution ownership lost");
+        doThrow(lostLease).when(guard).requireCurrentExecutionLease();
+
+        assertSame(lostLease, assertThrows(IllegalStateException.class, () -> service.getSemanticSnapshot(1L)));
+
+        verifyNoInteractions(nodeRepo, environmentRepo, ruleRepo, specRepo, templateRepo);
+    }
+
+    @Test
+    void snapshotDecodingReleasesTheTransactionAndAllowsTheNextCapture() throws Exception {
+        DeviceNodePo firstRow = DeviceNodePo.builder().id("first").userId(1L).build();
+        DeviceNodePo nextRow = DeviceNodePo.builder().id("next").userId(1L).build();
+        DeviceNodeDto firstNode = new DeviceNodeDto();
+        DeviceNodeDto nextNode = new DeviceNodeDto();
+        when(nodeRepo.findByUserId(1L)).thenReturn(List.of(firstRow), List.of(nextRow));
+        CountDownLatch decoding = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(deviceNodeMapper.toDto(firstRow)).thenAnswer(invocation -> {
+            assertFalse(transactionActive.get(), "pure decoding must not retain a database transaction");
+            decoding.countDown();
+            assertTrue(release.await(10, TimeUnit.SECONDS));
+            return firstNode;
+        });
+        when(deviceNodeMapper.toDto(nextRow)).thenReturn(nextNode);
+        var threads = Executors.newFixedThreadPool(2);
+        try {
+            var first = threads.submit(() -> service.getSemanticSnapshot(1L));
+            assertTrue(decoding.await(5, TimeUnit.SECONDS));
+            var next = threads.submit(() -> service.getSemanticSnapshot(1L));
+            assertSame(nextNode, next.get(5, TimeUnit.SECONDS).nodes().get(0));
+            release.countDown();
+            assertSame(firstNode, first.get(5, TimeUnit.SECONDS).nodes().get(0));
+        } finally {
+            release.countDown();
+            threads.shutdownNow();
+        }
     }
 }

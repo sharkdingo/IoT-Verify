@@ -1,3 +1,12 @@
+export const formatFuzzingElapsed = (
+  elapsedMs: number,
+  t: (key: string, values?: Record<string, number>) => string
+): string => {
+  if (elapsedMs < 1000) return t('app.fuzzElapsedUnderSecond')
+  const seconds = Math.round(elapsedMs / 1000)
+  return t(seconds === 1 ? 'app.fuzzElapsedSecond' : 'app.fuzzElapsedSeconds', { count: seconds })
+}
+
 export const fuzzingLimitationKey = (code: string): string => {
   const keys: Record<string, string> = {
     FINITE_TRACE_TEMPLATES_1_3_4_ONLY: 'app.fuzzLimitationFiniteTraceTemplates',

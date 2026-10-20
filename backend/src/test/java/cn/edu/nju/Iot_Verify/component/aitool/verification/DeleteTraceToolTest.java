@@ -96,7 +96,7 @@ class DeleteTraceToolTest {
         assertTrue(previewJson.path("requiresUserConfirmation").asBoolean());
         verify(verificationService, never()).deleteTrace(1L, 8L);
 
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", previewJson.path("impactToken").asText());
         String result = tool.execute("{\"traceId\":8,\"confirmed\":true,\"impactToken\":\""
                 + previewJson.path("impactToken").asText() + "\"}");
         JsonNode json = objectMapper.readTree(result);

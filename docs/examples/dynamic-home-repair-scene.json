@@ -1,0 +1,1986 @@
+{
+  "schema": "iot-verify.board-scene",
+  "version": 5,
+  "templates": [
+    {
+      "name": "Dynamic Home Sensor",
+      "manifest": {
+        "Name": "Dynamic Home Sensor",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "home",
+            "IsInside": false,
+            "Reads": true,
+            "FalsifiableWhenCompromised": false,
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Values": [
+              "present",
+              "absent"
+            ]
+          }
+        ],
+        "Modes": [],
+        "InitState": "",
+        "WorkingStates": [],
+        "Transitions": [],
+        "APIs": []
+      }
+    },
+    {
+      "name": "Dynamic Motion Sensor",
+      "manifest": {
+        "Name": "Dynamic Motion Sensor",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "motion",
+            "IsInside": false,
+            "Reads": true,
+            "FalsifiableWhenCompromised": false,
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Values": [
+              "detected",
+              "clear"
+            ]
+          }
+        ],
+        "Modes": [],
+        "InitState": "",
+        "WorkingStates": [],
+        "Transitions": [],
+        "APIs": []
+      }
+    },
+    {
+      "name": "Dynamic Smoke Sensor",
+      "manifest": {
+        "Name": "Dynamic Smoke Sensor",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "smoke",
+            "IsInside": false,
+            "Reads": true,
+            "FalsifiableWhenCompromised": false,
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Values": [
+              "detected",
+              "clear"
+            ]
+          }
+        ],
+        "Modes": [],
+        "InitState": "",
+        "WorkingStates": [],
+        "Transitions": [],
+        "APIs": []
+      }
+    },
+    {
+      "name": "Dynamic Weather Sensor",
+      "manifest": {
+        "Name": "Dynamic Weather Sensor",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "weather",
+            "IsInside": false,
+            "Reads": true,
+            "FalsifiableWhenCompromised": false,
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Values": [
+              "wet",
+              "dry"
+            ]
+          }
+        ],
+        "Modes": [],
+        "InitState": "",
+        "WorkingStates": [],
+        "Transitions": [],
+        "APIs": []
+      }
+    },
+    {
+      "name": "Dynamic Temperature Sensor",
+      "manifest": {
+        "Name": "Dynamic Temperature Sensor",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "temperature",
+            "IsInside": false,
+            "Reads": true,
+            "FalsifiableWhenCompromised": false,
+            "Trust": "trusted",
+            "Privacy": "public",
+            "LowerBound": 0,
+            "UpperBound": 50,
+            "NaturalChangeRate": "[-1,1]"
+          }
+        ],
+        "Modes": [],
+        "InitState": "",
+        "WorkingStates": [],
+        "Transitions": [],
+        "APIs": []
+      }
+    },
+    {
+      "name": "Dynamic Gas Sensor",
+      "manifest": {
+        "Name": "Dynamic Gas Sensor",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "gas",
+            "IsInside": false,
+            "Reads": true,
+            "FalsifiableWhenCompromised": false,
+            "Trust": "trusted",
+            "Privacy": "public",
+            "LowerBound": 0,
+            "UpperBound": 6,
+            "NaturalChangeRate": "0"
+          }
+        ],
+        "Modes": [],
+        "InitState": "",
+        "WorkingStates": [],
+        "Transitions": [],
+        "APIs": []
+      }
+    },
+    {
+      "name": "Dynamic Heater",
+      "manifest": {
+        "Name": "Dynamic Heater",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "temperature",
+            "IsInside": false,
+            "Reads": false,
+            "FalsifiableWhenCompromised": false,
+            "Trust": "trusted",
+            "Privacy": "public",
+            "LowerBound": 0,
+            "UpperBound": 50,
+            "NaturalChangeRate": "[-1,1]"
+          }
+        ],
+        "Modes": [
+          "SwitchState"
+        ],
+        "InitState": "off",
+        "Transitions": [],
+        "WorkingStates": [
+          {
+            "Name": "on",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": [
+              {
+                "VariableName": "temperature",
+                "ChangeRate": "1"
+              }
+            ]
+          },
+          {
+            "Name": "off",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          }
+        ],
+        "APIs": [
+          {
+            "Name": "on",
+            "StartState": "",
+            "EndState": "on",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "off",
+            "StartState": "",
+            "EndState": "off",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ],
+        "ImpactedVariables": [
+          "temperature"
+        ]
+      }
+    },
+    {
+      "name": "Dynamic Cooler",
+      "manifest": {
+        "Name": "Dynamic Cooler",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "temperature",
+            "IsInside": false,
+            "Reads": false,
+            "FalsifiableWhenCompromised": false,
+            "Trust": "trusted",
+            "Privacy": "public",
+            "LowerBound": 0,
+            "UpperBound": 50,
+            "NaturalChangeRate": "[-1,1]"
+          }
+        ],
+        "Modes": [
+          "SwitchState"
+        ],
+        "InitState": "off",
+        "Transitions": [],
+        "WorkingStates": [
+          {
+            "Name": "on",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": [
+              {
+                "VariableName": "temperature",
+                "ChangeRate": "-1"
+              }
+            ]
+          },
+          {
+            "Name": "off",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          }
+        ],
+        "APIs": [
+          {
+            "Name": "on",
+            "StartState": "",
+            "EndState": "on",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "off",
+            "StartState": "",
+            "EndState": "off",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ],
+        "ImpactedVariables": [
+          "temperature"
+        ]
+      }
+    },
+    {
+      "name": "Dynamic Light",
+      "manifest": {
+        "Name": "Dynamic Light",
+        "Description": "",
+        "InternalVariables": [],
+        "Modes": [
+          "SwitchState"
+        ],
+        "InitState": "off",
+        "Transitions": [],
+        "WorkingStates": [
+          {
+            "Name": "on",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          },
+          {
+            "Name": "off",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          }
+        ],
+        "APIs": [
+          {
+            "Name": "on",
+            "StartState": "",
+            "EndState": "on",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "off",
+            "StartState": "",
+            "EndState": "off",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ]
+      }
+    },
+    {
+      "name": "Dynamic Extractor",
+      "manifest": {
+        "Name": "Dynamic Extractor",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "gas",
+            "IsInside": false,
+            "Reads": false,
+            "FalsifiableWhenCompromised": false,
+            "Trust": "trusted",
+            "Privacy": "public",
+            "LowerBound": 0,
+            "UpperBound": 6,
+            "NaturalChangeRate": "0"
+          }
+        ],
+        "Modes": [
+          "SwitchState"
+        ],
+        "InitState": "off",
+        "Transitions": [],
+        "WorkingStates": [
+          {
+            "Name": "on",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": [
+              {
+                "VariableName": "gas",
+                "ChangeRate": "-1"
+              }
+            ]
+          },
+          {
+            "Name": "off",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          }
+        ],
+        "APIs": [
+          {
+            "Name": "on",
+            "StartState": "",
+            "EndState": "on",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "off",
+            "StartState": "",
+            "EndState": "off",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ],
+        "ImpactedVariables": [
+          "gas"
+        ]
+      }
+    },
+    {
+      "name": "Dynamic Gas Valve",
+      "manifest": {
+        "Name": "Dynamic Gas Valve",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "gas",
+            "IsInside": false,
+            "Reads": false,
+            "FalsifiableWhenCompromised": false,
+            "Trust": "trusted",
+            "Privacy": "public",
+            "LowerBound": 0,
+            "UpperBound": 6,
+            "NaturalChangeRate": "0"
+          }
+        ],
+        "Modes": [
+          "ValveState"
+        ],
+        "InitState": "open",
+        "Transitions": [],
+        "WorkingStates": [
+          {
+            "Name": "open",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": [
+              {
+                "VariableName": "gas",
+                "ChangeRate": "1"
+              }
+            ]
+          },
+          {
+            "Name": "closed",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          }
+        ],
+        "APIs": [
+          {
+            "Name": "open",
+            "StartState": "",
+            "EndState": "open",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "closed",
+            "StartState": "",
+            "EndState": "closed",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ],
+        "ImpactedVariables": [
+          "gas"
+        ]
+      }
+    },
+    {
+      "name": "Dynamic Alarm",
+      "manifest": {
+        "Name": "Dynamic Alarm",
+        "Description": "",
+        "InternalVariables": [],
+        "Modes": [
+          "SwitchState"
+        ],
+        "InitState": "off",
+        "Transitions": [],
+        "WorkingStates": [
+          {
+            "Name": "on",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          },
+          {
+            "Name": "off",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          }
+        ],
+        "APIs": [
+          {
+            "Name": "on",
+            "StartState": "",
+            "EndState": "on",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "off",
+            "StartState": "",
+            "EndState": "off",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ]
+      }
+    },
+    {
+      "name": "Dynamic Door",
+      "manifest": {
+        "Name": "Dynamic Door",
+        "Description": "",
+        "InternalVariables": [],
+        "Modes": [
+          "LockState"
+        ],
+        "InitState": "locked",
+        "Transitions": [],
+        "WorkingStates": [
+          {
+            "Name": "locked",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          },
+          {
+            "Name": "unlocked",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          }
+        ],
+        "APIs": [
+          {
+            "Name": "locked",
+            "StartState": "",
+            "EndState": "locked",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "unlocked",
+            "StartState": "",
+            "EndState": "unlocked",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ]
+      }
+    },
+    {
+      "name": "Dynamic Window",
+      "manifest": {
+        "Name": "Dynamic Window",
+        "Description": "",
+        "InternalVariables": [],
+        "Modes": [
+          "WindowState"
+        ],
+        "InitState": "closed",
+        "Transitions": [],
+        "WorkingStates": [
+          {
+            "Name": "open",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          },
+          {
+            "Name": "closed",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          }
+        ],
+        "APIs": [
+          {
+            "Name": "open",
+            "StartState": "",
+            "EndState": "open",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "closed",
+            "StartState": "",
+            "EndState": "closed",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ]
+      }
+    }
+  ],
+  "environmentVariables": [
+    {
+      "name": "home",
+      "value": "absent",
+      "trust": "trusted",
+      "privacy": "public"
+    },
+    {
+      "name": "motion",
+      "value": "clear",
+      "trust": "trusted",
+      "privacy": "public"
+    },
+    {
+      "name": "smoke",
+      "value": "clear",
+      "trust": "trusted",
+      "privacy": "public"
+    },
+    {
+      "name": "weather",
+      "value": "dry",
+      "trust": "trusted",
+      "privacy": "public"
+    },
+    {
+      "name": "temperature",
+      "value": "24",
+      "trust": "trusted",
+      "privacy": "public"
+    },
+    {
+      "name": "gas",
+      "value": "0",
+      "trust": "trusted",
+      "privacy": "public"
+    }
+  ],
+  "devices": [
+    {
+      "id": "home_sensor",
+      "templateName": "Dynamic Home Sensor",
+      "label": "Home Sensor",
+      "position": {
+        "x": 70,
+        "y": 80
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "motion_sensor",
+      "templateName": "Dynamic Motion Sensor",
+      "label": "Motion Sensor",
+      "position": {
+        "x": 300,
+        "y": 80
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "smoke_sensor",
+      "templateName": "Dynamic Smoke Sensor",
+      "label": "Smoke Sensor",
+      "position": {
+        "x": 530,
+        "y": 80
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "weather_sensor",
+      "templateName": "Dynamic Weather Sensor",
+      "label": "Weather Sensor",
+      "position": {
+        "x": 760,
+        "y": 80
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "temperature_sensor",
+      "templateName": "Dynamic Temperature Sensor",
+      "label": "Temperature Sensor",
+      "position": {
+        "x": 990,
+        "y": 80
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "gas_sensor",
+      "templateName": "Dynamic Gas Sensor",
+      "label": "Gas Sensor",
+      "position": {
+        "x": 1220,
+        "y": 80
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "heater",
+      "templateName": "Dynamic Heater",
+      "label": "Heater",
+      "position": {
+        "x": 70,
+        "y": 270
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "cooler",
+      "templateName": "Dynamic Cooler",
+      "label": "Cooler",
+      "position": {
+        "x": 300,
+        "y": 270
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "room_light_1",
+      "templateName": "Dynamic Light",
+      "label": "Room Light 1",
+      "position": {
+        "x": 530,
+        "y": 270
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "room_light_2",
+      "templateName": "Dynamic Light",
+      "label": "Room Light 2",
+      "position": {
+        "x": 760,
+        "y": 270
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "room_light_3",
+      "templateName": "Dynamic Light",
+      "label": "Room Light 3",
+      "position": {
+        "x": 990,
+        "y": 270
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "room_light_4",
+      "templateName": "Dynamic Light",
+      "label": "Room Light 4",
+      "position": {
+        "x": 1220,
+        "y": 270
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "room_light_5",
+      "templateName": "Dynamic Light",
+      "label": "Room Light 5",
+      "position": {
+        "x": 70,
+        "y": 460
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "room_light_6",
+      "templateName": "Dynamic Light",
+      "label": "Room Light 6",
+      "position": {
+        "x": 300,
+        "y": 460
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "room_light_7",
+      "templateName": "Dynamic Light",
+      "label": "Room Light 7",
+      "position": {
+        "x": 530,
+        "y": 460
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "room_light_8",
+      "templateName": "Dynamic Light",
+      "label": "Room Light 8",
+      "position": {
+        "x": 760,
+        "y": 460
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "extractor",
+      "templateName": "Dynamic Extractor",
+      "label": "Extractor",
+      "position": {
+        "x": 990,
+        "y": 460
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "gas_valve",
+      "templateName": "Dynamic Gas Valve",
+      "label": "Gas Valve",
+      "position": {
+        "x": 1220,
+        "y": 460
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "open",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "kitchen_alarm",
+      "templateName": "Dynamic Alarm",
+      "label": "Kitchen Alarm",
+      "position": {
+        "x": 70,
+        "y": 650
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "hall_alarm",
+      "templateName": "Dynamic Alarm",
+      "label": "Hall Alarm",
+      "position": {
+        "x": 300,
+        "y": 650
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "exit_alarm",
+      "templateName": "Dynamic Alarm",
+      "label": "Exit Alarm",
+      "position": {
+        "x": 530,
+        "y": 650
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "front_door",
+      "templateName": "Dynamic Door",
+      "label": "Front Door",
+      "position": {
+        "x": 760,
+        "y": 650
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "locked",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    },
+    {
+      "id": "window",
+      "templateName": "Dynamic Window",
+      "label": "Window",
+      "position": {
+        "x": 990,
+        "y": 650
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": [],
+      "state": "closed",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public"
+    }
+  ],
+  "rules": [
+    {
+      "name": "Heating starts too late",
+      "sources": [
+        {
+          "fromId": "temperature_sensor",
+          "fromApi": "temperature",
+          "itemType": "variable",
+          "relation": "<=",
+          "value": "20"
+        }
+      ],
+      "toId": "heater",
+      "toApi": "on"
+    },
+    {
+      "name": "Stop heating at comfort level",
+      "sources": [
+        {
+          "fromId": "temperature_sensor",
+          "fromApi": "temperature",
+          "itemType": "variable",
+          "relation": ">=",
+          "value": "24"
+        }
+      ],
+      "toId": "heater",
+      "toApi": "off"
+    },
+    {
+      "name": "Cooling starts too late",
+      "sources": [
+        {
+          "fromId": "temperature_sensor",
+          "fromApi": "temperature",
+          "itemType": "variable",
+          "relation": ">=",
+          "value": "28"
+        }
+      ],
+      "toId": "cooler",
+      "toApi": "on"
+    },
+    {
+      "name": "Stop cooling at comfort level",
+      "sources": [
+        {
+          "fromId": "temperature_sensor",
+          "fromApi": "temperature",
+          "itemType": "variable",
+          "relation": "<=",
+          "value": "24"
+        }
+      ],
+      "toId": "cooler",
+      "toApi": "off"
+    },
+    {
+      "name": "Motion lights room_light_1",
+      "sources": [
+        {
+          "fromId": "motion_sensor",
+          "fromApi": "motion",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "detected"
+        }
+      ],
+      "toId": "room_light_1",
+      "toApi": "on"
+    },
+    {
+      "name": "Away lights room_light_1",
+      "sources": [
+        {
+          "fromId": "home_sensor",
+          "fromApi": "home",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "absent"
+        }
+      ],
+      "toId": "room_light_1",
+      "toApi": "off"
+    },
+    {
+      "name": "Motion lights room_light_2",
+      "sources": [
+        {
+          "fromId": "motion_sensor",
+          "fromApi": "motion",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "detected"
+        }
+      ],
+      "toId": "room_light_2",
+      "toApi": "on"
+    },
+    {
+      "name": "Away lights room_light_2",
+      "sources": [
+        {
+          "fromId": "home_sensor",
+          "fromApi": "home",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "absent"
+        }
+      ],
+      "toId": "room_light_2",
+      "toApi": "off"
+    },
+    {
+      "name": "Motion lights room_light_3",
+      "sources": [
+        {
+          "fromId": "motion_sensor",
+          "fromApi": "motion",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "detected"
+        }
+      ],
+      "toId": "room_light_3",
+      "toApi": "on"
+    },
+    {
+      "name": "Away lights room_light_3",
+      "sources": [
+        {
+          "fromId": "home_sensor",
+          "fromApi": "home",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "absent"
+        }
+      ],
+      "toId": "room_light_3",
+      "toApi": "off"
+    },
+    {
+      "name": "Motion lights room_light_4",
+      "sources": [
+        {
+          "fromId": "motion_sensor",
+          "fromApi": "motion",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "detected"
+        }
+      ],
+      "toId": "room_light_4",
+      "toApi": "on"
+    },
+    {
+      "name": "Away lights room_light_4",
+      "sources": [
+        {
+          "fromId": "home_sensor",
+          "fromApi": "home",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "absent"
+        }
+      ],
+      "toId": "room_light_4",
+      "toApi": "off"
+    },
+    {
+      "name": "Motion lights room_light_5",
+      "sources": [
+        {
+          "fromId": "motion_sensor",
+          "fromApi": "motion",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "detected"
+        }
+      ],
+      "toId": "room_light_5",
+      "toApi": "on"
+    },
+    {
+      "name": "Away lights room_light_5",
+      "sources": [
+        {
+          "fromId": "home_sensor",
+          "fromApi": "home",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "absent"
+        }
+      ],
+      "toId": "room_light_5",
+      "toApi": "off"
+    },
+    {
+      "name": "Motion lights room_light_6",
+      "sources": [
+        {
+          "fromId": "motion_sensor",
+          "fromApi": "motion",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "detected"
+        }
+      ],
+      "toId": "room_light_6",
+      "toApi": "on"
+    },
+    {
+      "name": "Away lights room_light_6",
+      "sources": [
+        {
+          "fromId": "home_sensor",
+          "fromApi": "home",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "absent"
+        }
+      ],
+      "toId": "room_light_6",
+      "toApi": "off"
+    },
+    {
+      "name": "Motion lights room_light_7",
+      "sources": [
+        {
+          "fromId": "motion_sensor",
+          "fromApi": "motion",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "detected"
+        }
+      ],
+      "toId": "room_light_7",
+      "toApi": "on"
+    },
+    {
+      "name": "Away lights room_light_7",
+      "sources": [
+        {
+          "fromId": "home_sensor",
+          "fromApi": "home",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "absent"
+        }
+      ],
+      "toId": "room_light_7",
+      "toApi": "off"
+    },
+    {
+      "name": "Motion lights room_light_8",
+      "sources": [
+        {
+          "fromId": "motion_sensor",
+          "fromApi": "motion",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "detected"
+        }
+      ],
+      "toId": "room_light_8",
+      "toApi": "on"
+    },
+    {
+      "name": "Away lights room_light_8",
+      "sources": [
+        {
+          "fromId": "home_sensor",
+          "fromApi": "home",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "absent"
+        }
+      ],
+      "toId": "room_light_8",
+      "toApi": "off"
+    },
+    {
+      "name": "Extraction starts too late",
+      "sources": [
+        {
+          "fromId": "gas_sensor",
+          "fromApi": "gas",
+          "itemType": "variable",
+          "relation": ">",
+          "value": "4"
+        }
+      ],
+      "toId": "extractor",
+      "toApi": "on"
+    },
+    {
+      "name": "Gas warning sounds",
+      "sources": [
+        {
+          "fromId": "gas_sensor",
+          "fromApi": "gas",
+          "itemType": "variable",
+          "relation": ">=",
+          "value": "3"
+        }
+      ],
+      "toId": "kitchen_alarm",
+      "toApi": "on"
+    },
+    {
+      "name": "Smoke warning sounds",
+      "sources": [
+        {
+          "fromId": "smoke_sensor",
+          "fromApi": "smoke",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "detected"
+        }
+      ],
+      "toId": "kitchen_alarm",
+      "toApi": "on"
+    },
+    {
+      "name": "Clear kitchen warning",
+      "sources": [
+        {
+          "fromId": "smoke_sensor",
+          "fromApi": "smoke",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "clear"
+        },
+        {
+          "fromId": "gas_sensor",
+          "fromApi": "gas",
+          "itemType": "variable",
+          "relation": "<",
+          "value": "3"
+        }
+      ],
+      "toId": "kitchen_alarm",
+      "toApi": "off"
+    },
+    {
+      "name": "Relay kitchen_alarm on",
+      "sources": [
+        {
+          "fromId": "kitchen_alarm",
+          "fromApi": "SwitchState",
+          "itemType": "mode",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "toId": "hall_alarm",
+      "toApi": "on"
+    },
+    {
+      "name": "Relay kitchen_alarm off",
+      "sources": [
+        {
+          "fromId": "kitchen_alarm",
+          "fromApi": "SwitchState",
+          "itemType": "mode",
+          "relation": "=",
+          "value": "off"
+        }
+      ],
+      "toId": "hall_alarm",
+      "toApi": "off"
+    },
+    {
+      "name": "Relay hall_alarm on",
+      "sources": [
+        {
+          "fromId": "hall_alarm",
+          "fromApi": "SwitchState",
+          "itemType": "mode",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "toId": "exit_alarm",
+      "toApi": "on"
+    },
+    {
+      "name": "Relay hall_alarm off",
+      "sources": [
+        {
+          "fromId": "hall_alarm",
+          "fromApi": "SwitchState",
+          "itemType": "mode",
+          "relation": "=",
+          "value": "off"
+        }
+      ],
+      "toId": "exit_alarm",
+      "toApi": "off"
+    },
+    {
+      "name": "Stop gas supply during smoke",
+      "sources": [
+        {
+          "fromId": "smoke_sensor",
+          "fromApi": "smoke",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "detected"
+        }
+      ],
+      "toId": "gas_valve",
+      "toApi": "closed"
+    },
+    {
+      "name": "Away door lock",
+      "sources": [
+        {
+          "fromId": "home_sensor",
+          "fromApi": "home",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "absent"
+        }
+      ],
+      "toId": "front_door",
+      "toApi": "locked"
+    },
+    {
+      "name": "Emergency exit unlock",
+      "sources": [
+        {
+          "fromId": "exit_alarm",
+          "fromApi": "SwitchState",
+          "itemType": "mode",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "toId": "front_door",
+      "toApi": "unlocked"
+    },
+    {
+      "name": "Open hot room window",
+      "sources": [
+        {
+          "fromId": "temperature_sensor",
+          "fromApi": "temperature",
+          "itemType": "variable",
+          "relation": ">=",
+          "value": "27"
+        }
+      ],
+      "toId": "window",
+      "toApi": "open"
+    },
+    {
+      "name": "Close wet weather window",
+      "sources": [
+        {
+          "fromId": "weather_sensor",
+          "fromApi": "weather",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "wet"
+        }
+      ],
+      "toId": "window",
+      "toApi": "closed"
+    }
+  ],
+  "specs": [
+    {
+      "templateId": "1",
+      "aConditions": [
+        {
+          "deviceId": "temperature_sensor",
+          "targetType": "variable",
+          "key": "temperature",
+          "relation": ">=",
+          "value": "21",
+          "variableSource": "environment"
+        },
+        {
+          "deviceId": "temperature_sensor",
+          "targetType": "variable",
+          "key": "temperature",
+          "relation": "<=",
+          "value": "27",
+          "variableSource": "environment"
+        }
+      ],
+      "ifConditions": [],
+      "thenConditions": []
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "home_sensor",
+          "targetType": "variable",
+          "key": "home",
+          "relation": "=",
+          "value": "absent",
+          "variableSource": "environment"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "room_light_1",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "off"
+        },
+        {
+          "deviceId": "room_light_2",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "off"
+        },
+        {
+          "deviceId": "room_light_3",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "off"
+        },
+        {
+          "deviceId": "room_light_4",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "off"
+        },
+        {
+          "deviceId": "room_light_5",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "off"
+        },
+        {
+          "deviceId": "room_light_6",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "off"
+        },
+        {
+          "deviceId": "room_light_7",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "off"
+        },
+        {
+          "deviceId": "room_light_8",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "off"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "exit_alarm",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "front_door",
+          "targetType": "mode",
+          "key": "LockState",
+          "relation": "=",
+          "value": "unlocked"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "weather_sensor",
+          "targetType": "variable",
+          "key": "weather",
+          "relation": "=",
+          "value": "wet",
+          "variableSource": "environment"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "window",
+          "targetType": "mode",
+          "key": "WindowState",
+          "relation": "=",
+          "value": "closed"
+        }
+      ]
+    },
+    {
+      "templateId": "1",
+      "aConditions": [
+        {
+          "deviceId": "gas_sensor",
+          "targetType": "variable",
+          "key": "gas",
+          "relation": "<=",
+          "value": "3",
+          "variableSource": "environment"
+        }
+      ],
+      "ifConditions": [],
+      "thenConditions": []
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "home_sensor",
+          "targetType": "variable",
+          "key": "home",
+          "relation": "=",
+          "value": "present",
+          "variableSource": "environment"
+        },
+        {
+          "deviceId": "motion_sensor",
+          "targetType": "variable",
+          "key": "motion",
+          "relation": "=",
+          "value": "detected",
+          "variableSource": "environment"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "room_light_1",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        },
+        {
+          "deviceId": "room_light_2",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        },
+        {
+          "deviceId": "room_light_3",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        },
+        {
+          "deviceId": "room_light_4",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        },
+        {
+          "deviceId": "room_light_5",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        },
+        {
+          "deviceId": "room_light_6",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        },
+        {
+          "deviceId": "room_light_7",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        },
+        {
+          "deviceId": "room_light_8",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "home_sensor",
+          "targetType": "variable",
+          "key": "home",
+          "relation": "=",
+          "value": "absent",
+          "variableSource": "environment"
+        },
+        {
+          "deviceId": "exit_alarm",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "off"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "front_door",
+          "targetType": "mode",
+          "key": "LockState",
+          "relation": "=",
+          "value": "locked"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "weather_sensor",
+          "targetType": "variable",
+          "key": "weather",
+          "relation": "=",
+          "value": "dry",
+          "variableSource": "environment"
+        },
+        {
+          "deviceId": "temperature_sensor",
+          "targetType": "variable",
+          "key": "temperature",
+          "relation": ">=",
+          "value": "27",
+          "variableSource": "environment"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "window",
+          "targetType": "mode",
+          "key": "WindowState",
+          "relation": "=",
+          "value": "open"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "smoke_sensor",
+          "targetType": "variable",
+          "key": "smoke",
+          "relation": "=",
+          "value": "detected",
+          "variableSource": "environment"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "kitchen_alarm",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "kitchen_alarm",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "hall_alarm",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "hall_alarm",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "exit_alarm",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "gas_sensor",
+          "targetType": "variable",
+          "key": "gas",
+          "relation": ">=",
+          "value": "3",
+          "variableSource": "environment"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "kitchen_alarm",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "smoke_sensor",
+          "targetType": "variable",
+          "key": "smoke",
+          "relation": "=",
+          "value": "detected",
+          "variableSource": "environment"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "gas_valve",
+          "targetType": "mode",
+          "key": "ValveState",
+          "relation": "=",
+          "value": "closed"
+        }
+      ]
+    },
+    {
+      "templateId": "5",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "smoke_sensor",
+          "targetType": "variable",
+          "key": "smoke",
+          "relation": "=",
+          "value": "detected",
+          "variableSource": "environment"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "exit_alarm",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "smoke_sensor",
+          "targetType": "variable",
+          "key": "smoke",
+          "relation": "=",
+          "value": "clear",
+          "variableSource": "environment"
+        },
+        {
+          "deviceId": "gas_sensor",
+          "targetType": "variable",
+          "key": "gas",
+          "relation": "<",
+          "value": "3",
+          "variableSource": "environment"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "kitchen_alarm",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "off"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "kitchen_alarm",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "off"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "hall_alarm",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "off"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "hall_alarm",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "off"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "exit_alarm",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "off"
+        }
+      ]
+    }
+  ]
+}

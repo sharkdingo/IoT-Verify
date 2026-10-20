@@ -5,17 +5,70 @@ import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
 import cn.edu.nju.Iot_Verify.dto.model.ModelSemanticsDto;
 import cn.edu.nju.Iot_Verify.exception.PersistedDataIntegrityException;
 import cn.edu.nju.Iot_Verify.po.TracePo;
+import cn.edu.nju.Iot_Verify.po.VerificationTaskPo;
+import cn.edu.nju.Iot_Verify.repository.projection.VerificationTraceContextProjection;
+import org.springframework.data.projection.SpelAwareProxyProjectionFactory;
 import cn.edu.nju.Iot_Verify.repository.projection.TraceSummaryProjection;
+import cn.edu.nju.Iot_Verify.repository.projection.TraceTokenSourceProjection;
+import cn.edu.nju.Iot_Verify.dto.model.ModelTokenSource;
 import cn.edu.nju.Iot_Verify.util.JsonUtils;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.times;
 
 class TraceMapperTest {
 
+    private TraceTokenSourceProjection tokenSources(Long id) {
+        TraceTokenSourceProjection sources = mock(TraceTokenSourceProjection.class);
+        when(sources.getId()).thenReturn(id);
+        when(sources.getDeviceIdsJson()).thenReturn("[\"d1\"]");
+        when(sources.getTokenSourcesJson()).thenReturn("[\"BUNDLED\"]");
+        return sources;
+    }
+
     private final TraceMapper mapper = new TraceMapper();
+    private VerificationTaskPo run;
+
+    private VerificationTraceContextProjection runContext() {
+        return new SpelAwareProxyProjectionFactory().createProjection(VerificationTraceContextProjection.class, run);
+    }
+
+    @Test
+    void persistedContextRetainsTheDecodedRequestWithoutChangingMappedEvidence() {
+        TracePo po = baseTrace(VALID_REQUEST_JSON);
+
+        TraceMapper.PersistedContext context = mapper.readContext(po, runContext());
+
+        assertEquals("d1", context.request().getDevices().get(0).getVarName());
+        assertEquals(42L, context.request().getRules().get(0).getId());
+        assertEquals(VALID_REQUEST_JSON, run.getRequestJson());
+        assertEquals(1, context.trace().getStates().size());
+        assertEquals("d1", context.trace().getPlaybackScene().nodes().get(0).getId());
+        context.request().getDevices().get(0).setVarName("changed-by-fix");
+        assertEquals("d1", context.trace().getPlaybackScene().nodes().get(0).getId());
+        assertEquals(VALID_REQUEST_JSON, run.getRequestJson());
+    }
+
+    @Test
+    void summaryRejectsMissingMismatchedOrPartialFrozenTokenProvenance() {
+        TraceSummaryProjection trace = validSummaryProjection(9L);
+        assertThrows(PersistedDataIntegrityException.class, () -> mapper.toSummaryDto(trace, null));
+        assertThrows(PersistedDataIntegrityException.class, () -> mapper.toSummaryDto(trace, tokenSources(10L)));
+        TraceTokenSourceProjection sources = tokenSources(9L);
+        when(sources.getTokenSourcesJson()).thenReturn("[]");
+        assertThrows(PersistedDataIntegrityException.class, () -> mapper.toSummaryDto(trace, sources));
+        when(sources.getTokenSourcesJson()).thenReturn("[null]");
+        assertThrows(PersistedDataIntegrityException.class, () -> mapper.toSummaryDto(trace, sources));
+        when(sources.getTokenSourcesJson()).thenReturn("[\"CUSTOM\"]");
+        assertEquals(ModelTokenSource.CUSTOM, mapper.toSummaryDto(trace, sources).getModelTokenSourcesByDeviceId().get("d1"));
+    }
     private static final String VALID_STATE_JSON = "{\"stateIndex\":1,\"devices\":[],"
             + "\"triggeredRules\":[],\"compromisedAutomationLinks\":[]}";
     private static final String MODEL_SNAPSHOT_JSON = "{\"capturedAt\":\"2026-07-12T09:30:00\","
@@ -38,6 +91,9 @@ class TraceMapperTest {
     }
 
     private TracePo baseTrace(String requestJson) {
+        run = VerificationTaskPo.builder().id(9L).userId(1L)
+                .status(VerificationTaskPo.TaskStatus.COMPLETED)
+                .disabledRuleCount(0).skippedSpecCount(0).generationIssuesJson("[]").build();
         TracePo po = new TracePo();
         po.setId(1L);
         po.setUserId(1L);
@@ -47,16 +103,16 @@ class TraceMapperTest {
         po.setStatesJson("[" + VALID_STATE_JSON + "]");
         po.setStateCount(1);
         po.setVerificationTaskId(9L);
-        po.setRequestJson(requestJson != null ? requestJson : VALID_REQUEST_JSON);
-        po.setTemplateSnapshotsJson("{\"light\":{\"Name\":\"Light\"}}");
-        po.setModelSnapshotJson(MODEL_SNAPSHOT_JSON);
-        po.setModelSemanticsJson(MODEL_SEMANTICS_JSON);
-        po.setIsAttack(false);
-        po.setAttackBudget(0);
-        po.setEnablePrivacy(false);
-        po.setModeledDeviceAttackPointCount(1);
-        po.setModeledFalsifiableReadingDeviceCount(0);
-        po.setModeledAutomationLinkAttackPointCount(1);
+        run.setRequestJson(requestJson != null ? requestJson : VALID_REQUEST_JSON);
+        run.setTemplateSnapshotsJson("{\"light\":{\"Name\":\"Light\"}}");
+        run.setModelSnapshotJson(MODEL_SNAPSHOT_JSON);
+        run.setModelSemanticsJson(MODEL_SEMANTICS_JSON);
+        run.setIsAttack(false);
+        run.setAttackBudget(0);
+        run.setEnablePrivacy(false);
+        run.setModeledDeviceAttackPointCount(1);
+        run.setModeledFalsifiableReadingDeviceCount(0);
+        run.setModeledAutomationLinkAttackPointCount(1);
         return po;
     }
 
@@ -70,16 +126,16 @@ class TraceMapperTest {
                 + "\"command\":{\"deviceName\":\"d1\",\"action\":\"stay\"}}],\"specs\":[],"
                 + "\"attackScenario\":{\"mode\":\"ANY_UP_TO_BUDGET\",\"budget\":1},"
                 + "\"enablePrivacy\":true}");
-        po.setIsAttack(true);
-        po.setAttackBudget(1);
-        po.setEnablePrivacy(true);
-        po.setModelSemanticsJson(JsonUtils.toJson(
+        run.setIsAttack(true);
+        run.setAttackBudget(1);
+        run.setEnablePrivacy(true);
+        run.setModelSemanticsJson(JsonUtils.toJson(
                 ModelSemanticsDto.forRun(AttackScenarioDto.anyUpToBudget(1), true, 1, 1, 0)));
-        po.setModeledDeviceAttackPointCount(1);
-        po.setModeledFalsifiableReadingDeviceCount(0);
-        po.setModeledAutomationLinkAttackPointCount(1);
+        run.setModeledDeviceAttackPointCount(1);
+        run.setModeledFalsifiableReadingDeviceCount(0);
+        run.setModeledAutomationLinkAttackPointCount(1);
 
-        TraceDto dto = mapper.toDto(po);
+        TraceDto dto = mapper.toDto(po, runContext());
 
         assertEquals(Boolean.TRUE, dto.getAttack());
         assertEquals(1, dto.getAttackBudget());
@@ -89,7 +145,7 @@ class TraceMapperTest {
         assertEquals(2, dto.getModelSemantics().getModeledAttackPointCount());
         assertEquals(1, dto.getModelSnapshot().getDeviceCount());
         assertTrue(dto.getModelSnapshot().isTemplatesFrozen());
-        assertEquals(po.getTemplateSnapshotsJson(), dto.getTemplateSnapshotsJson());
+        assertEquals(run.getTemplateSnapshotsJson(), mapper.readContext(po, runContext()).templateSnapshotsJson());
         assertEquals("d1", dto.getPlaybackScene().nodes().get(0).getId());
         assertEquals("d1", dto.getPlaybackScene().rules().get(0).getCommand().getDeviceName());
     }
@@ -98,25 +154,25 @@ class TraceMapperTest {
     void rejectsInconsistentPersistedDisabledAttackBudget() {
         TracePo po = baseTrace("{\"devices\":[{\"varName\":\"d1\",\"templateName\":\"t1\"}],"
                 + "\"rules\":[],\"specs\":[]}");
-        po.setIsAttack(false);
-        po.setAttackBudget(7);
-        po.setEnablePrivacy(false);
-        po.setModeledDeviceAttackPointCount(0);
-        po.setModeledFalsifiableReadingDeviceCount(0);
-        po.setModeledAutomationLinkAttackPointCount(0);
+        run.setIsAttack(false);
+        run.setAttackBudget(7);
+        run.setEnablePrivacy(false);
+        run.setModeledDeviceAttackPointCount(0);
+        run.setModeledFalsifiableReadingDeviceCount(0);
+        run.setModeledAutomationLinkAttackPointCount(0);
 
         assertEquals("attackBudget", assertThrows(
-                PersistedDataIntegrityException.class, () -> mapper.toDto(po)).getField());
+                PersistedDataIntegrityException.class, () -> mapper.toDto(po, runContext())).getField());
     }
 
     @Test
     void traceWithoutPersistedModelContext_isRejected() {
         TracePo po = baseTrace("{\"devices\":[{\"varName\":\"d1\",\"templateName\":\"t1\"}],"
                 + "\"rules\":[],\"specs\":[],\"isAttack\":true,\"attackBudget\":1}");
-        po.setIsAttack(null);
+        run.setIsAttack(null);
 
         assertEquals("isAttack", assertThrows(
-                PersistedDataIntegrityException.class, () -> mapper.toDto(po)).getField());
+                PersistedDataIntegrityException.class, () -> mapper.toDto(po, runContext())).getField());
     }
 
     @Test
@@ -124,7 +180,7 @@ class TraceMapperTest {
         TracePo po = baseTrace("{ not valid json ");
 
         assertEquals("requestJson", assertThrows(
-                PersistedDataIntegrityException.class, () -> mapper.toDto(po)).getField());
+                PersistedDataIntegrityException.class, () -> mapper.toDto(po, runContext())).getField());
     }
 
     @Test
@@ -133,7 +189,7 @@ class TraceMapperTest {
             TracePo po = baseTrace(null);
             po.setStatesJson(statesJson);
             assertEquals("statesJson", assertThrows(
-                    PersistedDataIntegrityException.class, () -> mapper.toDto(po)).getField());
+                    PersistedDataIntegrityException.class, () -> mapper.toDto(po, runContext())).getField());
         }
     }
 
@@ -143,7 +199,7 @@ class TraceMapperTest {
         po.setStatesJson("[{\"stateIndex\":1,\"devices\":[]}]");
 
         assertEquals("statesJson", assertThrows(
-                PersistedDataIntegrityException.class, () -> mapper.toDto(po)).getField());
+                PersistedDataIntegrityException.class, () -> mapper.toDto(po, runContext())).getField());
     }
 
     @Test
@@ -157,7 +213,7 @@ class TraceMapperTest {
                     + "\"compromisedAutomationLinks\":[]}]");
 
             assertEquals("statesJson", assertThrows(
-                    PersistedDataIntegrityException.class, () -> mapper.toDto(po)).getField());
+                    PersistedDataIntegrityException.class, () -> mapper.toDto(po, runContext())).getField());
         }
     }
 
@@ -167,7 +223,7 @@ class TraceMapperTest {
         valid.setStatesJson("[{\"stateIndex\":1,\"devices\":[],"
                 + "\"triggeredRules\":[{\"ruleIndex\":0,\"ruleId\":\"42\","
                 + "\"ruleLabel\":\"Rule A\"}],\"compromisedAutomationLinks\":[]}]");
-        assertDoesNotThrow(() -> mapper.toDto(valid));
+        assertDoesNotThrow(() -> mapper.toDto(valid, runContext()));
 
         for (String evidence : java.util.List.of(
                 "{\"ruleIndex\":1}",
@@ -179,7 +235,7 @@ class TraceMapperTest {
                     + "\"compromisedAutomationLinks\":[]}]");
 
             assertEquals("statesJson", assertThrows(
-                    PersistedDataIntegrityException.class, () -> mapper.toDto(corrupt)).getField());
+                    PersistedDataIntegrityException.class, () -> mapper.toDto(corrupt, runContext())).getField());
         }
     }
 
@@ -194,7 +250,7 @@ class TraceMapperTest {
                 + "\"envVariables\":[{\"name\":\"weather\",\"value\":\"sunny\"}]}]");
 
         assertEquals("statesJson", assertThrows(
-                PersistedDataIntegrityException.class, () -> mapper.toDto(po)).getField());
+                PersistedDataIntegrityException.class, () -> mapper.toDto(po, runContext())).getField());
     }
 
     @Test
@@ -207,7 +263,7 @@ class TraceMapperTest {
             po.setStatesJson(statesJson);
 
             assertEquals("statesJson", assertThrows(
-                    PersistedDataIntegrityException.class, () -> mapper.toDto(po)).getField());
+                    PersistedDataIntegrityException.class, () -> mapper.toDto(po, runContext())).getField());
         }
     }
 
@@ -222,7 +278,7 @@ class TraceMapperTest {
                     + "\"triggeredRules\":[],\"compromisedAutomationLinks\":[]}]");
 
             assertEquals("statesJson", assertThrows(
-                    PersistedDataIntegrityException.class, () -> mapper.toDto(po)).getField());
+                    PersistedDataIntegrityException.class, () -> mapper.toDto(po, runContext())).getField());
         }
     }
 
@@ -232,7 +288,7 @@ class TraceMapperTest {
         po.setViolatedSpecJson("{\"id\":\"s0\",\"templateId\":\"3\",\"templateLabel\":\"Never\","
                 + "\"aConditions\":[],\"ifConditions\":[],\"thenConditions\":[],\"devices\":[]}");
 
-        TraceDto dto = mapper.toDto(po);
+        TraceDto dto = mapper.toDto(po, runContext());
 
         assertNotNull(dto.getViolatedSpec());
         assertEquals("s0", dto.getViolatedSpec().getId());
@@ -244,7 +300,7 @@ class TraceMapperTest {
         TracePo po = baseTrace(null);
         po.setCheckedExpression("CTLSPEC AG(!(camera_1.CameraMode=taking_photo))");
 
-        TraceDto dto = mapper.toDto(po);
+        TraceDto dto = mapper.toDto(po, runContext());
         TracePo roundTrip = mapper.toEntity(dto);
 
         assertEquals(po.getCheckedExpression(), dto.getCheckedExpression());
@@ -252,7 +308,7 @@ class TraceMapperTest {
     }
 
     @Test
-    void toEntityPersistsExactRunAttackSurface() {
+    void toEntityPersistsOnlyTraceEvidence() {
         TraceDto dto = new TraceDto();
         dto.setUserId(1L);
         dto.setVerificationTaskId(9L);
@@ -268,30 +324,24 @@ class TraceMapperTest {
         dto.setEnablePrivacy(false);
         dto.setModelSemantics(cn.edu.nju.Iot_Verify.dto.model.ModelSemanticsDto.forRun(
                 AttackScenarioDto.anyUpToBudget(2), false, 1, 2, 1));
-        dto.setTemplateSnapshotsJson("{\"light\":{\"Name\":\"Light\"}}");
         dto.setModelSnapshot(cn.edu.nju.Iot_Verify.dto.model.ModelRunSnapshotDto.captured(
                 java.time.LocalDateTime.of(2026, 7, 12, 9, 30), 1, 2, 1, 0, 1));
 
         TracePo po = mapper.toEntity(dto);
 
-        assertEquals(Boolean.TRUE, po.getIsAttack());
-        assertEquals(2, po.getAttackBudget());
-        assertEquals(1, po.getModeledDeviceAttackPointCount());
-        assertEquals(1, po.getModeledFalsifiableReadingDeviceCount());
-        assertEquals(2, po.getModeledAutomationLinkAttackPointCount());
-        assertEquals(dto.getTemplateSnapshotsJson(), po.getTemplateSnapshotsJson());
+        assertEquals("s0", po.getViolatedSpecId());
         assertEquals(1, po.getStateCount());
-        assertTrue(po.getModelSnapshotJson().contains("\"templatesFrozen\":true"));
     }
 
     @Test
     void summaryProjectionValidatesMetadataAndMapsPersistedStateCount() {
         TraceSummaryProjection projection = validSummaryProjection(8L);
 
-        var summary = mapper.toSummaryDto(projection);
+        var summary = mapper.toSummaryDto(projection, tokenSources(8L));
 
         assertEquals(2, summary.getStateCount());
         assertEquals(4L, summary.getVerificationTaskId());
+        assertEquals(ModelTokenSource.BUNDLED, summary.getModelTokenSourcesByDeviceId().get("d1"));
     }
 
     /**
@@ -305,7 +355,7 @@ class TraceMapperTest {
      */
     @Test
     void summaryCarriesNoModelOfItsOwn() {
-        var summary = mapper.toSummaryDto(validSummaryProjection(10L));
+        var summary = mapper.toSummaryDto(validSummaryProjection(10L), tokenSources(10L));
 
         for (var method : summary.getClass().getMethods()) {
             assertFalse(method.getName().toLowerCase().contains("smvmodel"),
@@ -320,31 +370,31 @@ class TraceMapperTest {
 
         assertEquals("stateCount", assertThrows(
                 PersistedDataIntegrityException.class,
-                () -> mapper.toSummaryDto(projection)).getField());
+                () -> mapper.toSummaryDto(projection, tokenSources(9L))).getField());
     }
 
     @Test
     void emptyStructuredModelContextFailsClosed() {
         TracePo emptySemantics = baseTrace(null);
-        emptySemantics.setModelSemanticsJson("{}");
+        run.setModelSemanticsJson("{}");
         assertEquals("modelSemanticsJson", assertThrows(
                 PersistedDataIntegrityException.class,
-                () -> mapper.toDto(emptySemantics)).getField());
+                () -> mapper.toDto(emptySemantics, runContext())).getField());
 
         TracePo emptySnapshot = baseTrace(null);
-        emptySnapshot.setModelSnapshotJson("{}");
+        run.setModelSnapshotJson("{}");
         assertEquals("modelSnapshotJson", assertThrows(
                 PersistedDataIntegrityException.class,
-                () -> mapper.toDto(emptySnapshot)).getField());
+                () -> mapper.toDto(emptySnapshot, runContext())).getField());
     }
 
     @Test
-    void persistedSemanticCountsMustMatchTraceColumns() {
+    void persistedSemanticCountsMustMatchOwnerColumns() {
         TracePo po = baseTrace(null);
-        po.setModeledAutomationLinkAttackPointCount(0);
+        run.setModeledAutomationLinkAttackPointCount(0);
 
         assertEquals("modelSemanticsJson", assertThrows(
-                PersistedDataIntegrityException.class, () -> mapper.toDto(po)).getField());
+                PersistedDataIntegrityException.class, () -> mapper.toDto(po, runContext())).getField());
     }
 
     /**
@@ -362,6 +412,11 @@ class TraceMapperTest {
      */
     @Test
     void neitherTraceDirectionCarriesTheRunsModel() {
+        for (Class<?> type : java.util.List.of(TraceDto.class, TracePo.class)) {
+            for (String field : java.util.List.of("requestJson", "templateSnapshotsJson")) {
+                assertThrows(NoSuchFieldException.class, () -> type.getDeclaredField(field));
+            }
+        }
         for (var method : TraceDto.class.getMethods()) {
             assertFalse(method.getName().toLowerCase().contains("smvmodel"),
                     "TraceDto must not carry the run's model: " + method.getName());
@@ -370,6 +425,65 @@ class TraceMapperTest {
             assertFalse(method.getName().toLowerCase().contains("smvmodel"),
                     "TracePo must not store a per-trace copy of the run's model: " + method.getName());
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"MISSING", "OWNER_ID", "USER", "PENDING", "RUNNING", "CANCELLED", "FAILED"})
+    void traceContextRequiresTheSameUsersCompletedOwner(String invalidOwner) {
+        TracePo po = baseTrace(null);
+        switch (invalidOwner) {
+            case "MISSING" -> { }
+            case "OWNER_ID" -> run.setId(10L);
+            case "USER" -> run.setUserId(2L);
+            default -> run.setStatus(VerificationTaskPo.TaskStatus.valueOf(invalidOwner));
+        }
+        assertEquals("verificationTaskId", assertThrows(PersistedDataIntegrityException.class,
+                () -> mapper.toDto(po, invalidOwner.equals("MISSING") ? null : runContext())).getField());
+    }
+
+    @Test
+    void traceCollectionRejectsAMissingOwnerIdentityExplicitly() {
+        TracePo po = baseTrace(null);
+        po.setVerificationTaskId(null);
+        assertEquals("verificationTaskId", assertThrows(PersistedDataIntegrityException.class,
+                () -> mapper.toDtoList(java.util.List.of(po), java.util.Map.of())).getField());
+    }
+
+    @Test
+    void allTracesInheritTheOwnersCompletenessInsteadOfRequestDefaults() {
+        TracePo po = baseTrace(null);
+        run.setDisabledRuleCount(2);
+        run.setSkippedSpecCount(1);
+        run.setGenerationIssuesJson("[{\"issueType\":\"RULE_DISABLED\",\"itemLabel\":\"Old rule\"}]");
+        TraceDto trace = mapper.toDto(po, runContext());
+        assertFalse(trace.getModelComplete());
+        assertEquals(2, trace.getDisabledRuleCount());
+        assertEquals(1, trace.getSkippedSpecCount());
+        assertEquals(1, trace.getGenerationIssues().size());
+        run.setDisabledRuleCount(null);
+        assertEquals("disabledRuleCount", assertThrows(PersistedDataIntegrityException.class,
+                () -> mapper.toDto(po, runContext())).getField());
+    }
+
+    @Test
+    void traceCollectionDecodesItsSharedOwnerOnce() {
+        TracePo first = baseTrace(null);
+        TracePo second = baseTrace(null);
+        second.setId(2L);
+        second.setViolatedSpecId("s2");
+        second.setViolatedSpecJson(second.getViolatedSpecJson().replace("s0", "s2"));
+        VerificationTraceContextProjection owner = spy(runContext());
+
+        var traces = mapper.toDtoList(java.util.List.of(first, second), java.util.Map.of(9L, owner));
+
+        assertEquals(java.util.List.of(1L, 2L), traces.stream().map(TraceDto::getId).toList());
+        assertEquals(java.util.List.of("s0", "s2"), traces.stream().map(TraceDto::getViolatedSpecId).toList());
+        verify(owner, times(1)).getModelSnapshotJson();
+        verify(owner, times(1)).getModelSemanticsJson();
+        verify(owner, times(1)).getGenerationIssuesJson();
+        verify(owner, times(1)).getRequestJson();
+        verify(owner, times(1)).getTemplateSnapshotsJson();
+        assertSame(traces.get(0).getPlaybackScene(), traces.get(1).getPlaybackScene());
     }
 
     private TraceSummaryProjection validSummaryProjection(Long id) {

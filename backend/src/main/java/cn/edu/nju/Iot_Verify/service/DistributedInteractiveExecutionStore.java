@@ -316,6 +316,8 @@ public class DistributedInteractiveExecutionStore {
 
     public void finish(Lease lease, InteractiveOperationStage stage) {
         if (lease == null || !lease.redisBacked) return;
+        // Keep cancellation set for the caller, but let Lettuce publish the owner's terminal state.
+        boolean interrupted = Thread.interrupted();
         try {
             redisTemplate.execute(
                     FINISH_SCRIPT,
@@ -327,6 +329,8 @@ public class DistributedInteractiveExecutionStore {
                     lease.exclusivePerUser ? "1" : "0");
         } catch (RuntimeException e) {
             log.warn("Could not publish final interactive status {}: {}", lease.statusKey(), e.toString());
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt();
         }
     }
 

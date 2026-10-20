@@ -67,17 +67,6 @@ public class TraceDto {
     @NotNull(message = "States are required")
     private List<TraceStateDto> states;
 
-    /**
-     * 验证请求快照（设备、规则、规约、参数），用于修复功能恢复上下文。
-     * 不序列化到 API 响应，仅供内部 FixService 使用。
-     */
-    @JsonIgnore
-    private String requestJson;
-
-    /** Exact manifests used by this run, retained only for server-side replay and drift checks. */
-    @JsonIgnore
-    private String templateSnapshotsJson;
-
     /** Generation omissions from the verification run that produced this trace. */
     private Integer disabledRuleCount;
 
@@ -88,19 +77,19 @@ public class TraceDto {
     private List<ModelGenerationIssueDto> generationIssues;
 
     /**
-     * 验证时的攻击模式开关，与轨迹的模型语义一起持久化。
+     * 验证时的攻击模式开关，从轨迹所属已完成运行读取。
      * 暴露给前端，使历史 trace 能显示自身的验证上下文，而非当前表单。
      */
     @JsonProperty("isAttack")
     private Boolean attack;
 
     /**
-     * 验证时的攻击预算，与轨迹的模型语义一起持久化。
+     * 验证时的攻击预算，从轨迹所属已完成运行读取。
      */
     private Integer attackBudget;
 
     /**
-     * 验证时的隐私维度开关，与轨迹的模型语义一起持久化。
+     * 验证时的隐私维度开关，从轨迹所属已完成运行读取。
      */
     private Boolean enablePrivacy;
 
@@ -111,15 +100,6 @@ public class TraceDto {
 
     /** Exact device layout and rules shown while replaying this historical evidence. */
     private ModelPlaybackSceneDto playbackScene;
-
-    /*
-     * No `smvModelContent` and no `hasSmvModel` here.
-     *
-     * Both existed to serve `GET /api/verify/traces/{id}/smv`, which is gone: the model is one per run,
-     * every trace of a run carried a byte-identical copy, and a trace cannot outlive its run (see
-     * `TracePo` for the measurements). A client that wants the model asks the run for it, and reads
-     * `hasSmvModel` off `VerificationRunDto` / `VerificationRunSummaryDto` to know whether it can.
-     */
 
     /**
      * 创建时间

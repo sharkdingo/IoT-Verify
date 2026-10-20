@@ -36,6 +36,41 @@ const typeInto = async (element: Element, value: string) => {
 }
 
 describe('AccountDeleteDialog confirmation gate', () => {
+  it('keeps a localized action name while deletion is pending without enabling a second submission', async () => {
+    const previousLocale = i18n.global.locale.value
+    const wrapper = mountDialog()
+    try {
+      await wrapper.setProps({ loading: true })
+      for (const language of ['en', 'zh-CN'] as const) {
+        i18n.global.locale.value = language
+        await wrapper.vm.$nextTick()
+        const button = wrapper.get(CONFIRM)
+        expect(button.text()).toBe(i18n.global.t('app.deleting'))
+        expect(button.attributes('aria-busy')).toBe('true')
+        expect(button.attributes('disabled')).toBeDefined()
+        await wrapper.get('form').trigger('submit')
+        expect(wrapper.emitted('confirm')).toBeUndefined()
+      }
+      await wrapper.setProps({ loading: false })
+      expect(wrapper.get(CONFIRM).text()).toBe(i18n.global.t('app.deleteAccountConfirm'))
+      expect(wrapper.get(CONFIRM).attributes('disabled')).toBeDefined()
+    } finally { wrapper.unmount(); i18n.global.locale.value = previousLocale }
+  })
+
+  it('keeps the irreversible consequences and exact confirmation requirements without repeated prompts', () => {
+    const wrapper = mountDialog()
+    expect(wrapper.find('.iot-dialog__subtitle').exists()).toBe(false)
+    expect(wrapper.get('.account-delete-warning span:last-child').text()).toBe(i18n.global.t('app.deleteAccountDataWarning'))
+    expect(wrapper.get('[data-testid="account-delete-export-note"]').text()).toContain(i18n.global.t('app.deleteAccountExportHint'))
+    expect(wrapper.get('.account-delete-field small').text()).toBe(i18n.global.t('app.deleteAccountConfirmationHint'))
+    const descriptionId = wrapper.get(confirmationField).attributes('aria-describedby')
+    expect(descriptionId).toBe('account-delete-confirmation-hint')
+    expect(wrapper.get(`#${descriptionId}`).text()).toBe(i18n.global.t('app.deleteAccountConfirmationHint'))
+    expect(wrapper.get('[data-testid="account-delete-password"]').element.parentElement?.textContent?.trim()).toBe(i18n.global.t('account.currentPassword'))
+    for (const input of wrapper.findAll('input')) expect(input.attributes('placeholder')).toBeUndefined()
+    wrapper.unmount()
+  })
+
   it('refuses a confirmation the user did not enter', async () => {
     const wrapper = mountDialog()
     // `setValue` fires a plain `input` Event with no `inputType`, as autofill does.
@@ -68,5 +103,28 @@ describe('AccountDeleteDialog confirmation gate', () => {
       { password: 'Password123', confirmation: 'alice' }
     ]])
     wrapper.unmount()
+  })
+
+  it('keeps raw rejection diagnostics in a closed disclosure and clears them on correction or cancel', async () => {
+    const wrapper = mountDialog()
+    try {
+      await wrapper.setProps({ failure: {
+        message: 'The account was not deleted.',
+        diagnostics: { cause: 'Current password is incorrect.', details: ['HTTP 400'],
+          fields: { password: 'Current password is incorrect.' } }
+      } })
+      const rejection = wrapper.get('[data-testid="account-delete-rejection"]')
+      expect(rejection.find('[data-testid="failure-fields"]').exists()).toBe(false)
+      expect(rejection.get('[data-testid="failure-technical-details"]').attributes('open')).toBeUndefined()
+      expect(rejection.get('[data-testid="failure-technical-details"]').text()).toContain('password: Current password is incorrect.')
+      expect(rejection.find('[data-testid="failure-cause"]').exists()).toBe(false)
+      await wrapper.get('input[type="password"]').setValue('CorrectedPassword123')
+      expect(wrapper.emitted('clear-failure')).toHaveLength(1)
+      await typeInto(wrapper.get(confirmationField).element, 'alice')
+      expect(wrapper.emitted('clear-failure')).toHaveLength(2)
+      await wrapper.get('[data-testid="account-delete-cancel"]').trigger('click')
+      expect(wrapper.emitted('clear-failure')).toHaveLength(3)
+      expect(wrapper.get<HTMLInputElement>('input[type="password"]').element.value).toBe('')
+    } finally { wrapper.unmount() }
   })
 })

@@ -222,6 +222,9 @@ public class UserOperationGuard {
             renewableLeases.remove(key, this);
             localSlots.remove(key, token);
             if (!redisBacked) return;
+            // Lettuce rejects commands on an interrupted worker; terminal cleanup must release
+            // this owner's slot before restoring the cancellation signal.
+            boolean interrupted = Thread.interrupted();
             try {
                 Long released = redisTemplate.execute(RELEASE_SCRIPT, java.util.List.of(key), token);
                 if (released == null) {
@@ -233,6 +236,8 @@ public class UserOperationGuard {
                 pendingReleases.put(key, new PendingRelease(
                         token, System.nanoTime() + Duration.ofMillis(ttlMillis).toNanos()));
                 log.warn("Could not release distributed operation lease {}: {}", key, e.toString());
+            } finally {
+                if (interrupted) Thread.currentThread().interrupt();
             }
         }
     }

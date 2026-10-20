@@ -154,13 +154,13 @@ describe('disclosure of environment evolution abstractions', () => {
     }
   })
 
-  it('states that the exogenous rule is a deliberate abstraction', () => {
-    // A conservative over-approximation the user was never told about is indistinguishable from a bug
-    // when it produces a counterexample. The exogenous wording must name it as an abstraction.
-    const en = i18n.global.getLocaleMessage('en') as Record<string, any>
-    const copy = String(en.app.environmentDiscreteExogenousEvolution)
-    expect(copy.toLowerCase()).toContain('abstraction')
-    const written = String(en.app.environmentDiscreteWrittenEvolution)
-    expect(written.toLowerCase()).toContain('exact')
+  it.each(['en', 'zh-CN'] as const)('explains exogenous choices and device-written hold behavior in %s', locale => {
+    // Describe reachable behavior rather than asking users to interpret implementation adjectives.
+    const messages = i18n.global.getLocaleMessage(locale) as Record<string, any>
+    const exogenous = String(messages.app.environmentDiscreteExogenousEvolution)
+    expect(exogenous).toContain(locale === 'en' ? 'any declared value each step' : '每步可取声明范围内的任意值')
+    const written = String(messages.app.environmentDiscreteWrittenEvolution)
+    expect(written).toContain(locale === 'en' ? 'unchanged when no write takes effect' : '没有生效的写入时保持不变')
+    expect(written).not.toContain(locale === 'en' ? 'any declared value' : '任意值')
   })
 })

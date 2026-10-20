@@ -4,6 +4,11 @@ import cn.edu.nju.Iot_Verify.dto.trace.TraceDto;
 import cn.edu.nju.Iot_Verify.dto.trace.TraceDeviceDto;
 import cn.edu.nju.Iot_Verify.dto.trace.TraceStateDto;
 import cn.edu.nju.Iot_Verify.dto.trace.TraceTriggeredRuleDto;
+import cn.edu.nju.Iot_Verify.dto.trace.TraceVariableDto;
+import cn.edu.nju.Iot_Verify.dto.trace.TraceTrustPrivacyDto;
+import cn.edu.nju.Iot_Verify.component.aitool.AiToolManager;
+import cn.edu.nju.Iot_Verify.component.aitool.ModelTraceToolPresenter;
+import cn.edu.nju.Iot_Verify.configure.ChatExecutionConfig;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import cn.edu.nju.Iot_Verify.exception.ResourceNotFoundException;
 import cn.edu.nju.Iot_Verify.security.UserContextHolder;
@@ -185,13 +190,268 @@ class GetTraceToolTest {
         assertEquals(false, beyondEnd.path("hasMoreStates").asBoolean());
     }
 
+    @Test
+    void execute_keepsBedReturnAndCameraStartInTheirActualAdjacentStates() throws Exception {
+        UserContextHolder.setUserId(1L);
+        TraceDto trace = TraceDto.builder().id(10L).modelComplete(true).states(List.of(
+                cameraState(1, "empty", "23", "on"),
+                cameraState(2, "occupied", "0", "on"),
+                cameraState(3, "occupied", "1", "takingphoto"))).build();
+        when(verificationService.getTrace(1L, 10L)).thenReturn(trace);
+
+        JsonNode states = objectMapper.readTree(tool.execute("{\"traceId\":10}")).path("states");
+
+        assertEquals("on", states.get(1).path("valueSnapshot").path("deviceStates").get(0)
+                .path("state").asText());
+        assertEquals("occupied", states.get(1).path("valueSnapshot").path("environmentValues").get(0)
+                .path("value").asText());
+        assertEquals("0", states.get(1).path("valueSnapshot").path("environmentValues").get(1)
+                .path("value").asText());
+        assertEquals("takingphoto", states.get(2).path("valueSnapshot").path("deviceStates").get(0)
+                .path("state").asText());
+        assertEquals("1", states.get(2).path("valueSnapshot").path("environmentValues").get(1)
+                .path("value").asText());
+        assertEquals(false, states.get(0).has("changesFromPreviousState"));
+        JsonNode returnToBed = states.get(1).path("changesFromPreviousState");
+        assertEquals(1, returnToBed.path("previousStateIndex").asInt());
+        assertEquals(0, returnToBed.path("deviceStates").size());
+        assertEquals("empty", returnToBed.path("environmentValues").get(0).path("previousValue").asText());
+        assertEquals("occupied", returnToBed.path("environmentValues").get(0).path("currentValue").asText());
+        JsonNode cameraStart = states.get(2).path("changesFromPreviousState");
+        assertEquals(2, cameraStart.path("previousStateIndex").asInt());
+        assertEquals(1, cameraStart.path("deviceStates").size());
+        assertEquals("on", cameraStart.path("deviceStates").get(0).path("previousState").asText());
+        assertEquals("takingphoto", cameraStart.path("deviceStates").get(0).path("currentState").asText());
+        assertEquals(1, cameraStart.path("environmentValues").size());
+        assertEquals("time", cameraStart.path("environmentValues").get(0).path("name").asText());
+
+        JsonNode page = objectMapper.readTree(tool.execute(
+                "{\"traceId\":10,\"stateOffset\":2,\"stateLimit\":1}"));
+        assertEquals(states.get(2), page.path("states").get(0));
+    }
+
+    @Test
+    void statePreview_doesNotInventAdjacentChangesAcrossOmittedStates() throws Exception {
+        JsonNode states = objectMapper.valueToTree(
+                ModelTraceToolPresenter.states(List.of(
+                        cameraState(1, "empty", "23", "on"),
+                        cameraState(3, "occupied", "1", "takingphoto"))));
+
+        assertEquals(false, states.get(1).has("changesFromPreviousState"));
+    }
+
+    @Test
+    void stateChanges_matchDeviceIdentityAndModeRatherThanDisplayLabel() {
+        TraceStateDto previous = cameraState(1, "empty", "23", "on");
+        TraceStateDto current = cameraState(2, "empty", "23", "takingphoto");
+        TraceDeviceDto unrelated = new TraceDeviceDto();
+        unrelated.setDeviceId("camera_2");
+        unrelated.setDeviceLabel("Hallway Camera");
+        unrelated.setMode("MachineState");
+        unrelated.setState("takingphoto");
+        TraceDeviceDto otherMode = new TraceDeviceDto();
+        otherMode.setDeviceId("camera_1");
+        otherMode.setDeviceLabel("Hallway Camera");
+        otherMode.setMode("PowerState");
+        otherMode.setState("takingphoto");
+        previous.setDevices(List.of(unrelated, otherMode, previous.getDevices().get(0)));
+
+        JsonNode changes = objectMapper.valueToTree(ModelTraceToolPresenter.states(List.of(previous, current)))
+                .get(1).path("changesFromPreviousState").path("deviceStates");
+
+        assertEquals(1, changes.size());
+        assertEquals("MachineState", changes.get(0).path("mode").asText());
+        assertEquals("on", changes.get(0).path("previousState").asText());
+        assertEquals("takingphoto", changes.get(0).path("currentState").asText());
+    }
+
+    @Test
+    void stateChanges_doNotTreatMissingOrUnobservedValuesAsTransitions() {
+        TraceStateDto previous = cameraState(1, "empty", "23", "on");
+        TraceStateDto current = cameraState(2, "occupied", "0", "takingphoto");
+        previous.getDevices().get(0).setState(null);
+        previous.getEnvVariables().get(0).setObserved(false);
+        current.getEnvVariables().get(1).setObserved(false);
+
+        JsonNode changes = objectMapper.valueToTree(ModelTraceToolPresenter.states(List.of(previous, current)))
+                .get(1).path("changesFromPreviousState");
+
+        assertEquals(0, changes.path("deviceStates").size());
+        assertEquals(0, changes.path("environmentValues").size());
+        JsonNode snapshot = objectMapper.valueToTree(ModelTraceToolPresenter.states(List.of(current)))
+                .get(0).path("valueSnapshot");
+        assertEquals(false, snapshot.path("environmentValues").get(1).path("observed").asBoolean());
+        assertEquals(false, snapshot.path("environmentValues").get(1).has("value"));
+    }
+
+    @Test
+    void execute_valueViewKeepsSnapshotsAndExposesExplicitLabelDetail() throws Exception {
+        UserContextHolder.setUserId(1L);
+        TraceStateDto state = cameraState(1, "occupied", "0", "takingphoto");
+        TraceTrustPrivacyDto label = new TraceTrustPrivacyDto();
+        label.setName("takingphoto");
+        label.setPropertyScope("state");
+        label.setMode("MachineState");
+        label.setTrust(false);
+        label.setPrivacy("private");
+        state.getDevices().get(0).setTrustPrivacy(List.of(label));
+        state.getDevices().get(0).setPrivacies(List.of(label));
+        when(verificationService.getTrace(1L, 11L)).thenReturn(
+                TraceDto.builder().id(11L).modelComplete(true).states(List.of(state)).build());
+
+        JsonNode values = objectMapper.readTree(tool.execute("{\"traceId\":11}"));
+        JsonNode nullDefault = objectMapper.readTree(tool.execute(
+                "{\"traceId\":11,\"includePropertyLabels\":null}"));
+        JsonNode full = objectMapper.readTree(tool.execute(
+                "{\"traceId\":11,\"includePropertyLabels\":true}"));
+        JsonNode device = values.path("states").get(0).path("devices").get(0);
+        JsonNode fullDevice = full.path("states").get(0).path("devices").get(0);
+
+        assertEquals(false, values.path("propertyLabelsIncluded").asBoolean());
+        assertEquals(values, nullDefault);
+        assertEquals(false, device.has("trustPrivacyLabels"));
+        assertEquals(false, device.has("privacyLabels"));
+        assertEquals("takingphoto", device.path("state").asText());
+        assertEquals("MachineState", device.path("mode").asText());
+        assertEquals(fullDevice.path("variables"), device.path("variables"));
+        assertEquals(full.path("states").get(0).path("environmentVariables"),
+                values.path("states").get(0).path("environmentVariables"));
+        assertEquals(true, full.path("propertyLabelsIncluded").asBoolean());
+        assertEquals(false, fullDevice.path("trustPrivacyLabels").get(0).path("trust").asBoolean());
+        assertEquals("private", fullDevice.path("privacyLabels").get(0).path("privacy").asText());
+    }
+
+    @Test
+    void execute_rejectsNonBooleanLabelDetailBeforeReading() throws Exception {
+        UserContextHolder.setUserId(1L);
+        for (String value : List.of("\"true\"", "1")) {
+            JsonNode result = objectMapper.readTree(tool.execute(
+                    "{\"traceId\":11,\"includePropertyLabels\":" + value + "}"));
+            assertEquals("VALIDATION_ERROR", result.path("errorCode").asText());
+        }
+        verify(verificationService, never()).getTrace(1L, 11L);
+    }
+
+    @Test
+    void execute_valueViewKeepsTheWholeLivenessCycleWithinTheToolByteBudget() throws Exception {
+        UserContextHolder.setUserId(1L);
+        List<TraceStateDto> sequence = IntStream.rangeClosed(1, 7).mapToObj(index -> {
+            TraceStateDto state = cameraState(index, "occupied", String.valueOf(index), "on");
+            state.setLoopStart(index == 6);
+            state.setLoopBack(index == 7);
+            state.setDevices(IntStream.range(0, 14).mapToObj(deviceIndex -> {
+                TraceDeviceDto device = new TraceDeviceDto();
+                device.setDeviceId("camera_" + deviceIndex);
+                device.setDeviceLabel("Camera " + deviceIndex);
+                device.setMode("MachineState");
+                device.setState("on");
+                List<TraceTrustPrivacyDto> labels = IntStream.range(0, 6).mapToObj(labelIndex -> {
+                    TraceTrustPrivacyDto label = new TraceTrustPrivacyDto();
+                    label.setName("state_" + labelIndex);
+                    label.setPropertyScope("state");
+                    label.setMode("MachineState");
+                    label.setTrust(true);
+                    label.setPrivacy("private");
+                    return label;
+                }).toList();
+                device.setTrustPrivacy(labels);
+                device.setPrivacies(labels);
+                return device;
+            }).toList());
+            return state;
+        }).toList();
+        when(verificationService.getTrace(1L, 12L)).thenReturn(
+                TraceDto.builder().id(12L).modelComplete(true).states(sequence).build());
+        AiToolManager manager = new AiToolManager(List.of(tool), objectMapper, new ChatExecutionConfig(), org.mockito.Mockito.mock(cn.edu.nju.Iot_Verify.component.ai.ChatConfirmationDetector.class));
+        manager.init();
+
+        JsonNode values = objectMapper.readTree(manager.execute("get_trace", "{\"traceId\":12}"));
+        JsonNode labels = objectMapper.readTree(manager.execute("get_trace",
+                "{\"traceId\":12,\"includePropertyLabels\":true}"));
+
+        assertEquals("SUCCESS", values.path("resultStatus").asText());
+        assertEquals(7, values.path("returnedStateCount").asInt());
+        assertEquals(false, values.path("hasMoreStates").asBoolean());
+        assertEquals(true, values.path("states").get(5).path("loopStart").asBoolean());
+        assertEquals(true, values.path("states").get(6).path("loopBack").asBoolean());
+        assertEquals(true, labels.path("propertyLabelsIncluded").asBoolean());
+        assertEquals(false, labels.path("hasMoreStates").asBoolean());
+        assertEquals(7, labels.path("returnedStateCount").asInt());
+        assertEquals(true, labels.path("states").get(6).path("loopBack").asBoolean());
+        assertEquals(6, labels.path("states").get(6).path("devices").get(0)
+                .path("propertyLabelsFromStateIndex").asInt());
+        assertEquals(6, labels.path("states").get(0).path("devices").get(0)
+                .path("trustPrivacyLabels").size());
+    }
+
+    @Test
+    void execute_labelReferencesPreserveChangesAndStartEachPageWithItsOwnBaseline() throws Exception {
+        UserContextHolder.setUserId(1L);
+        List<TraceStateDto> sequence = IntStream.rangeClosed(1, 7).mapToObj(index -> {
+            TraceStateDto state = cameraState(index, "occupied", "1", "on");
+            TraceDeviceDto device = state.getDevices().get(0);
+            TraceTrustPrivacyDto label = new TraceTrustPrivacyDto();
+            label.setName("on");
+            label.setPropertyScope("state");
+            label.setMode("MachineState");
+            label.setTrust(index < 3);
+            label.setPrivacy(index < 4 ? "private" : "public");
+            device.setTrustPrivacy(List.of(label));
+            device.setPrivacies(List.of(label));
+            if (index == 6) device.setDeviceId("camera_2");
+            if (index == 7) {
+                device.setDeviceId("camera_2");
+                device.setMode("PowerState");
+            }
+            return state;
+        }).toList();
+        when(verificationService.getTrace(1L, 13L)).thenReturn(
+                TraceDto.builder().id(13L).modelComplete(true).states(sequence).build());
+
+        JsonNode states = objectMapper.readTree(tool.execute(
+                "{\"traceId\":13,\"includePropertyLabels\":true}")).path("states");
+        assertEquals(1, states.get(1).path("devices").get(0)
+                .path("propertyLabelsFromStateIndex").asInt());
+        assertEquals(false, states.get(1).path("devices").get(0).has("trustPrivacyLabels"));
+        assertEquals(false, states.get(2).path("devices").get(0)
+                .path("trustPrivacyLabels").get(0).path("trust").asBoolean());
+        assertEquals("private", states.get(2).path("devices").get(0)
+                .path("privacyLabels").get(0).path("privacy").asText());
+        assertEquals("public", states.get(3).path("devices").get(0)
+                .path("privacyLabels").get(0).path("privacy").asText());
+        assertEquals(4, states.get(4).path("devices").get(0)
+                .path("propertyLabelsFromStateIndex").asInt());
+        assertEquals(false, states.get(5).path("devices").get(0).has("propertyLabelsFromStateIndex"));
+        assertEquals(false, states.get(6).path("devices").get(0).has("propertyLabelsFromStateIndex"));
+
+        JsonNode page = objectMapper.readTree(tool.execute(
+                "{\"traceId\":13,\"includePropertyLabels\":true,\"stateOffset\":1,\"stateLimit\":2}"))
+                .path("states");
+        JsonNode baseline = page.get(0).path("devices").get(0);
+        assertEquals(false, baseline.has("propertyLabelsFromStateIndex"));
+        assertEquals(true, baseline.path("trustPrivacyLabels").get(0).path("trust").asBoolean());
+        assertEquals("private", baseline.path("privacyLabels").get(0).path("privacy").asText());
+    }
+
+    private TraceStateDto cameraState(int index, String occupancy, String time, String cameraState) {
+        TraceDeviceDto camera = new TraceDeviceDto();
+        camera.setDeviceId("camera_1");
+        camera.setDeviceLabel("Hallway Camera");
+        camera.setMode("MachineState");
+        camera.setState(cameraState);
+        TraceVariableDto bed = new TraceVariableDto();
+        bed.setName("bedOccupancy");
+        bed.setValue(occupancy);
+        TraceVariableDto clock = new TraceVariableDto();
+        clock.setName("time");
+        clock.setValue(time);
+        return TraceStateDto.builder().stateIndex(index).devices(List.of(camera))
+                .envVariables(List.of(bed, clock)).build();
+    }
+
     /**
-     * A liveness counterexample's fault is its cycle, and the cycle is not visible in the values. NuSMV closes
-     * the path by re-printing the loop entry, so the closing state equals that entry — but whether it equals
-     * its own predecessor depends on the cycle length, and either way the assistant reads it wrong: a
-     * one-state cycle prints no variable lines and looks like a stalled or truncated run, a longer one prints
-     * the deltas back to the entry and looks like the path continuing. Paging makes recovery by comparison
-     * impossible, since one window need not hold both ends.
+     * NuSMV closes a liveness cycle by re-printing its entry; page-local value comparison cannot
+     * reliably distinguish a cycle from a finite path, particularly when the entry is on another page.
      */
     @Test
     void execute_marksTheCycleOfALivenessCounterexample() throws Exception {

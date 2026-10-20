@@ -53,7 +53,7 @@ describe('canOpenTracePlayback', () => {
       templateId: '1',
       templateLabel: 'Always',
       aConditions: [condition]
-    }))).toBe('Always: the actual contact in the home not in "closed,locked"')
+    }))).toBe('Must always hold: environment contact not in "closed,locked"')
 
     // A trust or privacy condition is about a label on a target, not the target's own value.
     // Rendering it bare put the label value where a state value belongs, so demo specification 6 read
@@ -67,7 +67,7 @@ describe('canOpenTracePlayback', () => {
         deviceLabel: 'Front Door', targetType: 'privacy', key: 'LockState',
         relation: 'EQ', value: 'private'
       }]
-    }))).toBe('Always: sensitivity(Front Door.LockState) = "private"')
+    }))).toBe('Must always hold: sensitivity(Front Door.LockState) = "private"')
 
     expect(formatTraceSpec(JSON.stringify({
       templateId: '1',
@@ -76,21 +76,21 @@ describe('canOpenTracePlayback', () => {
         deviceLabel: 'Front Door', targetType: 'trust', key: 'LockState',
         relation: 'EQ', value: 'untrusted'
       }]
-    }))).toBe('Always: controlSource(Front Door.LockState) = "untrusted"')
+    }))).toBe('Must always hold: controlSource(Front Door.LockState) = "untrusted"')
 
     expect(formatTraceSpec(JSON.stringify({
       templateId: '5',
       templateLabel: 'Response',
       ifConditions: [{ ...condition, relation: 'EQ', value: 'open' }],
       thenConditions: [{ ...condition, key: 'alarm', relation: 'GTE', value: '1' }]
-    }))).toBe('Response: IF the actual contact in the home = "open", '
-      + 'THEN eventually the actual alarm in the home >= "1"')
+    }))).toBe('Response: IF environment contact = "open", '
+      + 'THEN eventually environment alarm >= "1"')
 
     expect(formatTraceSpec(JSON.stringify({
       templateId: '7',
       templateLabel: 'Safety',
       aConditions: [condition]
-    }))).toBe('Safety: the actual contact in the home not in "closed,locked" '
+    }))).toBe('Safety: environment contact not in "closed,locked" '
       + 'must not hold with an untrusted control-source label')
   })
 
@@ -110,11 +110,11 @@ describe('canOpenTracePlayback', () => {
       }]
     }))
 
-    expect(spec('environment')).toBe('Always: the actual contact in the home = "closed"')
-    expect(spec('reported')).toBe('Always: the contact Front Door reports = "closed"')
+    expect(spec('environment')).toBe('Must always hold: environment contact = "closed"')
+    expect(spec('reported')).toBe('Must always hold: the contact Front Door reports = "closed"')
     expect(spec('environment')).not.toBe(spec('reported'))
     // A stored condition with no recorded source is marked, not shown as either answer.
-    expect(spec()).toBe('Always: Front Door contact (which value it means was not recorded) = "closed"')
+    expect(spec()).toBe('Must always hold: Front Door contact (which value it means was not recorded) = "closed"')
   })
 
   it('uses localized trace wording instead of hard-coded English', () => {
@@ -140,6 +140,28 @@ describe('canOpenTracePlayback', () => {
         value: 'off'
       }]
     }, translate)).toBe('不得发生：玄关相机.state 不属于 "off"')
+  })
+
+  it('localizes only recorded bundled tokens and matches normalized device references', () => {
+    const spec = { templateId: '3', aConditions: [{
+      deviceId: 'Air-Conditioner', deviceLabel: '空调', targetType: 'mode',
+      key: 'HvacMode', relation: '=', value: 'heat'
+    }] }
+    const messages: Record<string, string> = {
+      'app.traceSpecNever': '不得发生：{condition}',
+      'app.modelTokens.hvacMode': '空调模式',
+      'app.modelTokens.heat': '制热'
+    }
+    const translate = (key: string, params: Record<string, unknown> = {}) =>
+      (messages[key] || key).replace(/\{(\w+)\}/g, (_match, name) => String(params[name] ?? ''))
+    expect(formatTraceSpec(spec, translate, { air_conditioner: 'BUNDLED' }))
+      .toBe('不得发生：空调.空调模式 = "制热"')
+    for (const source of ['CUSTOM', 'UNKNOWN'] as const) {
+      expect(formatTraceSpec(spec, translate, { air_conditioner: source }))
+        .toBe('不得发生：空调.HvacMode = "heat"')
+    }
+    expect(formatTraceSpec(spec, undefined, { air_conditioner: 'BUNDLED' }))
+      .toBe('Must never hold: 空调.HvacMode = "heat"')
   })
 })
 
@@ -296,6 +318,17 @@ describe('playback device facts', () => {
         expect.objectContaining({ kind: 'variable', name: 'motion', previousValue: 'FALSE', currentValue: 'TRUE' })
       ])
     })
+  })
+
+  it('reports only the changed mode of a multi-mode state tuple', () => {
+    const previous = { deviceId: 'care_hub', mode: 'HomeMode;HubStatus', state: 'home;idle' }
+    expect(playbackDeviceChangeDetails({ ...previous, state: 'home;sending_alert' }, previous)?.details)
+      .toEqual([{ kind: 'state', name: 'HubStatus', previousValue: 'idle', currentValue: 'sending_alert' }])
+    expect(playbackDeviceChangeDetails({ ...previous, state: 'away;sending_alert' }, previous)?.details)
+      .toEqual([
+        { kind: 'state', name: 'HomeMode', previousValue: 'home', currentValue: 'away' },
+        { kind: 'state', name: 'HubStatus', previousValue: 'idle', currentValue: 'sending_alert' }
+      ])
   })
 
   it('reports environment changes independently from device changes', () => {

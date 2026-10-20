@@ -1,32 +1,32 @@
 import type { RouteLocationNormalizedLoaded, RouteLocationRaw } from 'vue-router';
 import { router } from './index';
+import { resolveAccountReturn } from './accountReturn';
 
-/**
- * Single owner of the "session is gone, go to the login surface" location shape.
- *
- * Returns `null` when the caller is already on the public login surface, so no caller
- * has to re-implement that check. Kept router-instance free so component callers can
- * navigate with their own injected router.
- */
 /**
  * Why the user is being sent to the login surface.
  *
- * The caller knows this and the helper cannot infer it: a rejected token and a deliberate sign-out in another
- * tab produce the same navigation but mean opposite things. I first set `session-expired` inside this function
- * for every caller, and `App.spec.ts` caught it — that path is a *cross-tab logout*, where the user chose to
- * leave, so telling them their session expired would be a plain untruth.
+ * Expiry, deliberate sign-out and a changed password need different recovery instructions.
+ * The caller owns that intent; the destination retains only a reason and the return path.
  */
-export type LoginRedirectReason = 'session-expired';
+export type LoginRedirectReason = 'session-expired' | 'password-changed' | 'password-change-unknown' | 'account-deletion-unknown';
 
+/**
+ * Single owner of the login destination. Public login callers need no additional navigation.
+ * Component callers can use their own router; only the transport wrapper below uses the singleton.
+ */
 export const loginRedirectTarget = (
-  current: Pick<RouteLocationNormalizedLoaded, 'path' | 'fullPath'>,
+  current: Pick<RouteLocationNormalizedLoaded, 'path' | 'fullPath'>
+    & Partial<Pick<RouteLocationNormalizedLoaded, 'query'>>,
   reason?: LoginRedirectReason
 ): RouteLocationRaw | null => {
   if (current.path === '/') return null;
 
   const query: Record<string, string> = { mode: 'login' };
   if (current.fullPath && current.fullPath !== '/') {
-    query.redirect = current.fullPath;
+    query.redirect = current.path === '/account'
+      && (reason === 'password-changed' || reason === 'password-change-unknown')
+      ? resolveAccountReturn(current.query?.returnTo)
+      : current.fullPath;
     // Only stated when the caller says so, and only alongside a return path — a `reason` without somewhere to
     // return to would be describing a session the user never had.
     if (reason) query.reason = reason;
@@ -37,8 +37,8 @@ export const loginRedirectTarget = (
 /**
  * For non-component callers (axios interceptor, SSE transport) that only have the singleton.
  *
- * Both of those callers reach here because a token was rejected mid-request, so `session-expired` is the default
- * — it is the only reason they ever have. A component caller with a different reason passes it explicitly.
+ * A rejected token defaults to expiry. HTTP callers pass the pending password-change intent
+ * when a background request rejects a credential whose password mutation has not settled.
  */
 export const redirectToLogin = async (
   options: { replace?: boolean, reason?: LoginRedirectReason } = {}

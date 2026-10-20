@@ -22,6 +22,7 @@ import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -45,14 +46,16 @@ public class DeviceTemplateSchemaValidator {
 
     public void validateRawManifest(String templateName, JsonNode manifestNode) {
         if (manifestNode == null || !manifestNode.isObject()) {
-            throw new BadRequestException("Template manifest is required and must be a JSON object.");
+            throw new BadRequestException("Template manifest is required and must be a JSON object.",
+                    Map.of("manifest", "Template manifest is required and must be a JSON object"));
         }
         validateNode(templateName, manifestNode);
     }
 
     public void validateManifest(String templateName, DeviceManifest manifest) {
         if (manifest == null) {
-            throw new BadRequestException("Template manifest is required.");
+            throw new BadRequestException("Template manifest is required.",
+                    Map.of("manifest", "Template manifest is required"));
         }
         validateNode(templateName, toSchemaNode(manifest));
     }
@@ -77,19 +80,39 @@ public class DeviceTemplateSchemaValidator {
     }
 
     private void validateNode(String templateName, JsonNode manifestNode) {
+        try {
+            validateNodeContents(templateName, manifestNode);
+        } catch (BadRequestException error) {
+            if (!error.getErrors().isEmpty()) throw error;
+            throw new BadRequestException(error.getMessage(), Map.of("manifest", error.getMessage()));
+        }
+    }
+
+    private void validateNodeContents(String templateName, JsonNode manifestNode) {
         String name = templateName == null || templateName.isBlank() ? "<unnamed>" : templateName;
         validateUnsupportedApiBehavior(name, manifestNode);
         Set<ValidationMessage> messages = getSchema().validate(manifestNode);
         if (!messages.isEmpty()) {
-            String details = messages.stream()
+            Map<String, String> errors = new LinkedHashMap<>();
+            List<ValidationMessage> reported = messages.stream()
+                    .sorted(Comparator.comparing((ValidationMessage message) -> message.getInstanceLocation().toString())
+                            .thenComparing(ValidationMessage::getMessage))
                     .limit(5)
-                    .map(ValidationMessage::getMessage)
-                    .collect(Collectors.joining("; "));
+                    .toList();
+            for (ValidationMessage message : reported) {
+                String path = "manifest" + message.getInstanceLocation().toString().replaceFirst("^\\$", "");
+                if (("required".equals(message.getType()) || "additionalProperties".equals(message.getType()))
+                        && message.getProperty() != null) {
+                    path += "." + message.getProperty();
+                }
+                errors.merge(path, message.getMessage(), (first, next) -> first + "; " + next);
+            }
+            String details = reported.stream().map(ValidationMessage::getMessage).collect(Collectors.joining("; "));
             if (messages.size() > 5) {
                 details += "; ... " + (messages.size() - 5) + " more";
             }
             throw new BadRequestException("Template '" + name + "' does not match "
-                    + CANONICAL_SCHEMA_PATH + ": " + details);
+                    + CANONICAL_SCHEMA_PATH + ": " + details, errors);
         }
         validateMultiModeStateLabels(name, manifestNode);
         validateConcreteInitialState(name, manifestNode);

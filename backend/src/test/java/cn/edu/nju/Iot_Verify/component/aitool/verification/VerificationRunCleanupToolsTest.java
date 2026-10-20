@@ -15,10 +15,12 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.time.LocalDateTime;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
@@ -56,6 +58,35 @@ class VerificationRunCleanupToolsTest {
     }
 
     @Test
+    void deleteRun_previewDistinguishesSameSizedRunsWithoutExposingTheAuthorizationKey() throws Exception {
+        LocalDateTime firstCompletedAt = LocalDateTime.of(2026, 10, 8, 12, 0);
+        LocalDateTime secondCompletedAt = firstCompletedAt.plusMinutes(1);
+        when(verificationService.getRunDeletionImpact(1L, 5L)).thenReturn(
+                RunDeletionImpactDto.builder().runId(5L).evidenceCount(3)
+                        .completedAt(firstCompletedAt).build());
+        when(verificationService.getRunDeletionImpact(1L, 6L)).thenReturn(
+                RunDeletionImpactDto.builder().runId(6L).evidenceCount(3)
+                        .completedAt(secondCompletedAt).build());
+
+        deleteRunTool.execute("{\"runId\":5,\"confirmed\":false}");
+        AiDestructiveActionGuard.PendingActionContext first = destructiveActionGuard
+                .pendingContext(1L, "verify-cleanup-session").orElseThrow();
+        deleteRunTool.execute("{\"runId\":6,\"confirmed\":false}");
+        AiDestructiveActionGuard.PendingActionContext second = destructiveActionGuard
+                .pendingContext(1L, "verify-cleanup-session").orElseThrow();
+
+        assertEquals("Verification run: " + firstCompletedAt + " · 3 stored counterexamples",
+                first.displayTarget());
+        assertEquals("Verification run: " + secondCompletedAt + " · 3 stored counterexamples",
+                second.displayTarget());
+        assertNotEquals(first.displayTarget(), second.displayTarget());
+        assertEquals("5", first.targetKey());
+        assertEquals("6", second.targetKey());
+        verify(verificationService, never()).deleteRun(1L, 5L, 3L);
+        verify(verificationService, never()).deleteRun(1L, 6L, 3L);
+    }
+
+    @Test
     void deleteRun_previewThenConfirmCascades() throws Exception {
         when(verificationService.getRunDeletionImpact(1L, 5L)).thenReturn(
                 RunDeletionImpactDto.builder().runId(5L).evidenceCount(3).build());
@@ -68,7 +99,7 @@ class VerificationRunCleanupToolsTest {
         assertTrue(preview.path("countIncludesUnavailableEvidence").asBoolean());
         verify(verificationService, never()).deleteRun(1L, 5L, 3L);
 
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", preview.path("impactToken").asText());
         JsonNode result = objectMapper.readTree(deleteRunTool.execute(
                 "{\"runId\":5,\"confirmed\":true,\"impactToken\":\""
                         + preview.path("impactToken").asText() + "\"}"));
@@ -82,7 +113,7 @@ class VerificationRunCleanupToolsTest {
     void deleteRun_staleTokenReturnsFreshPreview() throws Exception {
         when(verificationService.getRunDeletionImpact(1L, 5L)).thenReturn(
                 RunDeletionImpactDto.builder().runId(5L).evidenceCount(0).build());
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", "stale-token");
 
         JsonNode json = objectMapper.readTree(deleteRunTool.execute(
                 "{\"runId\":5,\"confirmed\":true,\"impactToken\":\"bogus\"}"));
@@ -100,7 +131,7 @@ class VerificationRunCleanupToolsTest {
 
         JsonNode preview = objectMapper.readTree(
                 deleteRunTool.execute("{\"runId\":5,\"confirmed\":false}"));
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", preview.path("impactToken").asText());
         JsonNode result = objectMapper.readTree(deleteRunTool.execute(
                 "{\"runId\":5,\"confirmed\":true,\"impactToken\":\""
                         + preview.path("impactToken").asText() + "\"}"));
@@ -131,7 +162,7 @@ class VerificationRunCleanupToolsTest {
         assertEquals("NuSMV process failed", preview.path("errorMessage").asText());
         verify(verificationService, never()).deleteTask(1L, 9L);
 
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", preview.path("impactToken").asText());
         JsonNode json = objectMapper.readTree(dismissTool.execute(
                 "{\"taskId\":9,\"confirmed\":true,\"impactToken\":\""
                         + preview.path("impactToken").asText() + "\"}"));
@@ -152,7 +183,7 @@ class VerificationRunCleanupToolsTest {
 
         JsonNode preview = objectMapper.readTree(
                 dismissTool.execute("{\"taskId\":9,\"confirmed\":false}"));
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", preview.path("impactToken").asText());
         JsonNode json = objectMapper.readTree(dismissTool.execute(
                 "{\"taskId\":9,\"confirmed\":true,\"impactToken\":\""
                         + preview.path("impactToken").asText() + "\"}"));
@@ -233,7 +264,7 @@ class VerificationRunCleanupToolsTest {
                 .when(failingMapper).writeValueAsString(any(Object.class));
         DismissVerifyTaskTool failingTool = new DismissVerifyTaskTool(
                 verificationService, failingMapper, destructiveActionGuard);
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", preview.path("impactToken").asText());
 
         JsonNode json = objectMapper.readTree(failingTool.execute(
                 "{\"taskId\":9,\"confirmed\":true,\"impactToken\":\""

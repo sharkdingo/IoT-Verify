@@ -5,11 +5,16 @@ import cn.edu.nju.Iot_Verify.component.aitool.AbstractAiTool;
 import cn.edu.nju.Iot_Verify.component.aitool.AiDestructiveActionGuard;
 import cn.edu.nju.Iot_Verify.component.aitool.BoardSemanticValidator;
 import cn.edu.nju.Iot_Verify.dto.board.CollectionMutationResultDto;
+import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
+import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvRelationUtils;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
+import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.security.UserContextHolder;
 import cn.edu.nju.Iot_Verify.exception.BaseException;
+import cn.edu.nju.Iot_Verify.exception.BadRequestException;
+import cn.edu.nju.Iot_Verify.exception.ResourceNotFoundException;
 import cn.edu.nju.Iot_Verify.exception.ConflictException;
 import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
 import cn.edu.nju.Iot_Verify.service.BoardStorageService;
@@ -57,13 +62,13 @@ public class ManageRuleTool extends AbstractAiTool {
 
         props.put("action", Map.of(
                 "type", "string",
-                "enum", List.of("add", "delete", "reorder"),
-                "description", "Action to perform: 'add' to create a new rule, 'delete' to remove an existing rule, 'reorder' to set the exact execution order of all existing rules. Rule execution order is verification-significant."
+                "enum", List.of("add", "update", "delete", "reorder"),
+                "description", "Action to perform: 'add' to create a new rule, 'update' to edit one existing rule in place, 'delete' to remove an existing rule, 'reorder' to set the exact execution order of all existing rules. Rule execution order is verification-significant."
         ));
 
         props.put("conditions", Map.of(
                 "type", "array",
-                "description", "Required for 'add'. Each condition: {deviceId, deviceLabel?, attribute, targetType, relation, value}. deviceId is the canonical board device id returned by board_overview or recommend_rules; deviceLabel is display-only. targetType=api is an event signal: attribute must be a Signal=true API and relation/value must be omitted. targetType=state/mode/variable requires relation and value; all value conditions support =, !=, in, not in; numeric variables additionally support >, <, >=, <=.",
+                "description", "Required for 'add' and 'update'. Each condition: {deviceId, deviceLabel?, attribute, targetType, relation, value}. deviceId is the canonical board device id returned by board_overview or recommend_rules; deviceLabel is display-only. targetType=api is an event signal: attribute must be a Signal=true API and relation/value must be omitted. targetType=state/mode/variable requires relation and value; all value conditions support =, !=, in, not in; numeric variables additionally support >, <, >=, <=.",
                 "items", Map.of(
                         "type", "object",
                         "properties", Map.of(
@@ -81,7 +86,7 @@ public class ManageRuleTool extends AbstractAiTool {
 
         props.put("command", Map.of(
                 "type", "object",
-                "description", "Required for 'add'. The action to execute when conditions are met. deviceId/contentDevice must be canonical board device ids; labels are display-only.",
+                "description", "Required for 'add' and 'update'. The action to execute when conditions are met. deviceId/contentDevice must be canonical board device ids; labels are display-only.",
                 "properties", Map.of(
                         "deviceId", Map.of("type", "string"),
                         "deviceLabel", Map.of("type", "string", "description", "Optional display snapshot; ignored for identity resolution."),
@@ -96,16 +101,20 @@ public class ManageRuleTool extends AbstractAiTool {
 
         props.put("label", Map.of(
                 "type", "string",
-                "description", "Optional user-facing rule name. It does not define behavior. If omitted, the backend generates a readable label from the typed conditions and command."
+                "description", "Optional user-facing rule name. It does not define behavior. If omitted, add generates a readable label; update preserves the existing label."
         ));
 
         props.put("ruleId", Map.of(
                 "type", "integer",
-                "description", "Required for 'delete'. The ID of the rule to delete (from list_rules result)."
+                "description", "Required for 'update' or 'delete'. Copy the existing ruleId from list_rules."
+        ));
+        props.put("expectedRule", Map.of(
+                "type", "object",
+                "description", "Required only for update. Copy the complete unchanged rule object from the latest list_rules result, including its display fields. The server rejects a changed baseline. Send the desired conditions/command separately; copy their schema fields without summary/description. Update keeps this rule's ID and execution position, preserves other rules, and supports undo."
         ));
         props.put("confirmed", Map.of(
                 "type", "boolean",
-                "description", "For delete: use false to preview the exact rule without changing it; use true only in a later turn after the user explicitly confirms that preview. Omit it entirely for add, which accepts no confirmation fields."
+                "description", "For delete: use false to preview the exact rule without changing it; use true only in a later turn after the user explicitly confirms that preview. Omit it entirely for add/update, which accept no confirmation fields."
         ));
         props.put("impactToken", Map.of(
                 "type", "string",
@@ -126,7 +135,7 @@ public class ManageRuleTool extends AbstractAiTool {
                 "object", props, List.of("action")
         );
 
-        return LlmToolSpec.of(getName(), "Add an automation rule, preview/delete one through explicit two-turn confirmation, or reorder all rules. Use list_rules before deleting or reordering.", schema);
+        return LlmToolSpec.of(getName(), "Add an automation rule, update an existing rule in place, preview/delete one through explicit two-turn confirmation, or reorder all rules. Use list_rules before updating, deleting or reordering. For a requested threshold or condition edit use update; never add a replacement and delete the original. Applying a formal fix_violation proposal, including rule removal, must use apply_fix instead so its verified-proposal guards are retained.", schema);
     }
 
     protected String doExecute(Long userId, String argsJson) {
@@ -139,14 +148,15 @@ public class ManageRuleTool extends AbstractAiTool {
             }
             requireOnlyFields(args, "arguments", Set.of(
                     "action", "conditions", "command", "label", "ruleId", "ruleIds",
-                    "expectedRuleIds", "confirmed", "impactToken"));
+                    "expectedRuleIds", "expectedRule", "confirmed", "impactToken"));
             String action = requiredTextField(args, "action", "arguments").toLowerCase(Locale.ROOT);
 
             return switch (action) {
                 case "add" -> executeAdd(userId, args);
+                case "update" -> executeUpdate(userId, args);
                 case "delete" -> executeDelete(userId, args);
                 case "reorder" -> executeReorder(userId, args);
-                default -> errorJson("Unknown action: " + action + ". Use 'add', 'delete', or 'reorder'.",
+                default -> errorJson("Unknown action: " + action + ". Use 'add', 'update', 'delete', or 'reorder'.",
                         "VALIDATION_ERROR", 400);
             };
         } catch (ArgValidationException e) {
@@ -166,157 +176,10 @@ public class ManageRuleTool extends AbstractAiTool {
 
     private String executeAdd(Long userId, JsonNode args) throws Exception {
         requireOnlyFields(args, "arguments", Set.of("action", "conditions", "command", "label"));
-        JsonNode conditionsNode = args.path("conditions");
-        JsonNode commandNode = args.path("command");
         List<DeviceNodeDto> nodes = safeList(boardStorageService.getNodes(userId));
-        Set<String> deviceIds = getDeviceIds(nodes);
-        Map<String, String> labelsById = labelsById(nodes);
-        BoardSemanticValidator.BoardContext semanticContext = BoardSemanticValidator.context(
-                nodes,
+        RuleDto newRule = parseRule(userId, args, nodes,
                 safeList(boardStorageService.getDeviceTemplates(userId)),
-                safeList(boardStorageService.getEnvironmentVariables(userId))
-        );
-
-        if (conditionsNode.isMissingNode() || !conditionsNode.isArray() || conditionsNode.isEmpty()) {
-            return errorJson("'conditions' array is required for add action.",
-                    "VALIDATION_ERROR", 400);
-        }
-        if (commandNode.isMissingNode() || !commandNode.isObject()) {
-            return errorJson("'command' object is required for add action.",
-                    "VALIDATION_ERROR", 400);
-        }
-
-        List<RuleDto.Condition> conditions = new ArrayList<>();
-        int index = 0;
-        for (JsonNode cn : conditionsNode) {
-            String conditionPath = "arguments.conditions[" + index + "]";
-            requireOnlyFields(cn, conditionPath, Set.of(
-                    "deviceId", "deviceLabel", "attribute", "targetType", "relation", "value"));
-            String deviceName = nullableTextField(cn, "deviceId", conditionPath);
-            String attribute = nullableTextField(cn, "attribute", conditionPath);
-            if (deviceName == null || attribute == null) {
-                return errorJson("Condition " + (index + 1) + " must include non-empty 'deviceId' and 'attribute'.",
-                        "VALIDATION_ERROR", 400);
-            }
-
-            String relationInput = nullableTextField(cn, "relation", conditionPath);
-            String relation = normalizeRelation(relationInput);
-            String value = nullableTextField(cn, "value", conditionPath);
-            String targetTypeInput = nullableTextField(cn, "targetType", conditionPath);
-            String targetType = normalizeTargetType(targetTypeInput);
-
-            if (targetTypeInput == null) {
-                return errorJson("Condition " + (index + 1) + " must include non-empty 'targetType'.",
-                        "VALIDATION_ERROR", 400);
-            }
-            if (targetType == null) {
-                return errorJson("Unsupported targetType '" + targetTypeInput + "' in condition " + (index + 1)
-                        + ". Allowed: api, variable, mode, state.",
-                        "VALIDATION_ERROR", 400);
-            }
-            if (!deviceIds.contains(deviceName)) {
-                return errorJson("Unknown deviceId '" + deviceName + "' in condition " + (index + 1)
-                        + ". Use a canonical id returned by board_overview.",
-                        "VALIDATION_ERROR", 400);
-            }
-
-            if (relationInput != null && relation == null) {
-                return errorJson("Unsupported relation '" + relationInput + "' in condition " + (index + 1)
-                        + ". Allowed: =, !=, >, <, >=, <=, in, not in.",
-                        "VALIDATION_ERROR", 400);
-            }
-
-            if ("api".equals(targetType)) {
-                if (relation != null || value != null) {
-                    return errorJson("API signal condition " + (index + 1) + " must not include relation or value.",
-                            "VALIDATION_ERROR", 400);
-                }
-            } else {
-                if (relation == null || value == null) {
-                    return errorJson("Condition relation and value are required for targetType '" + targetType
-                            + "' in condition " + (index + 1) + ".",
-                            "VALIDATION_ERROR", 400);
-                }
-            }
-
-            if (("in".equals(relation) || "not in".equals(relation)) && isEmptyValueList(value)) {
-                return errorJson("Condition value list cannot be empty for relation '" + relation
-                        + "' in condition " + (index + 1) + ".",
-                        "VALIDATION_ERROR", 400);
-            }
-
-            if (("state".equals(targetType) || "mode".equals(targetType))
-                    && !ENUM_RELATIONS.contains(relation)) {
-                return errorJson("Condition targetType '" + targetType
-                                + "' only supports =, !=, in, not in. Invalid condition: " + (index + 1),
-                        "VALIDATION_ERROR", 400);
-            }
-
-            RuleDto.Condition condition = RuleDto.Condition.builder()
-                    .deviceName(deviceName)
-                    .attribute(attribute)
-                    .targetType(targetType)
-                    .relation(relation)
-                    .value(value)
-                    .build();
-            String semanticError = BoardSemanticValidator.validateRuleCondition(semanticContext, condition, index);
-            if (semanticError != null) {
-                return errorJson(semanticError, "VALIDATION_ERROR", 400);
-            }
-            conditions.add(condition);
-            index++;
-        }
-
-        requireOnlyFields(commandNode, "arguments.command", Set.of(
-                "deviceId", "deviceLabel", "action", "contentDevice", "contentDeviceLabel", "content"));
-        String commandDeviceName = nullableTextField(commandNode, "deviceId", "arguments.command");
-        String commandAction = nullableTextField(commandNode, "action", "arguments.command");
-        if (commandDeviceName == null || commandAction == null) {
-            return errorJson("Command must include non-empty 'deviceId' and 'action'.",
-                    "VALIDATION_ERROR", 400);
-        }
-        if (!deviceIds.contains(commandDeviceName)) {
-            return errorJson("Unknown command deviceId '" + commandDeviceName
-                            + "'. Use a canonical id returned by board_overview.",
-                    "VALIDATION_ERROR", 400);
-        }
-
-        String contentDevice = nullableTextField(commandNode, "contentDevice", "arguments.command");
-        if (contentDevice != null && !deviceIds.contains(contentDevice)) {
-            return errorJson("Unknown command contentDevice '" + contentDevice + "'. Use the board device node id.",
-                    "VALIDATION_ERROR", 400);
-        }
-
-        RuleDto.Command command = RuleDto.Command.builder()
-                .deviceName(commandDeviceName)
-                .action(commandAction)
-                .contentDevice(contentDevice)
-                .content(nullableTextField(commandNode, "content", "arguments.command"))
-                .build();
-        String commandSemanticError = BoardSemanticValidator.validateRuleCommand(semanticContext, command);
-        if (commandSemanticError != null) {
-            return errorJson(commandSemanticError, "VALIDATION_ERROR", 400);
-        }
-        BoardSemanticValidator.GroupValidationIssue groupIssue =
-                BoardSemanticValidator.validateRuleConditionGroup(semanticContext, conditions, command);
-        if (groupIssue != null) {
-            return errorJson(groupIssue.message(), groupIssue.reasonCode(), 400);
-        }
-
-        String ruleString = nullableTextField(args, "label", "arguments");
-        if (ruleString == null) {
-            // Bounded only on this branch: a composed preview is the product's own output, and long
-            // device labels can push a legal rule past the cap, so truncating is right. A `label` the
-            // caller supplied is its choice and stays subject to rejection.
-            ruleString = RulePreviewText.bounded(buildRuleString(conditions, command, labelsById));
-        }
-
-        RuleDto newRule = RuleDto.builder()
-                .userId(userId)
-                .conditions(conditions)
-                .command(command)
-                .ruleString(ruleString)
-                .build();
+                safeList(boardStorageService.getEnvironmentVariables(userId)));
 
         CollectionMutationResultDto<RuleDto> mutation = boardStorageService.addRule(userId, newRule);
 
@@ -330,6 +193,210 @@ public class ManageRuleTool extends AbstractAiTool {
         return successJson(response, "Rule created but not formally verified.");
     }
 
+    /** Add and update share the same strict condition, command and conjunction admission. */
+    private RuleDto parseRule(Long userId, JsonNode args, List<DeviceNodeDto> nodes,
+                              List<DeviceTemplateDto> templates,
+                              List<BoardEnvironmentVariableDto> environment)
+            throws ArgValidationException {
+        JsonNode conditionsNode = args.path("conditions");
+        JsonNode commandNode = args.path("command");
+        Set<String> deviceIds = getDeviceIds(nodes);
+        Map<String, String> labelsById = labelsById(nodes);
+        BoardSemanticValidator.BoardContext semanticContext = BoardSemanticValidator.context(nodes, templates, environment);
+
+        if (conditionsNode.isMissingNode() || !conditionsNode.isArray() || conditionsNode.isEmpty()) {
+            throw new ArgValidationException(errorJson("'conditions' array is required for add/update.",
+                    "VALIDATION_ERROR", 400));
+        }
+        if (commandNode.isMissingNode() || !commandNode.isObject()) {
+            throw new ArgValidationException(errorJson("'command' object is required for add/update.",
+                    "VALIDATION_ERROR", 400));
+        }
+
+        List<RuleDto.Condition> conditions = new ArrayList<>();
+        int index = 0;
+        for (JsonNode cn : conditionsNode) {
+            String conditionPath = "arguments.conditions[" + index + "]";
+            requireOnlyFields(cn, conditionPath, Set.of(
+                    "deviceId", "deviceLabel", "attribute", "targetType", "relation", "value"));
+            String deviceName = nullableDeviceIdField(cn, "deviceId", conditionPath);
+            String attribute = nullableTextField(cn, "attribute", conditionPath);
+            if (deviceName == null || attribute == null) {
+                throw new ArgValidationException(errorJson("Condition " + (index + 1) + " must include non-empty 'deviceId' and 'attribute'.",
+                        "VALIDATION_ERROR", 400));
+            }
+
+            String relationInput = nullableTextField(cn, "relation", conditionPath);
+            String relation = normalizeRelation(relationInput);
+            String value = nullableTextField(cn, "value", conditionPath);
+            String targetTypeInput = nullableTextField(cn, "targetType", conditionPath);
+            String targetType = normalizeTargetType(targetTypeInput);
+
+            if (targetTypeInput == null) {
+                throw new ArgValidationException(errorJson("Condition " + (index + 1) + " must include non-empty 'targetType'.",
+                        "VALIDATION_ERROR", 400));
+            }
+            if (targetType == null) {
+                throw new ArgValidationException(errorJson("Unsupported targetType '" + targetTypeInput + "' in condition " + (index + 1)
+                        + ". Allowed: api, variable, mode, state.",
+                        "VALIDATION_ERROR", 400));
+            }
+            if (!deviceIds.contains(deviceName)) {
+                throw new ArgValidationException(errorJson("Unknown deviceId '" + deviceName + "' in condition " + (index + 1)
+                        + ". Use a canonical id returned by board_overview.",
+                        "VALIDATION_ERROR", 400));
+            }
+
+            if (relationInput != null && relation == null) {
+                throw new ArgValidationException(errorJson("Unsupported relation '" + relationInput + "' in condition " + (index + 1)
+                        + ". Allowed: =, !=, >, <, >=, <=, in, not in.",
+                        "VALIDATION_ERROR", 400));
+            }
+
+            if ("api".equals(targetType)) {
+                if (relation != null || value != null) {
+                    throw new ArgValidationException(errorJson("API signal condition " + (index + 1) + " must not include relation or value.",
+                            "VALIDATION_ERROR", 400));
+                }
+            } else {
+                if (relation == null || value == null) {
+                    throw new ArgValidationException(errorJson("Condition relation and value are required for targetType '" + targetType
+                            + "' in condition " + (index + 1) + ".",
+                            "VALIDATION_ERROR", 400));
+                }
+            }
+
+            if (("in".equals(relation) || "not in".equals(relation)) && isEmptyValueList(value)) {
+                throw new ArgValidationException(errorJson("Condition value list cannot be empty for relation '" + relation
+                        + "' in condition " + (index + 1) + ".",
+                        "VALIDATION_ERROR", 400));
+            }
+
+            if (("state".equals(targetType) || "mode".equals(targetType))
+                    && !ENUM_RELATIONS.contains(relation)) {
+                throw new ArgValidationException(errorJson("Condition targetType '" + targetType
+                                + "' only supports =, !=, in, not in. Invalid condition: " + (index + 1),
+                        "VALIDATION_ERROR", 400));
+            }
+
+            RuleDto.Condition condition = RuleDto.Condition.builder()
+                    .deviceName(deviceName)
+                    .attribute(attribute)
+                    .targetType(targetType)
+                    .relation(relation)
+                    .value(value)
+                    .build();
+            String semanticError = BoardSemanticValidator.validateRuleCondition(semanticContext, condition, index);
+            if (semanticError != null) {
+                throw new ArgValidationException(errorJson(semanticError, "VALIDATION_ERROR", 400));
+            }
+            conditions.add(condition);
+            index++;
+        }
+
+        requireOnlyFields(commandNode, "arguments.command", Set.of(
+                "deviceId", "deviceLabel", "action", "contentDevice", "contentDeviceLabel", "content"));
+        String commandDeviceName = nullableDeviceIdField(commandNode, "deviceId", "arguments.command");
+        String commandAction = nullableTextField(commandNode, "action", "arguments.command");
+        if (commandDeviceName == null || commandAction == null) {
+            throw new ArgValidationException(errorJson("Command must include non-empty 'deviceId' and 'action'.",
+                    "VALIDATION_ERROR", 400));
+        }
+        if (!deviceIds.contains(commandDeviceName)) {
+            throw new ArgValidationException(errorJson("Unknown command deviceId '" + commandDeviceName
+                            + "'. Use a canonical id returned by board_overview.",
+                    "VALIDATION_ERROR", 400));
+        }
+
+        String contentDevice = nullableDeviceIdField(commandNode, "contentDevice", "arguments.command");
+        if (contentDevice != null && !deviceIds.contains(contentDevice)) {
+            throw new ArgValidationException(errorJson("Unknown command contentDevice '" + contentDevice + "'. Use the board device node id.",
+                    "VALIDATION_ERROR", 400));
+        }
+
+        RuleDto.Command command = RuleDto.Command.builder()
+                .deviceName(commandDeviceName)
+                .action(commandAction)
+                .contentDevice(contentDevice)
+                .content(nullableTextField(commandNode, "content", "arguments.command"))
+                .build();
+        String commandSemanticError = BoardSemanticValidator.validateRuleCommand(semanticContext, command);
+        if (commandSemanticError != null) {
+            throw new ArgValidationException(errorJson(commandSemanticError, "VALIDATION_ERROR", 400));
+        }
+        BoardSemanticValidator.GroupValidationIssue groupIssue =
+                BoardSemanticValidator.validateRuleConditionGroup(semanticContext, conditions, command);
+        if (groupIssue != null) {
+            throw new ArgValidationException(errorJson(groupIssue.message(), groupIssue.reasonCode(), 400));
+        }
+
+        String ruleString = nullableTextField(args, "label", "arguments");
+        if (ruleString == null) {
+            // Bounded only on this branch: a composed preview is the product's own output, and long
+            // device labels can push a legal rule past the cap, so truncating is right. A `label` the
+            // caller supplied is its choice and stays subject to rejection.
+            ruleString = RulePreviewText.bounded(buildRuleString(conditions, command, labelsById));
+        }
+
+        return RuleDto.builder()
+                .userId(userId)
+                .conditions(conditions)
+                .command(command)
+                .ruleString(ruleString)
+                .build();
+
+    }
+
+    private String executeUpdate(Long userId, JsonNode args) throws Exception {
+        requireOnlyFields(args, "arguments", Set.of(
+                "action", "ruleId", "expectedRule", "conditions", "command", "label"));
+        long ruleId = positiveLongArg(args, "ruleId");
+        JsonNode expected = args.get("expectedRule");
+        if (expected == null || !expected.isObject()) {
+            return errorJson("expectedRule must copy the complete rule from list_rules.", "VALIDATION_ERROR", 400);
+        }
+        long expectedId = positiveLongArg(expected, "ruleId");
+        if (expectedId != ruleId) {
+            return errorJson("expectedRule.ruleId must match ruleId.", "VALIDATION_ERROR", 400);
+        }
+        // JSON integer node widths differ after a round trip; the typed id has one canonical width.
+        ((com.fasterxml.jackson.databind.node.ObjectNode) expected).put("ruleId", expectedId);
+        BoardSemanticSnapshotDto baseline = boardStorageService.getSemanticSnapshot(userId);
+        RuleDto proposed = parseRule(userId, args, baseline.nodes(), baseline.deviceTemplates(), baseline.environmentVariables());
+        CollectionMutationResultDto<RuleDto> mutation = boardStorageService.updateRulesAgainstSnapshot(userId, current -> {
+            List<RuleDto> next = new ArrayList<>(current.rules());
+            int position = -1;
+            for (int i = 0; i < next.size(); i++) {
+                if (Long.valueOf(ruleId).equals(next.get(i).getId())) { position = i; break; }
+            }
+            if (position < 0) throw new ResourceNotFoundException("Rule", ruleId);
+            RuleDto existing = next.get(position);
+            if (!expected.equals(objectMapper.valueToTree(RuleToolPresenter.present(existing, current.nodes())))) {
+                throw new ConflictException("This rule changed after it was read. Read list_rules again before updating it.");
+            }
+            // Template/state drift is checked against the committing snapshot, not the earlier read.
+            BoardSemanticValidator.GroupValidationIssue issue = BoardSemanticValidator.validateRuleConditionGroup(
+                    BoardSemanticValidator.context(current.nodes(), current.deviceTemplates(), current.environmentVariables()),
+                    proposed.getConditions(), proposed.getCommand());
+            if (issue != null) throw new BadRequestException(issue.message());
+            proposed.setId(existing.getId());
+            proposed.setCreatedAt(existing.getCreatedAt());
+            if (!args.has("label")) proposed.setRuleString(existing.getRuleString());
+            next.set(position, proposed);
+            return next;
+        });
+        RuleDto saved = mutation.getCurrentItems().stream().filter(rule -> Long.valueOf(ruleId).equals(rule.getId()))
+                .findFirst().orElseThrow(() -> new IllegalStateException("Updated rule missing from the committed snapshot"));
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("message", "Rule updated in place. It has not been formally re-verified.");
+        response.put("operation", "updated");
+        response.put("verificationStatus", "NOT_VERIFIED");
+        response.put("executionOrder", mutation.getCurrentItems().indexOf(saved) + 1);
+        response.put("rule", RuleToolPresenter.present(saved, baseline.nodes()));
+        response.put("totalRules", mutation.getCurrentCount());
+        return successJson(response, "Rule updated but not formally verified.");
+    }
+
     private String executeDelete(Long userId, JsonNode args) throws Exception {
         requireOnlyFields(args, "arguments", Set.of("action", "ruleId", "confirmed", "impactToken"));
         long ruleId = positiveLongArg(args, "ruleId");
@@ -341,13 +408,14 @@ public class ManageRuleTool extends AbstractAiTool {
             return errorJson("Rule not found: " + ruleId, "NOT_FOUND", 404);
         }
 
-        Object presentedRule = RuleToolPresenter.present(
+        Map<String, Object> presentedRule = RuleToolPresenter.present(
                 target, safeList(boardStorageService.getNodes(userId)));
         Map<String, Object> bindingSnapshot = Map.of("rule", presentedRule);
         boolean confirmed = booleanArg(args, "confirmed", false);
         if (!confirmed || !UserContextHolder.isDestructiveActionConfirmed()) {
             String impactToken = destructiveActionGuard.issue(
-                    userId, getName(), Long.toString(ruleId), bindingSnapshot, null);
+                    userId, getName(), Long.toString(ruleId),
+                    (String) presentedRule.getOrDefault("label", presentedRule.get("description")), bindingSnapshot, null);
             Map<String, Object> preview = new LinkedHashMap<>();
             preview.put("message", "No changes were made. Explicit user confirmation is required before deleting this rule.");
             preview.put("operation", "preview");
@@ -362,7 +430,8 @@ public class ManageRuleTool extends AbstractAiTool {
                 userId, getName(), Long.toString(ruleId), impactToken, bindingSnapshot);
         if (!confirmation.approved()) {
             String freshToken = destructiveActionGuard.issue(
-                    userId, getName(), Long.toString(ruleId), bindingSnapshot, null);
+                    userId, getName(), Long.toString(ruleId),
+                    (String) presentedRule.getOrDefault("label", presentedRule.get("description")), bindingSnapshot, null);
             return errorJson(confirmation.message(), confirmation.errorCode(), 409, Map.of(
                     "requiresUserConfirmation", true,
                     "currentPreview", Map.of(
@@ -382,11 +451,12 @@ public class ManageRuleTool extends AbstractAiTool {
             if (current == null) {
                 return errorJson("Rule not found: " + ruleId, "NOT_FOUND", 404);
             }
-            Object currentPresentation = RuleToolPresenter.present(
+            Map<String, Object> currentPresentation = RuleToolPresenter.present(
                     current, safeList(boardStorageService.getNodes(userId)));
             Map<String, Object> currentBinding = Map.of("rule", currentPresentation);
             String freshToken = destructiveActionGuard.issue(
-                    userId, getName(), Long.toString(ruleId), currentBinding, null);
+                    userId, getName(), Long.toString(ruleId),
+                    (String) currentPresentation.getOrDefault("label", currentPresentation.get("description")), currentBinding, null);
             return errorJson(conflict.getMessage(), "CONFIRMATION_STALE", 409, Map.of(
                     "requiresUserConfirmation", true,
                     "currentPreview", Map.of(
@@ -476,8 +546,8 @@ public class ManageRuleTool extends AbstractAiTool {
     private Set<String> getDeviceIds(List<DeviceNodeDto> nodes) {
         Set<String> ids = new java.util.HashSet<>();
         for (DeviceNodeDto node : nodes) {
-            String id = node != null ? trimToNull(node.getId()) : null;
-            if (id != null) {
+            String id = node != null ? node.getId() : null;
+            if (id != null && !id.isEmpty()) {
                 ids.add(id);
             }
         }
@@ -487,8 +557,8 @@ public class ManageRuleTool extends AbstractAiTool {
     private Map<String, String> labelsById(List<DeviceNodeDto> nodes) {
         Map<String, String> labels = new HashMap<>();
         for (DeviceNodeDto node : nodes) {
-            String id = node != null ? trimToNull(node.getId()) : null;
-            if (id == null) {
+            String id = node != null ? node.getId() : null;
+            if (id == null || id.isEmpty()) {
                 continue;
             }
             String label = trimToNull(node.getLabel());

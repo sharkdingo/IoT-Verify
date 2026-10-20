@@ -11,16 +11,20 @@ export type TaskProgressStage =
   | 'EXPLORING_CANDIDATES'
   | 'PERSISTING_RESULT'
 
-export type InteractiveOperationStage =
-  | 'QUEUED'
-  | 'RUNNING'
-  | 'PREPARING_CONTEXT'
-  | 'REQUESTING_MODEL'
-  | 'VALIDATING_RESULT'
-  | 'PREPARING_MODEL'
-  | 'SEARCHING_AND_VERIFYING'
-  | 'FINALIZING'
-  | 'CANCELLING'
+export const INTERACTIVE_OPERATION_STAGES = [
+  'QUEUED',
+  'RUNNING',
+  'PREPARING_CONTEXT',
+  'REQUESTING_MODEL',
+  'VALIDATING_RESULT',
+  'PREPARING_MODEL',
+  'SEARCHING_AND_VERIFYING',
+  'COMPARING_VERIFIED_OPTIONS',
+  'FINALIZING',
+  'CANCELLING'
+] as const
+
+export type InteractiveOperationStage = typeof INTERACTIVE_OPERATION_STAGES[number]
 
 export interface InteractiveOperationStatus {
   requestId: string

@@ -171,7 +171,7 @@ three candidates to one repair is the next step's job, not localization's.
 | :--- | :--- |
 | Parameter adjustment | `SKIPPED_NO_PARAMETERIZABLE_VALUES` — nothing numeric to move |
 | Condition adjustment | `NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE` — no condition change prevents this counterexample |
-| Permanent removal | **Verified**: delete the convenience-unlock rule |
+| Rule removal | **Verified**: delete the convenience-unlock rule |
 
 This is the most honest minute of the demo, so do not rush it. Two strategies decline, and
 both decline for a *reason the tool states*. Parameter tuning has no threshold to move

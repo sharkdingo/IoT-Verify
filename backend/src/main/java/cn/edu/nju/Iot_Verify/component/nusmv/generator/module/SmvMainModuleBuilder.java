@@ -39,6 +39,8 @@ public class SmvMainModuleBuilder {
 
     private record EarlierRuleAction(Set<Integer> affectedModes, String rawCondition) {}
 
+    private record RuleBranchKey(String targetVarName, int modeIndex) {}
+
     /**
      * Build a parameterized SMV main module (for ActFeedback §5 fix strategies).
      */
@@ -77,7 +79,9 @@ public class SmvMainModuleBuilder {
         if (ctx == null || ctx.config() == null) return false;
         ParameterizationConfig c = ctx.config();
         return (c.getParameterizedThresholds() != null && !c.getParameterizedThresholds().isEmpty())
-                || (c.getConditionLambdas() != null && !c.getConditionLambdas().isEmpty())
+                || (c.getConditionLambdas() != null && c.getConditionLambdas().keySet().stream()
+                        .anyMatch(key -> c.getFixedConditionLambdas() == null
+                                || !c.getFixedConditionLambdas().containsKey(key)))
                 || (c.getCandidateConditionValues() != null && !c.getCandidateConditionValues().isEmpty());
     }
 
@@ -92,8 +96,11 @@ public class SmvMainModuleBuilder {
             }
         }
         if (c.getConditionLambdas() != null) {
-            for (String lambdaName : c.getConditionLambdas().values()) {
-                content.append("\n\t").append(lambdaName).append(": boolean;");
+            for (Map.Entry<String, String> lambda : c.getConditionLambdas().entrySet()) {
+                if (c.getFixedConditionLambdas() == null
+                        || !c.getFixedConditionLambdas().containsKey(lambda.getKey())) {
+                    content.append("\n\t").append(lambda.getValue()).append(": boolean;");
+                }
             }
         }
         if (c.getCandidateConditionValues() != null) {
@@ -126,10 +133,28 @@ public class SmvMainModuleBuilder {
         }
     }
 
-    private static void appendParameterizationInvars(StringBuilder content, ParamCtx ctx) {
-        if (ctx == null || ctx.config() == null || ctx.config().getExclusionInvars() == null) return;
-        for (String invar : ctx.config().getExclusionInvars()) {
-            content.append("\nINVAR ").append(invar).append(";");
+    private static void appendParameterizationConstraints(StringBuilder content, ParamCtx ctx) {
+        if (ctx == null || ctx.config() == null) return;
+        ParameterizationConfig config = ctx.config();
+        if (config.getFixedConditionLambdas() != null && !config.getFixedConditionLambdas().isEmpty()) {
+            // Constants also fold inside learned exclusions. INVAR-pinned boolean variables still
+            // made those exclusions build exponential diagrams even after the rule guards were folded.
+            content.append("\nDEFINE");
+            for (Map.Entry<String, Boolean> fixed : config.getFixedConditionLambdas().entrySet()) {
+                String lambda = config.getConditionLambdas() != null
+                        ? config.getConditionLambdas().get(fixed.getKey()) : null;
+                if (lambda == null || fixed.getValue() == null) {
+                    throw SmvGenerationException.invalidBuilderInput("SmvMainModuleBuilder",
+                            "fixed condition lambda", "must name a declared guard with a boolean value");
+                }
+                content.append("\n\t").append(lambda).append(" := ")
+                        .append(fixed.getValue() ? "TRUE" : "FALSE").append(";");
+            }
+        }
+        if (config.getExclusionInvars() != null) {
+            for (String invar : config.getExclusionInvars()) {
+                content.append("\nINVAR ").append(invar).append(";");
+            }
         }
     }
 
@@ -270,7 +295,7 @@ public class SmvMainModuleBuilder {
             content.append("\nINVAR ").append(SmvConstants.NUSMV_COMPROMISED_POINT_COUNT)
                     .append(" <= ").append(attackBudget).append(";");
         }
-        appendParameterizationInvars(content, paramCtx);
+        appendParameterizationConstraints(content, paramCtx);
 
         content.append("\nVAR");
 
@@ -355,12 +380,18 @@ public class SmvMainModuleBuilder {
             content.append(";");
         }
 
-        appendStateTransitions(content, devices, rules, deviceSmvMap, isAttack, paramCtx, context);
+        Map<String, List<RuleDto>> rulesByTarget = groupRulesByResolvedTarget(rules, deviceSmvMap);
+        // State, property, and execution-probe assignments share branches only within this build.
+        Map<RuleBranchKey, List<SelectedRuleBranch>> selectedBranchesByMode = new HashMap<>();
+        appendStateTransitions(content, devices, rulesByTarget, deviceSmvMap, isAttack, paramCtx, context,
+                selectedBranchesByMode);
         appendEnvTransitions(content, devices, deviceSmvMap, environmentDomains);
         appendApiSignalTransitions(content, devices, deviceSmvMap);
-        appendPropertyTransitions(content, devices, rules, deviceSmvMap, isAttack, PropertyDimension.TRUST, paramCtx, context);
+        appendPropertyTransitions(content, devices, rulesByTarget, deviceSmvMap, isAttack,
+                PropertyDimension.TRUST, paramCtx, context, selectedBranchesByMode);
         if (enablePrivacy) {
-            appendPropertyTransitions(content, devices, rules, deviceSmvMap, isAttack, PropertyDimension.PRIVACY, paramCtx, context);
+            appendPropertyTransitions(content, devices, rulesByTarget, deviceSmvMap, isAttack,
+                    PropertyDimension.PRIVACY, paramCtx, context, selectedBranchesByMode);
         }
         appendVariablePropertyTransitions(content, devices, deviceSmvMap, PropertyDimension.TRUST, isAttack);
         if (enablePrivacy) {
@@ -369,7 +400,8 @@ public class SmvMainModuleBuilder {
         // Impact rates are DEFINEs inside each device module, so main emits no rate transition.
         appendExternalVariableAssignments(content, devices, deviceSmvMap, isAttack);
         appendInternalVariableTransitions(content, devices, deviceSmvMap, isAttack);
-        appendRuleExecutionProbeAssignments(content, rules, deviceSmvMap, isAttack, paramCtx, context);
+        appendRuleExecutionProbeAssignments(content, rules, rulesByTarget, deviceSmvMap, isAttack,
+                paramCtx, context, selectedBranchesByMode);
         appendGuardProbes(content, safeGuardProbes, deviceSmvMap, isAttack, paramCtx);
 
         return content.toString();
@@ -548,8 +580,15 @@ public class SmvMainModuleBuilder {
             Map<String, DeviceSmvData> deviceSmvMap,
             boolean isAttack,
             ParamCtx paramCtx,
-            SmvGenerationContext context) {
+            SmvGenerationContext context,
+            Map<RuleBranchKey, List<SelectedRuleBranch>> selectedBranchesByMode) {
+        RuleBranchKey key = new RuleBranchKey(targetVarName, modeIndex);
+        List<SelectedRuleBranch> cached = selectedBranchesByMode.get(key);
+        if (cached != null) {
+            return cached;
+        }
         if (deviceRules == null || deviceRules.isEmpty()) {
+            selectedBranchesByMode.put(key, List.of());
             return List.of();
         }
 
@@ -591,6 +630,7 @@ public class SmvMainModuleBuilder {
             }
             earlierActions.add(new EarlierRuleAction(affectedModes, rawCondition));
         }
+        selectedBranchesByMode.put(key, branches);
         return branches;
     }
 
@@ -610,13 +650,12 @@ public class SmvMainModuleBuilder {
 
     private void appendStateTransitions(StringBuilder content,
                                        List<DeviceVerificationDto> devices,
-                                       List<RuleDto> rules,
+                                       Map<String, List<RuleDto>> rulesByTarget,
                                        Map<String, DeviceSmvData> deviceSmvMap,
                                        boolean isAttack,
                                        ParamCtx paramCtx,
-                                       SmvGenerationContext context) {
-        Map<String, List<RuleDto>> rulesByTarget = groupRulesByResolvedTarget(rules, deviceSmvMap);
-
+                                       SmvGenerationContext context,
+                                       Map<RuleBranchKey, List<SelectedRuleBranch>> selectedBranchesByMode) {
         for (DeviceVerificationDto device : devices) {
             DeviceSmvData smv = deviceSmvMap.get(device.getVarName());
             if (smv == null || smv.getModes() == null) continue;
@@ -635,7 +674,7 @@ public class SmvMainModuleBuilder {
 
                     for (SelectedRuleBranch branch : buildSelectedRuleBranches(
                             smv, varName, modeIdx, deviceRules, deviceSmvMap,
-                            isAttack, paramCtx, context)) {
+                            isAttack, paramCtx, context, selectedBranchesByMode)) {
                         String stateCondition = branch.selectedCondition().equals("(" + branch.rawCondition() + ")")
                                 ? branch.rawCondition()
                                 : branch.selectedCondition();
@@ -703,7 +742,12 @@ public class SmvMainModuleBuilder {
                         && cfg.getConditionLambdas() != null
                         && cfg.getConditionLambdas().containsKey(lambdaKey)) {
                     String lambdaName = cfg.getConditionLambdas().get(lambdaKey);
-                    part = "(!" + lambdaName + " | (" + part + "))";
+                    Boolean fixed = cfg.getFixedConditionLambdas() != null
+                            ? cfg.getFixedConditionLambdas().get(lambdaKey) : null;
+                    // INVAR alone is applied after NuSMV builds symbolic guards. Fold pinned
+                    // switches now so disabled free-value comparisons cannot inflate that build.
+                    part = fixed == null ? "(!" + lambdaName + " | (" + part + "))"
+                            : fixed ? part : "TRUE";
                 }
                 parts.add(part);
             } else {
@@ -802,10 +846,12 @@ public class SmvMainModuleBuilder {
      */
     private void appendRuleExecutionProbeAssignments(StringBuilder content,
                                                      List<RuleDto> rules,
+                                                     Map<String, List<RuleDto>> rulesByTarget,
                                                      Map<String, DeviceSmvData> deviceSmvMap,
                                                      boolean isAttack,
                                                      ParamCtx paramCtx,
-                                                     SmvGenerationContext context) {
+                                                     SmvGenerationContext context,
+                                                     Map<RuleBranchKey, List<SelectedRuleBranch>> selectedBranchesByMode) {
         if (rules == null || rules.isEmpty()) {
             return;
         }
@@ -817,7 +863,6 @@ public class SmvMainModuleBuilder {
             selectedBranchesByRule.put(i, new LinkedHashSet<>());
         }
 
-        Map<String, List<RuleDto>> rulesByTarget = groupRulesByResolvedTarget(rules, deviceSmvMap);
         for (Map.Entry<String, List<RuleDto>> entry : rulesByTarget.entrySet()) {
             String targetVarName = entry.getKey();
             DeviceSmvData targetSmv = deviceSmvMap.get(targetVarName);
@@ -828,7 +873,7 @@ public class SmvMainModuleBuilder {
             for (int modeIndex = 0; modeIndex < targetSmv.getModes().size(); modeIndex++) {
                 for (SelectedRuleBranch branch : buildSelectedRuleBranches(
                         targetSmv, targetVarName, modeIndex, entry.getValue(), deviceSmvMap,
-                        isAttack, paramCtx, context)) {
+                        isAttack, paramCtx, context, selectedBranchesByMode)) {
                     Integer ruleIndex = ruleIndexes.get(branch.rule());
                     if (ruleIndex != null) {
                         selectedBranchesByRule.get(ruleIndex).add(branch.selectedCondition());
@@ -1558,15 +1603,13 @@ private String buildRuleStateCondition(RuleDto.Condition condition, DeviceSmvDat
 
     private void appendPropertyTransitions(StringBuilder content,
                                            List<DeviceVerificationDto> devices,
-                                           List<RuleDto> rules,
+                                           Map<String, List<RuleDto>> rulesByTarget,
                                            Map<String, DeviceSmvData> deviceSmvMap,
                                            boolean isAttack,
                                            PropertyDimension dim,
                                            ParamCtx paramCtx,
-                                           SmvGenerationContext context) {
-
-        Map<String, List<RuleDto>> rulesByTarget = groupRulesByResolvedTarget(rules, deviceSmvMap);
-
+                                           SmvGenerationContext context,
+                                           Map<RuleBranchKey, List<SelectedRuleBranch>> selectedBranchesByMode) {
         for (DeviceVerificationDto device : devices) {
             DeviceSmvData smv = deviceSmvMap.get(device.getVarName());
             if (smv == null || smv.isSensor()) continue;
@@ -1582,7 +1625,7 @@ private String buildRuleStateCondition(RuleDto.Condition condition, DeviceSmvDat
                 if (modeStates == null) continue;
                 List<SelectedRuleBranch> selectedBranches = buildSelectedRuleBranches(
                         smv, varName, i, deviceRules, deviceSmvMap,
-                        isAttack, paramCtx, context);
+                        isAttack, paramCtx, context, selectedBranchesByMode);
 
                 for (String state : modeStates) {
                     String cleanState = state.replace(" ", "");

@@ -15,6 +15,7 @@ import cn.edu.nju.Iot_Verify.component.fuzz.paper.PaperSeed;
 import cn.edu.nju.Iot_Verify.component.fuzz.paper.PaperStructuredMonitorFactory;
 import cn.edu.nju.Iot_Verify.component.fuzz.paper.PaperTruthValue;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvDataFactory;
+import cn.edu.nju.Iot_Verify.component.template.DeviceManifestModes;
 import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
@@ -2168,15 +2169,22 @@ final class FuzzModel {
                 }
             }
             LinkedHashMap<String, String> initialLocals = new LinkedHashMap<>();
-            for (Map.Entry<String, ValueDomain> entry : locals.entrySet()) {
-                VariableStateDto submitted = submittedVariables.get(entry.getKey());
-                if (submitted == null || !hasText(submitted.getValue())) {
-                    throw error("Local variable '" + entry.getKey() + "' on device '" + id
-                            + "' requires an explicit initial value.");
+            for (DeviceManifest.InternalVariable variable : safe(manifest.getInternalVariables())) {
+                if (!Boolean.TRUE.equals(variable.getIsInside())) {
+                    continue;
                 }
-                String value = cleanLiteral(submitted.getValue());
-                entry.getValue().requireValue(value, "local variable '" + entry.getKey() + "'");
-                initialLocals.put(entry.getKey(), value);
+                String name = variable.getName();
+                VariableStateDto submitted = submittedVariables.get(name);
+                String initialValue = submitted == null
+                        ? DeviceManifestModes.localInitialValue(manifest, variable, initialRaw)
+                        : submitted.getValue();
+                if (!hasText(initialValue)) {
+                    throw error("Local variable '" + name + "' on device '" + id
+                            + "' has an invalid initial value.");
+                }
+                String value = cleanLiteral(initialValue);
+                locals.get(name).requireValue(value, "local variable '" + name + "'");
+                initialLocals.put(name, value);
             }
 
             validateDynamics(id, workingStates, locals, ownEnvironmentDomains, impactedEnvironment);

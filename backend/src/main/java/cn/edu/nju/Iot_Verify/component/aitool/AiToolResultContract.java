@@ -97,7 +97,14 @@ public final class AiToolResultContract {
             case "cancel_verify_task", "cancel_simulate_task", "cancel_fuzz_task" ->
                     booleanField(root, "cancellationAccepted") && positiveId(root, "taskId");
             case "apply_fix" -> operation(root, "preview", "applied");
-            case "manage_rule" -> operation(root, "created", "preview", "deleted", "reordered");
+            case "manage_rule" -> operation(root, "created", "preview", "deleted", "reordered")
+                    || (operation(root, "updated") && positiveId(root.path("rule"), "ruleId")
+                        && root.path("rule").path("conditions").isArray()
+                        && !root.path("rule").path("conditions").isEmpty()
+                        && root.path("rule").path("command").isObject()
+                        && "NOT_VERIFIED".equals(root.path("verificationStatus").asText())
+                        && positiveId(root, "executionOrder") && positiveId(root, "totalRules")
+                        && root.path("executionOrder").longValue() <= root.path("totalRules").longValue());
             case "verify_model" -> enumText(root, "outcome", Set.of("SATISFIED", "VIOLATED", "INCONCLUSIVE"));
             case "verify_model_async", "simulate_model_async", "fuzz_model_async" ->
                     booleanTrue(root, "taskAccepted") && positiveId(root, "taskId");

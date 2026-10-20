@@ -4,6 +4,7 @@ import cn.edu.nju.Iot_Verify.dto.model.ModelGenerationIssueDto;
 import cn.edu.nju.Iot_Verify.dto.model.ModelRunSnapshotDto;
 import cn.edu.nju.Iot_Verify.dto.model.ModelSemanticsDto;
 import cn.edu.nju.Iot_Verify.dto.model.RunInitiator;
+import cn.edu.nju.Iot_Verify.dto.trace.TraceSummaryDto;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.AllArgsConstructor;
@@ -40,6 +41,9 @@ public class VerificationRunDto {
     private Boolean modelComplete;
     private Integer violatedSpecCount;
     private Integer counterexampleCount;
+    /** Exact saved trace references, including unavailable evidence, for this run alone. */
+    @Builder.Default
+    private List<TraceSummaryDto> counterexamples = List.of();
     private Integer disabledRuleCount;
     private Integer skippedSpecCount;
     private List<ModelGenerationIssueDto> generationIssues;

@@ -1,0 +1,2365 @@
+{
+  "schema": "iot-verify.board-scene",
+  "version": 5,
+  "templates": [
+    {
+      "name": "Salus House Light",
+      "manifest": {
+        "Name": "Salus House Light",
+        "Description": "",
+        "InternalVariables": [],
+        "Modes": [
+          "SwitchState"
+        ],
+        "InitState": "off",
+        "WorkingStates": [
+          {
+            "Name": "on",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          },
+          {
+            "Name": "off",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          }
+        ],
+        "Transitions": [],
+        "APIs": [
+          {
+            "Name": "on",
+            "StartState": "",
+            "EndState": "on",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "off",
+            "StartState": "",
+            "EndState": "off",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ]
+      }
+    },
+    {
+      "name": "Salus House Blind",
+      "manifest": {
+        "Name": "Salus House Blind",
+        "Description": "",
+        "InternalVariables": [],
+        "Modes": [
+          "BlindState"
+        ],
+        "InitState": "closed",
+        "WorkingStates": [
+          {
+            "Name": "open",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          },
+          {
+            "Name": "closed",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          }
+        ],
+        "Transitions": [],
+        "APIs": [
+          {
+            "Name": "open",
+            "StartState": "",
+            "EndState": "open",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "closed",
+            "StartState": "",
+            "EndState": "closed",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ]
+      }
+    },
+    {
+      "name": "Salus House Door",
+      "manifest": {
+        "Name": "Salus House Door",
+        "Description": "",
+        "InternalVariables": [],
+        "Modes": [
+          "LockState"
+        ],
+        "InitState": "locked",
+        "WorkingStates": [
+          {
+            "Name": "locked",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          },
+          {
+            "Name": "unlocked",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          }
+        ],
+        "Transitions": [],
+        "APIs": [
+          {
+            "Name": "locked",
+            "StartState": "",
+            "EndState": "locked",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "unlocked",
+            "StartState": "",
+            "EndState": "unlocked",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ]
+      }
+    },
+    {
+      "name": "Salus House Alarm",
+      "manifest": {
+        "Name": "Salus House Alarm",
+        "Description": "",
+        "InternalVariables": [],
+        "Modes": [
+          "SwitchState"
+        ],
+        "InitState": "off",
+        "WorkingStates": [
+          {
+            "Name": "on",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          },
+          {
+            "Name": "off",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          }
+        ],
+        "Transitions": [],
+        "APIs": [
+          {
+            "Name": "on",
+            "StartState": "",
+            "EndState": "on",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "off",
+            "StartState": "",
+            "EndState": "off",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ]
+      }
+    },
+    {
+      "name": "Salus House Camera",
+      "manifest": {
+        "Name": "Salus House Camera",
+        "Description": "",
+        "InternalVariables": [],
+        "Modes": [
+          "SwitchState"
+        ],
+        "InitState": "off",
+        "WorkingStates": [
+          {
+            "Name": "on",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          },
+          {
+            "Name": "off",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          }
+        ],
+        "Transitions": [],
+        "APIs": [
+          {
+            "Name": "on",
+            "StartState": "",
+            "EndState": "on",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "off",
+            "StartState": "",
+            "EndState": "off",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ]
+      }
+    },
+    {
+      "name": "Salus Bedroom Temperature",
+      "manifest": {
+        "Name": "Salus Bedroom Temperature",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "bedroomTemperature",
+            "Description": "",
+            "IsInside": false,
+            "Reads": true,
+            "FalsifiableWhenCompromised": false,
+            "Trust": "trusted",
+            "Privacy": "public",
+            "LowerBound": 0,
+            "UpperBound": 50,
+            "NaturalChangeRate": "[-1,1]"
+          }
+        ],
+        "Modes": [],
+        "InitState": "",
+        "WorkingStates": [],
+        "Transitions": [],
+        "APIs": []
+      }
+    },
+    {
+      "name": "Salus Room Occupancy",
+      "manifest": {
+        "Name": "Salus Room Occupancy",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "occupied",
+            "IsInside": true,
+            "FalsifiableWhenCompromised": false,
+            "Values": [
+              "present",
+              "absent"
+            ],
+            "Trust": "trusted",
+            "Privacy": "public"
+          }
+        ],
+        "Modes": [
+          "SensorState"
+        ],
+        "InitState": "present",
+        "WorkingStates": [
+          {
+            "Name": "present",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": [
+              {
+                "VariableName": "occupied",
+                "Value": "present"
+              }
+            ]
+          },
+          {
+            "Name": "absent",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": [
+              {
+                "VariableName": "occupied",
+                "Value": "absent"
+              }
+            ]
+          }
+        ],
+        "Transitions": [],
+        "APIs": []
+      }
+    },
+    {
+      "name": "Salus Daylight",
+      "manifest": {
+        "Name": "Salus Daylight",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "daylight",
+            "IsInside": true,
+            "FalsifiableWhenCompromised": false,
+            "Values": [
+              "bright",
+              "dark"
+            ],
+            "Trust": "trusted",
+            "Privacy": "public"
+          }
+        ],
+        "Modes": [
+          "SensorState"
+        ],
+        "InitState": "bright",
+        "WorkingStates": [
+          {
+            "Name": "bright",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": [
+              {
+                "VariableName": "daylight",
+                "Value": "bright"
+              }
+            ]
+          },
+          {
+            "Name": "dark",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": [
+              {
+                "VariableName": "daylight",
+                "Value": "dark"
+              }
+            ]
+          }
+        ],
+        "Transitions": [],
+        "APIs": []
+      }
+    },
+    {
+      "name": "Salus Sleep Sensor",
+      "manifest": {
+        "Name": "Salus Sleep Sensor",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "sleep",
+            "IsInside": true,
+            "FalsifiableWhenCompromised": false,
+            "Values": [
+              "asleep",
+              "awake"
+            ],
+            "Trust": "trusted",
+            "Privacy": "public"
+          }
+        ],
+        "Modes": [
+          "SensorState"
+        ],
+        "InitState": "asleep",
+        "WorkingStates": [
+          {
+            "Name": "asleep",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": [
+              {
+                "VariableName": "sleep",
+                "Value": "asleep"
+              }
+            ]
+          },
+          {
+            "Name": "awake",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": [
+              {
+                "VariableName": "sleep",
+                "Value": "awake"
+              }
+            ]
+          }
+        ],
+        "Transitions": [],
+        "APIs": []
+      }
+    },
+    {
+      "name": "Salus Bedroom Heater",
+      "manifest": {
+        "Name": "Salus Bedroom Heater",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "bedroomTemperature",
+            "Description": "",
+            "IsInside": false,
+            "Reads": false,
+            "FalsifiableWhenCompromised": false,
+            "Trust": "trusted",
+            "Privacy": "public",
+            "LowerBound": 0,
+            "UpperBound": 50,
+            "NaturalChangeRate": "[-1,1]"
+          }
+        ],
+        "Modes": [
+          "SwitchState"
+        ],
+        "InitState": "off",
+        "WorkingStates": [
+          {
+            "Name": "on",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": [
+              {
+                "VariableName": "bedroomTemperature",
+                "ChangeRate": "1"
+              }
+            ]
+          },
+          {
+            "Name": "off",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          }
+        ],
+        "Transitions": [],
+        "APIs": [
+          {
+            "Name": "on",
+            "StartState": "",
+            "EndState": "on",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "off",
+            "StartState": "",
+            "EndState": "off",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ],
+        "ImpactedVariables": [
+          "bedroomTemperature"
+        ]
+      }
+    },
+    {
+      "name": "Salus Bedroom Cooler",
+      "manifest": {
+        "Name": "Salus Bedroom Cooler",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "bedroomTemperature",
+            "Description": "",
+            "IsInside": false,
+            "Reads": false,
+            "FalsifiableWhenCompromised": false,
+            "Trust": "trusted",
+            "Privacy": "public",
+            "LowerBound": 0,
+            "UpperBound": 50,
+            "NaturalChangeRate": "[-1,1]"
+          }
+        ],
+        "Modes": [
+          "SwitchState"
+        ],
+        "InitState": "off",
+        "WorkingStates": [
+          {
+            "Name": "on",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": [
+              {
+                "VariableName": "bedroomTemperature",
+                "ChangeRate": "-1"
+              }
+            ]
+          },
+          {
+            "Name": "off",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          }
+        ],
+        "Transitions": [],
+        "APIs": [
+          {
+            "Name": "on",
+            "StartState": "",
+            "EndState": "on",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "off",
+            "StartState": "",
+            "EndState": "off",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ],
+        "ImpactedVariables": [
+          "bedroomTemperature"
+        ]
+      }
+    },
+    {
+      "name": "Salus Living Temperature",
+      "manifest": {
+        "Name": "Salus Living Temperature",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "livingTemperature",
+            "Description": "",
+            "IsInside": false,
+            "Reads": true,
+            "FalsifiableWhenCompromised": false,
+            "Trust": "trusted",
+            "Privacy": "public",
+            "LowerBound": 0,
+            "UpperBound": 50,
+            "NaturalChangeRate": "[-1,1]"
+          }
+        ],
+        "Modes": [],
+        "InitState": "",
+        "WorkingStates": [],
+        "Transitions": [],
+        "APIs": []
+      }
+    },
+    {
+      "name": "Salus Living Heater",
+      "manifest": {
+        "Name": "Salus Living Heater",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "livingTemperature",
+            "Description": "",
+            "IsInside": false,
+            "Reads": false,
+            "FalsifiableWhenCompromised": false,
+            "Trust": "trusted",
+            "Privacy": "public",
+            "LowerBound": 0,
+            "UpperBound": 50,
+            "NaturalChangeRate": "[-1,1]"
+          }
+        ],
+        "Modes": [
+          "SwitchState"
+        ],
+        "InitState": "off",
+        "WorkingStates": [
+          {
+            "Name": "on",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": [
+              {
+                "VariableName": "livingTemperature",
+                "ChangeRate": "1"
+              }
+            ]
+          },
+          {
+            "Name": "off",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          }
+        ],
+        "Transitions": [],
+        "APIs": [
+          {
+            "Name": "on",
+            "StartState": "",
+            "EndState": "on",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "off",
+            "StartState": "",
+            "EndState": "off",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ],
+        "ImpactedVariables": [
+          "livingTemperature"
+        ]
+      }
+    },
+    {
+      "name": "Salus Living Cooler",
+      "manifest": {
+        "Name": "Salus Living Cooler",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "livingTemperature",
+            "Description": "",
+            "IsInside": false,
+            "Reads": false,
+            "FalsifiableWhenCompromised": false,
+            "Trust": "trusted",
+            "Privacy": "public",
+            "LowerBound": 0,
+            "UpperBound": 50,
+            "NaturalChangeRate": "[-1,1]"
+          }
+        ],
+        "Modes": [
+          "SwitchState"
+        ],
+        "InitState": "off",
+        "WorkingStates": [
+          {
+            "Name": "on",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": [
+              {
+                "VariableName": "livingTemperature",
+                "ChangeRate": "-1"
+              }
+            ]
+          },
+          {
+            "Name": "off",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          }
+        ],
+        "Transitions": [],
+        "APIs": [
+          {
+            "Name": "on",
+            "StartState": "",
+            "EndState": "on",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "off",
+            "StartState": "",
+            "EndState": "off",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ],
+        "ImpactedVariables": [
+          "livingTemperature"
+        ]
+      }
+    },
+    {
+      "name": "Salus Kitchen Gas Sensor",
+      "manifest": {
+        "Name": "Salus Kitchen Gas Sensor",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "kitchenGas",
+            "Description": "",
+            "IsInside": false,
+            "Reads": true,
+            "FalsifiableWhenCompromised": false,
+            "Trust": "trusted",
+            "Privacy": "public",
+            "LowerBound": 0,
+            "UpperBound": 4,
+            "NaturalChangeRate": "0"
+          }
+        ],
+        "Modes": [],
+        "InitState": "",
+        "WorkingStates": [],
+        "Transitions": [],
+        "APIs": []
+      }
+    },
+    {
+      "name": "Salus Kitchen Exhaust Fan",
+      "manifest": {
+        "Name": "Salus Kitchen Exhaust Fan",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "kitchenGas",
+            "Description": "",
+            "IsInside": false,
+            "Reads": false,
+            "FalsifiableWhenCompromised": false,
+            "Trust": "trusted",
+            "Privacy": "public",
+            "LowerBound": 0,
+            "UpperBound": 4,
+            "NaturalChangeRate": "0"
+          }
+        ],
+        "Modes": [
+          "SwitchState"
+        ],
+        "InitState": "off",
+        "WorkingStates": [
+          {
+            "Name": "on",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": [
+              {
+                "VariableName": "kitchenGas",
+                "ChangeRate": "-1"
+              }
+            ]
+          },
+          {
+            "Name": "off",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          }
+        ],
+        "Transitions": [],
+        "APIs": [
+          {
+            "Name": "on",
+            "StartState": "",
+            "EndState": "on",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "off",
+            "StartState": "",
+            "EndState": "off",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ],
+        "ImpactedVariables": [
+          "kitchenGas"
+        ]
+      }
+    },
+    {
+      "name": "Salus Gas Valve",
+      "manifest": {
+        "Name": "Salus Gas Valve",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "kitchenGas",
+            "Description": "",
+            "IsInside": false,
+            "Reads": false,
+            "FalsifiableWhenCompromised": false,
+            "Trust": "trusted",
+            "Privacy": "public",
+            "LowerBound": 0,
+            "UpperBound": 4,
+            "NaturalChangeRate": "0"
+          }
+        ],
+        "Modes": [
+          "ValveState"
+        ],
+        "InitState": "open",
+        "WorkingStates": [
+          {
+            "Name": "open",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": [
+              {
+                "VariableName": "kitchenGas",
+                "ChangeRate": "1"
+              }
+            ]
+          },
+          {
+            "Name": "closed",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": []
+          }
+        ],
+        "Transitions": [],
+        "APIs": [
+          {
+            "Name": "open",
+            "StartState": "",
+            "EndState": "open",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "closed",
+            "StartState": "",
+            "EndState": "closed",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ],
+        "ImpactedVariables": [
+          "kitchenGas"
+        ]
+      }
+    },
+    {
+      "name": "Salus RFID Reader",
+      "manifest": {
+        "Name": "Salus RFID Reader",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "recognized",
+            "IsInside": true,
+            "FalsifiableWhenCompromised": false,
+            "Values": [
+              "known",
+              "unknown"
+            ],
+            "Trust": "trusted",
+            "Privacy": "public"
+          }
+        ],
+        "Modes": [
+          "SensorState"
+        ],
+        "InitState": "unknown",
+        "WorkingStates": [
+          {
+            "Name": "known",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": [
+              {
+                "VariableName": "recognized",
+                "Value": "known"
+              }
+            ]
+          },
+          {
+            "Name": "unknown",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": [
+              {
+                "VariableName": "recognized",
+                "Value": "unknown"
+              }
+            ]
+          }
+        ],
+        "Transitions": [],
+        "APIs": []
+      }
+    },
+    {
+      "name": "Salus Home Occupancy",
+      "manifest": {
+        "Name": "Salus Home Occupancy",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "occupied",
+            "IsInside": true,
+            "FalsifiableWhenCompromised": false,
+            "Values": [
+              "present",
+              "absent"
+            ],
+            "Trust": "trusted",
+            "Privacy": "public"
+          }
+        ],
+        "Modes": [
+          "SensorState"
+        ],
+        "InitState": "absent",
+        "WorkingStates": [
+          {
+            "Name": "present",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": [
+              {
+                "VariableName": "occupied",
+                "Value": "present"
+              }
+            ]
+          },
+          {
+            "Name": "absent",
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public",
+            "Dynamics": [
+              {
+                "VariableName": "occupied",
+                "Value": "absent"
+              }
+            ]
+          }
+        ],
+        "Transitions": [],
+        "APIs": []
+      }
+    }
+  ],
+  "environmentVariables": [
+    {
+      "name": "bedroomTemperature",
+      "value": "24",
+      "trust": "trusted",
+      "privacy": "public"
+    },
+    {
+      "name": "livingTemperature",
+      "value": "24",
+      "trust": "trusted",
+      "privacy": "public"
+    },
+    {
+      "name": "kitchenGas",
+      "value": "1",
+      "trust": "trusted",
+      "privacy": "public"
+    }
+  ],
+  "devices": [
+    {
+      "id": "bedroom_temperature",
+      "templateName": "Salus Bedroom Temperature",
+      "label": "Bedroom Temperature",
+      "position": {
+        "x": 70,
+        "y": 80
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "bedroom_occupancy",
+      "templateName": "Salus Room Occupancy",
+      "label": "Bedroom Occupancy",
+      "position": {
+        "x": 300,
+        "y": 80
+      },
+      "width": 176,
+      "height": 128,
+      "state": "present",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [
+        {
+          "name": "occupied",
+          "value": "present",
+          "trust": "trusted"
+        }
+      ],
+      "privacies": []
+    },
+    {
+      "id": "bedroom_daylight",
+      "templateName": "Salus Daylight",
+      "label": "Bedroom Daylight",
+      "position": {
+        "x": 530,
+        "y": 80
+      },
+      "width": 176,
+      "height": 128,
+      "state": "bright",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [
+        {
+          "name": "daylight",
+          "value": "bright",
+          "trust": "trusted"
+        }
+      ],
+      "privacies": []
+    },
+    {
+      "id": "bedroom_sleep",
+      "templateName": "Salus Sleep Sensor",
+      "label": "Bedroom Sleep",
+      "position": {
+        "x": 760,
+        "y": 80
+      },
+      "width": 176,
+      "height": 128,
+      "state": "asleep",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [
+        {
+          "name": "sleep",
+          "value": "asleep",
+          "trust": "trusted"
+        }
+      ],
+      "privacies": []
+    },
+    {
+      "id": "bedroom_heater",
+      "templateName": "Salus Bedroom Heater",
+      "label": "Bedroom Heater",
+      "position": {
+        "x": 990,
+        "y": 80
+      },
+      "width": 176,
+      "height": 128,
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "bedroom_cooler",
+      "templateName": "Salus Bedroom Cooler",
+      "label": "Bedroom Cooler",
+      "position": {
+        "x": 1220,
+        "y": 80
+      },
+      "width": 176,
+      "height": 128,
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "bedroom_light_1",
+      "templateName": "Salus House Light",
+      "label": "Bedroom Light 1",
+      "position": {
+        "x": 1450,
+        "y": 80
+      },
+      "width": 176,
+      "height": 128,
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "bedroom_light_2",
+      "templateName": "Salus House Light",
+      "label": "Bedroom Light 2",
+      "position": {
+        "x": 70,
+        "y": 270
+      },
+      "width": 176,
+      "height": 128,
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "bedroom_blind",
+      "templateName": "Salus House Blind",
+      "label": "Bedroom Blind",
+      "position": {
+        "x": 300,
+        "y": 270
+      },
+      "width": 176,
+      "height": 128,
+      "state": "closed",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "living_temperature",
+      "templateName": "Salus Living Temperature",
+      "label": "Living Temperature",
+      "position": {
+        "x": 530,
+        "y": 270
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "living_occupancy",
+      "templateName": "Salus Room Occupancy",
+      "label": "Living Occupancy",
+      "position": {
+        "x": 760,
+        "y": 270
+      },
+      "width": 176,
+      "height": 128,
+      "state": "present",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [
+        {
+          "name": "occupied",
+          "value": "present",
+          "trust": "trusted"
+        }
+      ],
+      "privacies": []
+    },
+    {
+      "id": "living_daylight",
+      "templateName": "Salus Daylight",
+      "label": "Living Daylight",
+      "position": {
+        "x": 990,
+        "y": 270
+      },
+      "width": 176,
+      "height": 128,
+      "state": "bright",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [
+        {
+          "name": "daylight",
+          "value": "bright",
+          "trust": "trusted"
+        }
+      ],
+      "privacies": []
+    },
+    {
+      "id": "living_heater",
+      "templateName": "Salus Living Heater",
+      "label": "Living Heater",
+      "position": {
+        "x": 1220,
+        "y": 270
+      },
+      "width": 176,
+      "height": 128,
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "living_cooler",
+      "templateName": "Salus Living Cooler",
+      "label": "Living Cooler",
+      "position": {
+        "x": 1450,
+        "y": 270
+      },
+      "width": 176,
+      "height": 128,
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "living_light_1",
+      "templateName": "Salus House Light",
+      "label": "Living Light 1",
+      "position": {
+        "x": 70,
+        "y": 460
+      },
+      "width": 176,
+      "height": 128,
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "living_light_2",
+      "templateName": "Salus House Light",
+      "label": "Living Light 2",
+      "position": {
+        "x": 300,
+        "y": 460
+      },
+      "width": 176,
+      "height": 128,
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "living_blind",
+      "templateName": "Salus House Blind",
+      "label": "Living Blind",
+      "position": {
+        "x": 530,
+        "y": 460
+      },
+      "width": 176,
+      "height": 128,
+      "state": "closed",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "kitchen_gas",
+      "templateName": "Salus Kitchen Gas Sensor",
+      "label": "Kitchen Gas",
+      "position": {
+        "x": 760,
+        "y": 460
+      },
+      "width": 176,
+      "height": 128,
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "kitchen_occupancy",
+      "templateName": "Salus Room Occupancy",
+      "label": "Kitchen Occupancy",
+      "position": {
+        "x": 990,
+        "y": 460
+      },
+      "width": 176,
+      "height": 128,
+      "state": "present",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [
+        {
+          "name": "occupied",
+          "value": "present",
+          "trust": "trusted"
+        }
+      ],
+      "privacies": []
+    },
+    {
+      "id": "kitchen_motion",
+      "templateName": "Salus Room Occupancy",
+      "label": "Kitchen Motion",
+      "position": {
+        "x": 1220,
+        "y": 460
+      },
+      "width": 176,
+      "height": 128,
+      "state": "present",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [
+        {
+          "name": "occupied",
+          "value": "present",
+          "trust": "trusted"
+        }
+      ],
+      "privacies": []
+    },
+    {
+      "id": "kitchen_fan",
+      "templateName": "Salus Kitchen Exhaust Fan",
+      "label": "Kitchen Fan",
+      "position": {
+        "x": 1450,
+        "y": 460
+      },
+      "width": 176,
+      "height": 128,
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "kitchen_valve",
+      "templateName": "Salus Gas Valve",
+      "label": "Kitchen Valve",
+      "position": {
+        "x": 70,
+        "y": 650
+      },
+      "width": 176,
+      "height": 128,
+      "state": "open",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "kitchen_light_1",
+      "templateName": "Salus House Light",
+      "label": "Kitchen Light 1",
+      "position": {
+        "x": 300,
+        "y": 650
+      },
+      "width": 176,
+      "height": 128,
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "kitchen_light_2",
+      "templateName": "Salus House Light",
+      "label": "Kitchen Light 2",
+      "position": {
+        "x": 530,
+        "y": 650
+      },
+      "width": 176,
+      "height": 128,
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "kitchen_alarm",
+      "templateName": "Salus House Alarm",
+      "label": "Kitchen Alarm",
+      "position": {
+        "x": 760,
+        "y": 650
+      },
+      "width": 176,
+      "height": 128,
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "entrance_rfid",
+      "templateName": "Salus RFID Reader",
+      "label": "Entrance Rfid",
+      "position": {
+        "x": 990,
+        "y": 650
+      },
+      "width": 176,
+      "height": 128,
+      "state": "unknown",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [
+        {
+          "name": "recognized",
+          "value": "unknown",
+          "trust": "trusted"
+        }
+      ],
+      "privacies": []
+    },
+    {
+      "id": "entrance_home",
+      "templateName": "Salus Home Occupancy",
+      "label": "Entrance Home",
+      "position": {
+        "x": 1220,
+        "y": 650
+      },
+      "width": 176,
+      "height": 128,
+      "state": "absent",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [
+        {
+          "name": "occupied",
+          "value": "absent",
+          "trust": "trusted"
+        }
+      ],
+      "privacies": []
+    },
+    {
+      "id": "entrance_door",
+      "templateName": "Salus House Door",
+      "label": "Entrance Door",
+      "position": {
+        "x": 1450,
+        "y": 650
+      },
+      "width": 176,
+      "height": 128,
+      "state": "locked",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "entrance_light",
+      "templateName": "Salus House Light",
+      "label": "Entrance Light",
+      "position": {
+        "x": 70,
+        "y": 840
+      },
+      "width": 176,
+      "height": 128,
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "entrance_camera",
+      "templateName": "Salus House Camera",
+      "label": "Entrance Camera",
+      "position": {
+        "x": 300,
+        "y": 840
+      },
+      "width": 176,
+      "height": 128,
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "entrance_alarm",
+      "templateName": "Salus House Alarm",
+      "label": "Entrance Alarm",
+      "position": {
+        "x": 530,
+        "y": 840
+      },
+      "width": 176,
+      "height": 128,
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "balcony_home",
+      "templateName": "Salus Home Occupancy",
+      "label": "Balcony Home",
+      "position": {
+        "x": 760,
+        "y": 840
+      },
+      "width": 176,
+      "height": 128,
+      "state": "absent",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [
+        {
+          "name": "occupied",
+          "value": "absent",
+          "trust": "trusted"
+        }
+      ],
+      "privacies": []
+    },
+    {
+      "id": "balcony_daylight",
+      "templateName": "Salus Daylight",
+      "label": "Balcony Daylight",
+      "position": {
+        "x": 990,
+        "y": 840
+      },
+      "width": 176,
+      "height": 128,
+      "state": "dark",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [
+        {
+          "name": "daylight",
+          "value": "dark",
+          "trust": "trusted"
+        }
+      ],
+      "privacies": []
+    },
+    {
+      "id": "balcony_door",
+      "templateName": "Salus House Door",
+      "label": "Balcony Door",
+      "position": {
+        "x": 1220,
+        "y": 840
+      },
+      "width": 176,
+      "height": 128,
+      "state": "locked",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "balcony_light",
+      "templateName": "Salus House Light",
+      "label": "Balcony Light",
+      "position": {
+        "x": 1450,
+        "y": 840
+      },
+      "width": 176,
+      "height": 128,
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "balcony_blind",
+      "templateName": "Salus House Blind",
+      "label": "Balcony Blind",
+      "position": {
+        "x": 70,
+        "y": 1030
+      },
+      "width": 176,
+      "height": 128,
+      "state": "closed",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "hall_occupancy",
+      "templateName": "Salus Room Occupancy",
+      "label": "Hall Occupancy",
+      "position": {
+        "x": 300,
+        "y": 1030
+      },
+      "width": 176,
+      "height": 128,
+      "state": "present",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [
+        {
+          "name": "occupied",
+          "value": "present",
+          "trust": "trusted"
+        }
+      ],
+      "privacies": []
+    },
+    {
+      "id": "hall_daylight",
+      "templateName": "Salus Daylight",
+      "label": "Hall Daylight",
+      "position": {
+        "x": 530,
+        "y": 1030
+      },
+      "width": 176,
+      "height": 128,
+      "state": "dark",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [
+        {
+          "name": "daylight",
+          "value": "dark",
+          "trust": "trusted"
+        }
+      ],
+      "privacies": []
+    },
+    {
+      "id": "hall_light_1",
+      "templateName": "Salus House Light",
+      "label": "Hall Light 1",
+      "position": {
+        "x": 760,
+        "y": 1030
+      },
+      "width": 176,
+      "height": 128,
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "hall_light_2",
+      "templateName": "Salus House Light",
+      "label": "Hall Light 2",
+      "position": {
+        "x": 990,
+        "y": 1030
+      },
+      "width": 176,
+      "height": 128,
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [],
+      "privacies": []
+    },
+    {
+      "id": "hall_alarm",
+      "templateName": "Salus House Alarm",
+      "label": "Hall Alarm",
+      "position": {
+        "x": 1220,
+        "y": 1030
+      },
+      "width": 176,
+      "height": 128,
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [],
+      "privacies": []
+    }
+  ],
+  "rules": [
+    {
+      "name": "bedroom cold heating",
+      "sources": [
+        {
+          "fromId": "bedroom_temperature",
+          "fromApi": "bedroomTemperature",
+          "itemType": "variable",
+          "relation": "<=",
+          "value": "20"
+        }
+      ],
+      "toId": "bedroom_heater",
+      "toApi": "on"
+    },
+    {
+      "name": "bedroom heating off",
+      "sources": [
+        {
+          "fromId": "bedroom_temperature",
+          "fromApi": "bedroomTemperature",
+          "itemType": "variable",
+          "relation": ">=",
+          "value": "24"
+        }
+      ],
+      "toId": "bedroom_heater",
+      "toApi": "off"
+    },
+    {
+      "name": "bedroom hot cooling",
+      "sources": [
+        {
+          "fromId": "bedroom_temperature",
+          "fromApi": "bedroomTemperature",
+          "itemType": "variable",
+          "relation": ">=",
+          "value": "28"
+        }
+      ],
+      "toId": "bedroom_cooler",
+      "toApi": "on"
+    },
+    {
+      "name": "bedroom cooling off",
+      "sources": [
+        {
+          "fromId": "bedroom_temperature",
+          "fromApi": "bedroomTemperature",
+          "itemType": "variable",
+          "relation": "<=",
+          "value": "24"
+        }
+      ],
+      "toId": "bedroom_cooler",
+      "toApi": "off"
+    },
+    {
+      "name": "bedroom occupied lighting 1",
+      "sources": [
+        {
+          "fromId": "bedroom_occupancy",
+          "fromApi": "occupied",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "present"
+        }
+      ],
+      "toId": "bedroom_light_1",
+      "toApi": "on"
+    },
+    {
+      "name": "bedroom occupied lighting 2",
+      "sources": [
+        {
+          "fromId": "bedroom_occupancy",
+          "fromApi": "occupied",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "present"
+        }
+      ],
+      "toId": "bedroom_light_2",
+      "toApi": "on"
+    },
+    {
+      "name": "bedroom daylight blind",
+      "sources": [
+        {
+          "fromId": "bedroom_daylight",
+          "fromApi": "daylight",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "bright"
+        }
+      ],
+      "toId": "bedroom_blind",
+      "toApi": "open"
+    },
+    {
+      "name": "living cold heating",
+      "sources": [
+        {
+          "fromId": "living_temperature",
+          "fromApi": "livingTemperature",
+          "itemType": "variable",
+          "relation": "<=",
+          "value": "22"
+        }
+      ],
+      "toId": "living_heater",
+      "toApi": "on"
+    },
+    {
+      "name": "living heating off",
+      "sources": [
+        {
+          "fromId": "living_temperature",
+          "fromApi": "livingTemperature",
+          "itemType": "variable",
+          "relation": ">=",
+          "value": "24"
+        }
+      ],
+      "toId": "living_heater",
+      "toApi": "off"
+    },
+    {
+      "name": "living hot cooling",
+      "sources": [
+        {
+          "fromId": "living_temperature",
+          "fromApi": "livingTemperature",
+          "itemType": "variable",
+          "relation": ">=",
+          "value": "26"
+        }
+      ],
+      "toId": "living_cooler",
+      "toApi": "on"
+    },
+    {
+      "name": "living cooling off",
+      "sources": [
+        {
+          "fromId": "living_temperature",
+          "fromApi": "livingTemperature",
+          "itemType": "variable",
+          "relation": "<=",
+          "value": "24"
+        }
+      ],
+      "toId": "living_cooler",
+      "toApi": "off"
+    },
+    {
+      "name": "living occupied lighting 1",
+      "sources": [
+        {
+          "fromId": "living_occupancy",
+          "fromApi": "occupied",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "present"
+        }
+      ],
+      "toId": "living_light_1",
+      "toApi": "on"
+    },
+    {
+      "name": "living occupied lighting 2",
+      "sources": [
+        {
+          "fromId": "living_occupancy",
+          "fromApi": "occupied",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "present"
+        }
+      ],
+      "toId": "living_light_2",
+      "toApi": "on"
+    },
+    {
+      "name": "living daylight blind",
+      "sources": [
+        {
+          "fromId": "living_daylight",
+          "fromApi": "daylight",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "bright"
+        }
+      ],
+      "toId": "living_blind",
+      "toApi": "open"
+    },
+    {
+      "name": "Late kitchen ventilation",
+      "sources": [
+        {
+          "fromId": "kitchen_gas",
+          "fromApi": "kitchenGas",
+          "itemType": "variable",
+          "relation": ">",
+          "value": "2"
+        }
+      ],
+      "toId": "kitchen_fan",
+      "toApi": "on"
+    },
+    {
+      "name": "Close gas supply on danger",
+      "sources": [
+        {
+          "fromId": "kitchen_gas",
+          "fromApi": "kitchenGas",
+          "itemType": "variable",
+          "relation": ">",
+          "value": "2"
+        }
+      ],
+      "toId": "kitchen_valve",
+      "toApi": "closed"
+    },
+    {
+      "name": "Kitchen occupied lighting 1",
+      "sources": [
+        {
+          "fromId": "kitchen_motion",
+          "fromApi": "occupied",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "present"
+        }
+      ],
+      "toId": "kitchen_light_1",
+      "toApi": "on"
+    },
+    {
+      "name": "Kitchen occupied lighting 2",
+      "sources": [
+        {
+          "fromId": "kitchen_occupancy",
+          "fromApi": "occupied",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "present"
+        }
+      ],
+      "toId": "kitchen_light_2",
+      "toApi": "on"
+    },
+    {
+      "name": "Gas alarm",
+      "sources": [
+        {
+          "fromId": "kitchen_gas",
+          "fromApi": "kitchenGas",
+          "itemType": "variable",
+          "relation": ">=",
+          "value": "2"
+        }
+      ],
+      "toId": "kitchen_alarm",
+      "toApi": "on"
+    },
+    {
+      "name": "Wrong RFID unlock",
+      "sources": [
+        {
+          "fromId": "entrance_rfid",
+          "fromApi": "recognized",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "unknown"
+        }
+      ],
+      "toId": "entrance_door",
+      "toApi": "unlocked"
+    },
+    {
+      "name": "Recognized visitor light",
+      "sources": [
+        {
+          "fromId": "entrance_rfid",
+          "fromApi": "recognized",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "known"
+        }
+      ],
+      "toId": "entrance_light",
+      "toApi": "on"
+    },
+    {
+      "name": "Away security camera",
+      "sources": [
+        {
+          "fromId": "entrance_home",
+          "fromApi": "occupied",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "absent"
+        }
+      ],
+      "toId": "entrance_camera",
+      "toApi": "on"
+    },
+    {
+      "name": "Relay gas alarm to entrance",
+      "sources": [
+        {
+          "fromId": "kitchen_alarm",
+          "fromApi": "SwitchState",
+          "itemType": "mode",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "toId": "entrance_alarm",
+      "toApi": "on"
+    },
+    {
+      "name": "Wrong away balcony unlock",
+      "sources": [
+        {
+          "fromId": "balcony_home",
+          "fromApi": "occupied",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "absent"
+        }
+      ],
+      "toId": "balcony_door",
+      "toApi": "unlocked"
+    },
+    {
+      "name": "Balcony dark lighting",
+      "sources": [
+        {
+          "fromId": "balcony_daylight",
+          "fromApi": "daylight",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "dark"
+        }
+      ],
+      "toId": "balcony_light",
+      "toApi": "on"
+    },
+    {
+      "name": "Balcony daytime blind",
+      "sources": [
+        {
+          "fromId": "balcony_daylight",
+          "fromApi": "daylight",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "bright"
+        }
+      ],
+      "toId": "balcony_blind",
+      "toApi": "open"
+    },
+    {
+      "name": "Hall dark motion lighting 1",
+      "sources": [
+        {
+          "fromId": "hall_occupancy",
+          "fromApi": "occupied",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "present"
+        },
+        {
+          "fromId": "hall_daylight",
+          "fromApi": "daylight",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "dark"
+        }
+      ],
+      "toId": "hall_light_1",
+      "toApi": "on"
+    },
+    {
+      "name": "Hall dark motion lighting 2",
+      "sources": [
+        {
+          "fromId": "hall_occupancy",
+          "fromApi": "occupied",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "present"
+        },
+        {
+          "fromId": "hall_daylight",
+          "fromApi": "daylight",
+          "itemType": "variable",
+          "relation": "=",
+          "value": "dark"
+        }
+      ],
+      "toId": "hall_light_2",
+      "toApi": "on"
+    },
+    {
+      "name": "Relay entrance alarm to hall",
+      "sources": [
+        {
+          "fromId": "entrance_alarm",
+          "fromApi": "SwitchState",
+          "itemType": "mode",
+          "relation": "=",
+          "value": "on"
+        }
+      ],
+      "toId": "hall_alarm",
+      "toApi": "on"
+    }
+  ],
+  "specs": [
+    {
+      "templateId": "1",
+      "aConditions": [
+        {
+          "deviceId": "bedroom_temperature",
+          "targetType": "variable",
+          "key": "bedroomTemperature",
+          "relation": ">=",
+          "value": "21",
+          "variableSource": "environment"
+        },
+        {
+          "deviceId": "bedroom_temperature",
+          "targetType": "variable",
+          "key": "bedroomTemperature",
+          "relation": "<=",
+          "value": "27",
+          "variableSource": "environment"
+        }
+      ],
+      "ifConditions": [],
+      "thenConditions": []
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "bedroom_sleep",
+          "targetType": "variable",
+          "key": "sleep",
+          "relation": "=",
+          "value": "asleep",
+          "variableSource": "reported"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "bedroom_light_1",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "off"
+        },
+        {
+          "deviceId": "bedroom_light_2",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "off"
+        },
+        {
+          "deviceId": "bedroom_blind",
+          "targetType": "mode",
+          "key": "BlindState",
+          "relation": "=",
+          "value": "closed"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "entrance_home",
+          "targetType": "variable",
+          "key": "occupied",
+          "relation": "=",
+          "value": "absent",
+          "variableSource": "reported"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "bedroom_light_1",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "off"
+        },
+        {
+          "deviceId": "bedroom_light_2",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "off"
+        },
+        {
+          "deviceId": "living_light_1",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "off"
+        },
+        {
+          "deviceId": "living_light_2",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "off"
+        },
+        {
+          "deviceId": "kitchen_light_1",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "off"
+        },
+        {
+          "deviceId": "kitchen_light_2",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "off"
+        },
+        {
+          "deviceId": "entrance_light",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "off"
+        },
+        {
+          "deviceId": "balcony_light",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "off"
+        },
+        {
+          "deviceId": "hall_light_1",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "off"
+        },
+        {
+          "deviceId": "hall_light_2",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "off"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "entrance_rfid",
+          "targetType": "variable",
+          "key": "recognized",
+          "relation": "=",
+          "value": "unknown",
+          "variableSource": "reported"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "entrance_door",
+          "targetType": "mode",
+          "key": "LockState",
+          "relation": "=",
+          "value": "locked"
+        }
+      ]
+    },
+    {
+      "templateId": "4",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "balcony_home",
+          "targetType": "variable",
+          "key": "occupied",
+          "relation": "=",
+          "value": "absent",
+          "variableSource": "reported"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "balcony_door",
+          "targetType": "mode",
+          "key": "LockState",
+          "relation": "=",
+          "value": "locked"
+        }
+      ]
+    },
+    {
+      "templateId": "1",
+      "aConditions": [
+        {
+          "deviceId": "kitchen_gas",
+          "targetType": "variable",
+          "key": "kitchenGas",
+          "relation": "<=",
+          "value": "2",
+          "variableSource": "environment"
+        }
+      ],
+      "ifConditions": [],
+      "thenConditions": []
+    }
+  ]
+}

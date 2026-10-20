@@ -1,13 +1,17 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, h } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useModalAccessibility } from '@/composables/useModalAccessibility'
+import FailureDetails from '@/components/FailureDetails.vue'
+import InfoTooltip from '@/components/common/InfoTooltip.vue'
+import HintTooltip from '@/components/common/HintTooltip.vue'
 import boardApi from '@/api/board'
 import { FIX_RESPONSE_INCOMPLETE_CODE } from '@/utils/fixResponse'
 import { generationIssueReasonKey } from '@/utils/generationIssue'
-import { localizedErrorMessage, localizedTextOrFallback } from '@/utils/userMessage'
+import { errorDetails, technicalErrorLines, type ApiErrorDetails } from '@/utils/userMessage'
 import { requestInteractiveCancellation } from '@/utils/interactiveCancellation'
 import { formatModelTokenBySource } from '@/utils/modelTokenDisplay'
+import { formatRelationGlyph } from '@/utils/modelPresentation'
 import { useAuth } from '@/stores/auth'
 import { specTemplateDetails } from '@/assets/config/specTemplates'
 import type {
@@ -25,7 +29,7 @@ import type {
   PreferredRangeSelection
 } from '@/types/fix'
 import type { InteractiveOperationStage } from '@/types/task'
-import { confirmDestructive, notifyBlocked, notifyError, notifySuccess } from '@/utils/feedback'
+import { acknowledgeFailure, confirmDestructive, notifyBlocked, notifyError } from '@/utils/feedback'
 
 const props = defineProps<{
   visible: boolean
@@ -39,11 +43,17 @@ const emit = defineEmits<{
   'outcome-uncertain': []
 }>()
 
-const { t, locale } = useI18n()
+const { t } = useI18n()
 const { getToken } = useAuth()
 
 const faultLoading = ref(false)
-const faultLoadFailed = ref(false)
+type FixFailure = { key: string; suggestionKey: string; diagnostics: ApiErrorDetails }
+const formatFixFailure = (failure: FixFailure) => ({
+  message: t(failure.key), suggestion: t(failure.suggestionKey),
+  details: technicalErrorLines(failure.diagnostics)
+})
+const faultLoadError = ref<FixFailure | null>(null)
+const faultLoadFailure = computed(() => faultLoadError.value ? formatFixFailure(faultLoadError.value) : null)
 const strategyLoading = ref<FixStrategyName | null>(null)
 const fixSearchElapsedSeconds = ref(0)
 const fixProgressStage = ref<InteractiveOperationStage>('QUEUED')
@@ -73,7 +83,14 @@ let lastResolvedFixRequest: {
   requestId: string
   evidence: FixRequestTerminalEvidence
 } | null = null
-const strategyErrors = ref<Partial<Record<FixStrategyName, string>>>({})
+const strategyErrors = ref<Partial<Record<FixStrategyName, FixFailure>>>({})
+const selectedStrategyFailure = computed(() => {
+  const failure = strategyErrors.value[selectedStrategy.value]
+  return failure ? formatFixFailure(failure) : null
+})
+const selectedStrategyFailureTone = computed(() => [
+  'app.fixSearchOutcomeUnknown', 'app.fixSearchCancelledWithoutResult', 'app.fixSearchEndedWithoutResult'
+].includes(strategyErrors.value[selectedStrategy.value]?.key || '') ? 'warning' : 'danger')
 const strategyWarnings = ref<Partial<Record<FixStrategyName, string[]>>>({})
 const fixResult = ref<FixResult | null>(null)
 // Which listed alternative each strategy's Apply acts on; absent means the first, the smallest change.
@@ -85,7 +102,7 @@ const selectedStrategy = ref<FixStrategyName>('parameter')
 const applyingFix = ref(false)
 const parameterTargetCatalog = ref<ParameterTarget[]>([])
 const lastParameterRequestFingerprint = ref<string | null>(null)
-// 记录本次 /fix 用的参数偏好选择，apply 时原样回传，保证后端重算复现同一建议。
+// Apply submits the parameter preferences bound to the signed proposal, without searching again.
 const lastPreferredRangeSelections = ref<PreferredRangeSelection[] | undefined>(undefined)
 
 // One row per adjustable threshold. A row left at the template bounds expresses no preference and is
@@ -178,6 +195,12 @@ const strategyLabels = computed<Record<FixStrategyName, string>>(() => ({
   remove: t('app.fixStrategyRemove')
 }))
 
+const compactStrategyLabels = computed<Record<FixStrategyName, string>>(() => ({
+  parameter: t('app.fixStrategyParameterCompact'),
+  condition: t('app.fixStrategyConditionCompact'),
+  remove: t('app.fixStrategyRemoveCompact')
+}))
+
 const strategyDescriptions = computed<Record<FixStrategyName, string>>(() => ({
   parameter: t('app.fixStrategyParameterDesc'),
   condition: t('app.fixStrategyConditionDesc'),
@@ -187,27 +210,30 @@ const strategyDescriptions = computed<Record<FixStrategyName, string>>(() => ({
 const strategyOptions = computed(() => strategyOrder.map(value => ({
   value,
   label: strategyLabels.value[value],
+  compactLabel: compactStrategyLabels.value[value],
   icon: strategyIcons[value]
 })))
 
-const fixResponseErrorMessage = (error: any, fallback: string) => {
+const fixResponseErrorKey = (error: any, fallbackKey: string) => {
   if (error?.response?.status === 429
     && error?.response?.data?.data?.reasonCode === 'USER_FORMAL_OPERATION_BUSY') {
-    return t('app.formalOperationBusy')
+    return 'app.formalOperationBusy'
   }
-  return error?.code === FIX_RESPONSE_INCOMPLETE_CODE
-    ? t('app.fixResponseIncomplete')
-    : localizedErrorMessage(error, fallback, locale.value)
+  return error?.code === FIX_RESPONSE_INCOMPLETE_CODE ? 'app.fixResponseIncomplete' : fallbackKey
 }
 
-const fixApplyErrorMessage = (error: any) => {
+const fixApplyErrorKey = (error: any) => {
+  if (error?.response?.status === 503
+    && error?.response?.data?.data?.reasonCode === 'FIX_APPLY_PREFLIGHT_UNAVAILABLE') {
+    return 'app.fixApplyPreflightUnavailable'
+  }
   const raw = error?.response?.data?.message || error?.message
   if (typeof raw === 'string'
     && (/rules\[\d+\]\.conditions\[\d+\]\.deviceName/i.test(raw)
       || /unknown (?:condition|command|content) device/i.test(raw))) {
-    return t('app.fixDeviceReferenceUnavailable')
+    return 'app.fixDeviceReferenceUnavailable'
   }
-  return localizedTextOrFallback(raw, t('app.failedToApplyFix'), locale.value)
+  return fixResponseErrorKey(error, 'app.failedToApplyFix')
 }
 
 const displayedFixWarnings = computed(() => Array.from(new Set([
@@ -265,17 +291,7 @@ const formatModelToken = (value: unknown, source: ModelTokenSource) => {
   return formatModelTokenBySource(source, value, t)
 }
 
-/**
- * Words here, glyphs on the canvas and in the inspector — and that is not a divergence.
- *
- * An audit read three renderings of one operator as a defect. Two of them were: `SystemInspector` and
- * `CanvasBoard` keyed their maps on `EQ`/`GTE`, which nothing persists, so both fell through to the raw `>=`
- * while disagreeing on `in`. Those now share one glyph set.
- *
- * This one is different, because the output goes into a **sentence**: `parameterTargetFallback` reads
- * "temperature greater or equal 30", and `≥` mid-sentence reads worse than the words. The rule is the audience,
- * not the string — a canvas edge label has no room for a word, and prose has no use for a glyph.
- */
+// Condition-change prose uses words; compact parameter targets use relation glyphs.
 const formatRelation = (value: unknown) => {
   const raw = String(value ?? '').trim()
   const normalized = raw.toLowerCase().replace(/_/g, ' ')
@@ -293,12 +309,12 @@ const formatRelation = (value: unknown) => {
   return labels[normalized] || raw
 }
 
-const formatPreferredRangeTarget = (adjustment: ParameterTarget) => t('app.preferredRangeTargetLabel', {
-  description: t('app.parameterTargetFallback', {
-    attribute: formatModelToken(adjustment.attribute, adjustment.modelTokenSource),
-    relation: formatRelation(adjustment.relation),
-    original: formatModelToken(adjustment.originalValue, adjustment.modelTokenSource)
-  })
+const formatPreferredRangeTarget = (adjustment: ParameterTarget) => t('app.fixParameterTargetLabel', {
+  rule: adjustment.rulePosition,
+  device: adjustment.deviceLabel,
+  attribute: formatModelToken(adjustment.attribute, adjustment.modelTokenSource),
+  relation: formatRelationGlyph(adjustment.relation),
+  original: formatModelToken(adjustment.originalValue, adjustment.modelTokenSource)
 })
 
 const parameterAdjustmentByTargetId = computed(() => {
@@ -471,7 +487,7 @@ const fetchFaultRules = async () => {
   const traceId = props.traceId
   const requestVersion = dialogRequestVersion
   faultLoading.value = true
-  faultLoadFailed.value = false
+  faultLoadError.value = null
   try {
     const result = await boardApi.getFaultRules(traceId)
     if (requestVersion !== dialogRequestVersion || traceId !== props.traceId || !props.visible) return
@@ -480,8 +496,10 @@ const fetchFaultRules = async () => {
   } catch (error: any) {
     if (requestVersion !== dialogRequestVersion || traceId !== props.traceId || !props.visible) return
     console.error('Failed to fetch fault rules:', error)
-    faultLoadFailed.value = true
-    notifyError(fixResponseErrorMessage(error, t('app.failedToLoadFaultLocalization')))
+    faultLoadError.value = {
+      key: fixResponseErrorKey(error, 'app.failedToLoadFaultLocalization'),
+      suggestionKey: 'app.fixRequestFailedNextStep', diagnostics: errorDetails(error)
+    }
   } finally {
     if (requestVersion === dialogRequestVersion && traceId === props.traceId) {
       faultLoading.value = false
@@ -542,17 +560,23 @@ const invalidateStrategyResult = (strategy: FixStrategyName) => {
 
 // The selected strategy shows its failure inline, so a toast would state it twice; one the user has
 // switched away from would otherwise fail unseen.
-const reportStrategyError = (strategy: FixStrategyName, message: string) => {
-  strategyErrors.value[strategy] = message
-  if (selectedStrategy.value !== strategy) notifyError(message)
+const reportStrategyError = (strategy: FixStrategyName, key: string, error?: unknown) => {
+  const failure: FixFailure = {
+    key: unresolvedFixRequestId.value ? 'app.fixSearchOutcomeUnknown' : key,
+    suggestionKey: unresolvedFixRequestId.value ? 'app.fixStopRequestMayStillBeRunning' : 'app.fixRequestFailedNextStep',
+    diagnostics: errorDetails(error)
+  }
+  strategyErrors.value[strategy] = failure
+  if (selectedStrategy.value !== strategy) notifyError(t(failure.key))
 }
 
 const fetchFixSuggestions = async (strategy: FixStrategyName = selectedStrategy.value) => {
-  if (!props.traceId || strategyLoading.value || activeFixRequestId.value || unresolvedFixRequestId.value) return
+  if (!props.traceId || applyingFix.value || strategyLoading.value || activeFixRequestId.value || unresolvedFixRequestId.value
+    || dialogWideSkipAttempt.value) return
 
   const authToken = getToken()
   if (!authToken) {
-    reportStrategyError(strategy, t('app.fixAuthenticationRequired'))
+    reportStrategyError(strategy, 'app.fixAuthenticationRequired')
     return
   }
   // Try is disabled while a row has an issue, and its row states why; never send unvalidated bounds.
@@ -609,17 +633,19 @@ const fetchFixSuggestions = async (strategy: FixStrategyName = selectedStrategy.
       syncPreferredRangeRows()
     }
     fixResult.value = mergeFixResult(fixResult.value, result)
-    if (result.faultRules?.length) faultRules.value = result.faultRules
+    faultRules.value = result.faultRules
+    faultLoadError.value = null
   } catch (error: any) {
     postSettledWithTerminalEvidence = Boolean(error?.response)
       || error?.code === FIX_RESPONSE_INCOMPLETE_CODE
-    if (!postSettledWithTerminalEvidence && activeFixRequestId.value === requestId) {
-      beginUnknownFixRecovery(requestId)
+    const outcomeUnknown = !postSettledWithTerminalEvidence && activeFixRequestId.value === requestId
+    if (outcomeUnknown) unresolvedFixRequestId.value = requestId
+    if (requestVersion === dialogRequestVersion && traceId === props.traceId && props.visible
+      && error?.name !== 'CanceledError' && error?.code !== 'ERR_CANCELED') {
+      console.error('Failed to fetch fix suggestions:', error)
+      reportStrategyError(strategy, fixResponseErrorKey(error, 'app.failedToLoadFixSuggestions'), error)
     }
-    if (requestVersion !== dialogRequestVersion || traceId !== props.traceId || !props.visible) return
-    if (error?.name === 'CanceledError' || error?.code === 'ERR_CANCELED') return
-    console.error('Failed to fetch fix suggestions:', error)
-    reportStrategyError(strategy, fixResponseErrorMessage(error, t('app.failedToLoadFixSuggestions')))
+    if (outcomeUnknown) beginUnknownFixRecovery(requestId)
   } finally {
     if (postSettledWithTerminalEvidence && activeFixRequestId.value === requestId) {
       clearActiveFixTracking(requestId, 'post-terminal')
@@ -655,7 +681,7 @@ const preferenceActionBlockedReason = computed(() =>
 
 /** Back to the template bounds. The next "retry" searches without preferences; nothing runs here. */
 const resetPreferenceRows = () => {
-  if (preferenceActionBlockedReason.value) return
+  if (applyingFix.value || preferenceActionBlockedReason.value) return
   preferredRangeRows.value = []
   syncPreferredRangeRows()
 }
@@ -677,7 +703,7 @@ const handleOpen = () => {
   fixResult.value = null
   faultLocalization.value = null
   faultRules.value = []
-  faultLoadFailed.value = false
+  faultLoadError.value = null
   strategyLoading.value = null
   strategyErrors.value = {}
   strategyWarnings.value = {}
@@ -692,6 +718,7 @@ const handleOpen = () => {
 
 // Switch strategy
 const switchStrategy = (strategy: FixStrategyName) => {
+  if (applyingFix.value) return
   selectedStrategy.value = strategy
 }
 
@@ -699,7 +726,14 @@ const trySelectedStrategy = () => fetchFixSuggestions(selectedStrategy.value)
 
 // Apply the exact signed suggestion after the server checks the complete formal-model snapshot.
 const applyFix = async (suggestion: FixSuggestion) => {
-  if (!props.traceId) return
+  if (!props.traceId || applyingFix.value) return
+  const traceId = props.traceId
+  const authToken = getToken()
+  if (!authToken) {
+    notifyBlocked(t('app.fixAuthenticationRequired'))
+    return
+  }
+  const ownsApply = () => getToken() === authToken
   if (!templateSnapshotAllowsApply.value) {
     notifyBlocked(fixResult.value?.templateSnapshotComparison === 'CHANGED'
       ? t('app.fixTemplateSnapshotChangedLimitation')
@@ -708,26 +742,36 @@ const applyFix = async (suggestion: FixSuggestion) => {
   }
   if (suggestion.strategy === 'remove' && !await confirmDestructive({
     title: t('app.removeRulesFixTitle'),
-    message: t('app.confirmRemoveRulesFix', { count: suggestion.removedRuleDescriptions?.length || 0 }),
-    confirmText: t('app.removeRulesAndApply')
+    message: h('div', [
+      h('p', t('app.confirmRemoveRulesFix', { count: suggestion.removedRuleDescriptions.length })),
+      h('ul', { class: 'mt-3 list-disc space-y-2 pl-5 break-words' },
+        suggestion.removedRuleDescriptions.map(description => h('li', description)))
+    ]),
+    confirmText: t('app.removeRulesAndApply'),
+    customClass: 'fix-removal-confirm'
   })) return
+  if (!ownsApply()) return
   applyingFix.value = true
   try {
     const result = await boardApi.applyFix(
-      props.traceId,
+      traceId,
       suggestion,
       suggestion.strategy === 'parameter' ? lastPreferredRangeSelections.value : undefined
     )
+    if (!ownsApply()) return
     if (!result.applied || !result.verificationEvidenceReused) {
-      notifyBlocked(localizedTextOrFallback(result.message, t('app.failedToApplyFix'), locale.value))
+      void acknowledgeFailure({
+        title: t('app.failedToApplyFix'),
+        message: t('app.failedToApplyFix'),
+        suggestion: t('app.fixApplyRejectedNextStep'),
+        details: technicalErrorLines(errorDetails({ message: result.message }))
+      })
       return
     }
     emit('applied', result)
     emit('update:visible', false)
-    // The parent-controlled visibility prop releases this dialog's modal depth on render.
-    await nextTick()
-    notifySuccess(t('app.fixAppliedWithSignedEvidence'))
   } catch (error: any) {
+    if (!ownsApply()) return
     console.error('Failed to apply fix:', error)
     const status = Number(error?.response?.status)
     const reasonCode = error?.response?.data?.data?.reasonCode
@@ -740,7 +784,14 @@ const applyFix = async (suggestion: FixSuggestion) => {
       return
     }
     // Drift, stale targets, and service-unavailable preflight failures occur before the write.
-    notifyError(fixApplyErrorMessage(error))
+    const messageKey = fixApplyErrorKey(error)
+    void acknowledgeFailure({
+      title: t('app.failedToApplyFix'),
+      message: t(messageKey),
+      suggestion: t(messageKey === 'app.fixApplyPreflightUnavailable' || messageKey === 'app.formalOperationBusy'
+        ? 'app.fixApplyPreflightRetry' : 'app.fixApplyRejectedNextStep'),
+      details: technicalErrorLines(errorDetails(error))
+    })
   } finally {
     applyingFix.value = false
   }
@@ -773,6 +824,7 @@ const preexistingViolationLabel = (templateId: string) => {
  */
 const DIALOG_WIDE_SKIP_STATUSES = new Set<FixStrategyAttemptStatus>([
   'SKIPPED_NO_FAULT_RULES',
+  'SKIPPED_INITIAL_STATE_VIOLATION',
   'SKIPPED_INCOMPLETE_SOURCE_MODEL'
 ])
 
@@ -785,6 +837,14 @@ const currentStrategyAttempt = computed(() =>
     ?? dialogWideSkipAttempt.value
 )
 
+const dialogTone = computed(() => {
+  const status = currentStrategyAttempt.value?.status
+  if (faultLoadError.value || status === 'FAILED_MODEL_GENERATION' || status === 'FAILED_SOLVER_EXECUTION') return 'danger'
+  if (selectedStrategyFailure.value) return selectedStrategyFailureTone.value
+  if (verifiedCount.value > 0 || (status && !INAPPLICABLE_ATTEMPT_STATUSES.has(status))) return 'warning'
+  return 'info'
+})
+
 // A choice exists only with two or more options; a single one is shown without selection chrome.
 const hasAlternatives = computed(() => currentAlternatives.value.length > 1)
 
@@ -792,7 +852,7 @@ const hasAlternatives = computed(() => currentAlternatives.value.length > 1)
 const alternativesIncomplete = computed(() => currentStrategyAttempt.value?.alternativesComplete === false)
 
 const localizedFaultLocalizationSummary = computed(() => {
-  if (!faultLocalization.value) return ''
+  if (faultLoading.value || faultLoadError.value || !faultLocalization.value) return ''
   return faultRules.value.length > 0
     ? t('app.faultLocalizationScopeCaveat')
     : t('app.faultLocalizationNoRuleCaveat')
@@ -820,6 +880,7 @@ const SETTLED_ATTEMPT_STATUSES = new Set<FixStrategyAttemptStatus>([
   'SKIPPED_NO_SPEC',
   'SKIPPED_NO_PARAMETERIZABLE_VALUES',
   'SKIPPED_NO_FAULT_RULES',
+  'SKIPPED_INITIAL_STATE_VIOLATION',
   'SKIPPED_UNSUPPORTED',
   'SKIPPED_INCOMPLETE_SOURCE_MODEL'
 ])
@@ -869,8 +930,12 @@ const strategyAttemptOutcomeTitle = (attempt: FixStrategyAttempt) => {
   if (attempt.status === 'FAILED_SOLVER_EXECUTION') return t('app.fixStrategySolverFailedTitle')
   if (attempt.status === 'SEARCH_BUDGET_EXHAUSTED') return t('app.fixStrategyBudgetExhaustedTitle')
   if (attempt.status === 'TIMED_OUT') return t('app.fixStrategyTimedOutTitle')
-  // SKIPPED_TIMEOUT included: the time limit ran out before this strategy started, so it never ran.
-  if (attempt.status.startsWith('SKIPPED_')) return t('app.fixStrategyNotRunTitle')
+  if (attempt.status === 'SKIPPED_INITIAL_STATE_VIOLATION') return t('app.fixInitialStateViolationTitle')
+  if (attempt.status === 'SKIPPED_NO_FAULT_RULES') return t('app.fixNoControllableRuleTitle')
+  if (attempt.status === 'SKIPPED_INCOMPLETE_SOURCE_MODEL') return t('app.fixIncompleteModelTitle')
+  if (attempt.status === 'SKIPPED_NO_PARAMETERIZABLE_VALUES') return t('app.fixNoAdjustableValuesTitle')
+  if (attempt.status === 'SKIPPED_TIMEOUT') return t('app.fixStrategyNotRunTitle')
+  if (attempt.status.startsWith('SKIPPED_')) return t('app.fixStrategyNotApplicableTitle')
   // VERIFIED: the option list renders instead of this outcome, since a verified attempt always carries one.
   return t('app.verifiedSolution')
 }
@@ -890,6 +955,7 @@ const strategyAttemptOutcomeNote = (attempt: FixStrategyAttempt) => {
 
 // Retrying a settled outcome repeats it, unless the user changed the parameter ranges it was searched with.
 const currentAttemptSettled = computed(() => {
+  if (dialogWideSkipAttempt.value) return true
   const attempt = currentStrategyAttempt.value
   if (!attempt || !SETTLED_ATTEMPT_STATUSES.has(attempt.status)) return false
   return !(attempt.strategy === 'parameter' && parameterRangesEditedSinceLastRequest.value)
@@ -929,6 +995,16 @@ const noAttemptLeftToChangeTheOutcome = computed(() => Boolean(dialogWideSkipAtt
     return attemptIsProof(attempt) && !attemptSearchedNarrowedRanges(attempt)
   }))
 
+// Reviewing the model is useful after a bounded search too; this guidance makes no claim of impossibility.
+const modelReviewAfterSearch = computed(() => !dialogWideSkipAttempt.value
+  && verifiedCount.value === 0
+  && strategyOrder.every(strategy => {
+    const attempt = fixResult.value?.strategyAttempts?.find(item => item.strategy === strategy)
+    return Boolean(attempt && (attemptIsProof(attempt)
+      || INAPPLICABLE_ATTEMPT_STATUSES.has(attempt.status)
+      || attempt.status === 'SEARCH_BUDGET_EXHAUSTED'))
+  }))
+
 const tryNextStrategy = () => {
   const strategy = nextUntriedStrategy.value
   if (!strategy) return
@@ -947,17 +1023,17 @@ const verifiedCount = computed(() =>
  * hears neither.
  */
 const searchAnnouncement = computed(() => {
+  // The failure card owns its alert; repeating it in this status region announces the same event twice.
+  if (selectedStrategyFailure.value) return ''
   if (currentStrategyLoading.value) {
-    return t('app.tryingFixStrategy', { strategy: strategyLabels.value[selectedStrategy.value] })
+    return `${t('app.tryingFixStrategy', { strategy: strategyLabels.value[selectedStrategy.value] })} · ${fixProgressStageLabel.value}`
   }
   if (currentSuggestion.value) {
     return hasAlternatives.value
       ? t('app.fixAlternativesTitle', { count: currentAlternatives.value.length })
       : t('app.verifiedSolution')
   }
-  const error = strategyErrors.value[selectedStrategy.value]
-  if (error) return error
-  if (selectedStrategy.value === 'parameter' && parameterPreferencesChanged.value) {
+  if (selectedStrategy.value === 'parameter' && parameterPreferencesChanged.value && !dialogWideSkipAttempt.value) {
     return t('app.parameterPreferencesChanged')
   }
   return currentStrategyAttempt.value ? strategyAttemptOutcomeTitle(currentStrategyAttempt.value) : ''
@@ -1002,13 +1078,6 @@ const getFaultRuleReason = (rule: FaultRule) => {
   return rule.reason
 }
 
-const getConditionActionLabel = (action?: string) => {
-  if (action === 'remove') return t('app.remove')
-  if (action === 'add') return t('app.add')
-  if (action === 'keep') return t('app.keep')
-  return action || ''
-}
-
 const formatConditionAdjustment = (adjustment: NonNullable<FixSuggestion['conditionAdjustments']>[number]) => {
   const device = adjustment.deviceLabel || t('app.unknownModelItem')
   const condition = [
@@ -1033,6 +1102,12 @@ const clearActiveFixTracking = (
   evidence: FixRequestTerminalEvidence
 ) => {
   if (activeFixRequestId.value !== requestId) return
+  const failure = strategyLoading.value ? strategyErrors.value[strategyLoading.value] : undefined
+  if (unresolvedFixRequestId.value === requestId && failure) {
+    failure.key = evidence === 'cancel-accepted'
+      ? 'app.fixSearchCancelledWithoutResult' : 'app.fixSearchEndedWithoutResult'
+    failure.suggestionKey = 'app.fixRequestFailedNextStep'
+  }
   lastResolvedFixRequest = { requestId, evidence }
   activeFixAbortController.value?.abort()
   activeFixAbortController.value = null
@@ -1053,6 +1128,9 @@ const clearActiveFixTracking = (
 }
 
 const warnFixOutcomeUnknown = (requestId: string) => {
+  if (activeFixRequestId.value !== requestId) return
+  if (props.visible && strategyLoading.value === selectedStrategy.value
+    && strategyErrors.value[selectedStrategy.value]) return
   if (fixOutcomeUnknownWarningRequestId === requestId) return
   fixOutcomeUnknownWarningRequestId = requestId
   notifyBlocked(t('app.fixStopRequestMayStillBeRunning'))
@@ -1129,6 +1207,23 @@ const disposeActiveFixSearch = () => {
   })
 }
 
+// A hard refresh does not unmount Vue, and an XHR stop can disappear with its document.
+// Send an independent keepalive stop even if an ordinary cancellation is already pending.
+const cancelFixOnPageHide = () => {
+  const requestId = activeFixRequestId.value
+  const authToken = activeFixAuthToken.value
+  if (!requestId || !authToken) return
+  pendingFixCancellationId.value = requestId
+  fixProgressStage.value = 'CANCELLING'
+  void boardApi.cancelFixRequest(requestId, authToken, { keepalive: true }).then(accepted => {
+    if (accepted) clearActiveFixTracking(requestId, 'cancel-accepted')
+    else beginUnknownFixRecovery(requestId)
+  }).catch(error => {
+    console.warn(`[Fix] Failed to cancel automatic-fix request ${requestId} on page leave:`, error)
+    beginUnknownFixRecovery(requestId)
+  })
+}
+
 const prepareForLogout = async (): Promise<'ready' | 'outcome-unknown'> => {
   const requestId = activeFixRequestId.value
   if (!requestId) return unresolvedFixRequestId.value ? 'outcome-unknown' : 'ready'
@@ -1175,7 +1270,10 @@ watch(() => props.visible, (val) => {
   }
 }, { immediate: true })
 
+onMounted(() => window.addEventListener('pagehide', cancelFixOnPageHide))
+
 onBeforeUnmount(() => {
+  window.removeEventListener('pagehide', cancelFixOnPageHide)
   disposeActiveFixSearch()
   dialogRequestVersion += 1
 })
@@ -1199,7 +1297,10 @@ const closeDialog = () => {
 }
 
 const isDialogOpen = computed(() => props.visible)
-const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen, closeDialog)
+const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen, closeDialog,
+  opener => document.querySelector<HTMLElement>('[data-testid="verification-result-dialog"] [role="dialog"]')
+    ?? document.querySelector<HTMLElement>(opener?.closest('[data-testid="trace-history-panel"]')
+      ? '[data-testid="open-history-panel"]' : '[data-testid="open-verification-panel"]'))
 </script>
 
 <template>
@@ -1214,11 +1315,12 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
     <div
       :ref="setDialogRef"
       class="iot-dialog iot-dialog--lg"
-      :class="verifiedCount > 0 ? 'iot-dialog--warning' : hasAttemptResults ? 'iot-dialog--danger' : 'iot-dialog--info'"
+      :class="`iot-dialog--${dialogTone}`"
       role="dialog"
       aria-modal="true"
       aria-labelledby="fix-result-dialog-title"
       tabindex="-1"
+      autofocus
       @click.stop
     >
       
@@ -1229,22 +1331,24 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
       >
         <div class="iot-dialog__icon">
           <span class="material-symbols-outlined" aria-hidden="true">
-            {{ strategyLoading ? 'progress_activity' : verifiedCount > 0 ? 'build' : hasAttemptResults ? 'search_off' : 'build' }}
+            {{ strategyLoading ? 'progress_activity' : dialogTone === 'danger' ? 'error' : verifiedCount > 0 ? 'build' : hasAttemptResults ? 'search_off' : 'build' }}
           </span>
         </div>
         <div class="iot-dialog__heading">
           <h3 id="fix-result-dialog-title" class="iot-dialog__title">{{ t('app.fixSuggestions') }}</h3>
           <p class="iot-dialog__subtitle">{{ headerStatus }}</p>
         </div>
-        <button
-          type="button"
-          :disabled="applyingFix"
-          @click="closeDialog"
-          class="iot-dialog__close"
-          :aria-label="t('app.close')"
-        >
-          <span class="material-symbols-outlined" aria-hidden="true">close</span>
-        </button>
+        <HintTooltip :content="t('app.close')">
+          <button
+            type="button"
+            :disabled="applyingFix"
+            @click="closeDialog"
+            class="iot-dialog__close"
+            :aria-label="t('app.close')"
+          >
+            <span class="material-symbols-outlined" aria-hidden="true">close</span>
+          </button>
+        </HintTooltip>
       </div>
 
       <!-- Content -->
@@ -1262,36 +1366,34 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
                 <span class="material-symbols-outlined board-text-danger">warning</span>
               </div>
               <div class="flex-1">
-                <span class="text-lg font-bold board-text-danger">{{ t('app.violationDetected') }}</span>
                 <div class="flex items-center gap-2 mt-1">
-                  <span class="text-sm board-text-danger">
+                  <span data-testid="fix-fault-summary" class="text-sm board-text-danger">
                     {{ faultLoading
                       ? t('app.loadingFaultLocalization')
-                      : t('app.faultRulesIdentified', { count: faultRules.length }) }}
+                      : faultLoadError
+                        ? t('app.faultLocalization')
+                        : t('app.faultRulesIdentified', { count: faultRules.length }) }}
                   </span>
                 </div>
                 <p v-if="localizedFaultLocalizationSummary" class="mt-2 text-xs leading-relaxed board-text-danger">
                   {{ localizedFaultLocalizationSummary }}
                 </p>
-                <details v-if="fixResult?.violatedSpecId || violatedSpecId" class="mt-2 text-[11px] board-text-danger">
+                <details v-if="fixResult?.violatedSpecId || violatedSpecId" class="mt-2 text-xs board-text-danger">
                   <summary class="cursor-pointer font-semibold">{{ t('app.technicalDetails') }}</summary>
                   <div class="mt-1 grid gap-1 sm:grid-cols-[9rem_minmax(0,1fr)]">
                     <span class="font-medium">{{ t('app.specificationTechnicalId') }}</span>
-                    <code class="break-all rounded board-chip-danger px-2 py-1 text-[11px] board-text-danger">{{ fixResult?.violatedSpecId || violatedSpecId }}</code>
+                    <code class="break-all rounded board-chip-danger px-2 py-1 text-xs board-text-danger">{{ fixResult?.violatedSpecId || violatedSpecId }}</code>
                   </div>
                 </details>
               </div>
             </div>
-            <p class="text-sm board-text-danger mt-3 ml-13">
-              {{ fixResult ? t('app.fixResultsRemainAdvisory') : t('app.fixAdvisoryBeforeRun') }}
-            </p>
           </div>
 
           <div
             v-if="localizedFixLimitations.length || displayedFixWarnings.length || displayedSourceGenerationIssues.length"
             class="board-surface-warning rounded-xl p-4 text-sm"
           >
-            <div class="mb-2 flex items-center gap-2 font-bold">
+            <div class="mb-2 flex items-center gap-2 font-semibold">
               <span class="material-symbols-outlined text-lg">warning</span>
               {{ t('app.fixLimitations') }}
             </div>
@@ -1306,18 +1408,19 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
             </ul>
             <details v-if="displayedFixWarnings.length" class="mt-3 text-xs board-text-warning">
               <summary class="cursor-pointer font-semibold">{{ t('app.fixTechnicalDiagnostics') }}</summary>
-              <ul class="mt-2 list-disc space-y-1 pl-5 font-mono text-[11px]">
+              <ul class="mt-2 list-disc space-y-1 pl-5 font-mono text-xs">
                 <li v-for="warning in displayedFixWarnings" :key="warning">{{ warning }}</li>
               </ul>
             </details>
           </div>
 
           <!-- Strategy Tabs -->
-          <div class="border border-slate-200 rounded-xl overflow-hidden dark:border-slate-700">
-            <div class="bg-slate-50 px-4 py-3 border-b border-slate-200 dark:border-slate-700 dark:bg-slate-800">
+          <div class="border board-border-subtle rounded-xl overflow-hidden">
+            <div class="board-bg-muted px-4 py-3 border-b board-border-subtle">
               <div class="flex items-center gap-2">
-                <span class="material-symbols-outlined text-slate-600 dark:text-slate-300">tune</span>
-                <span class="font-bold text-slate-800 dark:text-slate-100">{{ t('app.fixStrategies') }}</span>
+                <span class="material-symbols-outlined board-text-muted">tune</span>
+                <span class="font-semibold board-text-strong">{{ t('app.fixStrategies') }}</span>
+                <InfoTooltip :text="t('app.fixAdvisoryBeforeRun')" :label="t('app.showHelpFor', { topic: t('app.fixStrategies') })" test-id="fix-scope-help" />
               </div>
             </div>
             
@@ -1330,18 +1433,21 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
                   type="button"
                   :data-testid="`fix-strategy-${option.value}`"
                   @click="switchStrategy(option.value)"
+                  :disabled="applyingFix"
                   :aria-pressed="selectedStrategy === option.value"
-                  class="flex-1 px-4 py-3 rounded-lg font-medium text-sm transition-all flex items-center justify-center gap-2"
+                  :aria-label="option.label"
+                  class="iot-action-label flex-1 min-w-0 min-h-11 rounded-lg px-2 py-2 flex items-center justify-center gap-1.5 transition-colors disabled:cursor-not-allowed"
                   :class="selectedStrategy === option.value
-                    ? 'bg-[color:var(--accent-fill)] text-white shadow-md'
-                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700'"
+                    ? applyingFix ? 'bg-[color:var(--accent-fill-disabled)] text-white' : 'bg-[color:var(--accent-fill)] text-white shadow-md hover:bg-[color:var(--accent-fill-hover)]'
+                    : 'board-bg-control board-text-muted enabled:hover:board-control-hover enabled:hover:board-text-strong'"
                 >
-                  <span class="material-symbols-outlined text-lg" aria-hidden="true">
+                  <span class="material-symbols-outlined hidden shrink-0 text-lg sm:inline" aria-hidden="true">
                     {{ option.icon }}
                   </span>
-                  {{ option.label }}
+                  <span class="sm:hidden">{{ option.compactLabel }}</span>
+                  <span class="hidden min-w-0 break-words sm:inline">{{ option.label }}</span>
                   <template v-if="fixResult?.suggestions.some(s => s.strategy === option.value && suggestionIsCurrent(s))">
-                    <span class="material-symbols-outlined text-sm" aria-hidden="true">verified</span>
+                    <span class="material-symbols-outlined hidden shrink-0 text-sm sm:inline" aria-hidden="true">verified</span>
                     <span class="sr-only" data-testid="fix-strategy-verified">{{ t('app.fixStrategyHasVerifiedOption') }}</span>
                   </template>
                 </button>
@@ -1351,7 +1457,7 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
               <!-- The attempt outcome is stated once, by the suggestion card or the outcome
                    empty state below; repeating it here also showed stale text beside the
                    "search ranges changed" notice. -->
-              <div class="text-sm text-slate-500 mb-4 pl-1 dark:text-slate-300">
+              <div class="text-sm board-text-muted mb-4 pl-1">
                 {{ strategyDescriptions[selectedStrategy] }}
               </div>
 
@@ -1364,7 +1470,7 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
               >{{ searchAnnouncement }}</p>
 
               <div
-                v-if="currentStrategyLoading"
+                v-if="currentStrategyLoading && !selectedStrategyFailure"
                 data-testid="fix-strategy-loading"
                 class="board-surface-info mb-4 rounded-lg px-4 py-3 text-sm"
               >
@@ -1382,129 +1488,20 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
                 v-else-if="anotherStrategyLoading && !currentSuggestion"
                 id="fix-another-strategy-running"
                 data-testid="fix-another-strategy-running"
-                class="mb-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                class="mb-4 rounded-lg border board-border-subtle board-bg-muted px-4 py-3 text-xs board-text-muted"
               >
                 {{ t('app.anotherFixStrategyRunning', { strategy: strategyLabels[strategyLoading!] }) }}
               </div>
 
-              <!-- Preferred Ranges -->
-              <div
-                v-if="selectedStrategy === 'parameter' && parameterTargetCatalog.length && !parameterRangesSettledOverTemplate"
-                data-testid="fix-parameter-ranges"
-                class="border border-slate-200 rounded-lg overflow-hidden mb-4 dark:border-slate-700"
-              >
-                <div class="bg-slate-50 px-3 py-2 border-b border-slate-200 flex items-center gap-2 dark:border-slate-700 dark:bg-slate-800">
-                  <span class="material-symbols-outlined text-slate-600 text-lg dark:text-slate-300">speed</span>
-                  <span class="font-bold text-sm text-slate-800 dark:text-slate-100">{{ t('app.parameterSearchRanges') }}</span>
-                  <span
-                    v-if="activePreferredRangeCount"
-                    class="ml-auto px-2 py-0.5 board-chip-info text-xs rounded-full"
-                  >{{ t('app.parameterSearchRangesActive', { count: activePreferredRangeCount }) }}</span>
-                </div>
-                <div class="p-3 space-y-3">
-                  <p class="text-xs text-slate-500 dark:text-slate-400">{{ t('app.parameterSearchRangesHint') }}</p>
-                  <div class="space-y-2">
-                    <!-- Every row repeats the same bound and button labels, so each control is named
-                         with its row's target first; otherwise a screen reader hears identical names. -->
-                    <div
-                      v-for="{ row, target, issue } in preferredRangeRowViews"
-                      :key="row.targetId"
-                      data-testid="fix-parameter-range-row"
-                      class="grid grid-cols-1 sm:grid-cols-[minmax(0,1.6fr)_1fr_1fr_auto] gap-2 items-end"
-                    >
-                      <p class="min-w-0 text-sm text-slate-800 dark:text-slate-100">
-                        <span :id="`fix-range-target-${row.targetId}`" class="block truncate font-medium" :title="formatPreferredRangeTarget(target)">{{ formatPreferredRangeTarget(target) }}</span>
-                        <span class="text-xs text-slate-500 dark:text-slate-400">{{ t('app.parameterTemplateRange', { lower: target.lowerBound, upper: target.upperBound }) }}</span>
-                      </p>
-                      <label class="text-xs font-medium text-slate-600 dark:text-slate-300">
-                        <span :id="`fix-range-lower-${row.targetId}`">{{ t('app.lowerBound') }}</span>
-                        <input
-                          v-model.number="row.lower"
-                          type="number"
-                          :aria-labelledby="`fix-range-target-${row.targetId} fix-range-lower-${row.targetId}`"
-                          :aria-invalid="issue?.lowerInvalid ? 'true' : undefined"
-                          :aria-describedby="issue?.lowerInvalid ? `fix-range-issue-${row.targetId}` : undefined"
-                          :disabled="Boolean(preferenceActionBlockedReason)"
-                          class="mt-1 w-full rounded-md border bg-white px-2 py-1.5 text-sm text-slate-800 focus:border-[color:var(--accent-border)] focus:outline-none disabled:cursor-not-allowed dark:bg-slate-950 dark:text-slate-100"
-                          :class="issue?.lowerInvalid ? 'border-[color:var(--danger-border)]' : 'border-slate-300 dark:border-slate-600'"
-                        />
-                      </label>
-                      <label class="text-xs font-medium text-slate-600 dark:text-slate-300">
-                        <span :id="`fix-range-upper-${row.targetId}`">{{ t('app.upperBound') }}</span>
-                        <input
-                          v-model.number="row.upper"
-                          type="number"
-                          :aria-labelledby="`fix-range-target-${row.targetId} fix-range-upper-${row.targetId}`"
-                          :aria-invalid="issue?.upperInvalid ? 'true' : undefined"
-                          :aria-describedby="issue?.upperInvalid ? `fix-range-issue-${row.targetId}` : undefined"
-                          :disabled="Boolean(preferenceActionBlockedReason)"
-                          class="mt-1 w-full rounded-md border bg-white px-2 py-1.5 text-sm text-slate-800 focus:border-[color:var(--accent-border)] focus:outline-none disabled:cursor-not-allowed dark:bg-slate-950 dark:text-slate-100"
-                          :class="issue?.upperInvalid ? 'border-[color:var(--danger-border)]' : 'border-slate-300 dark:border-slate-600'"
-                        />
-                      </label>
-                      <button
-                        type="button"
-                        data-testid="fix-keep-original"
-                        :aria-pressed="rowKeepsOriginal(row, target)"
-                        :aria-labelledby="`fix-range-target-${row.targetId} fix-range-keep-${row.targetId}`"
-                        :disabled="Boolean(preferenceActionBlockedReason)"
-                        @click="toggleKeepOriginal(row, target)"
-                        class="h-9 rounded-md px-3 text-sm font-medium flex items-center gap-1 transition-colors disabled:cursor-not-allowed"
-                        :class="rowKeepsOriginal(row, target)
-                          ? 'board-chip-info'
-                          : 'board-chip-neutral hover:board-control-hover hover:board-text-strong'"
-                      >
-                        <span class="material-symbols-outlined text-base" aria-hidden="true">lock</span>
-                        <span :id="`fix-range-keep-${row.targetId}`">{{ t('app.keepOriginalValue', { value: target.originalValue }) }}</span>
-                      </button>
-                      <p
-                        v-if="issue"
-                        :id="`fix-range-issue-${row.targetId}`"
-                        data-testid="fix-range-issue"
-                        role="alert"
-                        class="sm:col-span-4 text-[length:var(--iot-font-min)] font-semibold board-text-danger"
-                      >{{ issue.message }}</p>
-                    </div>
-                  </div>
-
-                  <div
-                    v-if="fixResult?.unusedPreferredRangeSelections?.length"
-                    class="board-surface-warning rounded-md px-3 py-2 text-xs"
-                  >
-                    {{ t('app.unusedPreferencesDetail', { count: fixResult.unusedPreferredRangeSelections.length }) }}
-                  </div>
-
-                  <div v-if="narrowedPreferredRangeRows.length" class="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      data-testid="fix-reset-ranges"
-                      :disabled="Boolean(preferenceActionBlockedReason)"
-                      :aria-describedby="preferenceActionBlockedReason ? 'fix-preference-blocked' : undefined"
-                      @click="resetPreferenceRows"
-                      class="px-3 py-2 rounded-md board-chip-neutral hover:board-control-hover hover:board-text-strong text-sm font-medium flex items-center gap-1 transition-colors disabled:cursor-not-allowed"
-                    >
-                      <span class="material-symbols-outlined text-base" aria-hidden="true">restart_alt</span>
-                      {{ t('app.resetParameterSearchRanges') }}
-                    </button>
-                  </div>
-                  <p
-                    v-if="preferenceActionBlockedReason"
-                    id="fix-preference-blocked"
-                    data-testid="fix-preference-blocked"
-                    class="mt-2 text-xs text-slate-500 dark:text-slate-400"
-                  >{{ preferenceActionBlockedReason }}</p>
-                </div>
-              </div>
 
               <!-- Verified alternatives: every one passed the same check, so the verdict is stated once. -->
-              <div v-if="currentSuggestion">
+              <div v-if="currentSuggestion" data-testid="fix-verified-proposals">
                 <div class="p-4 rounded-xl mb-4 bg-[color:var(--success-surface)] border border-[color:var(--success-border)]">
                   <div class="flex items-center gap-3">
                     <div class="w-10 h-10 rounded-xl flex items-center justify-center board-chip-success">
                       <span class="material-symbols-outlined board-text-success" aria-hidden="true">verified</span>
                     </div>
                     <div class="flex-1">
-                      <span class="font-bold board-text-success">{{ t('app.verifiedSolution') }}</span>
                       <p class="text-sm board-text-success">{{ strategyAttemptReasonLabel('VERIFIED') }}</p>
                     </div>
                   </div>
@@ -1513,7 +1510,7 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
                 <p
                   v-if="hasAlternatives"
                   id="fix-alternatives-title"
-                  class="mb-2 text-sm font-bold text-slate-700 dark:text-slate-200"
+                  class="mb-2 text-sm font-semibold board-text-strong"
                 >{{ t('app.fixAlternativesTitle', { count: currentAlternatives.length }) }}</p>
                 <div
                   :role="hasAlternatives ? 'radiogroup' : undefined"
@@ -1527,13 +1524,13 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
                     :class="hasAlternatives
                       ? ['rounded-lg border-2 p-3 cursor-pointer', alternativeIndex === currentAlternativeIndex
                         ? 'border-[color:var(--accent-border)]'
-                        : 'border-slate-200 dark:border-slate-700']
+                        : 'board-border-subtle ']
                       : undefined"
                     @click="hasAlternatives && selectAlternative(alternativeIndex)"
                   >
                     <label
                       v-if="hasAlternatives"
-                      class="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-800 cursor-pointer dark:text-slate-100"
+                      class="mb-3 flex items-center gap-2 text-sm font-semibold board-text-strong cursor-pointer"
                     >
                       <input
                         type="radio"
@@ -1548,30 +1545,28 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
                     <div class="space-y-4">
                       <!-- Parameter Adjustments -->
                       <div v-if="alternative.parameterAdjustments?.length">
-                        <div class="flex items-center gap-2 mb-2 text-sm font-bold text-slate-700 dark:text-slate-200">
-                          <span class="material-symbols-outlined board-text-info">tune</span>
+                        <div class="flex items-center gap-2 mb-2 text-sm font-semibold board-text-strong">
+                          <span class="material-symbols-outlined board-text-muted">tune</span>
                           {{ t('app.parameterAdjustments') }} ({{ alternative.parameterAdjustments.length }})
                         </div>
                         <div class="space-y-2">
                           <div
                             v-for="(adj, idx) in alternative.parameterAdjustments"
                             :key="idx"
-                            class="board-surface-info rounded-lg p-3"
+                            class="board-note rounded-lg p-3"
                           >
-                            <div class="flex items-center justify-between">
+                            <div class="flex flex-wrap items-start justify-between gap-2">
                               <div class="min-w-0 flex items-center gap-2">
                                 <span
-                                  class="max-w-[14rem] truncate px-2 py-0.5 bg-[color:var(--accent-fill)] text-white text-xs rounded font-bold"
-                                  :title="formatPreferredRangeTarget(adj)"
+                                  class="min-w-0 break-words px-2 py-0.5 board-meta-chip text-xs rounded font-semibold"
                                 >{{ formatPreferredRangeTarget(adj) }}</span>
-                                <code class="min-w-0 truncate text-sm font-mono text-slate-700 dark:text-slate-200" :title="`${formatModelToken(adj.attribute, adj.modelTokenSource)} ${adj.relation}`">{{ formatModelToken(adj.attribute, adj.modelTokenSource) }} {{ adj.relation }}</code>
                               </div>
-                              <span class="text-xs text-slate-500 dark:text-slate-300">{{ t('app.rangeLabel') }}: [{{ adj.lowerBound }}, {{ adj.upperBound }}]</span>
+                              <span class="text-xs board-text-muted">{{ t('app.rangeLabel') }}: [{{ adj.lowerBound }}, {{ adj.upperBound }}]</span>
                             </div>
                             <div class="flex items-center gap-2 mt-2">
-                              <span class="px-2 py-1 board-chip-danger rounded font-mono text-sm line-through">{{ adj.originalValue }}</span>
-                              <span class="material-symbols-outlined text-slate-500 dark:text-slate-500">arrow_forward</span>
-                              <span class="px-2 py-1 board-chip-success rounded font-mono text-sm">{{ adj.newValue }}</span>
+                              <span class="px-2 py-1 board-meta-chip rounded font-mono text-sm line-through">{{ adj.originalValue }}</span>
+                              <span class="material-symbols-outlined board-text-muted">arrow_forward</span>
+                              <span class="px-2 py-1 board-chip-accent rounded font-mono text-sm">{{ adj.newValue }}</span>
                             </div>
                             <p
                               v-if="parameterAdjustmentMakesRuleUnreachable(adj)"
@@ -1586,40 +1581,24 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
 
                       <!-- Condition Adjustments -->
                       <div v-if="alternative.conditionAdjustments?.length">
-                        <div class="flex items-center gap-2 mb-2 text-sm font-bold text-slate-700 dark:text-slate-200">
-                          <span class="material-symbols-outlined board-text-success">checklist</span>
+                        <div class="flex items-center gap-2 mb-2 text-sm font-semibold board-text-strong">
+                          <span class="material-symbols-outlined board-text-muted">checklist</span>
                           {{ t('app.conditionAdjustments') }} ({{ alternative.conditionAdjustments.length }})
                         </div>
                         <div class="space-y-2">
-                          <div
+                          <p
                             v-for="(adj, idx) in alternative.conditionAdjustments"
                             :key="idx"
-                            class="board-surface-success rounded-lg p-3 flex items-center gap-3"
+                            class="board-note rounded-lg p-3 break-words text-sm font-medium board-text-strong"
                           >
-                            <div
-                              class="w-8 h-8 rounded-lg flex items-center justify-center"
-                              :class="adj.action === 'remove' ? 'board-chip-danger' : adj.action === 'add' ? 'board-chip-success' : 'bg-slate-100 dark:bg-slate-700'"
-                            >
-                              <span class="material-symbols-outlined text-sm" :class="adj.action === 'remove' ? 'board-text-danger' : adj.action === 'add' ? 'board-text-success' : 'text-slate-600 dark:text-slate-200'" aria-hidden="true">
-                                {{ adj.action === 'remove' ? 'remove' : adj.action === 'add' ? 'add' : 'check' }}
-                              </span>
-                            </div>
-                            <div class="flex-1">
-                              <span class="text-sm font-medium text-slate-700 dark:text-slate-200">{{ formatConditionAdjustment(adj) }}</span>
-                            </div>
-                            <span
-                              class="px-2 py-0.5 rounded text-xs font-medium"
-                              :class="adj.action === 'remove' ? 'board-chip-danger board-text-danger' : adj.action === 'add' ? 'board-chip-success board-text-success' : 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-200'"
-                            >
-                              {{ getConditionActionLabel(adj.action) }}
-                            </span>
-                          </div>
+                            {{ formatConditionAdjustment(adj) }}
+                          </p>
                         </div>
                       </div>
 
                       <!-- Disabled Rules -->
                       <div v-if="alternative.removedRuleDescriptions?.length">
-                        <div class="flex items-center gap-2 mb-2 text-sm font-bold text-slate-700 dark:text-slate-200">
+                        <div class="flex items-center gap-2 mb-2 text-sm font-semibold board-text-strong">
                           <span class="material-symbols-outlined board-text-warning">block</span>
                           {{ t('app.rulesToRemove') }} ({{ alternative.removedRuleDescriptions.length }})
                         </div>
@@ -1629,7 +1608,7 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
                               v-for="(description, index) in alternative.removedRuleDescriptions"
                               :key="`${index}-${description}`"
                               data-testid="fix-removed-rule"
-                              class="block rounded-lg bg-[color:var(--warning-fill)] px-3 py-1 text-sm font-medium text-white"
+                              class="block break-words rounded-lg bg-[color:var(--warning-fill)] px-3 py-1 text-sm font-medium text-white"
                             >
                               {{ description }}
                             </span>
@@ -1673,25 +1652,25 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
                 <p
                   v-if="alternativesIncomplete"
                   data-testid="fix-alternatives-incomplete"
-                  class="mt-3 flex items-start gap-2 text-xs text-slate-500 dark:text-slate-400"
+                  class="mt-3 flex items-start gap-2 text-xs board-text-muted"
                 >
                   <span class="material-symbols-outlined text-sm" aria-hidden="true">info</span>
                   {{ t('app.fixAlternativesIncomplete') }}
                 </p>
               </div>
 
-              <div v-else-if="strategyErrors[selectedStrategy]" class="board-surface-danger rounded-lg px-4 py-4">
+              <div v-else-if="selectedStrategyFailure" id="fix-search-failure" class="rounded-lg px-4 py-4" :class="`board-surface-${selectedStrategyFailureTone}`" role="alert" data-testid="fix-search-failure">
                 <div class="flex items-start gap-2">
-                  <span class="material-symbols-outlined text-lg" aria-hidden="true">error</span>
-                  <div>
-                    <p class="font-semibold">{{ t('app.fixStrategyRequestFailed') }}</p>
-                    <p class="mt-1 text-xs">{{ strategyErrors[selectedStrategy] }}</p>
+                  <span class="material-symbols-outlined shrink-0 text-lg" aria-hidden="true">{{ selectedStrategyFailureTone === 'warning' ? 'help' : 'error' }}</span>
+                  <div class="min-w-0 flex-1">
+                    <p class="font-semibold" data-testid="fix-search-failure-summary">{{ selectedStrategyFailure.message }}</p>
+                    <FailureDetails v-bind="selectedStrategyFailure" />
                   </div>
                 </div>
               </div>
 
               <div
-                v-else-if="selectedStrategy === 'parameter' && parameterPreferencesChanged"
+                v-else-if="selectedStrategy === 'parameter' && parameterPreferencesChanged && !dialogWideSkipAttempt"
                 data-testid="fix-parameter-preferences-stale"
                 class="board-surface-warning rounded-lg px-4 py-4"
               >
@@ -1707,53 +1686,167 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
               <div
                 v-else-if="currentStrategyAttempt"
                 data-testid="fix-attempt-outcome"
-                class="text-center py-8 text-slate-500 dark:text-slate-300"
+                class="text-center py-8 board-text-muted"
               >
                 <span class="material-symbols-outlined text-4xl mb-2 block" aria-hidden="true">
                   {{ attemptIsProof(currentStrategyAttempt) ? 'search_off' : 'help' }}
                 </span>
-                <p class="font-semibold text-slate-700 dark:text-slate-200">{{ strategyAttemptOutcomeTitle(currentStrategyAttempt) }}</p>
-                <p class="mx-auto mt-2 max-w-lg text-xs text-slate-500 dark:text-slate-400">
+                <p class="font-semibold board-text-strong">{{ strategyAttemptOutcomeTitle(currentStrategyAttempt) }}</p>
+                <p class="mx-auto mt-2 max-w-lg text-xs board-text-muted">
                   {{ strategyAttemptOutcomeDetail(currentStrategyAttempt) }}
                 </p>
                 <p
                   v-if="strategyAttemptOutcomeNote(currentStrategyAttempt)"
                   data-testid="fix-attempt-outcome-note"
-                  class="mx-auto mt-2 max-w-lg text-xs text-slate-500 dark:text-slate-400"
+                  class="mx-auto mt-2 max-w-lg text-xs board-text-muted"
                 >
                   {{ strategyAttemptOutcomeNote(currentStrategyAttempt) }}
                 </p>
+                <p
+                  v-if="modelReviewAfterSearch"
+                  data-testid="fix-no-safe-repair-next-step"
+                  class="mx-auto mt-3 max-w-lg text-xs board-text-strong"
+                >
+                  {{ t('app.fixNoSafeRepairNextStep') }}
+                </p>
               </div>
 
-              <div v-else-if="!currentStrategyLoading" class="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-5 text-center text-slate-600 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300">
-                <span class="material-symbols-outlined mb-2 block text-3xl text-slate-400 dark:text-slate-500" aria-hidden="true">science</span>
+              <div v-else-if="!currentStrategyLoading" class="rounded-lg border border-dashed border-[color:var(--border-strong)] board-bg-muted px-4 py-5 text-center board-text-muted">
+                <span class="material-symbols-outlined mb-2 block text-3xl board-text-muted" aria-hidden="true">science</span>
                 <p class="font-semibold">{{ t('app.fixStrategyNotTried') }}</p>
               </div>
 
+              <!-- Preferred Ranges -->
+              <div
+                v-if="selectedStrategy === 'parameter' && parameterTargetCatalog.length && !parameterRangesSettledOverTemplate && !dialogWideSkipAttempt"
+                data-testid="fix-parameter-ranges"
+                class="border board-border-subtle rounded-lg overflow-hidden mt-4 mb-4"
+              >
+                <div class="board-bg-muted px-3 py-2 border-b board-border-subtle flex items-center gap-2">
+                  <span class="material-symbols-outlined board-text-muted text-lg">speed</span>
+                  <span class="font-semibold text-sm board-text-strong">{{ t('app.parameterSearchRanges') }}</span>
+                  <InfoTooltip :text="t('app.parameterSearchRangesHint')" :label="t('app.showHelpFor', { topic: t('app.parameterSearchRanges') })" test-id="fix-range-help" />
+                  <span
+                    v-if="activePreferredRangeCount"
+                    class="ml-auto px-2 py-0.5 board-meta-chip text-xs rounded-full"
+                  >{{ t('app.parameterSearchRangesActive', { count: activePreferredRangeCount }) }}</span>
+                </div>
+                <div class="p-3 space-y-3">
+                  <div class="space-y-2">
+                    <!-- Every row repeats the same bound and button labels, so each control is named
+                         with its row's target first; otherwise a screen reader hears identical names. -->
+                    <div
+                      v-for="{ row, target, issue } in preferredRangeRowViews"
+                      :key="row.targetId"
+                      data-testid="fix-parameter-range-row"
+                      class="grid grid-cols-1 sm:grid-cols-[minmax(0,1.6fr)_1fr_1fr_auto] gap-2 items-end"
+                    >
+                      <p class="min-w-0 text-sm board-text-strong">
+                        <span :id="`fix-range-target-${row.targetId}`" class="block break-words font-medium">{{ formatPreferredRangeTarget(target) }}</span>
+                        <span class="text-xs board-text-muted">{{ t('app.parameterTemplateRange', { lower: target.lowerBound, upper: target.upperBound }) }}</span>
+                      </p>
+                      <label class="board-form-label">
+                        <span :id="`fix-range-lower-${row.targetId}`">{{ t('app.lowerBound') }}</span>
+                        <input
+                          v-model.number="row.lower"
+                          type="number"
+                          :aria-labelledby="`fix-range-target-${row.targetId} fix-range-lower-${row.targetId}`"
+                          :aria-invalid="issue?.lowerInvalid ? 'true' : undefined"
+                          :aria-describedby="issue?.lowerInvalid ? `fix-range-issue-${row.targetId}` : undefined"
+                          :disabled="applyingFix || Boolean(preferenceActionBlockedReason)"
+                          class="board-field mt-1 disabled:cursor-not-allowed"
+                        />
+                      </label>
+                      <label class="board-form-label">
+                        <span :id="`fix-range-upper-${row.targetId}`">{{ t('app.upperBound') }}</span>
+                        <input
+                          v-model.number="row.upper"
+                          type="number"
+                          :aria-labelledby="`fix-range-target-${row.targetId} fix-range-upper-${row.targetId}`"
+                          :aria-invalid="issue?.upperInvalid ? 'true' : undefined"
+                          :aria-describedby="issue?.upperInvalid ? `fix-range-issue-${row.targetId}` : undefined"
+                          :disabled="applyingFix || Boolean(preferenceActionBlockedReason)"
+                          class="board-field mt-1 disabled:cursor-not-allowed"
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        data-testid="fix-keep-original"
+                        :aria-pressed="rowKeepsOriginal(row, target)"
+                        :aria-labelledby="`fix-range-target-${row.targetId} fix-range-keep-${row.targetId}`"
+                        :disabled="applyingFix || Boolean(preferenceActionBlockedReason)"
+                        @click="toggleKeepOriginal(row, target)"
+                        class="board-action-secondary disabled:cursor-not-allowed"
+                        :class="rowKeepsOriginal(row, target)
+                          ? 'board-chip-info'
+                          : 'board-chip-neutral hover:board-control-hover hover:board-text-strong'"
+                      >
+                        <span class="material-symbols-outlined text-base" aria-hidden="true">lock</span>
+                        <span :id="`fix-range-keep-${row.targetId}`">{{ t('app.keepOriginalValue', { value: target.originalValue }) }}</span>
+                      </button>
+                      <p
+                        v-if="issue"
+                        :id="`fix-range-issue-${row.targetId}`"
+                        data-testid="fix-range-issue"
+                        role="alert"
+                        class="board-caption sm:col-span-4 board-text-danger"
+                      >{{ issue.message }}</p>
+                    </div>
+                  </div>
+
+                  <div
+                    v-if="fixResult?.unusedPreferredRangeSelections?.length"
+                    class="board-surface-warning rounded-md px-3 py-2 text-xs"
+                  >
+                    {{ t('app.unusedPreferencesDetail', { count: fixResult.unusedPreferredRangeSelections.length }) }}
+                  </div>
+
+                  <div v-if="narrowedPreferredRangeRows.length" class="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      data-testid="fix-reset-ranges"
+                      :disabled="applyingFix || Boolean(preferenceActionBlockedReason)"
+                      :aria-describedby="preferenceActionBlockedReason ? 'fix-preference-blocked' : undefined"
+                      @click="resetPreferenceRows"
+                      class="board-action-secondary disabled:cursor-not-allowed"
+                    >
+                      <span class="material-symbols-outlined text-base" aria-hidden="true">restart_alt</span>
+                      {{ t('app.resetParameterSearchRanges') }}
+                    </button>
+                  </div>
+                  <p
+                    v-if="preferenceActionBlockedReason"
+                    id="fix-preference-blocked"
+                    data-testid="fix-preference-blocked"
+                    class="mt-2 text-xs board-text-muted"
+                  >{{ preferenceActionBlockedReason }}</p>
+                </div>
+              </div>
             </div>
           </div>
 
           <!-- Fault Rules Section -->
-          <div class="border border-slate-200 rounded-xl overflow-hidden dark:border-slate-700">
-            <div class="bg-slate-50 px-4 py-3 border-b border-slate-200 dark:border-slate-700 dark:bg-slate-800">
+          <div class="border board-border-subtle rounded-xl overflow-hidden">
+            <div class="board-bg-muted px-4 py-3 border-b board-border-subtle">
               <div class="flex items-center gap-2">
-                <span class="material-symbols-outlined text-slate-600 dark:text-slate-300">search</span>
-                <span class="font-bold text-slate-800 dark:text-slate-100">{{ t('app.faultLocalization') }}</span>
-                <span class="ml-auto px-2 py-0.5 board-chip-danger text-xs rounded-full">{{ t('app.rulesCount', { count: faultRules.length }) }}</span>
+                <span class="material-symbols-outlined board-text-muted">search</span>
+                <span class="font-semibold board-text-strong">{{ t('app.faultLocalization') }}</span>
+                <span v-if="!faultLoading && !faultLoadError" data-testid="fix-fault-count" class="ml-auto px-2 py-0.5 board-meta-chip text-xs rounded-full">{{ t('app.rulesCount', { count: faultRules.length }) }}</span>
               </div>
             </div>
             
             <div class="p-4">
-              <div v-if="faultLoading" class="flex items-center justify-center gap-2 py-8 text-sm text-slate-500 dark:text-slate-300">
+              <div v-if="faultLoading" class="flex items-center justify-center gap-2 py-8 text-sm board-text-muted">
                 <span class="material-symbols-outlined animate-spin" aria-hidden="true">progress_activity</span>
                 {{ t('app.loadingFaultLocalization') }}
               </div>
-              <div v-else-if="faultLoadFailed" class="text-center py-8 board-text-danger">
+              <div v-else-if="faultLoadError" class="py-8 board-text-danger" role="alert" data-testid="fix-fault-failure">
                 <span class="material-symbols-outlined text-3xl" aria-hidden="true">error</span>
-                <p class="mt-2 text-sm font-medium">{{ t('app.failedToLoadFaultLocalization') }}</p>
+                <p class="mt-2 text-sm font-medium">{{ faultLoadFailure?.message }}</p>
+                <FailureDetails v-if="faultLoadFailure" v-bind="faultLoadFailure" />
               </div>
-              <div v-else-if="faultRules.length === 0" class="text-center py-8 text-slate-500 dark:text-slate-400">
-                <span class="material-symbols-outlined text-4xl mb-2 block">check_circle</span>
+              <div v-else-if="faultRules.length === 0" class="text-center py-8 board-text-muted">
+                <span class="material-symbols-outlined text-4xl mb-2 block" aria-hidden="true">info</span>
                 <p>{{ t('app.noFaultRulesFound') }}</p>
                 <p class="text-xs mt-1">{{ t('app.violationMayBeDeviceTransitions') }}</p>
               </div>
@@ -1762,25 +1855,25 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
                 <div 
                   v-for="(rule, idx) in faultRules"
                   :key="idx"
-                  class="border border-slate-200 rounded-lg p-3 hover:bg-slate-50 transition-colors dark:border-slate-700 dark:hover:bg-slate-800"
+                  class="border board-border-subtle rounded-lg p-3 hover:board-control-hover hover:board-text-strong transition-colors"
                   :class="{ 'border-[color:var(--warning-border)] board-chip-warning': rule.conflicting }"
                 >
-                  <div class="flex items-center justify-between mb-2">
-                    <div class="flex items-center gap-2">
-                      <span class="w-6 h-6 bg-[color:var(--accent-fill-hover)] text-white rounded flex items-center justify-center text-xs font-bold">{{ idx + 1 }}</span>
-                      <code class="text-xs bg-slate-100 px-2 py-1 rounded font-mono dark:bg-slate-800 dark:text-slate-100">{{ rule.ruleString?.trim() || t('app.noDescription') }}</code>
+                  <div class="flex flex-wrap items-start justify-between gap-2 mb-2">
+                    <div class="flex min-w-0 flex-1 items-start gap-2">
+                      <span class="w-6 h-6 shrink-0 bg-[color:var(--accent-fill-hover)] text-white rounded flex items-center justify-center text-xs font-semibold">{{ idx + 1 }}</span>
+                      <code class="min-w-0 break-all text-xs board-bg-control px-2 py-1 rounded font-mono board-text-strong">{{ rule.ruleString?.trim() || t('app.noDescription') }}</code>
                     </div>
                     <span v-if="rule.conflicting" class="px-2 py-0.5 board-chip-warning board-text-warning text-xs rounded flex items-center gap-1">
                       <span class="material-symbols-outlined text-xs">warning</span>
                       {{ t('app.conflicts') }}
                     </span>
                   </div>
-                  <div class="grid grid-cols-1 gap-2 text-xs text-slate-600 sm:grid-cols-3 dark:text-slate-300">
+                  <div class="grid grid-cols-1 gap-2 break-words text-xs board-text-muted sm:grid-cols-3">
                     <div>{{ t('app.transitionNumberLabel') }}: <span class="font-medium">{{ rule.transitionNumber }}</span></div>
                     <div>{{ t('app.device') }}: <span class="font-medium">{{ rule.targetDeviceLabel }}</span></div>
                     <div>{{ t('app.action') }}: <span data-testid="fix-fault-action" class="font-medium">{{ formatModelToken(rule.targetActionLabel, rule.modelTokenSource) }}</span></div>
                   </div>
-                  <div v-if="rule.reason" class="mt-2 text-xs text-slate-500 flex items-start gap-1 dark:text-slate-400">
+                  <div v-if="rule.reasonCode !== 'TRIGGERED' && rule.reason" class="mt-2 text-xs board-text-muted flex items-start gap-1">
                     <span class="material-symbols-outlined text-xs mt-0.5">info</span>
                     {{ getFaultRuleReason(rule) }}
                   </div>
@@ -1800,29 +1893,28 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
            taller than the fold: the action landed 19px past
            the visible edge and read as a broken, half-drawn control in both themes. An action the
            user must reach to make progress does not belong behind a scroll. Matches the
-           dismiss-left / primary-right footer RuleBuilderDialog already establishes. -->
-      <div class="iot-dialog__footer">
+           trailing action row of the shared dialog shell. -->
+      <div class="iot-dialog__footer flex-wrap">
+        <p
+          v-if="applyBlockedReason"
+          id="fix-apply-readiness"
+          data-testid="fix-apply-readiness"
+          role="status"
+          class="basis-full text-xs leading-5 board-text-muted"
+        >
+          {{ applyBlockedReason }}
+        </p>
         <button
           type="button"
           :disabled="applyingFix"
           @click="closeDialog"
-          class="iot-dialog-btn iot-dialog-btn--ghost"
+          class="iot-dialog-btn iot-dialog-btn--ghost shrink-0 whitespace-nowrap"
         >
           <span class="material-symbols-outlined text-sm" aria-hidden="true">close</span>
           {{ t('app.close') }}
         </button>
 
-        <div ref="footerActionsRef" class="ml-auto flex min-w-0 flex-col items-end gap-2">
-          <p
-            v-if="applyBlockedReason"
-            id="fix-apply-readiness"
-            data-testid="fix-apply-readiness"
-            role="status"
-            class="max-w-xl text-right text-xs leading-5 text-slate-500 dark:text-slate-400"
-          >
-            {{ applyBlockedReason }}
-          </p>
-
+        <div ref="footerActionsRef" class="contents">
           <button
             v-if="currentSuggestion"
             type="button"
@@ -1832,16 +1924,35 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
               ? 'iot-dialog-btn--danger'
               : 'iot-dialog-btn--primary'"
             :disabled="applyDisabled"
+            :aria-label="applyingFix ? t('app.applying') : currentSuggestion.strategy === 'remove'
+              ? t('app.removeRulesAndApply') : t('app.applyThisFix')"
             :aria-describedby="applyBlockedReason ? 'fix-apply-readiness' : undefined"
             @click="applyFix(currentSuggestion)"
           >
             <span v-if="!applyingFix" class="material-symbols-outlined" aria-hidden="true">check_circle</span>
             <span v-else class="iot-dialog-btn__spinner"></span>
-            {{ applyingFix
+            <span class="sm:hidden">{{ applyingFix
+              ? t('app.applying')
+              : currentSuggestion.strategy === 'remove'
+                ? t('app.removeRulesAndApplyCompact')
+                : t('app.applyThisFixCompact') }}</span>
+            <span class="hidden sm:inline">{{ applyingFix
               ? t('app.applying')
               : currentSuggestion.strategy === 'remove'
                 ? t('app.removeRulesAndApply')
-                : t('app.applyThisFix') }}
+                : t('app.applyThisFix') }}</span>
+          </button>
+
+          <button
+            v-else-if="dialogWideSkipAttempt"
+            type="button"
+            data-testid="fix-search-blocked"
+            disabled
+            aria-describedby="fix-search-needs-verification"
+            class="iot-dialog-btn iot-dialog-btn--primary"
+          >
+            <span class="material-symbols-outlined" aria-hidden="true">block</span>
+            {{ t('app.fixSearchUnavailable') }}
           </button>
 
           <button
@@ -1849,15 +1960,20 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
             type="button"
             data-testid="fix-try-current"
             :disabled="strategyLoading !== null || Boolean(rangeBlockedReasonIds)"
-            :aria-describedby="[anotherStrategyLoading ? 'fix-another-strategy-running' : '', rangeBlockedReasonIds]
+            :aria-label="currentStrategyAttempt || strategyErrors[selectedStrategy]
+              ? t('app.retryFixStrategy') : t('app.tryFixStrategy')"
+            :aria-describedby="[anotherStrategyLoading ? 'fix-another-strategy-running' : '', currentStrategyLoading && selectedStrategyFailure ? 'fix-search-failure' : '', rangeBlockedReasonIds]
               .filter(Boolean).join(' ') || undefined"
             @click="trySelectedStrategy"
             class="iot-dialog-btn iot-dialog-btn--primary"
           >
             <span class="material-symbols-outlined" aria-hidden="true">science</span>
-            {{ currentStrategyAttempt || strategyErrors[selectedStrategy]
+            <span class="sm:hidden">{{ currentStrategyAttempt || strategyErrors[selectedStrategy]
+              ? t('app.retryFixStrategyCompact')
+              : t('app.tryFixStrategyCompact') }}</span>
+            <span class="hidden sm:inline">{{ currentStrategyAttempt || strategyErrors[selectedStrategy]
               ? t('app.retryFixStrategy')
-              : t('app.tryFixStrategy') }}
+              : t('app.tryFixStrategy') }}</span>
           </button>
 
           <button
@@ -1865,14 +1981,24 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
             type="button"
             data-testid="fix-try-next-strategy"
             :disabled="strategyLoading !== null"
+            :aria-label="t('app.fixTryNextStrategy', { strategy: strategyLabels[nextUntriedStrategy] })"
             :aria-describedby="anotherStrategyLoading ? 'fix-another-strategy-running' : undefined"
             @click="tryNextStrategy"
             class="iot-dialog-btn iot-dialog-btn--primary"
           >
             <span class="material-symbols-outlined" aria-hidden="true">{{ strategyIcons[nextUntriedStrategy] }}</span>
-            {{ t('app.fixTryNextStrategy', { strategy: strategyLabels[nextUntriedStrategy] }) }}
+            <span class="sm:hidden">{{ t('app.fixTryNextStrategy', { strategy: compactStrategyLabels[nextUntriedStrategy] }) }}</span>
+            <span class="hidden sm:inline">{{ t('app.fixTryNextStrategy', { strategy: strategyLabels[nextUntriedStrategy] }) }}</span>
           </button>
         </div>
+        <p
+          v-if="dialogWideSkipAttempt"
+          id="fix-search-needs-verification"
+          data-testid="fix-search-needs-verification"
+          class="basis-full text-xs leading-5 board-text-muted"
+        >
+          {{ t('app.fixSearchNeedsNewVerification') }}
+        </p>
       </div>
     </div>
   </div>

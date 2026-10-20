@@ -5,6 +5,7 @@ import cn.edu.nju.Iot_Verify.component.ai.LlmRequestControlHolder;
 import cn.edu.nju.Iot_Verify.exception.BadRequestException;
 import cn.edu.nju.Iot_Verify.exception.ResourceNotFoundException;
 import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
+import cn.edu.nju.Iot_Verify.exception.InternalServerException;
 import cn.edu.nju.Iot_Verify.dto.RequestLimits;
 import cn.edu.nju.Iot_Verify.dto.model.InteractiveOperationStage;
 import cn.edu.nju.Iot_Verify.dto.model.InteractiveOperationStatusDto;
@@ -100,7 +101,10 @@ public class InteractiveAiExecutionService {
         } catch (ExecutionException e) {
             Throwable cause = e.getCause();
             if (cause instanceof RuntimeException runtime) throw runtime;
-            throw new ServiceUnavailableException("AI recommendation failed.", cause);
+            log.error("AI recommendation worker failed: userId={}, requestId={}, stage={}",
+                    userId, id, execution.stage.get(), cause);
+            if (cause instanceof Error error) throw error;
+            throw new InternalServerException("AI recommendation execution failed.", cause);
         } finally {
             if (executor.getThreadPoolExecutor() != null) executor.getThreadPoolExecutor().purge();
         }

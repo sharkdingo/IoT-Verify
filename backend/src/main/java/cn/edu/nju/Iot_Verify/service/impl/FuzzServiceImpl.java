@@ -10,7 +10,7 @@ import cn.edu.nju.Iot_Verify.component.fuzz.FuzzInputEvent;
 import cn.edu.nju.Iot_Verify.component.fuzz.FuzzInputEventSource;
 import cn.edu.nju.Iot_Verify.component.fuzz.FuzzLimitationContract;
 import cn.edu.nju.Iot_Verify.component.fuzz.FuzzMetadataPolicy;
-import cn.edu.nju.Iot_Verify.component.fuzz.FuzzModelFingerprint;
+import cn.edu.nju.Iot_Verify.util.ModelFingerprint;
 import cn.edu.nju.Iot_Verify.component.fuzz.FuzzModelInputSnapshotCodec;
 import cn.edu.nju.Iot_Verify.component.fuzz.FuzzPaperDomainPreviewer;
 import cn.edu.nju.Iot_Verify.component.fuzz.FuzzSpecEligibility;
@@ -59,6 +59,7 @@ import cn.edu.nju.Iot_Verify.repository.projection.CompletedRunDeletionProjectio
 import cn.edu.nju.Iot_Verify.repository.projection.FuzzFindingSummaryProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.FuzzTaskProgressProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.FuzzTaskSummaryProjection;
+import cn.edu.nju.Iot_Verify.repository.projection.FuzzSpecificationPresentationProjection;
 import cn.edu.nju.Iot_Verify.service.FuzzService;
 import cn.edu.nju.Iot_Verify.util.JsonUtils;
 import cn.edu.nju.Iot_Verify.util.RunInitiatorResolver;
@@ -76,6 +77,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Duration;
@@ -127,7 +129,6 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
     // The previous 12,500,000 was *identical* to the raw budget ceiling (5000 x 50 x 50), so the complexity
     // factor had no headroom to trim and consumed the whole budget instead: every shipped example scene
     // refused the product's own default settings, for searches measured at about 16 seconds.
-    // No separate wall-clock deadline exists, so this guard is also what bounds a run's duration.
     private static final long MAX_EFFECTIVE_WORK = 30_000_000L;
     private static final long MAX_MODEL_STRUCTURE_UNITS = 10_000L;
     private static final int MAX_FUZZ_COLLECTION_ITEMS = 1_000;
@@ -155,7 +156,7 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
     private final int maxActiveTasksPerUser;
     private final int maxStoredTasksPerUser;
     private final Semaphore globalTaskCapacity;
-    private final FuzzModelFingerprint modelFingerprint;
+    private final ModelFingerprint modelFingerprint;
     private final String workerId = UUID.randomUUID().toString();
     private final ScheduledExecutorService leaseMaintenanceExecutor =
             Executors.newSingleThreadScheduledExecutor(runnable -> {
@@ -172,7 +173,7 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
                            BoardDataConverter boardDataConverter,
                            FuzzEngine fuzzEngine,
                            FuzzPaperDomainPreviewer fuzzPaperDomainPreviewer,
-                           FuzzModelFingerprint modelFingerprint,
+                           ModelFingerprint modelFingerprint,
                            FuzzMapper fuzzMapper,
                            @Qualifier("fuzzTaskExecutor") ThreadPoolTaskExecutor fuzzTaskExecutor,
                            FuzzAdmissionConfig fuzzAdmissionConfig,
@@ -1474,31 +1475,44 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
     }
 
     @Override
-    @Transactional(readOnly = true)
+    @Transactional(readOnly = true, propagation = Propagation.SUPPORTS)
     public List<FuzzRunSummaryDto> getRuns(Long userId, int page, int size) {
         Pageable pageable = pageRequest(page, size, 100);
-        List<FuzzTaskSummaryProjection> runs =
-                taskRepository.findSummaryByUserIdAndStatusOrderByCreatedAtDescIdDesc(
-                userId, FuzzTaskPo.TaskStatus.COMPLETED, pageable);
-        if (runs.isEmpty()) return List.of();
-        List<Long> runIds = runs.stream().map(FuzzTaskSummaryProjection::getId).toList();
-        Map<Long, List<FuzzFindingSummaryProjection>> findingsByRun = findingRepository
-                .findSummariesByUserIdAndFuzzTaskIdIn(userId, runIds)
-                .stream()
+        var readTransaction = new TransactionTemplate(transactionTemplate.getTransactionManager());
+        readTransaction.setReadOnly(true);
+        RunHistoryRows rows = readTransaction.execute(status -> {
+            List<FuzzTaskSummaryProjection> runs =
+                    taskRepository.findSummaryByUserIdAndStatusOrderByCreatedAtDescIdDesc(
+                            userId, FuzzTaskPo.TaskStatus.COMPLETED, pageable);
+            if (runs.isEmpty()) return new RunHistoryRows(runs, List.of(), List.of());
+            List<Long> runIds = runs.stream().map(FuzzTaskSummaryProjection::getId).toList();
+            return new RunHistoryRows(runs,
+                    taskRepository.findSpecificationPresentationByUserIdAndIdIn(userId, runIds),
+                    findingRepository.findSummariesByUserIdAndFuzzTaskIdIn(userId, runIds));
+        });
+        // Capture the related scalar projections together; standalone reads release JDBC before decoding.
+        Map<Long, FuzzSpecificationPresentationProjection> presentations = rows.presentations().stream()
+                .collect(Collectors.toMap(FuzzSpecificationPresentationProjection::getId, item -> item));
+        Map<Long, List<FuzzFindingSummaryProjection>> findingsByRun = rows.findings().stream()
                 .collect(Collectors.groupingBy(
                         FuzzFindingSummaryProjection::getFuzzTaskId,
                         LinkedHashMap::new,
                         Collectors.toList()));
-        return runs.stream()
+        return rows.runs().stream()
                 .map(run -> toRunSummaryOrUnavailable(
-                        run, findingsByRun.getOrDefault(run.getId(), List.of())))
+                        run, findingsByRun.getOrDefault(run.getId(), List.of()), presentations.get(run.getId())))
                 .toList();
     }
 
+    private record RunHistoryRows(List<FuzzTaskSummaryProjection> runs,
+                                  List<FuzzSpecificationPresentationProjection> presentations,
+                                  List<FuzzFindingSummaryProjection> findings) {}
+
     private FuzzRunSummaryDto toRunSummaryOrUnavailable(
-            FuzzTaskSummaryProjection run, List<FuzzFindingSummaryProjection> findings) {
+            FuzzTaskSummaryProjection run, List<FuzzFindingSummaryProjection> findings,
+            FuzzSpecificationPresentationProjection presentation) {
         try {
-            return fuzzMapper.toRunSummaryDtoFromTaskProjection(run, findings);
+            return fuzzMapper.toRunSummaryDtoFromTaskProjection(run, findings, presentation);
         } catch (PersistedDataIntegrityException e) {
             log.error("Fuzz history item {} is unavailable because persisted data is invalid",
                     run != null ? run.getId() : null, e);
@@ -1518,11 +1532,16 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
     }
 
     @Override
-    @Transactional(readOnly = true)
+    @Transactional(readOnly = true, propagation = Propagation.SUPPORTS)
     public FuzzRunDto getRun(Long userId, Long runId) {
-        FuzzTaskPo run = requireOwnedRun(userId, runId);
-        return fuzzMapper.toRunDto(run, loadOrderedFindings(userId, runId));
+        var readTransaction = new TransactionTemplate(transactionTemplate.getTransactionManager());
+        readTransaction.setReadOnly(true);
+        RunDetailRows rows = readTransaction.execute(status ->
+                new RunDetailRows(requireOwnedRun(userId, runId), loadOrderedFindings(userId, runId)));
+        return fuzzMapper.toRunDto(rows.run(), rows.findings());
     }
+
+    private record RunDetailRows(FuzzTaskPo run, List<FuzzFindingPo> findings) {}
 
     @Override
     @Transactional(readOnly = true)
@@ -1758,6 +1777,11 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
     @Override
     protected Optional<FuzzTaskPo> findTaskByIdAndUserId(Long id, Long userId) {
         return taskRepository.findByIdAndUserId(id, userId);
+    }
+
+    @Override
+    protected Optional<FuzzTaskPo> findTaskByIdAndUserIdForUpdate(Long id, Long userId) {
+        return taskRepository.findByIdAndUserIdForUpdate(id, userId);
     }
 
     @Override

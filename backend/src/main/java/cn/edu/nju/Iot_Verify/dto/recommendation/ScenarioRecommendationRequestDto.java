@@ -5,8 +5,10 @@ import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import lombok.Data;
+import java.util.List;
 
 @Data
 public class ScenarioRecommendationRequestDto {
@@ -39,6 +41,8 @@ public class ScenarioRecommendationRequestDto {
     @Size(max = RecommendationLimits.MAX_USER_REQUIREMENT_LENGTH,
             message = "User requirement must be at most 2000 characters")
     private String userRequirement;
+    @Size(min = 1, max = 100)
+    private List<@NotBlank @Size(max = 100) String> templateNames;
 
     @JsonIgnore
     @AssertTrue(message = "Each minimum scenario count must be less than or equal to its maximum")

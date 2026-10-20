@@ -7,13 +7,13 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Once a strategy has a verified repair, looking for alternatives costs about as long again as that repair
- * took and never more than an equal share of the time left, so it neither keeps the user waiting long
- * after an answer exists nor starves the strategies after it.
+ * Affordable finite searches get a measured opportunity to finish. Larger searches retain their
+ * proportional comparison window; neither can starve later strategies or exceed a running child budget.
  */
 class FixContextTimeShareTest {
 
@@ -57,11 +57,28 @@ class FixContextTimeShareTest {
 
     @Test
     void theMinimumSearchDoesNotOverrideTheShare() {
-        FixContext ctx = contextWithDeadlineIn(Duration.ofSeconds(8));
+        FixContext ctx = contextWithDeadlineIn(Duration.ofSeconds(4));
         ctx.beginStrategy("parameter", 2);
 
         ctx.startAlternativesSearch();
-        assertEquals(4_000, ctx.remainingMillis());
+        assertEquals(2_000, ctx.remainingMillis());
+    }
+
+    @Test
+    void aQuickVerifiedRepairReportsComparisonOnceAndDoesNotAddTenSeconds() {
+        java.util.concurrent.atomic.AtomicInteger reports = new java.util.concurrent.atomic.AtomicInteger();
+        FixContext ctx = FixContext.builder().clock(clock).deadline(clock.instant().plusSeconds(60))
+                .onVerifiedRepair(reports::incrementAndGet).build();
+        ctx.beginStrategy("condition", 1);
+        assertEquals(0, reports.get());
+        clock.advance(Duration.ofSeconds(1));
+        ctx.startAlternativesSearch();
+        assertEquals(1, reports.get());
+        assertEquals(3_000, ctx.remainingMillis());
+        clock.advance(Duration.ofSeconds(1));
+        ctx.startAlternativesSearch();
+        assertEquals(1, reports.get());
+        assertEquals(2_000, ctx.remainingMillis());
     }
 
     @Test
@@ -97,6 +114,88 @@ class FixContextTimeShareTest {
 
         assertFalse(ctx.isExpired());
         assertEquals(Long.MAX_VALUE, ctx.remainingMillis());
+    }
+
+    @Test
+    void aSmallFiniteSearchGetsTimeToFinishInsteadOfTheShortComparisonWindow() {
+        FixContext ctx = contextWithDeadlineIn(Duration.ofSeconds(300));
+        ctx.beginStrategy("condition", 1);
+        ctx.initializeStrategySearch("condition", 20, List.of(2L, 2L));
+        clock.advance(Duration.ofSeconds(2));
+        ctx.startAlternativesSearch();
+
+        assertTrue(ctx.prefersCompleteSearch());
+        assertEquals(28_000, ctx.remainingMillis());
+        clock.advance(Duration.ofSeconds(28).plusMillis(1));
+        assertTrue(ctx.isExpired());
+    }
+
+    @Test
+    void cheapFiniteEnumerationMayFinishBeyondTheNominalAttemptCount() {
+        FixContext ctx = contextWithDeadlineIn(Duration.ofSeconds(300));
+        ctx.beginStrategy("remove", 1);
+        ctx.initializeStrategySearch("remove", 3, List.of(2L, 2L, 2L));
+        ctx.addStrategyAttempts("remove", 3);
+        assertTrue(ctx.hasStrategyAttemptsLeft("remove"));
+
+        clock.advance(FixContext.SMALL_SEARCH_TIME);
+        assertFalse(ctx.hasStrategyAttemptsLeft("remove"));
+        assertEquals(3, ctx.strategySearchProgress("remove").attemptLimit());
+    }
+
+    @Test
+    void freeValueDomainsAndOverflowCannotMakeALargeSearchLookSmall() {
+        FixContext ctx = contextWithDeadlineIn(Duration.ofSeconds(300));
+        ctx.beginStrategy("condition", 1);
+        ctx.initializeStrategySearch("condition", 20, List.of(2L, 2L, 101L));
+        assertFalse(ctx.prefersCompleteSearch());
+        assertEquals(20, ctx.strategySearchProgress("condition").attemptLimit());
+
+        ctx.initializeStrategySearch("parameter", 20, List.of(4_294_967_296L, 4_294_967_296L));
+        assertFalse(ctx.prefersCompleteSearch());
+        assertThrows(IllegalArgumentException.class,
+                () -> ctx.initializeStrategySearch("condition", 20, List.of(0L)));
+    }
+
+    @Test
+    void anExtraFiniteSearchAttemptAlsoBoundsTheRunningSolverAndKeepsComparisonFeedback() {
+        java.util.concurrent.atomic.AtomicInteger reports = new java.util.concurrent.atomic.AtomicInteger();
+        FixContext ctx = FixContext.builder().clock(clock).deadline(clock.instant().plusSeconds(300))
+                .onVerifiedRepair(reports::incrementAndGet).build();
+        ctx.beginStrategy("condition", 1);
+        ctx.initializeStrategySearch("condition", 2, List.of(2L, 2L));
+        ctx.addStrategyAttempts("condition", 2);
+        assertEquals(300_000, ctx.remainingMillis(), "nominal discovery keeps its original budget");
+        clock.advance(Duration.ofSeconds(29));
+        assertTrue(ctx.hasStrategyAttemptsLeft("condition"));
+        ctx.addStrategyAttempts("condition", 1);
+        assertEquals(1_000, ctx.remainingMillis(), "the child solver cannot spend more than the small-search remainder");
+
+        ctx.startAlternativesSearch();
+        assertEquals(1, reports.get(), "an extra attempt's deadline must not hide the first verified-repair feedback");
+        clock.advance(Duration.ofSeconds(1));
+        assertTrue(ctx.isExpired());
+    }
+
+    @Test
+    void completeEnumerationStillSharesTimeAndResetsForTheNextStrategy() {
+        FixContext ctx = contextWithDeadlineIn(Duration.ofSeconds(12));
+        ctx.beginStrategy("parameter", 3);
+        ctx.initializeStrategySearch("parameter", 20, List.of(11L));
+        ctx.startAlternativesSearch();
+        assertEquals(4_000, ctx.remainingMillis());
+
+        ctx.beginStrategy("condition", 2);
+        assertFalse(ctx.prefersCompleteSearch());
+        assertEquals(12_000, ctx.remainingMillis());
+    }
+
+    @Test
+    void aFiniteSearchWithoutADeadlineKeepsItsAttemptLimit() {
+        FixContext ctx = FixContext.builder().clock(clock).build();
+        ctx.initializeStrategySearch("remove", 3, List.of(2L, 2L));
+        assertFalse(ctx.prefersCompleteSearch());
+        assertEquals(3, ctx.strategySearchProgress("remove").attemptLimit());
     }
 
     private static final class MutableClock extends Clock {

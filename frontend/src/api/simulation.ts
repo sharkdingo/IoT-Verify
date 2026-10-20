@@ -16,8 +16,7 @@ import {
   validateSimulationResult,
   validateSimulationTrace,
   validateSimulationTraceSummaryList,
-  validateTaskCancellationResult,
-  validateTaskProgress
+  validateTaskCancellationResult
 } from '@/utils/runResponse'
 
 // 辅助函数：解包Result
@@ -61,14 +60,6 @@ export default {
 
   deleteTask: async (taskId: number): Promise<void> => {
     return unpack<void>(await api.delete(`/simulate/tasks/${taskId}`))
-  },
-
-  // 获取任务进度
-  getTaskProgress: async (taskId: number): Promise<number> => {
-    return validateTaskProgress(
-      unpack<unknown>(await api.get(`/simulate/tasks/${taskId}/progress`)),
-      'Simulation task progress'
-    )
   },
 
   // 取消任务

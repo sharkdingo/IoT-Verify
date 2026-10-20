@@ -1,17 +1,10 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { parse } from '@vue/compiler-sfc'
+import type { TemplateChildNode } from '@vue/compiler-dom'
 
-/**
- * The action dock has two groups with different consequences: run actions drive the verifier,
- * suggestions only propose edits. Every button used to be an opaque saturated fill in its own hue,
- * so eight of them read as eight primary actions and an empty Board offered no focal point --
- * measured in a browser as 8 of 8 dock buttons carrying primary weight.
- *
- * These tests pin the resulting hierarchy at the source. They are text assertions over the
- * component and stylesheet rather than a mounted render, because Board.vue is far too large to
- * mount cheaply and the property in question is which visual treatment each button is given.
- */
+// Toolbar groups preserve workflow meaning while their controls share one visual treatment.
 describe('board action dock hierarchy', () => {
   const root = join(process.cwd(), 'src')
   const board = readFileSync(join(root, 'views/Board.vue'), 'utf8')
@@ -24,14 +17,34 @@ describe('board action dock hierarchy', () => {
     'open-spec-recommendations'
   ]
 
-  // Run History is deliberately not here: it reads a stored result rather than running one, so it
-  // has its own group. It keeps the filled treatment because reading a verdict is a primary task.
   const RUN_TOOLS = [
     'open-simulation-panel',
     'open-verification-panel',
     'open-fuzzing-panel',
     'open-history-panel'
   ]
+
+  it('retains functional hints while layout toggles have only their accessible names', () => {
+    const ast = parse(board).descriptor.template?.ast
+    expect(ast).toBeDefined()
+    const tooltipParents = new Map<string, boolean>()
+    const visit = (node: TemplateChildNode, inTooltip: boolean) => {
+      if (node.type !== 1) return
+      const wrapped = inTooltip || node.tag === 'HintTooltip'
+      if (node.tag === 'button') {
+        const testId = node.props.find(prop => prop.type === 6 && prop.name === 'data-testid')
+        if (testId?.type === 6 && testId.value) tooltipParents.set(testId.value.content, wrapped)
+      }
+      node.children.forEach(child => visit(child, wrapped))
+    }
+    ast?.children.forEach(node => visit(node, false))
+    for (const id of [...RUN_TOOLS, ...SUGGESTION_TOOLS]) expect(tooltipParents.get(id), id).toBe(true)
+    for (const id of ['toggle-action-dock', 'restore-action-dock']) {
+      expect(tooltipParents.get(id), id).toBe(false)
+      expect(buttonMarkup(id)).toContain(':aria-label=')
+      expect(buttonMarkup(id)).not.toContain('title=')
+    }
+  })
 
   /**
    * The complete opening tag of one dock button.
@@ -63,123 +76,25 @@ describe('board action dock hierarchy', () => {
     throw new Error(`unterminated <button> for ${testId}`)
   }
 
-  it('gives every suggestion tool the quieter secondary treatment', () => {
-    for (const id of SUGGESTION_TOOLS) {
-      expect(buttonMarkup(id), `${id} should use the shared secondary treatment`)
-        .toContain('board-tool-button--suggestion')
-    }
-  })
-
-  it('keeps run actions above the suggestion tier', () => {
-    // If a run action were demoted to a suggestion, the dock would have no primary action at all, which is
-    // the opposite failure: a user could not tell what the Board is for.
-    for (const id of RUN_TOOLS) {
-      expect(buttonMarkup(id), `${id} must not be demoted to a suggestion`)
-        .not.toContain('board-tool-button--suggestion')
-    }
-  })
-
-  it('separates a formal proof from candidate evidence and from a view', () => {
-    // User request: unify all run tool buttons to use the evidence tier for visual consistency.
-    // The original design distinguished verification (formal proof) as --primary from simulation/exploration
-    // (candidate evidence) as --evidence, based on epistemic weight. This has been unified per user preference.
-    //
-    // All three run tools now use the evidence tier.
-    for (const id of ['open-verification-panel', 'open-simulation-panel', 'open-fuzzing-panel']) {
+  it('gives all execution, history and suggestion entries the same neutral control', () => {
+    for (const id of [...RUN_TOOLS, ...SUGGESTION_TOOLS]) {
       const markup = buttonMarkup(id)
-      expect(markup, `${id} uses evidence tier for visual consistency`)
-        .toContain('board-tool-button--evidence')
-    }
-
-    expect(buttonMarkup('open-history-panel'), 'run history opens a view and writes nothing')
-      .toContain('board-tool-button--view')
-
-    // Each tier must actually be defined, or a typo silently yields an unstyled button.
-    for (const tier of ['--primary', '--evidence', '--view']) {
-      expect(css, `board-tool-button${tier} should be defined`).toContain(`.board-tool-button${tier}`)
+      expect(markup, id).toContain('class="board-tool-button transition-colors"')
+      expect(markup, id).not.toMatch(/board-tool-button--|\bbg-|\bshadow-/)
     }
   })
 
-  it('gives every quiet tier a visible boundary', () => {
-    // A demoted tier is still a control, and its edge has to be findable. Both quiet tiers have a surface
-    // barely distinguishable from the panel behind the dock — 1.22:1 for `--evidence`, 1.10 for `--view` — so
-    // the border alone carries the boundary and has to clear the 3:1 minimum by itself.
-    //
-    // Two independent design reviews, one per theme, both called Run History "too quiet" and "easy to miss".
-    // That reads like taste until it is measured: its border was **1.48:1**. The reviews were describing a
-    // real boundary failure, so the fix is a value rather than an opinion — and a later edit that softens
-    // either border back toward the panel would reintroduce it invisibly.
-    for (const tier of ['--evidence', '--view']) {
-      const at = css.indexOf(`.iot-board .board-tool-button${tier} {`)
-      expect(at, `board-tool-button${tier} should exist`).toBeGreaterThan(-1)
-      const rule = css.slice(at, at + css.slice(at).indexOf('}'))
-      expect(rule, `${tier} needs an explicit border to carry its boundary`).toMatch(/border:\s*1px solid/)
-      // A low percentage blends into the panel: 42% measured 1.87:1. 80% is the floor that clears 3:1.
-      const mix = /border:\s*1px solid color-mix\(in srgb, var\(--accent\) (\d+)%/.exec(rule)
-      if (mix) {
-        expect(Number(mix[1]), `${tier} border at ${mix[1]}% accent is too close to the panel`)
-          .toBeGreaterThanOrEqual(80)
-      }
+  it('marks open panels with a shared marker rather than an inset shadow', () => {
+    const rule = (selector: string) => {
+      const start = css.indexOf(selector + ' {')
+      expect(start, selector).toBeGreaterThan(-1)
+      return css.slice(start, css.indexOf('}', start))
     }
-  })
-
-  it('marks an open panel with more than colour in every tier', () => {
-    // A tinted tier is a weaker signal than a fill, so its pressed state has to work harder — and the
-    // pressed state is how a user knows which panel is currently covering the canvas.
-    for (const tier of ['--evidence', '--view']) {
-      const rule = css.slice(css.indexOf(`.iot-board .board-tool-button${tier}[aria-pressed='true']`))
-      expect(rule.slice(0, rule.indexOf('}')), `${tier} pressed state needs a non-colour cue`)
-        .toMatch(/box-shadow:\s*inset/)
-    }
-  })
-
-  it('does not give a suggestion tool a saturated fill', () => {
-    // A saturated fill is what made all eight compete. Catching the utility class directly means a
-    // future edit cannot reintroduce the competition one button at a time.
-    for (const id of SUGGESTION_TOOLS) {
-      expect(buttonMarkup(id), `${id} should not carry a saturated background`)
-        .not.toMatch(/bg-(teal|amber|purple|red|indigo|green|cyan|blue)-[5-9]00/)
-    }
-  })
-
-  it('states each suggestion category with its own accent so colour coding survives', () => {
-    // Demoting the fill must not erase the category cue: the icon keeps the hue the fill used to
-    // carry, otherwise four identical grey buttons become harder to tell apart, not easier.
-    const accents = ['--iot-tool-scenario', '--iot-tool-rule', '--iot-tool-device', '--iot-tool-spec']
-    for (const accent of accents) {
-      expect(board, `${accent} should be applied to a dock button`).toContain(accent)
-      expect(css, `${accent} should be defined for the light theme`).toContain(`${accent}:`)
-    }
-    // And a dark-theme override, since the light-theme hues lose contrast on a dark surface.
-    const darkBlock = css.slice(css.indexOf('.dark .iot-board {'))
-    for (const accent of accents) {
-      expect(darkBlock, `${accent} needs a dark-theme value`).toContain(`${accent}:`)
-    }
-  })
-
-  it('signals the active suggestion panel without relying on colour alone', () => {
-    // Someone who cannot distinguish the accent hue still needs to see which panel is open.
-    const rule = css.slice(css.indexOf(".board-tool-button--suggestion[aria-pressed='true']"))
-      .slice(0, 400)
-    expect(rule).toContain('box-shadow')
-  })
-
-  it('keeps the suggestion fill neutral so the accent border stays identifiable', () => {
-    // Reviewing the rendered screenshot -- not the CSS -- showed the first version of this treatment
-    // nearly vanished in the light theme: a hairline border measured 1.23:1 against the fill, below
-    // the 3:1 minimum for identifying a UI component. Tinting the fill with the same accent did not
-    // fix it, because darkening the border darkened the fill in step (purple measured *down*, from
-    // 2.99:1 to 2.39:1). A neutral fill decouples the two and measures 5.02-8.72:1 in light and
-    // 9.38-12.30:1 in dark. So the fill must not be mixed with the accent.
-    const block = css.slice(
-      css.indexOf('.iot-board .board-tool-button--suggestion {'),
-      css.indexOf('.iot-board .board-tool-button--suggestion:hover')
-    )
-    expect(block, 'the suggestion button needs a background').toMatch(/background-color:/)
-    expect(block, 'tinting the fill with the accent dilutes the border contrast')
-      .not.toMatch(/background-color:[^;]*--board-tool-accent/)
-    expect(block, 'the border carries the button shape, so it uses the full accent')
-      .toMatch(/border:[^;]*--board-tool-accent/)
+    expect(rule('.iot-board .board-tool-button')).toContain('box-shadow: none;')
+    const selected = rule(".iot-board .board-tool-button[aria-pressed='true']")
+    expect(selected).toContain('background-color: var(--accent-surface);')
+    expect(selected).not.toContain('box-shadow')
+    expect(rule(".iot-board .board-tool-button[aria-pressed='true']::before")).toContain('opacity: 1;')
   })
 
   it('keeps every suggestion tool a real focusable button with a name', () => {
@@ -215,35 +130,12 @@ describe('board action dock hierarchy', () => {
     expect(board, 'the rail needs a dedicated short label').toContain("t('app.fuzzSearchShort')")
   })
 
-  it('shows what caused the selected counterexample step without an extra click', () => {
-    // Which automation produced this state answers "why is the trace here", so it must not sit behind an
-    // interaction. It used to be a `<details open>` and the guard asserted the `open` attribute; the block
-    // is now an unconditional row, which satisfies the same requirement more directly -- a disclosure that
-    // is open by default and holds one line is chrome, not a control. The requirement is visibility, so
-    // assert that, and assert it is not inside a `<details>` at all.
-    const at = board.indexOf('data-testid="trace-step-values"')
-    expect(at, 'trace-step-values should exist').toBeGreaterThan(-1)
-
-    // The nearest enclosing element must not be a disclosure. Comments and attribute strings can contain
-    // the literal `<details`, so strip comments first and match only opening tags (not bare text).
-    const markup = board.replace(/<!--[\s\S]*?-->/g, '')
-    const markupAt = markup.indexOf('data-testid="trace-step-values"')
-    expect(markupAt, 'trace-step-values should survive comment stripping').toBeGreaterThan(-1)
-
-    // Scan for `<details` as an opening tag (followed by whitespace or `>`), not as text in an attribute.
-    const beforeTarget = markup.slice(0, markupAt)
-    const detailsMatches = [...beforeTarget.matchAll(/<details(?:\s|>)/g)]
-    const openAt = detailsMatches.length > 0 ? detailsMatches[detailsMatches.length - 1].index! : -1
-    const closeAt = beforeTarget.lastIndexOf('</details>')
-
-    expect(
-      openAt > closeAt,
-      'the cause of the selected step must not be behind a disclosure'
-    ).toBe(false)
-
-    // The triggered-rule chips are the payload, and they render in the same always-visible row.
-    expect(markup.slice(markupAt, markupAt + 1600), 'the triggered rules should render in that row')
-      .toContain('data-testid="trace-timeline-triggered-rules"')
+  it('gives recorded execution one home in Step changes for each replay kind', () => {
+    expect(board).not.toContain('data-testid="trace-timeline-triggered-rules"')
+    expect(board.match(/<template #changes>\s*<PlaybackChangesPanel/g)).toHaveLength(2)
+    const changes = readFileSync(join(root, 'components/PlaybackChangesPanel.vue'), 'utf8')
+    expect(changes.match(/data-testid="playback-change-automation"/g)).toHaveLength(1)
+    expect(changes).not.toMatch(/<details(?:\s|>)/)
   })
 
   it('derives every dock mode decision from one list of available modes', () => {
@@ -289,27 +181,25 @@ describe('board action dock hierarchy', () => {
      * against an inspector at 1120..1440, and at 1100x800 it is 336..692 against 780..1100. The map lives
      * inside that inspector. At narrow widths the inspector is a 56px rail and the map is not rendered.
      */
-    /*
-     * The slice must span the WHOLE tag, not `<div` up to the testid.
-     *
-     * The first version ended the slice at the testid, so it only ever examined `'<div\n          '` — pure
-     * whitespace — and a `v-show` written after the testid (the natural place, and where the original one was)
-     * was invisible to it. Mutation-verified blind: re-adding `v-show="!isWorkflowPanelOpen"` right after either
-     * testid left the spec green. Both halves of the check were fiction.
-     */
-    const openingTag = (testId: string): string => {
-      const at = board.indexOf(`data-testid="${testId}"`)
-      expect(at, `${testId} should exist`).toBeGreaterThan(-1)
-      const start = board.lastIndexOf('<div', at)
-      const end = board.indexOf('>', at)
-      expect(end, `${testId}'s tag should be closed`).toBeGreaterThan(start)
-      return board.slice(start, end)
+    // Read directives from the element itself, independent of its tag or comparisons in bindings.
+    const visibilityDirectives = new Map<string, string[]>()
+    const targets = ['canvas-map', 'canvas-map-viewport']
+    const ast = parse(board).descriptor.template?.ast
+    expect(ast).toBeDefined()
+    const visit = (node: TemplateChildNode) => {
+      if (node.type !== 1) return
+      const testId = node.props.find(prop => prop.type === 6 && prop.name === 'data-testid')
+      if (testId?.type === 6 && testId.value && targets.includes(testId.value.content)) {
+        visibilityDirectives.set(testId.value.content, node.props.flatMap(prop =>
+          prop.type === 7 && (prop.name === 'show' || prop.name === 'if') ? [prop.name] : []))
+      }
+      node.children.forEach(visit)
     }
-
-    expect(openingTag('canvas-map'), 'the map card should not be conditionally hidden')
-      .not.toMatch(/v-(show|if)=/)
-    expect(openingTag('canvas-map-viewport'), 'the map viewport should not be conditionally hidden')
-      .not.toMatch(/v-(show|if)=/)
+    ast?.children.forEach(visit)
+    for (const testId of targets) {
+      expect(visibilityDirectives.has(testId), `${testId} should exist`).toBe(true)
+      expect(visibilityDirectives.get(testId), `${testId} should not be conditionally hidden`).toEqual([])
+    }
 
     // One heading, and it must name the map unconditionally. Asserting the *absence* of the removed
     // `app.canvasView` key was vacuous — that key no longer exists in `assets/`, so nothing could reintroduce
@@ -318,7 +208,7 @@ describe('board action dock hierarchy', () => {
     expect(headingAt, 'the map heading should exist').toBeGreaterThan(-1)
     const heading = board.slice(headingAt, board.indexOf('</span>', headingAt))
     expect(heading, 'the map heading should not branch on state').not.toMatch(/\?[^:]*:/)
-    expect(heading, 'the map heading should name the map').toContain("t('app.canvasMap')")
+    expect(heading, 'the compact heading should name the map').toContain("t('app.canvasMapShort')")
   })
 
   it('keeps the dock heading a tier above the group labels it introduces', () => {

@@ -1,26 +1,19 @@
 <script setup lang="ts">
-import HintTooltip from '@/components/common/HintTooltip.vue'
+import PlaybackTerminal from '@/components/PlaybackTerminal.vue'
+import PlaybackStateDetails from '@/components/PlaybackStateDetails.vue'
 import InfoTooltip from '@/components/common/InfoTooltip.vue'
+import HintTooltip from '@/components/common/HintTooltip.vue'
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useTimelineRail } from '@/composables/useTimelineRail'
-import type { SimulationState } from '../types/simulation'
+import type { TraceState } from '../types/verify'
 import type { ModelRunSnapshot, ModelSemantics, RunBoardComparison } from '../types/modelSemantics'
 import type { EnvironmentValueProvenance } from '../types/model'
-import type { TraceTriggeredRule } from '../types/verify'
 import { isModelSemanticsConsistent } from '../utils/modelSemantics'
-import {
-  isPlaybackDeviceAttacked,
-  normalizePlaybackDeviceId,
-  playbackDeviceChanged,
-  playbackDeviceSecurityFacts,
-  playbackDeviceSummaryParts,
-  formatPlaybackSecurityLabel
-} from '../utils/traceView'
 
 const props = defineProps<{
-  states: SimulationState[]
+  states: TraceState[]
   visible: boolean
+  panelOpen?: boolean
   actualSteps?: number
   requestedSteps?: number
   modelComplete?: boolean
@@ -51,20 +44,17 @@ const props = defineProps<{
   boardComparison?: RunBoardComparison
   currentRuleIds?: string[]
   currentDeviceIds?: string[]
-  formatDeviceModelToken?: (device: SimulationState['devices'][number], value: unknown) => string
+  formatDeviceModelToken?: (device: TraceState['devices'][number], value: unknown) => string
   formatEnvironmentModelToken?: (name: string, value: unknown) => string
-  /** False once the change panel has been dismissed on the current step; owned by the Board. */
-  changePanelVisible?: boolean
 }>()
 
 const emit = defineEmits<{
-  'update:visible': [value: boolean]
-  'highlight-state': [data: { states: SimulationState[]; selectedStateIndex: number } | null]
-  'open-run-details': []
-  'restore-change-panel': []
+  'highlight-state': [data: { states: TraceState[]; selectedStateIndex: number } | null]
+  'hide-panel': []
 }>()
 
 const { t } = useI18n()
+const terminalTab = defineModel<'changes' | 'details' | 'run'>('tab', { default: 'changes' })
 
 // 当前选中的状态索引
 const selectedStateIndex = ref(0)
@@ -84,41 +74,11 @@ const totalStates = computed(() => {
   return props.states?.length || 0
 })
 
-const selectedStateNumber = computed({
-  get: () => selectedStateIndex.value + 1,
-  set: (value: number) => {
-    if (!Number.isFinite(value)) return
-    selectState(Math.trunc(value) - 1)
-  }
-})
-
 const currentEnvironmentVariables = computed(() => currentState.value?.envVariables || [])
-const currentTriggeredRules = computed(() => currentState.value?.triggeredRules || [])
 const currentCompromisedAutomationLinks = computed(() => currentState.value?.compromisedAutomationLinks || [])
 const currentDevices = computed(() => currentState.value?.devices || [])
-const currentRuleIdSet = computed(() => new Set((props.currentRuleIds || []).map(String)))
-const currentDeviceIdSet = computed(() => new Set(
-  (props.currentDeviceIds || []).map(normalizePlaybackDeviceId)
-))
-
-const triggeredRuleLabel = (rule: TraceTriggeredRule, index: number) =>
-  rule.ruleLabel?.trim() || t('app.ruleNumber', { number: index + 1 })
-
-const triggeredRuleExistsOnCurrentBoard = (rule: TraceTriggeredRule) =>
-  rule.ruleId != null && currentRuleIdSet.value.has(String(rule.ruleId))
-
-const previousDevice = (deviceId: string) => previousState.value?.devices?.find(device =>
-  normalizePlaybackDeviceId(device.deviceId) === normalizePlaybackDeviceId(deviceId)
-)
-
-const deviceChanged = (device: SimulationState['devices'][number]) =>
-  selectedStateIndex.value > 0 && playbackDeviceChanged(device, previousDevice(device.deviceId))
-
-const deviceExistsOnCurrentBoard = (deviceId: string) =>
-  currentDeviceIdSet.value.has(normalizePlaybackDeviceId(deviceId))
-
 const formatDeviceModelToken = (
-  device: SimulationState['devices'][number],
+  device: TraceState['devices'][number],
   value: unknown
 ): string => props.formatDeviceModelToken
   ? props.formatDeviceModelToken(device, value)
@@ -129,126 +89,13 @@ const formatEnvironmentModelToken = (name: string, value: unknown): string =>
     ? props.formatEnvironmentModelToken(name, value)
     : String(value ?? '')
 
-const deviceSummary = (device: SimulationState['devices'][number]) => {
-  const parts = playbackDeviceSummaryParts(device, value => formatDeviceModelToken(device, value))
-  return parts.length > 0 ? parts.join(' · ') : t('app.unknown')
-}
-
-const deviceChangeSummary = (device: SimulationState['devices'][number]) => {
-  const previous = previousDevice(device.deviceId)
-  if (!previous) return t('app.traceVisualization.changed')
-  const changes: string[] = []
-  if ((previous.state || '') !== (device.state || '')) {
-    changes.push(`${t('app.state')}: ${previous.state
-      ? formatDeviceModelToken(device, previous.state)
-      : t('app.unknown')} -> ${device.state
-      ? formatDeviceModelToken(device, device.state)
-      : t('app.unknown')}`)
-  }
-  if ((previous.mode || '') !== (device.mode || '')) {
-    changes.push(`${t('app.mode')}: ${previous.mode
-      ? formatDeviceModelToken(device, previous.mode)
-      : t('app.unknown')} -> ${device.mode
-      ? formatDeviceModelToken(device, device.mode)
-      : t('app.unknown')}`)
-  }
-  const previousVariables = new Map((previous.variables || []).map(variable => [variable.name, variable.value]))
-  ;(device.variables || []).forEach(variable => {
-    const previousValue = previousVariables.get(variable.name)
-    if (previousValue !== undefined && previousValue !== variable.value) {
-      changes.push(`${formatDeviceModelToken(device, variable.name)}: ${formatDeviceModelToken(device, previousValue)} -> ${formatDeviceModelToken(device, variable.value)}`)
-    }
-  })
-  if (previous.compromised !== device.compromised) {
-    changes.push(device.compromised
-      ? t('app.traceVisualization.deviceBecameCompromised')
-      : t('app.traceVisualization.deviceNoLongerCompromised'))
-  }
-  return changes.join(' · ') || t('app.traceVisualization.changed')
-}
-
 const modelSemanticsConsistent = computed(() => isModelSemanticsConsistent(
   props.modelSemantics,
   { isAttack: props.isAttack, attackBudget: props.attackBudget, enablePrivacy: props.enablePrivacy }
 ))
 
-const attackSelectionText = computed(() => {
-  if (props.modelSemantics?.attackSelectionPolicy === 'EXACT_ATTACK_POINTS') {
-    const points = (props.modelSemantics.selectedAttackPoints || [])
-      .map(point => point.displayLabel?.trim() || (point.kind === 'DEVICE'
-        ? t('app.attackDevicePoint', { id: point.deviceId })
-        : t('app.attackAutomationLinkPoint', { id: point.ruleId })))
-      .join(', ')
-    return t('app.attackExactSelectionDetail', {
-      count: props.modelSemantics.selectedAttackPoints?.length ?? 0,
-      points
-    })
-  }
-  return t('app.attackExhaustiveSelectionDetail', {
-    count: props.attackBudget ?? 0,
-    total: props.modelSemantics?.modeledAttackPointCount ?? 0
-  })
-})
-
-const attackSelectionShortText = computed(() => {
-  if (!modelSemanticsConsistent.value) {
-    return t('app.traceVisualization.attackScenario')
-  }
-  return props.modelSemantics?.attackSelectionPolicy === 'EXACT_ATTACK_POINTS'
-    ? t('app.attackExactSelectionShort', {
-        count: props.modelSemantics.selectedAttackPoints?.length ?? 0
-      })
-    : t('app.attackExhaustiveSelectionShort', { count: props.attackBudget ?? 0 })
-})
-
-/**
- * The run's read-only semantics, as one hint rather than a standing panel.
- *
- * These six facts used to sit in a `<details data-testid="simulation-timeline-snapshot-notice">` that
- * occupied permanent height on an overlay whose subject is the canvas behind it. The counterexample
- * side already resolved exactly this — see `counterexampleTraceHelpText` in `Board.vue` and the
- * measurement recorded beside its `InfoTooltip` (that block was the largest part of a 137.5px body,
- * re-read on every step, for facts a reader needs once).
- *
- * `modelTraceNotPrediction` is deliberately absent: it is already the always-visible subtitle in the
- * header, so repeating it here would be a third statement of one fact. The frozen-snapshot counts are
- * absent for the same reason — the run-details dialog owns them.
- */
-const playbackSemanticsHelpText = computed(() => {
-  const details = [t('app.traceVisualization.playbackSnapshotReadOnly')]
-
-  if (!modelSemanticsConsistent.value) {
-    details.push(t('app.modelSemanticsUnavailable'))
-    return details.join('\n\n')
-  }
-
-  details.push(props.isAttack
-    ? attackSelectionText.value
-    : t('app.traceVisualization.simulationNoAttackContext'))
-  details.push(props.enablePrivacy
-    ? t('app.traceVisualization.privacyPropagationEnabled')
-    : t('app.traceVisualization.privacyPropagationNotModeled'))
-  details.push(t('app.environmentEvolutionIncluded'))
-  details.push(t('app.labelPropagationScopeSummary'))
-  return details.join('\n\n')
-})
-
-const deviceSecurityFacts = (device: SimulationState['devices'][number]) =>
-  playbackDeviceSecurityFacts(device)
-
-const formattedDeviceSecurityLabels = (
-  device: SimulationState['devices'][number],
-  labels: string[]
-) => labels.map(label => formatPlaybackSecurityLabel(
-  label,
-  value => formatDeviceModelToken(device, value)
-))
-
 const getPreviousEnvValue = (name: string) =>
   previousState.value?.envVariables?.find(variable => variable.name === name)?.value
-
-const environmentVariableChanged = (name: string, value: string) =>
-  selectedStateIndex.value > 0 && getPreviousEnvValue(name) !== value
 
 const getProvenanceForVariable = (name: string) =>
   props.modelSnapshot?.environmentProvenance?.find((p: EnvironmentValueProvenance) => p.name === name) || null
@@ -305,12 +152,9 @@ const hasAttackedDevices = computed(() => {
   if (!currentState.value?.devices) return false
   return currentState.value.devices.some(device => device.compromised === true)
 })
-
-// 关闭
-const close = () => {
-  emit('update:visible', false)
-  emit('highlight-state', null)
-}
+const runtimeAttackLabel = computed(() => runtimeCompromisedPointCount.value === null
+  ? t('app.traceVisualization.attackedBang')
+  : `${t('app.traceVisualization.runtimeCompromisedPoints')}: ${runtimeCompromisedPointCount.value}`)
 
 // 跳转到指定状态
 const goToState = (index: number) => {
@@ -319,26 +163,9 @@ const goToState = (index: number) => {
 }
 
 const selectState = (index: number) => {
+  stop()
   goToState(index)
   highlightState()
-}
-
-const selectPreviousState = () => selectState(selectedStateIndex.value - 1)
-const selectNextState = () => selectState(selectedStateIndex.value + 1)
-
-// Timeline rail interaction logic (pointer scrubbing, keyboard navigation, button scrolling)
-const simulationRail = useTimelineRail({
-  totalStates,
-  selectedStateIndex,
-  onSelectState: (index: number) => selectState(index),
-  testIdPrefix: 'simulation-timeline'
-})
-
-// Wrapper to stop playback when scrubbing starts
-const scrubStateFromPointer = (event: PointerEvent) => {
-  // A deliberate seek supersedes playback rather than competing with its timer for the index.
-  stop()
-  simulationRail.scrubStateFromPointer(event)
 }
 
 const getStateAriaLabel = (index: number) => {
@@ -438,119 +265,40 @@ onBeforeUnmount(() => {
 watch(selectedStateIndex, () => {
   if (props.visible) {
     highlightState()
-    simulationRail.revealStateButton(selectedStateIndex.value, false)
+
   }
 })
 </script>
 
 <template>
-  <div
+  <PlaybackTerminal
     v-if="visible"
-    class="board-timeline-host board-timeline-host--simulation"
-    data-testid="simulation-timeline-host"
-    :data-playback-change-popover="String(changePanelVisible === true)"
-    role="region"
-    :aria-label="t('app.traceVisualization.stateSequence')"
+    v-model:tab="terminalTab"
+    kind="simulation"
+    :selected-state-index="selectedStateIndex"
+    :total-states="totalStates"
+    :playing="isPlaying"
+    :panel-open="panelOpen"
+    :state-label="getStateAriaLabel"
+    @seek="selectState"
+    @toggle-play="play"
+    @scrub-start="stop"
+    @hide-panel="emit('hide-panel')"
   >
-    <div
-      class="board-timeline board-timeline--simulation iot-scroll-region"
-      data-testid="simulation-timeline"
-      :data-selected-state-index="selectedStateIndex"
-    >
-      <header class="board-timeline__sticky-header mb-2 flex items-start justify-between gap-3 border-b border-slate-200 pb-2">
-        <div class="min-w-0">
-          <div class="flex flex-wrap items-center gap-2">
-            <h2 class="text-sm font-bold text-slate-800">{{ t('app.traceVisualization.modelTracePlayback') }}</h2>
-            <!-- Replaces the standing snapshot disclosure this panel used to end with; the
-                 counterexample bar carries the same control for the same reason. -->
-            <InfoTooltip
-              :text="playbackSemanticsHelpText"
-              :label="t('app.runScopeAndSnapshot')"
-              placement="right"
-              test-id="simulation-timeline-snapshot-notice"
-            />
-            <span class="rounded-full board-chip-info px-2 py-0.5 text-xs font-semibold board-text-info" aria-live="polite">
-              {{ totalStates > 0 ? selectedStateIndex + 1 : 0 }} / {{ totalStates }}
-            </span>
-            <span v-if="runtimeCompromisedPointCount !== null" class="inline-flex items-center gap-1 rounded-full board-chip-danger px-2 py-0.5 text-xs font-semibold board-text-danger">
-              <span class="material-symbols-outlined text-xs" aria-hidden="true">warning</span>
-              {{ t('app.traceVisualization.runtimeCompromisedPoints') }}: {{ runtimeCompromisedPointCount }}
-            </span>
-            <span v-if="isAttack" class="rounded-full board-chip-warning px-2 py-0.5 text-xs font-semibold board-text-warning">
-              {{ attackSelectionShortText }}
-            </span>
-            <span v-if="enablePrivacy && modelSemanticsConsistent" class="rounded-full board-chip-info px-2 py-0.5 text-xs font-semibold board-text-info">
-              {{ t('app.traceVisualization.privacyPropagationEnabled') }}
-            </span>
-            <span v-if="hasAttackedDevices" class="inline-flex items-center gap-1 rounded-full bg-[color:var(--danger-fill)] px-2 py-0.5 text-xs font-semibold text-white">
-              <span class="material-symbols-outlined text-xs" aria-hidden="true">security</span>
-              {{ t('app.traceVisualization.attackedBang') }}
-            </span>
-          </div>
-          <p class="mt-0.5 text-[length:var(--iot-font-min)] leading-4 text-slate-500">{{ t('app.traceVisualization.modelTraceNotPrediction') }}</p>
-        </div>
-
-        <div class="flex flex-shrink-0 items-center gap-2">
-          <button
-            type="button"
-            data-testid="simulation-timeline-play"
-            :disabled="totalStates <= 1"
-            :aria-label="isPlaying ? t('app.traceVisualization.pause') : t('app.traceVisualization.play')"
-            class="inline-flex h-8 items-center gap-1 rounded-lg px-3 text-xs font-semibold transition-colors"
-            :class="isPlaying
-              ? 'bg-[color:var(--accent-fill)] text-white'
-              : totalStates <= 1
-                ? 'cursor-not-allowed board-chip-neutral'
-                : 'board-chip-neutral hover:board-control-hover hover:board-text-strong'"
-            @click="play"
-          >
-            <span class="material-symbols-outlined text-base" aria-hidden="true">{{ isPlaying ? 'pause' : 'play_arrow' }}</span>
-            {{ isPlaying ? t('app.traceVisualization.pause') : t('app.traceVisualization.play') }}
-          </button>
-          <!-- Only reachable once the panel has been dismissed on this step; the Board owns the
-               dismissed-key state, so recovery is an event rather than local state. -->
-          <HintTooltip v-if="changePanelVisible === false" :content="t('app.showStepChanges')">
-            <button
-              type="button"
-              data-testid="simulation-timeline-restore-changes"
-              class="board-card inline-flex h-8 items-center gap-1 rounded-lg border board-border-subtle px-2 text-xs font-semibold board-text-strong transition-colors hover:board-control-hover"
-              :aria-label="t('app.showStepChanges')"
-              @click="emit('restore-change-panel')"
-            >
-              <span class="material-symbols-outlined text-base" aria-hidden="true">difference</span>
-              <span class="hidden sm:inline">{{ t('app.stepChanges') }}</span>
-            </button>
-          </HintTooltip>
-          <HintTooltip :content="t('app.viewSimulationRunDetails')">
-            <button
-              type="button"
-              data-testid="simulation-timeline-run-details"
-              class="board-card inline-flex h-8 items-center gap-1 rounded-lg border board-border-subtle px-2 text-xs font-semibold board-text-strong transition-colors hover:board-control-hover"
-              :aria-label="t('app.viewSimulationRunDetails')"
-              @click="emit('open-run-details')"
-            >
-              <span class="material-symbols-outlined text-base" aria-hidden="true">description</span>
-              <span class="hidden sm:inline">{{ t('app.runDetails') }}</span>
-            </button>
-          </HintTooltip>
-          <HintTooltip :content="t('app.close')">
-            <button
-              type="button"
-              data-testid="simulation-timeline-close"
-              class="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium board-text-muted transition-colors hover:board-control-hover hover:board-text-strong"
-              :aria-label="t('app.close')"
-              @click="close"
-            >
-              <span class="material-symbols-outlined text-base" aria-hidden="true">close</span>
-              <span>{{ t('app.close') }}</span>
-            </button>
-          </HintTooltip>
-        </div>
-      </header>
-
+    <template #help>
+      <InfoTooltip :text="t('app.playbackNavigationHint')" :label="t('app.showHelpFor', { topic: t('app.playbackControls') })" test-id="simulation-timeline-snapshot-notice" />
+    </template>
+    <template #status>
+      <HintTooltip v-if="(runtimeCompromisedPointCount !== null && runtimeCompromisedPointCount > 0) || hasAttackedDevices" :content="runtimeAttackLabel">
+        <button type="button" class="playback-terminal__icon board-text-danger" data-testid="simulation-runtime-attack" :aria-label="runtimeAttackLabel" @click="terminalTab = 'details'">
+          <span class="material-symbols-outlined" aria-hidden="true">gpp_bad</span>
+        </button>
+      </HintTooltip>
+    </template>
+    <template v-if="modelComplete === false || (actualSteps !== undefined && requestedSteps !== undefined && actualSteps < requestedSteps) || !modelSemanticsConsistent || boardComparison === 'CHANGED'" #context>
       <div
         v-if="modelComplete === false"
-        class="mb-2 rounded-lg board-surface-warning px-3 py-2 text-[11px] font-medium leading-4 board-text-warning"
+        class="mb-2 rounded-lg board-surface-warning px-3 py-2 text-[length:var(--iot-font-caption)] font-medium leading-4 board-text-warning"
         data-testid="simulation-timeline-incomplete-warning"
       >
         {{ t('app.traceVisualization.modelIncompletePlayback', { rules: disabledRuleCount || 0 }) }}
@@ -558,7 +306,7 @@ watch(selectedStateIndex, () => {
 
       <div
         v-if="actualSteps !== undefined && requestedSteps !== undefined && actualSteps < requestedSteps"
-        class="mb-2 rounded-lg board-surface-warning px-3 py-2 text-[11px] font-medium leading-4 board-text-warning"
+        class="mb-2 rounded-lg board-surface-warning px-3 py-2 text-[length:var(--iot-font-caption)] font-medium leading-4 board-text-warning"
         data-testid="simulation-timeline-short-horizon-warning"
       >
         {{ t('app.simulationStoppedBeforeRequestedSteps', { actual: actualSteps, requested: requestedSteps }) }}
@@ -566,309 +314,32 @@ watch(selectedStateIndex, () => {
 
       <div
         v-if="!modelSemanticsConsistent"
-        class="mb-2 rounded-lg board-surface-warning px-3 py-2 text-[11px] font-semibold leading-4 board-text-warning"
+        class="mb-2 rounded-lg board-surface-warning px-3 py-2 text-[length:var(--iot-font-caption)] font-semibold leading-4 board-text-warning"
       >
         {{ t('app.modelSemanticsUnavailable') }}
       </div>
 
       <div
         v-if="boardComparison === 'CHANGED'"
-        class="mb-2 rounded-lg board-surface-warning px-3 py-2 text-[11px] font-medium leading-4 board-text-warning"
+        class="mb-2 rounded-lg board-surface-warning px-3 py-2 text-[length:var(--iot-font-caption)] font-medium leading-4 board-text-warning"
         data-testid="simulation-board-drift-warning"
       >
-        {{ t('app.runBoardInputChanged') }}
+        {{ t('app.playbackBoardInputChanged') }}
       </div>
-
-      <section class="border-b border-slate-200 pb-2" :aria-label="t('app.traceVisualization.stateSequence')">
-        <!--
-          Step controls and the rail are different modalities, so they coexist: buttons move +/-1, the
-          number input jumps exactly, the rail below shows position and scrubs. The range slider that used
-          to sit between them was a second full-width x-axis over the same index as the rail -- that pair
-          is what read as two timelines for one sequence, so the slider is gone and the rail took over the
-          drag it uniquely provided (`scrubStateFromPointer`).
-        -->
-        <div class="flex flex-wrap items-center gap-2">
-          <div class="flex items-center gap-1">
-            <button
-              type="button"
-              class="board-card inline-flex h-8 w-8 items-center justify-center rounded-lg border board-border-subtle board-text-strong transition-colors hover:board-control-hover disabled:cursor-not-allowed disabled:text-slate-300"
-              :disabled="selectedStateIndex <= 0"
-              :aria-label="t('app.traceVisualization.previousState')"
-              @click="selectPreviousState"
-            >
-              <span class="material-symbols-outlined text-lg" aria-hidden="true">chevron_left</span>
-            </button>
-            <label class="board-card flex h-8 items-center gap-1 rounded-lg border border-slate-200 px-2 text-xs font-semibold text-slate-600">
-              <span>{{ t('app.traceVisualization.stateLabel') }}</span>
-              <input
-                v-model.number="selectedStateNumber"
-                data-testid="simulation-timeline-step-input"
-                type="number"
-                :min="1"
-                :max="Math.max(totalStates, 1)"
-                :disabled="totalStates <= 0"
-                class="w-10 bg-transparent text-center font-bold text-slate-800 outline-none"
-                :aria-label="t('app.traceVisualization.jumpToState')"
-              >
-              <span class="text-slate-500">/ {{ totalStates }}</span>
-            </label>
-            <button
-              type="button"
-              class="board-card inline-flex h-8 w-8 items-center justify-center rounded-lg border board-border-subtle board-text-strong transition-colors hover:board-control-hover disabled:cursor-not-allowed disabled:text-slate-300"
-              :disabled="selectedStateIndex >= totalStates - 1"
-              :aria-label="t('app.traceVisualization.nextState')"
-              @click="selectNextState"
-            >
-              <span class="material-symbols-outlined text-lg" aria-hidden="true">chevron_right</span>
-            </button>
-          </div>
-          <span class="text-[length:var(--iot-font-min)] font-semibold text-slate-500">
-            {{ selectedStateIndex === 0
-              ? t('app.traceVisualization.initialModelState')
-              : t('app.traceVisualization.transitionNumber', { index: selectedStateIndex }) }}
-          </span>
-        </div>
-
-        <div data-testid="simulation-timeline-scroll" class="iot-scroll-region-x mt-1 py-1">
-          <div
-            class="relative h-14 touch-none"
-            data-testid="simulation-timeline-track"
-            role="group"
-            :aria-label="t('app.traceVisualization.jumpToState')"
-            :style="{ width: states.length > 15 ? 'max-content' : '100%', minWidth: states.length > 15 ? `${Math.max(states.length * 38, 500)}px` : '100%' }"
-            @pointerdown="scrubStateFromPointer"
-          >
-            <div class="absolute left-2 right-2 top-1/2 h-3 -translate-y-1/2 rounded bg-slate-200"></div>
-            <div
-              v-if="selectedStateIndex > 0 && totalStates > 1"
-              class="absolute top-1/2 h-3 -translate-y-1/2 rounded bg-[color:var(--accent)] transition-all duration-300"
-              :style="{
-                left: '8px',
-                width: `calc((100% - 16px) * ${selectedStateIndex / (totalStates - 1)})`
-              }"
-            ></div>
-            <div class="absolute left-2 right-2 top-1/2 flex -translate-y-1/2 items-center justify-between">
-              <!-- The `v-for` belongs on the wrapper: `index` comes from the loop, so a tooltip hoisted above it
-                   would reference a variable that is not in scope there. -->
-              <HintTooltip
-                v-for="(_, index) in states"
-                :key="index"
-                :content="getStateAriaLabel(index)"
-              >
-                <button
-                  type="button"
-                  :tabindex="index === selectedStateIndex ? 0 : -1"
-                  :aria-label="getStateAriaLabel(index)"
-                  :aria-current="index === selectedStateIndex ? 'step' : undefined"
-                  :data-testid="`simulation-timeline-state-${index}`"
-                  class="w-7 h-7 rounded-full border-3 transition-all flex items-center justify-center relative z-10 flex-shrink-0 focus:outline-none focus:ring-2 focus:ring-[color:var(--accent-border)] focus:ring-offset-2"
-                  :class="index === selectedStateIndex
-                    ? 'scale-125 border-[color:var(--accent-border)] bg-[color:var(--accent)] shadow-md'
-                    : index < selectedStateIndex
-                      ? 'board-border-subtle board-chip-info'
-                      : 'border-slate-300 bg-white hover:border-[color:var(--accent)]'"
-                  @click="selectState(index)"
-                  @keydown="simulationRail.handleStateKeydown($event, index)"
-                >
-                  <!--
-                    The rail shows shape, not numbers — the same decision as the counterexample rail in
-                    `Board.vue`, applied here so the two playback surfaces do not diverge.
-
-                    These printed the step number at `text-[7px]`, and `text-[8px]` when selected, against
-                    the product's 11px `--iot-font-min` floor. A 28px marker cannot hold a legible two-digit
-                    number, and the number is already available three other ways: the `n / total` badge, the
-                    scrub control, and this button's own `aria-label` and `title`.
-                  -->
-                  <span
-                    v-if="index === selectedStateIndex"
-                    class="h-1.5 w-1.5 rounded-full bg-white"
-                    aria-hidden="true"
-                  ></span>
-                </button>
-              </HintTooltip>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- `simulation-step-values`, matching `trace-step-values` on the counterexample side. The old name
-           shared a prefix with the `simulation-timeline-state-{i}` step buttons, so a selector looking for
-           steps matched this panel too — the same collision that produced four false findings when
-           measuring the trace rail. -->
-      <!--
-        Which automation produced this state stays unconditionally visible; the value tables below do not.
-
-        Collapsing the whole block put the answer to "what changed from the previous step" behind a
-        click, which is the complaint recorded verbatim in this file's own history: "I cannot see what
-        changed from the previous step... State details is collapsed and shows no state values". The
-        counterexample side resolved the same tension by removing the disclosure from its cause row
-        (`trace-step-values`, guarded by `actionDockHierarchy.spec.ts`), and it earns that by carrying
-        only chips — it deliberately omits device values, because the canvas nodes are their authority.
-
-        This surface does carry device and environment tables, which are genuinely too tall to leave
-        open on an overlay where vertical space is scarcest. So the split is by role rather than by
-        surface: the cause is chrome-free and always visible, the tables keep their disclosure.
-      -->
-      <section class="mb-2 border-b border-slate-200 pb-2" data-testid="simulation-timeline-triggered-rules">
-        <div class="text-[length:var(--iot-font-min)] font-bold uppercase text-slate-500">
-          {{ selectedStateIndex === 0
-            ? t('app.traceVisualization.initialModelState')
-            : t('app.traceVisualization.rulesAppliedToReachState') }}
-        </div>
-        <div v-if="selectedStateIndex > 0 && currentTriggeredRules.length > 0" class="mt-1.5 flex flex-wrap gap-1.5">
-          <span
-            v-for="(rule, index) in currentTriggeredRules"
-            :key="rule.ruleId || `${rule.ruleLabel}-${index}`"
-            class="inline-flex max-w-full items-center gap-1 rounded-full border px-2 py-0.5 text-[length:var(--iot-font-min)] font-semibold"
-            :class="triggeredRuleExistsOnCurrentBoard(rule)
-              ? 'board-border-subtle board-chip-success board-text-success'
-              : 'board-surface-warning board-text-warning'"
-            :title="triggeredRuleExistsOnCurrentBoard(rule) ? undefined : t('app.traceVisualization.historicalRuleNotOnCurrentBoard')"
-          >
-            <span class="max-w-[14rem] truncate">{{ triggeredRuleLabel(rule, index) }}</span>
-            <span v-if="!triggeredRuleExistsOnCurrentBoard(rule)" class="material-symbols-outlined text-[12px]" aria-hidden="true">history</span>
-          </span>
-        </div>
-        <p v-else-if="selectedStateIndex > 0" class="mt-1 text-[11px] text-slate-500">
-          {{ t('app.traceVisualization.noRulesApplied') }}
-        </p>
-      </section>
-
-      <details class="group mb-2 pt-2" data-testid="simulation-step-values">
-        <summary class="flex cursor-pointer list-none items-center justify-between gap-3 rounded-lg px-1 py-1 text-[11px] font-semibold board-text-muted hover:board-control-hover hover:board-text-strong">
-          <span class="inline-flex items-center gap-1.5">
-            <span class="material-symbols-outlined text-base" aria-hidden="true">tune</span>
-            {{ t('app.traceVisualization.stateDetails') }}
-          </span>
-          <span class="material-symbols-outlined text-base transition-transform group-open:rotate-180" aria-hidden="true">expand_more</span>
-        </summary>
-        <div class="mt-1.5 border-t border-slate-200">
-      <section
-        v-if="currentCompromisedAutomationLinks.length > 0"
-        class="board-surface-danger border-b px-2 py-2"
-        data-testid="simulation-timeline-compromised-links"
-      >
-        <div class="text-[length:var(--iot-font-min)] font-bold uppercase board-text-danger">
-          {{ t('app.traceVisualization.compromisedAutomationLinks') }}
-        </div>
-        <div class="mt-1.5 flex flex-wrap gap-1.5">
-          <span
-            v-for="(rule, index) in currentCompromisedAutomationLinks"
-            :key="rule.ruleId || `${rule.ruleLabel}-${index}`"
-            class="inline-flex max-w-full items-center gap-1 rounded-full border board-border-subtle bg-white px-2 py-1 text-[length:var(--iot-font-min)] font-semibold board-text-danger"
-            :title="triggeredRuleExistsOnCurrentBoard(rule) ? t('app.traceVisualization.compromisedAutomationLinkHint') : t('app.traceVisualization.historicalRuleNotOnCurrentBoard')"
-          >
-            <span class="material-symbols-outlined text-[12px]" aria-hidden="true">link_off</span>
-            <span class="max-w-[14rem] truncate">{{ triggeredRuleLabel(rule, index) }}</span>
-            <span v-if="!triggeredRuleExistsOnCurrentBoard(rule)" class="material-symbols-outlined text-[12px]" aria-hidden="true">history</span>
-          </span>
-        </div>
-      </section>
-
-      <section v-if="currentDevices.length > 0" class="border-b border-slate-200 py-2" data-testid="simulation-timeline-devices">
-        <div class="mb-1.5 inline-flex items-center gap-1 text-[length:var(--iot-font-min)] font-bold uppercase text-slate-500">
-          <span class="material-symbols-outlined text-[13px]" aria-hidden="true">devices</span>
-          {{ t('app.traceVisualization.devicesInCurrentState') }}
-        </div>
-        <div class="flex flex-wrap gap-1.5">
-          <span
-            v-for="device in currentDevices"
-            :key="device.deviceId"
-            class="inline-flex max-w-full flex-wrap items-center gap-1 rounded border px-2 py-1 text-[length:var(--iot-font-min)] font-semibold"
-            :class="!deviceExistsOnCurrentBoard(device.deviceId)
-              ? 'board-surface-warning board-text-warning'
-              : deviceChanged(device)
-                ? 'board-border-subtle board-chip-info board-text-info'
-                : 'border-slate-200 bg-slate-50 text-slate-700'"
-            :title="deviceExistsOnCurrentBoard(device.deviceId) ? undefined : t('app.traceVisualization.historicalDeviceNotOnCurrentBoard')"
-          >
-            <span class="font-bold">{{ device.deviceLabel || device.deviceId }}</span>
-            <span class="max-w-[20rem] break-words font-mono font-normal">{{ deviceSummary(device) }}</span>
-            <span
-              v-if="deviceChanged(device)"
-              class="max-w-[24rem] truncate rounded board-chip-info px-1 text-[length:var(--iot-font-min)] board-text-info"
-              :title="deviceChangeSummary(device)"
-            >
-              {{ deviceChangeSummary(device) }}
-            </span>
-            <span v-if="isPlaybackDeviceAttacked(device)" class="rounded board-chip-danger px-1 text-[length:var(--iot-font-min)] board-text-danger">{{ t('app.traceVisualization.attacked') }}</span>
-            <!--
-              Provenance, not a hazard — so `info`, not `warning`.
-
-              `nusmv-model.md` is explicit: "Trust labels describe provenance and propagation; `untrusted` does not
-              mean the device is selected as compromised", and the origin defaults "do not claim that motion
-              sensing is inherently more accurate... it states only the modeled origin assumption". A schedule
-              value, an inbound email or a door-contact reading starts `untrusted` because nothing in the house
-              vouched for it, which is a fact about the model, not a problem with the design.
-
-              Both desktop reviews of an ordinary simulation read the amber exactly as the docs warn against — "it
-              may imply a security defect even though this is an ordinary trace", "颜色和措辞像警告". The `attacked`
-              chip beside it keeps `danger`, because a selected compromise genuinely is one.
-            -->
-            <span
-              v-if="deviceSecurityFacts(device).untrustedLabels.length > 0"
-              class="rounded board-chip-info px-1 text-[length:var(--iot-font-min)] board-text-info"
-              :title="t('app.traceVisualization.untrustedLabelDetails', { labels: formattedDeviceSecurityLabels(device, deviceSecurityFacts(device).untrustedLabels).join(', ') })"
-            >
-              {{ t('app.traceVisualization.includesUntrustedSource') }}
-            </span>
-            <span
-              v-if="deviceSecurityFacts(device).privateLabels.length > 0"
-              class="rounded board-chip-info px-1 text-[length:var(--iot-font-min)] board-text-info"
-              :title="t('app.traceVisualization.privateLabelDetails', { labels: formattedDeviceSecurityLabels(device, deviceSecurityFacts(device).privateLabels).join(', ') })"
-            >
-              {{ t('app.traceVisualization.includesPrivateData') }}
-            </span>
-            <span v-if="!deviceExistsOnCurrentBoard(device.deviceId)" class="material-symbols-outlined text-[12px]" aria-hidden="true">history</span>
-          </span>
-        </div>
-      </section>
-
-      <section v-if="currentEnvironmentVariables.length > 0" class="border-b border-slate-200 py-2" data-testid="simulation-timeline-env">
-        <div class="mb-1.5 inline-flex items-center gap-1 text-[length:var(--iot-font-min)] font-bold uppercase text-slate-500">
-          <span class="material-symbols-outlined text-[13px]" aria-hidden="true">terrain</span>
-          {{ t('app.traceVisualization.environmentVariables') }}
-        </div>
-        <div class="flex flex-wrap gap-1.5">
-          <span
-            v-for="envVar in currentEnvironmentVariables"
-            :key="envVar.name"
-            class="inline-flex max-w-full items-center gap-1 rounded-full border px-2 py-1 text-[length:var(--iot-font-min)] font-bold"
-            :class="environmentVariableChanged(envVar.name, envVar.value)
-              ? 'board-surface-warning board-text-warning'
-              : 'border-slate-200 bg-slate-50 text-slate-600'"
-            :title="environmentVariableTitle(envVar.name, envVar.value)"
-          >
-            <span class="max-w-[7rem] truncate">{{ formatEnvironmentModelToken(envVar.name, envVar.name) }}</span>
-            <span class="font-mono">{{ formatEnvironmentModelToken(envVar.name, envVar.value) }}</span>
-            <span v-if="environmentVariableChanged(envVar.name, envVar.value)" class="rounded-full board-chip-warning px-1 text-[length:var(--iot-font-min)] board-text-warning">{{ t('app.traceVisualization.changed') }}</span>
-          </span>
-        </div>
-      </section>
-
-      <!--
-        The "Run scope and submission snapshot" disclosure that used to close this panel is gone.
-
-        Of its ten rows, two (the frozen-snapshot title and its device/rule/spec/variable/template
-        counts) were a verbatim second copy of the card the run-details dialog already opens with, and
-        five more were run-level semantics that the counterexample side had already moved into an
-        `InfoTooltip` for a measured reason — permanent height on an overlay whose subject is the
-        canvas, for facts a reader needs once. Those five now live in `playbackSemanticsHelpText`
-        beside the header title.
-
-        The board-comparison verdict was the one row with no other home, so it moved to the run-details
-        dialog next to the verification dialog's `verification-board-comparison`, which also closes a
-        gap: the simulation dialog never showed board drift at all.
-      -->
-        </div>
-      </details>
-    </div>
-  </div>
+    </template>
+    <template #details>
+      <PlaybackStateDetails
+        :devices="currentDevices"
+        :environment-variables="currentEnvironmentVariables"
+        :compromised-automation-links="currentCompromisedAutomationLinks"
+        :current-device-ids="currentDeviceIds || []"
+        :current-rule-ids="currentRuleIds || []"
+        :format-device-token="formatDeviceModelToken"
+        :format-environment-token="formatEnvironmentModelToken"
+        :environment-title="environmentVariableTitle"
+      />
+    </template>
+    <template #changes><slot name="changes" /></template>
+    <template #run><slot name="run" /></template>
+  </PlaybackTerminal>
 </template>
-
-<style scoped>
-.material-symbols-outlined {
-  font-family: 'Material Symbols Outlined';
-  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
-}
-</style>

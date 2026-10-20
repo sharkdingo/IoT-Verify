@@ -1,9 +1,13 @@
 // @vitest-environment jsdom
 import { mount } from '@vue/test-utils'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import postcss from 'postcss'
 import { createI18n } from 'vue-i18n'
+import { i18n as appI18n } from '@/assets/i18n'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import SimulationTimeline from '../SimulationTimeline.vue'
-import type { SimulationState } from '@/types/simulation'
+import type { TraceState } from '@/types/verify'
 import type { ModelSemantics } from '@/types/modelSemantics'
 
 const i18n = createI18n({
@@ -12,16 +16,34 @@ const i18n = createI18n({
   messages: {
     en: {
       app: {
+        ...appI18n.global.getLocaleMessage('en').app,
         close: 'Close',
         exit: 'Exit',
         exitTimeline: 'Exit playback and return to the canvas',
         unknown: 'Unknown',
         state: 'State',
         mode: 'Mode',
+        trust: 'Source label',
+        privacy: 'Sensitivity label',
         ruleNumber: 'Rule {number}',
-        runDetails: 'Run details',
         stepChanges: 'Step changes',
-        showStepChanges: 'Show the step-changes panel again',
+        playbackControls: 'Playback controls',
+        playbackViews: 'Playback terminal views',
+        playbackTimeline: 'Timeline',
+        playbackRunInfo: 'Run info',
+        playbackNavigationHint: 'Click or drag the timeline to seek.',
+        showHelpFor: 'Help for {topic}',
+        completeModel: 'Complete model',
+        incompleteModel: 'Incomplete model',
+        playbackDeviceReadings: 'Device states and reported values',
+        playbackActualEnvironment: 'Actual home environment',
+        playbackUntrustedSources: 'Untrusted source labels: {labels}',
+        playbackPrivateValues: 'Private-data labels: {labels}',
+        hidePlaybackPanel: 'Hide playback terminal',
+        playbackPreviousWindow: 'Previous group of states',
+        playbackNextWindow: 'Next group of states',
+        playbackStateWindow: 'States {start}–{end} / {total}',
+        playbackInitialState: 'Initial',
         viewSimulationRunDetails: 'View run details',
         runScopeAndSnapshot: 'Run Scope and Submission Snapshot',
         simulationStoppedBeforeRequestedSteps: 'Only {actual} of {requested} transitions were returned',
@@ -38,6 +60,7 @@ const i18n = createI18n({
         modelRunSnapshotSummary: 'Captured {time}: {devices} devices, {rules} rules, {specs} specs, {variables} variables, {templates} templates',
         runBoardInputUnchanged: 'Current input matches',
         runBoardInputChanged: 'Current input changed',
+        playbackBoardInputChanged: 'Current input changed; replay uses the saved run scene',
         runBoardComparisonUnavailable: 'Comparison unavailable',
         runBoardNotCompared: 'Current board not compared',
         runBoardInputUnchangedShort: 'Current input matches',
@@ -45,7 +68,6 @@ const i18n = createI18n({
         runBoardComparisonUnavailableShort: 'Comparison unavailable',
         runBoardNotComparedShort: 'Current board not compared',
         traceVisualization: {
-          stateSequence: 'State sequence',
           modelTracePlayback: 'Model Trace Playback',
           modelTraceNotPrediction: 'Model execution, not a physical prediction',
           simulationAttackContext: 'Attack budget {count} of {total} ({devices} devices + {links} links)',
@@ -61,6 +83,7 @@ const i18n = createI18n({
           historicalDeviceNotOnCurrentBoard: 'Historical device is no longer on this board',
           runtimeCompromisedPoints: 'Current compromised points',
           compromisedAutomationLinks: 'Compromised automation links in this branch',
+          securityLabels: 'Source and sensitivity labels',
           compromisedAutomationLinkHint: 'Command does not reach the target',
           attackScenario: 'Attack scenario',
           attackBudget: 'budget',
@@ -69,6 +92,7 @@ const i18n = createI18n({
           compromisedPointCount: 'Current Compromised Points',
           attackedBang: 'Attacked',
           attacked: 'Attacked',
+          compromised: 'Compromised',
           includesUntrustedSource: 'Includes untrusted source',
           includesPrivateData: 'Includes private-data label',
           untrustedLabelDetails: 'Untrusted source labels: {labels}',
@@ -132,7 +156,7 @@ const consistentSemantics: ModelSemantics = {
   localVariableFallbackPolicy: 'STUTTER_WHEN_NO_DECLARED_EVOLUTION'
 }
 
-const states = (prefix: string): SimulationState[] => [
+const states = (prefix: string): TraceState[] => [
   {
     stateIndex: 1,
     triggeredRules: [],
@@ -154,12 +178,116 @@ const states = (prefix: string): SimulationState[] => [
 ]
 
 describe('SimulationTimeline', () => {
+  it('keeps the playback heading in the timeline scroll flow', () => {
+    const sheet = postcss.parse(readFileSync(join(process.cwd(), 'src/styles/board.css'), 'utf8'))
+    const positionRules: string[] = []
+    sheet.walkRules(rule => {
+      if (rule.parent?.type !== 'root') return
+      const positions = rule.nodes.filter(node => node.type === 'decl' && node.prop === 'position')
+      if (positions.length) positionRules.push(`${rule.selector} { ${positions.join(';')} }`)
+    })
+    const style = document.createElement('style')
+    style.textContent = positionRules.join('\n')
+    document.head.appendChild(style)
+    const wrapper = mount(SimulationTimeline, {
+      attachTo: document.body,
+      props: { visible: true, modelSemantics: consistentSemantics, states: states('playback') },
+      global: { plugins: [i18n], stubs: { Teleport: true } }
+    })
+    try {
+      // A heading taller than the capped scrollport must scroll away from the seek controls.
+      expect(getComputedStyle(wrapper.get('header').element).position).not.toMatch(/^(sticky|fixed|absolute)$/)
+    } finally {
+      wrapper.unmount()
+      style.remove()
+    }
+  })
+
   beforeEach(() => {
     Element.prototype.scrollIntoView = vi.fn()
   })
 
   afterEach(() => {
     vi.useRealTimers()
+  })
+
+  it('keeps playing when the terminal is hidden without clearing the selected state', async () => {
+    vi.useFakeTimers()
+    const wrapper = mount(SimulationTimeline, {
+      props: { visible: true, states: states('hidden'), modelSemantics: consistentSemantics },
+      global: { plugins: [i18n], stubs: { Teleport: true } }
+    })
+    await wrapper.get('[data-testid="simulation-timeline-play"]').trigger('click')
+    await wrapper.setProps({ panelOpen: false })
+    expect(wrapper.emitted('highlight-state')?.some(([state]) => state === null)).not.toBe(true)
+    await vi.advanceTimersByTimeAsync(1500)
+    expect(wrapper.get('[data-testid="simulation-timeline"]').attributes('data-selected-state-index')).toBe('1')
+    expect(wrapper.get('[data-testid="simulation-timeline-play"]').attributes('aria-label')).toBe('Pause')
+    wrapper.unmount()
+  })
+
+  it('pauses while editing a state number and restores an unfinished entry on blur', async () => {
+    vi.useFakeTimers()
+    const wrapper = mount(SimulationTimeline, {
+      props: { visible: true, states: states('draft'), modelSemantics: consistentSemantics },
+      global: { plugins: [i18n], stubs: { Teleport: true } }
+    })
+    try {
+      await wrapper.get('[data-testid="simulation-timeline-play"]').trigger('click')
+      const input = wrapper.get('[data-testid="simulation-timeline-step-input"]')
+      ;(input.element as HTMLInputElement).value = ''
+      await input.trigger('input')
+      expect(wrapper.get('[data-testid="simulation-timeline-play"]').attributes('aria-label')).toBe('Play')
+      await vi.advanceTimersByTimeAsync(3000)
+      expect(wrapper.get('[data-testid="simulation-timeline"]').attributes('data-selected-state-index')).toBe('0')
+      await wrapper.get('[data-testid="simulation-timeline-step-input"]').trigger('blur')
+      expect((wrapper.get('[data-testid="simulation-timeline-step-input"]').element as HTMLInputElement).value).toBe('1')
+    } finally { wrapper.unmount() }
+  })
+
+  it.each(['en', 'zh-CN'] as const)('keeps saved-scene drift guidance across replay views in %s', async locale => {
+    const previousLocale = appI18n.global.locale.value
+    appI18n.global.locale.value = locale
+    const wrapper = mount(SimulationTimeline, {
+      props: { visible: true, states: states('history'), modelSemantics: consistentSemantics, boardComparison: 'CHANGED' },
+      global: { plugins: [appI18n], stubs: { Teleport: true } }
+    })
+    try {
+      for (const view of ['changes', 'details', 'run']) {
+        await wrapper.get(`[data-testid="simulation-timeline-${view}-tab"]`).trigger('click')
+        const warning = wrapper.get('[data-testid="simulation-board-drift-warning"]')
+        expect(warning.isVisible()).toBe(true)
+        expect(warning.text()).toMatch(locale === 'en' ? /replay uses the scene saved for this run/i : /回放.*本次运行保存的场景/)
+        expect(warning.text()).not.toMatch(/rerun|重新运行/i)
+      }
+      await wrapper.setProps({ boardComparison: 'UNCHANGED' })
+      expect(wrapper.find('[data-testid="simulation-board-drift-warning"]').exists()).toBe(false)
+    } finally { wrapper.unmount(); appI18n.global.locale.value = previousLocale }
+  })
+
+  it.each(['marker', 'keyboard', 'next', 'number'])('pauses autoplay when seeking with %s', async method => {
+    vi.useFakeTimers()
+    const wrapper = mount(SimulationTimeline, {
+      props: { visible: true, states: states('seek'), modelSemantics: consistentSemantics },
+      global: { plugins: [i18n], stubs: { Teleport: true } }
+    })
+
+    await wrapper.get('[data-testid="simulation-timeline-play"]').trigger('click')
+    expect(wrapper.get('[data-testid="simulation-timeline-play"]').attributes('aria-label')).toBe('Pause')
+    if (method === 'marker') {
+      await wrapper.get('[data-testid="simulation-timeline-state-1"]').trigger('click')
+    } else if (method === 'keyboard') {
+      await wrapper.get('[data-testid="simulation-timeline-state-0"]').trigger('keydown', { key: 'ArrowRight' })
+    } else if (method === 'next') {
+      await wrapper.get('button[aria-label="Next state"]').trigger('click')
+    } else {
+      await wrapper.get('[data-testid="simulation-timeline-step-input"]').setValue('2')
+    }
+
+    expect(wrapper.get('[data-testid="simulation-timeline-play"]').attributes('aria-label')).toBe('Play')
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(wrapper.get('[data-testid="simulation-timeline"]').attributes('data-selected-state-index')).toBe('1')
+    wrapper.unmount()
   })
 
   it('resets playback focus to the first state whenever it opens', async () => {
@@ -170,7 +298,7 @@ describe('SimulationTimeline', () => {
         states: states('first')
       },
       global: {
-        plugins: [i18n]
+        plugins: [i18n], stubs: { Teleport: true }
       }
     })
 
@@ -185,31 +313,23 @@ describe('SimulationTimeline', () => {
     expect(highlightEvents.at(-1)?.[0]).toMatchObject({ selectedStateIndex: 0 })
   })
 
-  it('publishes whether the change inspector is open, so the bar can yield its column', async () => {
-    /*
-     * The host is a `position: fixed` **sibling** of `.iot-board`, so the short-landscape rule that makes
-     * this bar give the change inspector a right-hand column cannot be written as a board descendant —
-     * `.iot-board.has-playback-change-popover .board-timeline-host` matched nothing, while its pair rule for
-     * the popover *did* match. The inspector narrowed to 42vw on cue and the bar never yielded, so the two
-     * overlapped: exactly the case the rule exists to prevent. The attribute is how the rule reaches here.
-     *
-     * `=== true` rather than truthiness, because the prop is optional: an omitted prop must read as
-     * "no inspector open", not as the string "undefined", which the attribute selector would not match
-     * either way but which would misreport the state to anything reading it.
-     */
+  it('keeps playback and the selected state while switching terminal tabs', async () => {
+    vi.useFakeTimers()
     const wrapper = mount(SimulationTimeline, {
-      props: { visible: true, modelSemantics: consistentSemantics, states: states('first'), changePanelVisible: true },
-      global: { plugins: [i18n] }
+      props: { visible: true, modelSemantics: consistentSemantics, states: states('tabs') },
+      slots: { changes: '<p data-testid="test-changes">Before and after values</p>' },
+      global: { plugins: [i18n], stubs: { Teleport: true } }
     })
-    const host = () => wrapper.get('[data-testid="simulation-timeline-host"]')
-    expect(host().attributes('data-playback-change-popover')).toBe('true')
-
-    await wrapper.setProps({ changePanelVisible: false })
-    expect(host().attributes('data-playback-change-popover')).toBe('false')
-
-    await wrapper.setProps({ changePanelVisible: undefined })
-    expect(host().attributes('data-playback-change-popover'), 'an absent prop is not an open inspector')
-      .toBe('false')
+    await wrapper.get('[data-testid="simulation-timeline-play"]').trigger('click')
+    await wrapper.get('[data-testid="simulation-timeline-changes-tab"]').trigger('click')
+    expect(wrapper.get('[data-testid="test-changes"]').isVisible()).toBe(true)
+    expect(wrapper.get('[data-testid="simulation-timeline-play"]').attributes('aria-label')).toBe('Pause')
+    await vi.advanceTimersByTimeAsync(1500)
+    expect(wrapper.get('[data-testid="simulation-timeline"]').attributes('data-selected-state-index')).toBe('1')
+    await wrapper.get('[data-testid="simulation-timeline-changes-tab"]').trigger('click')
+    expect(wrapper.get('[data-testid="simulation-timeline-state-1"]').attributes('aria-current')).toBe('step')
+    expect(wrapper.emitted('highlight-state')?.some(event => event[0] === null)).toBe(false)
+    wrapper.unmount()
   })
 
   it('does not warn about run semantics for a manifest the product actually produces', () => {
@@ -225,7 +345,7 @@ describe('SimulationTimeline', () => {
      */
     const wrapper = mount(SimulationTimeline, {
       props: { visible: true, modelSemantics: consistentSemantics, states: states('semantics') },
-      global: { plugins: [i18n] }
+      global: { plugins: [i18n], stubs: { Teleport: true } }
     })
     expect(wrapper.text(), 'a consistent manifest is not a reason to warn')
       .not.toContain('Model semantics unavailable')
@@ -236,7 +356,7 @@ describe('SimulationTimeline', () => {
   it('resets to the first state when a same-length run replaces the visible run', async () => {
     const wrapper = mount(SimulationTimeline, {
       props: { visible: true, modelSemantics: consistentSemantics, states: states('first') },
-      global: { plugins: [i18n] }
+      global: { plugins: [i18n], stubs: { Teleport: true } }
     })
 
     await wrapper.get('[data-testid="simulation-timeline-state-2"]').trigger('click')
@@ -257,7 +377,7 @@ describe('SimulationTimeline', () => {
     vi.useFakeTimers()
     const wrapper = mount(SimulationTimeline, {
       props: { visible: true, modelSemantics: consistentSemantics, states: states('playback') },
-      global: { plugins: [i18n] }
+      global: { plugins: [i18n], stubs: { Teleport: true } }
     })
 
     await wrapper.get('[data-testid="simulation-timeline-play"]').trigger('click')
@@ -267,15 +387,36 @@ describe('SimulationTimeline', () => {
     expect(wrapper.get('[data-testid="simulation-timeline-play"]').attributes('aria-label')).toBe('Play')
   })
 
-  it('opens run details from the timeline header instead of a separate floating overlay', async () => {
+  it('renders run information as a terminal view without opening another surface', async () => {
     const wrapper = mount(SimulationTimeline, {
       props: { visible: true, modelSemantics: consistentSemantics, states: states('details') },
-      global: { plugins: [i18n] }
+      slots: { run: '<p data-testid="run-content">Saved run diagnostics</p>' },
+      global: { plugins: [i18n], stubs: { Teleport: true } }
     })
 
-    await wrapper.get('[data-testid="simulation-timeline-run-details"]').trigger('click')
+    await wrapper.get('[data-testid="simulation-timeline-run-tab"]').trigger('click')
+    expect(wrapper.get('[data-testid="run-content"]').isVisible()).toBe(true)
+    expect(wrapper.get('[data-testid="simulation-timeline-track"]').isVisible()).toBe(true)
+    expect(wrapper.emitted('highlight-state')).toBeUndefined()
+  })
 
-    expect(wrapper.emitted('open-run-details')).toHaveLength(1)
+  it('keeps model coverage in run information while incomplete-model warnings stay visible', async () => {
+    const wrapper = mount(SimulationTimeline, {
+      props: { visible: true, modelComplete: undefined, modelSemantics: consistentSemantics, states: states('coverage') },
+      slots: { run: '<p data-testid="coverage-run-content">Model generation diagnostics</p>' },
+      global: { plugins: [i18n], stubs: { Teleport: true } }
+    })
+    expect(wrapper.find('button[aria-label="Complete model"]').exists()).toBe(false)
+    expect(wrapper.find('button[aria-label="Incomplete model"]').exists()).toBe(false)
+    await wrapper.setProps({ modelComplete: true })
+    expect(wrapper.find('button[aria-label="Complete model"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="simulation-timeline-run-tab"]').trigger('click')
+    expect(wrapper.get('[data-testid="coverage-run-content"]').isVisible()).toBe(true)
+    await wrapper.setProps({ modelComplete: false })
+    expect(wrapper.find('button[aria-label="Incomplete model"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="simulation-timeline-changes-tab"]').trigger('click')
+    expect(wrapper.get('[data-testid="simulation-timeline-incomplete-warning"]').text()).toContain('rules omitted')
+    wrapper.unmount()
   })
 
   it('keeps a shortened simulation horizon visible during playback', () => {
@@ -287,7 +428,7 @@ describe('SimulationTimeline', () => {
         actualSteps: 2,
         requestedSteps: 6
       },
-      global: { plugins: [i18n] }
+      global: { plugins: [i18n], stubs: { Teleport: true } }
     })
 
     expect(wrapper.get('[data-testid="simulation-timeline-short-horizon-warning"]').text())
@@ -311,15 +452,15 @@ describe('SimulationTimeline', () => {
         ]
       },
       global: {
-        plugins: [i18n]
+        plugins: [i18n], stubs: { Teleport: true }
       }
     })
 
-    expect(wrapper.text()).toContain('Current compromised points: 4')
+    expect(wrapper.get('[data-testid="simulation-runtime-attack"]').attributes('aria-label')).toBe('Current compromised points: 4')
     expect(wrapper.text()).not.toContain('Current compromised points: 9')
   })
 
-  it('explains an attack budget with immutable counts from the run snapshot', () => {
+  it('keeps the help concise instead of repeating the run scope', () => {
     const wrapper = mount(SimulationTimeline, {
       props: {
         visible: true,
@@ -350,15 +491,16 @@ describe('SimulationTimeline', () => {
           localVariableFallbackPolicy: 'STUTTER_WHEN_NO_DECLARED_EVOLUTION'
         }
       },
-      global: { plugins: [i18n] }
+      global: { plugins: [i18n], stubs: { Teleport: true } }
     })
 
     // Asserted on the help affordance's `text` prop, not on rendered output: these facts moved from a
     // standing disclosure into an `InfoTooltip`, and `ElTooltip` renders its content only once opened,
     // so `wrapper.text()` cannot see prose that is genuinely reachable.
     const helpText = wrapper.findComponent({ name: 'InfoTooltip' }).props('text') as string
-    expect(helpText).toContain('Exhaustive up to 2 of 5 points')
-    expect(helpText).toContain('Labels propagate only on automation commands')
+    expect(helpText).toContain('Click or drag the timeline')
+    expect(helpText).not.toContain('Exhaustive up to')
+    expect(helpText).not.toContain('Labels propagate only')
     expect(helpText).not.toContain('Model semantics unavailable')
   })
 
@@ -372,13 +514,13 @@ describe('SimulationTimeline', () => {
         attackBudget: 2,
         enablePrivacy: true
       },
-      global: { plugins: [i18n] }
+      global: { plugins: [i18n], stubs: { Teleport: true } }
     })
 
     expect(wrapper.text()).toContain('Model semantics unavailable')
     expect(wrapper.text()).not.toContain('Attack budget 2 of')
     expect(wrapper.text()).not.toContain('Privacy propagation modeled')
-    expect(wrapper.text()).toContain('Attack scenario')
+    expect(wrapper.find('[data-testid="simulation-timeline-track"]').exists()).toBe(true)
   })
 
   it('does not treat an environment variable named attackBudget as attack count', () => {
@@ -397,7 +539,7 @@ describe('SimulationTimeline', () => {
         ]
       },
       global: {
-        plugins: [i18n]
+        plugins: [i18n], stubs: { Teleport: true }
       }
     })
 
@@ -418,7 +560,7 @@ describe('SimulationTimeline', () => {
           globalVariables: [{ name: 'compromisedPointCount', value: 'unknown', modelTokenSource: 'UNKNOWN' }]
         }]
       },
-      global: { plugins: [i18n] }
+      global: { plugins: [i18n], stubs: { Teleport: true } }
     })
 
     expect(wrapper.text()).not.toContain('NaN')
@@ -445,10 +587,10 @@ describe('SimulationTimeline', () => {
         boardComparison: 'CHANGED',
         currentRuleIds: []
       },
-      global: { plugins: [i18n] }
+      global: { plugins: [i18n], stubs: { Teleport: true } }
     })
 
-    expect(wrapper.text()).toContain('Model execution, not a physical prediction')
+    expect(wrapper.text()).not.toContain('Model execution, not a physical prediction')
     expect(wrapper.get('[data-testid="simulation-timeline-incomplete-warning"]').text())
       .toContain('2 rules omitted')
     // The frozen-snapshot counts are deliberately NOT here any more: the run-details dialog owns
@@ -456,7 +598,7 @@ describe('SimulationTimeline', () => {
     // height for a fact a reader needs once. What must survive is the help affordance itself —
     // its accessible name, since `ElTooltip` renders the prose only once opened.
     expect(wrapper.get('[data-testid="simulation-timeline-snapshot-notice"]')
-      .attributes('aria-label')).toContain('Run Scope')
+      .attributes('aria-label')).toContain('Playback controls')
     expect(wrapper.text(), 'the counts must not return to this surface')
       .not.toContain('3 devices, 2 rules, 0 specs')
     // This surface warns only when the board HAS drifted; the full four-way verdict (including
@@ -466,9 +608,10 @@ describe('SimulationTimeline', () => {
       .toContain('Current input changed')
 
     await wrapper.get('[data-testid="simulation-timeline-state-1"]').trigger('click')
-    const ruleSummary = wrapper.get('[data-testid="simulation-timeline-triggered-rules"]')
-    expect(ruleSummary.text()).toContain('history activation')
-    expect(ruleSummary.find('[title="Historical rule is no longer on this board"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="simulation-timeline-triggered-rules"]').exists()).toBe(false)
+    const highlighted = wrapper.emitted('highlight-state')!.at(-1)![0] as { selectedStateIndex: number; states: TraceState[] }
+    expect(highlighted.selectedStateIndex).toBe(1)
+    expect(highlighted.states[1].triggeredRules).toEqual(expect.arrayContaining([expect.objectContaining({ ruleLabel: 'history activation' })]))
   })
 
   it('keeps historical devices visible and marks state changes in the saved snapshot', async () => {
@@ -506,24 +649,22 @@ describe('SimulationTimeline', () => {
           }
         ]
       },
-      global: { plugins: [i18n] }
+      global: { plugins: [i18n], stubs: { Teleport: true } }
     })
 
-    // Same reason as above: the read-only sentence now lives in the tooltip's content, which
-    // `ElTooltip` does not render until opened. Assert the prop, which is the real contract.
+    // The help explains navigation; the full saved state stays in State details.
     expect(wrapper.findComponent({ name: 'InfoTooltip' }).props('text') as string)
-      .toContain('Saved read-only run snapshot')
+      .toContain('Click or drag the timeline')
 
     await wrapper.get('[data-testid="simulation-timeline-state-1"]').trigger('click')
-    const devices = wrapper.get('[data-testid="simulation-timeline-devices"]')
+    const devices = wrapper.get('[data-testid="playback-state-devices"]')
     expect(devices.text()).toContain('Current sensor')
     expect(devices.text()).toContain('active')
     expect(devices.text()).toContain('Removed lock')
     expect(devices.text()).toContain('unlocked')
-    expect(devices.text()).toContain('idle -> active')
-    expect(devices.text()).toContain('locked -> unlocked')
-    expect(devices.text()).toContain('Attacked')
-    expect(devices.find('[title="Historical device is no longer on this board"]').exists()).toBe(true)
+    expect(devices.text()).not.toContain('idle -> active')
+    expect(wrapper.get('[data-testid="playback-state-security"]').text()).toContain('Compromised')
+    expect(devices.text()).toContain('Historical device is no longer on this board')
   })
 
   it('shows trust and privacy facts from the selected historical state', () => {
@@ -548,18 +689,16 @@ describe('SimulationTimeline', () => {
           }]
         }]
       },
-      global: { plugins: [i18n] }
+      global: { plugins: [i18n], stubs: { Teleport: true } }
     })
 
-    const devices = wrapper.get('[data-testid="simulation-timeline-devices"]')
-    expect(devices.text()).toContain('Includes untrusted source')
-    expect(devices.text()).toContain('Includes private-data label')
-    expect(devices.find('[title="Untrusted source labels: motion"]').exists()).toBe(true)
-    expect(devices.find('[title="Private-data labels: video"]').exists()).toBe(true)
+    const security = wrapper.get('[data-testid="playback-state-security"]')
+    expect(security.text()).toContain('Untrusted source labels: motion')
+    expect(security.text()).toContain('Private-data labels: video')
   })
 
   it('formats bundled playback tokens at the display boundary without mutating saved states', () => {
-    const savedStates: SimulationState[] = [{
+    const savedStates: TraceState[] = [{
       stateIndex: 1,
       triggeredRules: [],
       compromisedAutomationLinks: [],
@@ -584,7 +723,7 @@ describe('SimulationTimeline', () => {
       sunny: '晴朗',
       photo: '照片'
     }
-    const formatToken = (_device: SimulationState['devices'][number], value: unknown) =>
+    const formatToken = (_device: TraceState['devices'][number], value: unknown) =>
       translations[String(value)] || String(value ?? '')
     const formatEnvironmentToken = (_name: string, value: unknown) =>
       translations[String(value)] || String(value ?? '')
@@ -598,16 +737,16 @@ describe('SimulationTimeline', () => {
         formatDeviceModelToken: formatToken,
         formatEnvironmentModelToken: formatEnvironmentToken
       },
-      global: { plugins: [i18n] }
+      global: { plugins: [i18n], stubs: { Teleport: true } }
     })
 
-    const devices = wrapper.get('[data-testid="simulation-timeline-devices"]')
+    const devices = wrapper.get('[data-testid="playback-state-devices"]')
     expect(devices.text()).toContain('开启')
     expect(devices.text()).toContain('设备状态')
-    expect(devices.text()).toContain('天气=晴朗')
-    expect(devices.find('[title="Untrusted source labels: 设备状态: 开启"]').exists()).toBe(true)
-    expect(devices.find('[title="Private-data labels: 照片"]').exists()).toBe(true)
-    expect(wrapper.get('[data-testid="simulation-timeline-env"]').text()).toContain('天气晴朗')
+    expect(devices.text()).toContain('天气晴朗')
+    expect(wrapper.get('[data-testid="playback-state-security"]').text()).toContain('设备状态: 开启')
+    expect(wrapper.get('[data-testid="playback-state-security"]').text()).toContain('照片')
+    expect(wrapper.get('[data-testid="playback-state-environment"]').text()).toContain('天气晴朗')
     expect(savedStates).toEqual(canonicalSnapshot)
   })
 
@@ -624,10 +763,10 @@ describe('SimulationTimeline', () => {
           devices: []
         }]
       },
-      global: { plugins: [i18n] }
+      global: { plugins: [i18n], stubs: { Teleport: true } }
     })
 
-    const links = wrapper.get('[data-testid="simulation-timeline-compromised-links"]')
+    const links = wrapper.get('[data-testid="playback-state-compromised-links"]')
     expect(links.text()).toContain('Hall motion turns on light')
     expect(links.text()).not.toContain('iot_verify_automation_link_compromised_0')
   })
@@ -636,7 +775,7 @@ describe('SimulationTimeline', () => {
     // A value that moved with no stated cause is the case a user cannot act on: they cannot tell
     // whether their own rule did it or the model allowed it. So every combination the backend can
     // report must produce a cause, not just the ones that were easy to render first.
-    const provenanceStates = (name: string, from: string, to: string): SimulationState[] => [
+    const provenanceStates = (name: string, from: string, to: string): TraceState[] => [
       {
         stateIndex: 1,
         triggeredRules: [],
@@ -675,12 +814,12 @@ describe('SimulationTimeline', () => {
             environmentProvenance: [provenance]
           } as never
         },
-        global: { plugins: [i18n] }
+        global: { plugins: [i18n], stubs: { Teleport: true } }
       })
       // Index 1 is the second state -- the one that changed. Index 0 has no predecessor, so it
       // deliberately carries no cause annotation.
       await wrapper.get('[data-testid="simulation-timeline-state-1"]').trigger('click')
-      return wrapper.get('[data-testid="simulation-timeline-env"]').html()
+      return wrapper.get('[data-testid="playback-state-environment"]').html()
     }
 
     it('reports a device when exactly one device declares it writes the value', async () => {
@@ -750,35 +889,24 @@ describe('SimulationTimeline', () => {
     })
   })
 
-  /**
-   * The counterexample rail has this guard in `views/board/actionDockHierarchy.spec.ts` ("shows what
-   * caused the selected counterexample step without an extra click"). This rail had none, which is how a
-   * change wrapping its whole step-values block in a collapsed `<details>` shipped: the only existing
-   * assertion checked that the testid *exists*, and the E2E helper clicks the disclosure open before
-   * reading it, so nothing noticed the answer had moved behind a click.
-   *
-   * Asserted against a mounted DOM rather than the source text, so it covers the rendered ancestry
-   * instead of a regex over markup.
-   */
-  it('does not put the cause of the selected step behind a disclosure', async () => {
+  it('keeps navigation separate from execution records and full state values', async () => {
     const wrapper = mount(SimulationTimeline, {
+      attachTo: document.body,
       props: { visible: true, modelSemantics: consistentSemantics, states: states('playback') },
-      global: { plugins: [i18n] }
+      global: { plugins: [i18n], stubs: { Teleport: true } }
     })
 
     // Past the initial state: there is no rule that produced state 0, so the row renders from step 1 on.
     await wrapper.get('[data-testid="simulation-timeline-state-1"]').trigger('click')
 
-    const cause = wrapper.get('[data-testid="simulation-timeline-triggered-rules"]')
-    expect(
-      cause.element.closest('details'),
-      'the cause of the selected step must not sit inside a <details>'
-    ).toBeNull()
+    expect(wrapper.find('[data-testid="simulation-timeline-triggered-rules"]').exists()).toBe(false)
 
-    // The value tables keep their disclosure: they are genuinely tall, and the canvas nodes are the
-    // richer authority for device values. Removing the disclosure entirely is not the fix.
-    const values = wrapper.find('[data-testid="simulation-step-values"]')
+    const values = wrapper.find('[data-testid="playback-state-details"]')
     expect(values.exists(), 'the value tables should still be present').toBe(true)
-    expect(values.element.tagName.toLowerCase(), 'and should still be a disclosure').toBe('details')
+    expect(values.isVisible(), 'full state values belong to a separate terminal view').toBe(false)
+    await wrapper.get('[data-testid="simulation-timeline-details-tab"]').trigger('click')
+    expect(wrapper.get('[data-testid="simulation-timeline-details-tab"]').attributes('aria-selected')).toBe('true')
+    expect(wrapper.get('[data-testid="playback-state-details"]').isVisible()).toBe(true)
+    wrapper.unmount()
   })
 })

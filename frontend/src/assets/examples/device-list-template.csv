@@ -1,0 +1,3 @@
+templateName,label,state,currentStateTrust,currentStatePrivacy,variable:motion,trust:motion,privacy:motion
+Motion Detector,entry_motion,,,,active,trusted,private
+Light,entry_light

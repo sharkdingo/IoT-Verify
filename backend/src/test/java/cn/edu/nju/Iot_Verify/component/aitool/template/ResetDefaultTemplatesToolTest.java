@@ -68,7 +68,7 @@ class ResetDefaultTemplatesToolTest {
         String publicToken = first.path("preview").path("impactToken").asText();
         verify(boardStorageService, never()).resetDefaultTemplates(1L, "domain-token");
 
-        UserContextHolder.setDefaultTemplateResetConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DEFAULT_TEMPLATE_RESET", publicToken);
         when(boardStorageService.resetDefaultTemplates(1L, "domain-token"))
                 .thenReturn(preview(true, "domain-token"));
         JsonNode applied = objectMapper.readTree(tool.execute(

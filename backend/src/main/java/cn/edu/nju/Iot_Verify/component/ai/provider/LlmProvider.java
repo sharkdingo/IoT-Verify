@@ -27,13 +27,22 @@ public interface LlmProvider {
      * prompt completions (without tools).
      *
      * @param request messages + optional tools + optional generation params
-     * @return the model's reply as text or tool-call requests; {@link LlmChatResponse#empty()}
-     *         if the provider returned no choice
+     * @return the assembled model reply as text or tool-call requests; cancellation may return
+     *         {@link LlmChatResponse#empty()}. Incomplete provider responses must fail explicitly.
      */
     LlmChatResponse chat(LlmChatRequest request);
 
     default LlmChatResponse chat(LlmChatRequest request, LlmRequestControl control) {
         return chat(request);
+    }
+
+    /** Streams public assistant text while assembling a complete, validated tool-aware response. */
+    default LlmChatResponse chat(LlmChatRequest request, LlmRequestControl control, Consumer<String> onDelta) {
+        LlmChatResponse response = chat(request, control);
+        if (!control.isCancellationRequested() && response != null && !response.text().isEmpty()) {
+            onDelta.accept(response.text());
+        }
+        return response;
     }
 
     /**

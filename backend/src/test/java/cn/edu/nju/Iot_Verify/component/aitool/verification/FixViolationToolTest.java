@@ -1,5 +1,7 @@
 package cn.edu.nju.Iot_Verify.component.aitool.verification;
 
+import cn.edu.nju.Iot_Verify.component.ai.LlmRequestControl;
+import cn.edu.nju.Iot_Verify.component.ai.LlmRequestControlHolder;
 import cn.edu.nju.Iot_Verify.exception.ResourceNotFoundException;
 import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
 import cn.edu.nju.Iot_Verify.exception.SmvGenerationException;
@@ -16,6 +18,12 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -37,6 +45,8 @@ class FixViolationToolTest {
     @AfterEach
     void tearDown() {
         UserContextHolder.clear();
+        LlmRequestControlHolder.clear();
+        Thread.interrupted();
     }
 
     private void assertValidationError(String argsJson) throws Exception {
@@ -143,6 +153,86 @@ class FixViolationToolTest {
         assertTrue(node.path("message").asText().contains("no Board change was applied"));
         assertEquals(1, node.path("parameterTargets").size());
         assertFalse(node.path("parameterTargets").get(0).has("ruleIndex"));
+        assertTrue(node.path("preferredRangeSelections").isArray());
+        assertTrue(node.path("preferredRangeSelections").isEmpty());
+    }
+
+    @Test
+    void executeRetainsTheExactPreferredRangesWithItsCanonicalResult() throws Exception {
+        String targetId = PreferredRangeSelection.targetIdFor(1L, 0, 0);
+        when(fixService.fix(anyLong(), anyLong(), any(), any())).thenReturn(FixResultDto.builder()
+                .traceId(1L).fixable(false).suggestions(java.util.List.of()).build());
+
+        JsonNode result = objectMapper.readTree(tool.execute("""
+                {"traceId":1,"preferredRangeSelections":[{"targetId":"%s","lower":10,"upper":20}]}
+                """.formatted(targetId)));
+
+        assertEquals(targetId, result.path("preferredRangeSelections").get(0).path("targetId").asText());
+        assertEquals(10, result.path("preferredRangeSelections").get(0).path("lower").asInt());
+        assertEquals(20, result.path("preferredRangeSelections").get(0).path("upper").asInt());
+    }
+
+    @Test
+    void stoppingTheAssistantInterruptsItsActiveReadOnlyFixSearch() throws Exception {
+        LlmRequestControl control = new LlmRequestControl();
+        CountDownLatch enteredSearch = new CountDownLatch(1);
+        CountDownLatch finished = new CountDownLatch(1);
+        AtomicBoolean searchInterrupted = new AtomicBoolean();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        AtomicReference<String> result = new AtomicReference<>();
+        when(fixService.fix(anyLong(), anyLong(), any(), any())).thenAnswer(invocation -> {
+            enteredSearch.countDown();
+            try {
+                new CountDownLatch(1).await(30, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                searchInterrupted.set(true);
+                Thread.currentThread().interrupt();
+            }
+            return FixResultDto.builder().traceId(1L).fixable(false).suggestions(List.of()).build();
+        });
+        Thread worker = new Thread(() -> {
+            UserContextHolder.setUserId(1L);
+            LlmRequestControlHolder.set(control);
+            try {
+                result.set(tool.execute("{\"traceId\":1}"));
+            } catch (Throwable e) {
+                failure.set(e);
+            } finally {
+                UserContextHolder.clear();
+                LlmRequestControlHolder.clear();
+                finished.countDown();
+            }
+        });
+        worker.start();
+        try {
+            assertTrue(enteredSearch.await(3, TimeUnit.SECONDS));
+            control.cancel();
+            assertTrue(finished.await(2, TimeUnit.SECONDS), "Stop must reach the active fix search");
+            assertTrue(searchInterrupted.get());
+            assertNull(failure.get());
+            assertFalse(Thread.currentThread().isInterrupted());
+            JsonNode stopped = objectMapper.readTree(result.get());
+            assertEquals("FIX_ANALYSIS_CANCELLED", stopped.path("errorCode").asText());
+            assertEquals(499, stopped.path("status").asInt());
+            assertFalse(stopped.has("suggestions"));
+        } finally {
+            worker.interrupt();
+            worker.join(3000);
+        }
+    }
+
+    @Test
+    void anAlreadyStoppedAssistantDoesNotStartFixAnalysisOrReportATimeout() throws Exception {
+        LlmRequestControl control = new LlmRequestControl();
+        control.cancel();
+        LlmRequestControlHolder.set(control);
+
+        JsonNode result = objectMapper.readTree(tool.execute("{\"traceId\":1}"));
+
+        assertEquals("FIX_ANALYSIS_CANCELLED", result.path("errorCode").asText());
+        assertEquals(499, result.path("status").asInt());
+        assertTrue(Thread.currentThread().isInterrupted());
+        verifyNoInteractions(fixService);
     }
 
     @Test

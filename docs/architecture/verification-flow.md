@@ -5,20 +5,21 @@ counterexample, and optional fix attempt. Field-level contracts live in
 [../api/verification.md](../api/verification.md); model construction lives in
 [nusmv-model.md](nusmv-model.md).
 
-Verified against code on 2026-09-30. Primary sources:
+Verified against code on 2026-10-09. Source:
 `VerificationController`, `SimulationController`, `VerificationServiceImpl`,
 `SimulationServiceImpl`, `SmvGenerator`, `NusmvExecutor`, and `SmvTraceParser`.
 
 ## Pipeline
 
 ```text
-devices + environmentVariables + rules + specs
-  + attackScenario + enablePrivacy
+attackScenario + enablePrivacy
         |
         | POST /api/verify or /api/verify/async
         v
-DTO validation + current-template semantic validation
+Strict run-parameter validation
+  -> BoardDataConverter (read saved devices/environment/rules/specs/layout)
   + capture referenced template manifests once
+  -> captured-scene semantic validation
         |
         | known invalid references/domains -> 400/422, no task id
         v
@@ -42,7 +43,7 @@ VerificationResultDto {
 }
 ```
 
-The request needs at least one device and one specification. There is no `saveTrace`
+The saved board needs at least one device and one specification. There is no `saveTrace`
 input: parsed counterexamples are persisted automatically.
 
 Known semantic mismatches, such as unknown actions, illegal enum values, non-signal API
@@ -91,17 +92,21 @@ than relying on the current form:
 
 Clients should reject or visibly downgrade interpretation if `modelSemantics` is absent
 or contradicts the run flags, or if `modelSnapshot` cannot establish frozen templates.
-The current frontend performs these checks. It compares current modelable input only for
-runs submitted in the same browser tab; historical results explicitly say that the
-current Board was not compared.
+The current frontend performs these checks. Current-Board comparison and repair
+availability are described under [Trace playback](#trace-playback).
 
-Board-backed AI verification and simulation first capture every persisted model-defining
-collection plus device-template definitions in one per-user locked transaction. They
-derive the request and referenced manifest set from that single snapshot and pass both
-to the service layer, so a concurrent edit cannot produce a run assembled from Board
-states that never coexisted. Direct REST callers instead define the device/environment/
-rule/spec request snapshot in their submitted DTO; the service captures the referenced
-templates once during request acceptance and uses that frozen set for the run.
+REST and AI verification/simulation call the same service entry points with run
+parameters only. Each service captures scene collections and referenced manifests
+once through `BoardDataConverter.getModelInputSnapshot(userId)`, then deep-copies the
+scene before execution or queueing. AI tools do not capture a second scene or supply
+a separate template map. Generation and validation reuse the captured manifests;
+neither reloads mutable templates. `ModelRunPreparation` shares template-derived
+semantic validation, environment defaults and device expansion, attack-surface analysis,
+and model snapshot/provenance capture. Verification supplies its specifications to
+that preparation; simulation supplies none. Required scene collections, attack options,
+privacy activation, simulation steps, and model fingerprints retain their operation-specific
+validation. The browser's local scene fingerprint is used for staleness warnings and is
+never submitted as model authority.
 
 ## Sync, async, and simulation
 
@@ -116,10 +121,23 @@ templates once during request acceptance and uses that frozen set for the run.
 Async validation and template capture complete before task creation. Invalid requests
 return no pollable task. Queue saturation returns 503. A successful submit returns the
 task's persisted current status; acceptance never implies completion.
+Synchronous and asynchronous verification use the same generation, NuSMV execution,
+and result-parsing method with the accepted frozen input. Parsed counterexamples
+share the run's frozen replay scene rather than deriving a separate scene per property.
+The async worker adds progress and cancellation checks and commits the result through the lease-fenced
+completion transaction. A successful execution with an incomplete parsed verdict completes
+as `INCONCLUSIVE`; a generation or executor failure marks the task `FAILED`.
 Task completion, worker failure, and user cancellation use conditional state transitions so
 a terminal state cannot be overwritten by a late worker. Success and worker-failure writes
 require the current worker id plus an unexpired lease; cancellation remains authoritative
 without depending on worker ownership.
+
+Cancellation first obtains the owned task's row lock, then publishes its local stop marker and
+samples the terminal database time. Both cancellation status reads use locking current reads.
+Under MySQL `REPEATABLE_READ`, an ordinary snapshot read can retain `RUNNING` after another
+transaction commits `CANCELLED`, producing a false rejection in the response. The lock also
+serializes cancellation with worker terminal writes; stopping local execution does not wait for
+the worker to finish while the request holds that lock.
 
 Accepted async verification and simulation tasks receive a renewable instance lease
 before executor dispatch. Lease timestamps come from the database clock and cover both
@@ -137,17 +155,14 @@ ownership predicate, lease/start/terminal timestamps come from the database cloc
 terminal transitions clear ownership. Maintenance on every instance renews only its local
 work and marks only expired active rows failed; it does not scan and fail all
 `PENDING`/`RUNNING` rows at process startup. A lease whose expiry equals the sampled instant
-counts as **expired**, in all three sweeps: every renewal, start, and terminal-commit guard
-requires `leaseExpiresAt > currentTime`, so such a row can no longer renew, progress, or commit
-a result, and treating it as live would leave work no worker can advance unreclaimed. Both sides
-carry microsecond precision (`CURRENT_TIMESTAMP(6)` against Hibernate's `datetime(6)`), so the
-equality is rare in practice; the reason it is specified is that thirteen ownership predicates must
-not disagree about where the boundary lies. This preserves
+counts as **expired**: renewal, start, progress, and terminal-commit guards all require
+`leaseExpiresAt > currentTime`, and recovery sweeps include equality. Both sides carry microsecond
+precision (`CURRENT_TIMESTAMP(6)` against Hibernate's `datetime(6)`). This preserves
 healthy work during rolling deployments and prevents a delayed queued worker from starting
 after ownership has been lost. Each local worker also tracks its last successful lease
 confirmation with a monotonic clock: transient database errors are retried, but a worker
 that cannot confirm ownership for the complete two-minute task TTL is interrupted.
-Progress updates use the same worker-id and lease predicate. Terminal transactions acquire
+Terminal transactions acquire
 the task row lock before sampling the microsecond database time and before writing linked
 counterexamples or simulation traces, so a worker waiting behind cancellation/recovery cannot
 publish stale evidence and a sub-second task cannot have `completedAt` before `createdAt`.
@@ -171,6 +186,10 @@ snapshot and positive state count; simulation summaries validate step/count meta
 generation diagnostics, and structured run context. Full detail reads remain authoritative:
 they validate every saved state and bind each rule event to the exact indexed rule in the
 server-internal frozen request before returning replay or fix evidence.
+`TraceMapper` first validates the [owning completed run context](data-authority-model.md#trace),
+then returns the validated trace and its decoded frozen request together for fix analysis.
+Fix reuses that request and still validates its attack selection, device
+domains, and complete frozen template/token-source evidence before running a strategy.
 
 Simulation has no specifications and therefore no safety conclusion. `states` is one
 possible trajectory through the generated model. `requestedSteps` is the requested
@@ -346,8 +365,10 @@ read-only historical model snapshot:
   it already describes the model frozen at submission. The client cannot detect that by watching the
   displayed result — both run paths clear it before submitting, so there is nothing to flag for the
   whole duration — so each path captures a semantic-change counter at submission and compares it on
-  arrival (`semanticSceneChangeCount` in `Board.vue`). A run read back from history was never in
-  flight and is simply current;
+  arrival (`semanticSceneChangeCount` in `Board.vue`). Historical results compare their frozen
+  model fingerprints with the current Board. Repair is available only after that comparison
+  confirms an unchanged model; loading or unavailable comparisons remain explicit, while
+  historical replay stays available;
 - active edges come from backend `triggeredRules`, not frontend re-evaluation guesses;
 - edges are static outside playback, and command-flow particles appear only for a
   backend-reported triggered rule whose delivery link is not compromised. Each selected
@@ -383,10 +404,10 @@ A counterexample can be analyzed through fault localization and `fix`. Fix gener
 advisory: `fixable=true` means at least one candidate was forward-verified against the
 stored model context, not that applying it to a later board is guaranteed.
 
-Applying a fix is a separate confirmed mutation. The server recomputes the selected
-strategy against the trace's exact frozen manifests, verifies it again, and rejects
-board/template/environment/spec drift inside
-the same per-user lock and transaction before writing. Stable `targetId` and
+Applying a fix is a separate confirmed mutation. The server validates the signed,
+forward-verified suggestion and reuses its verification evidence only after rejecting
+board/template/environment/spec drift inside the same per-user lock and transaction.
+It does not rerun strategy search or NuSMV during application. Stable `targetId` and
 `adjustmentId` values locate user-visible adjustments; rule/condition indexes and
 generated `param_*` names stay internal. Details live in [auto-fix.md](auto-fix.md).
 

@@ -15,6 +15,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Index;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.Table;
+import jakarta.persistence.UniqueConstraint;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -31,6 +32,8 @@ import java.time.LocalDateTime;
         @Index(name = "idx_fuzz_task_active_lease", columnList = "status,lease_expires_at"),
         @Index(name = "idx_fuzz_task_user_status_created",
                 columnList = "user_id,status,created_at,id")
+}, uniqueConstraints = {
+        @UniqueConstraint(name = "uk_fuzz_task_user_id", columnNames = {"user_id", "id"})
 })
 @Data
 @Builder

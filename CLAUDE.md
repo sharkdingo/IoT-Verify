@@ -120,8 +120,9 @@ proceeding either way would be unsafe or wasted, ask one specific question.
 - **Encoding**: `.editorconfig` and `.gitattributes` enforce UTF-8 + LF, but **PowerShell can defeat
   them**: prefer `pwsh` (7) and never Windows PowerShell 5.1 `-Encoding utf8`, which writes a BOM.
 - **Frontend↔backend contract**: field names are camelCase on both sides
-  (e.g. `userId`, not `user_id`). All REST responses use the `Result<T>` envelope
-  except SSE. Keep TypeScript types in `frontend/src/types/` aligned with the backend
+  (e.g. `userId`, not `user_id`). Follow the response conventions in
+  [docs/api/overview.md](docs/api/overview.md), including SSE and SMV-download exceptions.
+  Keep TypeScript types in `frontend/src/types/` aligned with the backend
   DTOs; document field changes in the owning `docs/api/*.md`.
 - **Docs discipline**: no dead links, no stale "(planned)" markers for files that now
   exist, uniform "Verified against code on <date>" notes. Prefer relative Markdown

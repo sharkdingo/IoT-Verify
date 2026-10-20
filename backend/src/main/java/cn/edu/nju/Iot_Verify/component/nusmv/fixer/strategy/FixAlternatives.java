@@ -29,7 +29,7 @@ import java.util.Set;
  */
 final class FixAlternatives {
 
-    /** More alternatives than this stop being a choice and become a list to scroll. */
+    /** Large or unbounded searches retain a short list; affordable finite searches may finish it. */
     static final int LIMIT = 5;
 
     private record Entry(Set<String> changes, FixSuggestionDto suggestion) {}
@@ -44,7 +44,7 @@ final class FixAlternatives {
     }
 
     boolean full() {
-        return listed.size() >= LIMIT;
+        return !ctx.prefersCompleteSearch() && listed.size() >= LIMIT;
     }
 
     /** Whether some listed repair changes only part of {@code changes}. */

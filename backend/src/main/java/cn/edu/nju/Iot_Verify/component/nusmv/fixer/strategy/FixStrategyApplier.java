@@ -270,7 +270,7 @@ public final class FixStrategyApplier {
         return mapped;
     }
 
-    // ---- remove: permanently drop the flagged rules ----
+    // ---- remove: drop the flagged rules ----
 
     private static List<RuleDto> applyRemove(List<Integer> removedIndices, List<RuleDto> rules) {
         if (removedIndices == null || removedIndices.isEmpty()) {

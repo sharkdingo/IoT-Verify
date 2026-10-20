@@ -4,8 +4,9 @@ This runbook exercises the main IoT-Verify product loop with one deliberately un
 repairable smart-home scene. It is designed for an acceptance demonstration, not as a
 claim that one scenario covers every possible template or formal property.
 
-Verified against the scene file on 2026-08-12. Source:
-[`../examples/acceptance-demo-scene.json`](../examples/acceptance-demo-scene.json).
+Verified against code on 2026-10-12. Sources:
+[`../examples/acceptance-demo-scene.json`](../examples/acceptance-demo-scene.json), the additional
+scenes linked below, and `AcceptanceDemoScenarioNusmvTest`.
 
 The canonical scene file is that document. It contains four device instances, two shared environment
 values, three automation rules, and five formal specifications.
@@ -23,6 +24,8 @@ priority, RFID trust/privacy attack propagation, and away-mode unlock, see
 [Additional Default-Template Scenarios](default-template-scenarios.md). For a scripted
 presentation built on the away-mode scene, see
 [Presenter Walkthrough: "Nobody Home, Door Unlocked"](away-mode-unlock-demo.md).
+For a care apartment with explicit lighting response timing and ventilation effects, see
+[Elderly care](default-template-scenarios.md#elderly-care).
 
 All four device types (`Motion Detector`, `Camera`, `Alarm`, and `Light`) are built-in
 default templates. The demo does not require creating or editing a custom template.
@@ -45,7 +48,7 @@ the import preview can truthfully confirm semantic equality.
   Board timeline.
 - Attack modeling with budget `1` exposes additional untrusted-source and compromised-
   automation-link failures while the camera-sensitivity property remains satisfied.
-- Automatic fix can forward-verify permanent removal of the camera-photo rule. Applying
+- Automatic fix can forward-verify removal of the camera-photo rule. Applying
   that suggestion is a destructive Board mutation and requires confirmation; the next
   baseline verification satisfies all five emitted properties.
 
@@ -242,10 +245,9 @@ command result. The UI therefore reports "no condition adjustment passed full-mo
 rechecking" rather than treating the strategy as not run. This is not a verification or
 transport failure, and it does not imply that the other strategies have no proposal.
 
-The suggestion means permanent rule removal, not temporary disablement. Confirm
-**Remove Rules and Apply** only after reviewing the exact rule. The server recomputes the
-candidate, verifies every submitted specification on the current complete model, checks
-for Board drift, and writes only if that result still matches.
+The suggestion means rule removal, not temporary disablement. Confirm
+**Remove Rules and Apply** only after reviewing the exact rule. Application follows the
+[signed-fix contract](../api/verification.md#post-apiverifytracesidfixapply--apply-a-fix-suggestion).
 
 Expected after apply:
 
@@ -283,7 +285,7 @@ and verifies the complete repaired model again:
 | --- | --- | --- | --- |
 | `parameter` | Temperature `>= 28` heats the room while the policy requires `off` below `35` and `heat` from `35` | Move that threshold from `28` to `35` | `2 / 2` specifications satisfied; `0` disabled rules; `0` skipped specifications |
 | `condition` | A cold-room rule heats while a separate occupancy sensor reports `absent` | Add `occupied = present` to the heating rule | `1 / 1` specification satisfied; `0` disabled rules; `0` skipped specifications |
-| `remove` | Hall motion commands a privacy-forbidden camera photo | Permanently remove the camera-photo automation | `5 / 5` specifications satisfied; `0` disabled rules; `0` skipped specifications |
+| `remove` | Hall motion commands a privacy-forbidden camera photo | Remove the camera-photo automation | `5 / 5` specifications satisfied; `0` disabled rules; `0` skipped specifications |
 
 An additional interaction regression combines all three strategies on one trace. An early
 `temperature >= 28 -> heat` rule conflicts with an occupancy-aware low-temperature policy,
@@ -335,3 +337,67 @@ capabilities:
 cd frontend
 npx playwright test e2e/board-full-flow.spec.ts --grep "finds and applies|persists every item in a coordinated|imports the acceptance scene"
 ```
+
+## Dynamic interactions and incompatible requirements
+
+The importable [dynamic home](../examples/dynamic-home-repair-scene.json) contains 23 devices,
+33 ordered rules, and 17 requirements. Shared home occupancy, motion, smoke and weather values
+may change on every modeled step; temperature has `[-1,1]` natural drift and heating/cooling
+effects, while gas evolves through the open supply and extractor. These inputs are intentionally
+independent, so verification includes simultaneous changes rather than assuming a favorable schedule.
+
+The five seeded problems are late heating/cooling, motion lighting that overrides away shutoff,
+away locking that overrides emergency evacuation, hot-room window opening that overrides rain
+closure, and late extraction. The twelve initially satisfied requirements protect useful occupied
+lighting, non-emergency away locking, dry-weather ventilation, gas and smoke alarms, the three-hop
+alarm chain, smoke-triggered supply closure, and alarm clearing. Every successive repair must
+preserve all requirements that passed before it, including earlier repairs. All listed choices are
+individually reapplied and verified; no automation is deleted to obtain the parameter/condition repairs.
+
+The owning regression also triples the eight lights and their paired on/off rules, producing
+39 devices and 65 rules. Every extra actuator participates in both away and occupied-lighting
+requirements. Original counterexamples must include numeric environment changes, changing smoke
+input, alarm state transitions, and overlapping rules with opposing commands. Such rules do
+not both execute: the recorded branch must be the earlier winning command, while the blocked
+command is absent from execution evidence.
+
+The [emergency-policy conflict](../examples/emergency-policy-conflict-scene.json) contains four
+devices, four rules and four requirements. It deliberately requires the same door to unlock for
+an active alarm and remain locked whenever the home is empty. Smoke and occupancy can change
+during a run. The away-lock and alarm responses initially pass; repairing evacuation must never
+be certified by breaking them or disabling the alarm. This example needs a user policy decision,
+not merely a different threshold. To give evacuation precedence, explicitly add the alarm-off
+exception to both the away-lock requirement and its rule, then run a new verification. The owning
+regression checks that this revised set of four requirements holds; automatic repair never makes
+that requirement change on the user's behalf. Repair outcomes and search limitations are defined in
+[auto-fix.md](../architecture/auto-fix.md).
+
+The [entry-to-camera chain](../examples/entry-camera-chain-scene.json) has eight devices, seven rules
+and two requirements. Motion must still turn on the entry light, but six downstream relay links
+must not power the privacy camera. The original chain violates camera privacy while entry lighting
+passes. Every single downstream cut is a verified removal alternative; removing the entry-light rule
+is rejected because it breaks that passing response. This small finite search must finish with all
+six choices even when its nominal attempt budget is two, and every choice is independently verified.
+Removing only the last camera-power link preserves the other relay automations. Rule removal remains
+a user-confirmed destructive choice; a complete list does not pick the user's preferred edit for them.
+
+The [forked camera chain](../examples/forked-chain-repair-scene.json) contains 21 devices, 19 rules
+and 15 requirements. Two independent three-link paths connect entry lighting to camera power;
+cutting either path alone leaves the other one active. Eight additional motion-light responses,
+a three-hop smoke-alarm chain, and a changing CO2 environment exercise unrelated behavior in
+the same complete model. Initially twelve requirements pass; camera privacy, the CO2 bound,
+and eventual ventilation from the boundary reading fail. The camera repair must preserve all
+twelve passing requirements and cut one downstream link on each path, never the shared entry
+response. There are nine minimal two-rule cuts. The owning regression lists all nine for the
+independent seven-device, seven-rule, two-requirement chain, and separately verifies every listed
+repair with all devices and the original changing environment. In that larger model, the measured cost may justify an explicitly
+incomplete alternative list; completeness is governed by [automatic fix](../architecture/auto-fix.md#listing-alternatives-fixalternatives).
+Successive CO2 and camera repairs must also preserve requirements established by earlier repairs.
+
+The [relay feedback cycle](../examples/relay-cycle-repair-scene.json) contains two relays,
+four rules and four requirements. The chain turns heating on, turns cooling on, then turns
+heating and cooling off. It violates mutual exclusion while both eventual-on requirements
+and the cooling-to-heating-off response pass. A condition repair must keep all four rules,
+restore mutual exclusion, and preserve those three passing requirements. Both relay states
+remain valid candidate preconditions because the loop produces both states at different
+steps; the outcome of one command must not eliminate a useful guard for the whole loop.

@@ -4,14 +4,23 @@ Field-level contract for `/api/auth`. The `Result<T>` envelope, the `Bearer` sch
 and error codes are defined once in [overview.md](overview.md); this doc covers the
 request/response bodies only.
 
-Verified against code on 2026-07-30. Source: `controller/AuthController.java`,
-`service/impl/AuthServiceImpl.java`, and `dto/auth/`.
+Verified against code on 2026-10-19. Source: `controller/AuthController.java`,
+`service/impl/AuthServiceImpl.java`, `configure/DatabaseSchemaConstraints.java`, `po/UserPo.java`,
+`util/JwtUtil.java`, `security/JwtAuthenticationFilter.java`, and `dto/auth/`.
+
+The immutable JWT parser is initialized once per backend instance. Each authenticated request
+still verifies the token signature, expiry, and identity claims, then checks token revocation and
+the current account credential version; parser reuse does not cache authentication decisions.
 
 ---
 
 ## `POST /api/auth/register`
 
 Public. Creates a user.
+
+Registration uniqueness conflicts identify the editable field through `data.reasonCode` and
+`data.errors`: `PHONE_ALREADY_EXISTS` with `errors.phone`, or `USERNAME_ALREADY_EXISTS` with
+`errors.username`. The form localizes these reasons without parsing the English diagnostic message.
 
 **Request body**: `RegisterRequestDto`
 
@@ -20,6 +29,10 @@ Public. Creates a user.
 | `phone` | `String` | Required; must match `^1[3-9]\d{9}$` (mainland China mobile) |
 | `username` | `String` | Required; raw input at most 100 characters; NFC-normalized and stripped of surrounding Unicode whitespace; 3–20 Unicode code points afterwards; no control, invisible format, or line-separator characters; must not match the phone-number pattern; unique with case- and accent-sensitive matching; usable for login |
 | `password` | `String` | Required; 10–64 characters and at most 72 UTF-8 bytes |
+
+The phone-number pattern reserves identifiers for phone login without consulting
+existing accounts. Other accepted usernames use the username namespace; registration
+and username changes do not compare them against the phone column's collation.
 
 **Response**: `AuthResponseDto` (under `data`)
 
@@ -108,10 +121,97 @@ token is blacklisted instead of reporting a logout that left unknown chat work r
   server-side verification/simulation/exploration tasks; those tasks remain associated with the
   account and can be viewed after the user signs in again.
 
+Frontend credential ownership across asynchronous logout is described in the
+[frontend integration guide](../guides/frontend-integration.md#auth--apiauthts).
+
 ```bash
 curl -X POST http://localhost:8080/api/auth/logout \
   -H "Authorization: Bearer $TOKEN"
 ```
+
+---
+
+## `GET /api/auth/account`
+
+Authenticated. Reads the current account's authoritative profile. The owner comes from
+the authenticated user id; the endpoint accepts no other account selector.
+
+**Response**: `AccountProfileDto` (under `data`)
+
+| Field | Type | Notes |
+| :--- | :--- | :--- |
+| `userId` | `Long` | Stable identity used by all user-owned data |
+| `phone` | `String` | Current login phone; read-only in the user center |
+| `username` | `String` | Current display name and username login identifier |
+| `createdAt` | `LocalDateTime` | Registration time; follows the [timestamp contract](overview.md#timestamp-format) |
+
+The profile contains no password hash, token, or internal authentication state.
+
+## `PATCH /api/auth/account/username`
+
+Authenticated. Changes only the current account's username after verifying its current
+password. User id, phone, existing login token, scene, and history ownership stay the same.
+The old username stops being a login identifier; phone login remains available.
+
+**Request body**: `UpdateUsernameRequestDto`
+
+| Field | Type | Rules |
+| :--- | :--- | :--- |
+| `username` | `String` | Required; uses the [registration username rules](#post-apiauthregister) |
+| `currentPassword` | `String` | Required; at most 128 characters; must match the current password |
+| `expectedUsername` | `String` | Required; at most 100 characters; the authoritative username read before editing |
+
+**Response**: `AccountProfileDto`, as above. A normalized no-op returns the existing
+profile without changing account state. The account row is locked before checking the
+password and expected username. Another tab's completed rename therefore causes a
+conflict instead of being overwritten by an old form. A database unique constraint,
+rather than a preliminary availability query, decides concurrent name claims.
+
+## `POST /api/auth/account/password`
+
+Authenticated. Changes the password and invalidates every previously issued login
+token for this account. The caller must sign in again; no replacement token is returned.
+
+**Request body**: `ChangePasswordRequestDto`
+
+| Field | Type | Rules |
+| :--- | :--- | :--- |
+| `currentPassword` | `String` | Required; at most 128 characters; must match the current password |
+| `newPassword` | `String` | Required; uses the [registration password rules](#post-apiauthregister); must differ from the current password |
+
+**Response**: void. Password verification, hash replacement, and credential invalidation
+commit in one transaction under the account row lock. Concurrent changes using the same
+old password cannot both succeed. Invalidation is independent of Redis; its mechanism
+belongs to the [authentication scheme](overview.md#authentication).
+
+This command changes credentials only. It does not delete account data or cancel
+verification, simulation, or exploration tasks. Requests already authenticated before
+the change may finish. The web client's preparation of active AI work and local session
+is described in the [frontend integration guide](../guides/frontend-integration.md#auth--apiauthts).
+
+### Account-change rejection and uncertain outcomes
+
+Both mutation endpoints are rate-limited before password work. They use the account-change
+buckets documented in the [configuration reference](../getting-started/configuration.md#authentication-jwt).
+An incorrect current password returns `400`, retaining the valid session. Missing or
+invalid login credentials still follow the normal `401` contract.
+
+Account-change rejections include `data.reasonCode` and `data.errors`, a field-name-to-message
+map. Clients localize the stable code rather than matching English diagnostic text.
+
+| HTTP | `reasonCode` | Field | Meaning |
+| :--- | :--- | :--- | :--- |
+| 400 | `CURRENT_PASSWORD_INCORRECT` | `currentPassword` | Current password did not match |
+| 400 | `NEW_PASSWORD_UNCHANGED` | `newPassword` | New password matches the current password |
+| 409 | `USERNAME_ALREADY_EXISTS` | `username` | Another account owns the requested username |
+| 409 | `ACCOUNT_PROFILE_CHANGED` | `expectedUsername` | The form's username baseline is stale; `data.currentProfile` supplies the current `AccountProfileDto` |
+
+DTO validation retains the existing field-error contract. A definite `4xx` rejection
+does not imply that the account mutation succeeded. If a response is missing or a `5xx`
+arrives, the mutation may have committed: do not retry automatically. Re-read the profile
+after an uncertain rename and ask the user to review the current value. After an
+uncertain password change, clear only the initiating local session and ask the user to
+sign in to determine which password is current.
 
 ---
 
@@ -174,17 +274,17 @@ is treated as a definite rejection and leaves the deletion form available for co
   snapshots required for reversible edits, so it is user content and is removed with the account.
 - Deletes the `app_user` row last.
 
-`JwtAuthenticationFilter` also checks that the token's user id still exists before
-establishing authentication. This keeps a deleted account from authenticating even if
-Redis blacklist revocation is temporarily unavailable.
+The [authentication filter](overview.md#authentication) rejects tokens whose account
+has been deleted, including when Redis is unavailable.
 
-Startup first performs an idempotent transactional cleanup of legacy rows whose `user_id` no
-longer exists in `app_user`, chat/AI state whose session or session owner is gone, and findings
-whose task is missing or belongs to another user. It then adds or verifies the cascade ownership
-constraints and required indexes. An unexpected non-cascade constraint fails startup instead of
-silently weakening account-deletion integrity. Active-account rows are not rewritten. MySQL
-startup also verifies and, when necessary, migrates `app_user.username` to the case- and
-accent-sensitive `utf8mb4_0900_as_cs` collation.
+After Hibernate creates the current schema and its ownership indexes, `DatabaseSchemaConstraints`
+establishes or verifies cascade ownership constraints. It never repairs or deletes persisted
+rows; invalid ownership or a non-cascade constraint fails startup. These constraints remain
+necessary for account-deletion races even on a fresh database: the entities store scalar owner
+ids rather than JPA associations. On MySQL the same initializer establishes the case- and
+accent-sensitive `utf8mb4_0900_as_cs` username collation, independently of the database's default
+collation. The MySQL-specific collation is applied here so the common entity mapping also builds
+on H2.
 
 ```bash
 curl -X DELETE http://localhost:8080/api/auth/account \

@@ -12,10 +12,7 @@ const { t } = useI18n()
 <template>
   <span
     v-if="initiator !== 'USER'"
-    class="inline-flex max-w-full items-center gap-1 rounded-full border px-2 py-0.5 text-[length:var(--iot-font-min)] font-semibold"
-    :class="initiator === 'AI_ASSISTANT'
-      ? 'board-surface-accent'
-      : 'border-slate-200 bg-slate-50 text-slate-600 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300'"
+    class="board-meta-chip inline-flex max-w-full items-center gap-1 rounded-full border px-2 py-0.5 board-badge"
     :data-testid="`run-initiator-${initiator.toLowerCase()}`"
   >
     <span class="material-symbols-outlined text-[13px]" aria-hidden="true">

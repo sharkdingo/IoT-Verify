@@ -3,7 +3,7 @@
 System topology, the front/back boundary, and the backend package layout. Deep dives
 link out to the focused architecture documents.
 
-Verified against code on 2026-07-25. Source: `backend/src/main/java/cn/edu/nju/Iot_Verify/`,
+Verified against code on 2026-10-18. Source: `backend/src/main/java/cn/edu/nju/Iot_Verify/`,
 `frontend/src/`.
 
 ---
@@ -52,16 +52,17 @@ Base package `cn.edu.nju.Iot_Verify`:
 ```
 controller/          REST controllers (Result<T> wrapper)
 service/ , service/impl/   business logic
+  recommendation/    typed recommendation and rule-check implementations shared by REST and chat
 component/
   nusmv/
     generator/       SMV model generation (device modules + main + specs)
     executor/        NusmvExecutor — subprocess exec, semaphore concurrency, timeout
     parser/          SmvTraceParser — counterexample parsing
-    fixer/           FaultLocalizer + parameter/condition/permanent-removal fix strategies
+    fixer/           FaultLocalizer + parameter/condition/rule-removal fix strategies
   fuzz/              deterministic bounded path search + finite specification monitor
-  aitool/            the 53 AI tools (board/node/rule/scenario/spec/template/simulation/verification/fuzz)
+  aitool/            registered AI tools (board/node/rule/scenario/spec/template/simulation/verification/fuzz/chat/preparation)
   ai/                LLM abstraction: domain model + LlmProvider (OpenAiLlmProvider adapter)
-                     + LlmChatService / PromptCompletionService / LlmMessageCodec facades
+                     + LlmChatService / PromptCompletionService; LlmMessageCodec owns history encoding
 dto/                 request/response DTOs
 po/                  JPA entities
 repository/          Spring Data repositories
@@ -94,10 +95,10 @@ frontend/src/
   types/     TypeScript contracts (auth, device, node, edge, rule, spec, verify, fuzzing, …)
   stores/    reactive state (auth, chat)
   router/    routes + auth guard
-  views/     Landing / Board / NotFound
+  views/     Landing / Board / Account / NotFound
   components/ CanvasBoard, ChatView, ControlCenter, SystemInspector,
               TraceHistoryPanel, SimulationTimeline, FixResultDialog,
-              RuleBuilderDialog, DeviceDialog, …
+              RuleBuilder, DeviceDialog, …
   assets/    static assets + i18n (zh-CN / en)
 ```
 
@@ -105,6 +106,23 @@ The public landing page owns the integrated login/register panel via query modes
 as `/?mode=login` and `/?mode=register`. Standalone `Login`, `Register`, and
 `TemplateCreate` routes/views are intentionally absent in the current development
 surface.
+
+Canvas presentation reuses reactive template-alias indexes; the first matching template retains
+precedence. Bundled-icon fallback lookup is indexed once from the static asset inventory. Sparse
+playback builds current/previous device and variable indexes in one historical pass, preserving
+first-match alias order and frozen reading objects. Pan and zoom reuse those indexes. The model
+comparison source reads semantic node fields explicitly so geometry and display-name updates do
+not serialize the scene. Inspector tab totals read collection sizes, while only the active
+inventory formats and filters its rows.
+
+The private, lazy `/account` page owns account form drafts and combines profile,
+credential, session, and account-deletion actions. The workspace has one account entry;
+sign-out remains a confirmed action within that page. The existing auth store owns the
+displayed login identity. Account reads and credential mutations stay
+in `AuthController` / `AuthServiceImpl`, with the same user repository and row lock as
+other account operations. Credential validity is checked against the account at request
+authentication; see the [authentication scheme](../api/overview.md#authentication).
+Adding another account capability does not require a parallel settings store or service.
 
 ---
 

@@ -1,6 +1,8 @@
+// @vitest-environment jsdom
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import postcss, { type Rule } from 'postcss'
 
 /**
  * Reduced motion stops decoration. It must not stop the one animation that carries information.
@@ -24,6 +26,33 @@ import { describe, expect, it } from 'vitest'
 const boardCss = () => readFileSync(join(__dirname, '../board.css'), 'utf8')
 
 describe('reduced motion', () => {
+  it('keeps authentication progress moving while stopping decorative motion', () => {
+    const view = readFileSync(join(__dirname, '../../views/Landing.vue'), 'utf8')
+    const css = postcss.parse(view.slice(view.indexOf('<style scoped>') + 14, view.indexOf('</style>')))
+    const rules: Rule[] = []
+    css.walkAtRules('media', media => {
+      if (media.params.includes('prefers-reduced-motion: reduce')) media.walkRules(rule => { rules.push(rule) })
+    })
+    const host = document.createElement('div')
+    host.className = 'landing-wrapper'
+    const spinner = document.createElement('span')
+    spinner.className = 'auth-submit__spinner'
+    const decoration = document.createElement('div')
+    decoration.className = 'showcase-node'
+    host.append(spinner, decoration)
+    const applies = (rule: Rule, element: Element) => rule.selectors.some(selector => element.matches(selector))
+    const stops = rules.filter(rule => rule.nodes.some(node =>
+      node.type === 'decl' && /^(animation|animation-name)$/.test(node.prop) && node.value === 'none'))
+    expect(stops.filter(rule => applies(rule, spinner))).toEqual([])
+    expect(stops.some(rule => applies(rule, decoration))).toBe(true)
+    const duration = rules.filter(rule => applies(rule, spinner)).flatMap(rule => rule.nodes)
+      .find(node => node.type === 'decl' && node.prop === 'animation-duration')
+    expect(duration?.type).toBe('decl')
+    if (duration?.type === 'decl') expect(Number.parseFloat(duration.value)).toBeGreaterThanOrEqual(2)
+    const base = css.nodes.find(node => node.type === 'rule' && node.selector === '.auth-submit__spinner')
+    expect(base?.toString()).toMatch(/animation:[^;]+infinite/)
+  })
+
   /** The `@media (prefers-reduced-motion: reduce)` block that owns the animation overrides. */
   const motionBlock = () => {
     const css = boardCss()

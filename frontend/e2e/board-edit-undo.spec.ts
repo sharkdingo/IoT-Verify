@@ -41,8 +41,8 @@ const openBoardWithScene = async (
     process.cwd(), '..', 'docs', 'examples', 'default-climate-conflict-scene.json'
   )
   await page.getByTestId('scene-import-file').setInputFiles(scenePath)
-  await page.getByRole('dialog', { name: 'Confirm Full Scene Replacement' })
-    .getByRole('button', { name: 'Replace in full' })
+  await page.getByRole('dialog', { name: 'Replace the current scene?' })
+    .getByRole('button', { name: 'Replace scene' })
     .click()
   await expect.poll(async () => (await ruleIds(request, auth)).length,
     { timeout: 60_000 }).toBeGreaterThan(0)
@@ -123,13 +123,13 @@ test.describe('board edit undo and redo', () => {
       const originalLabel = 'Living-room Air Conditioner'
       const renamedLabel = 'Renamed living-room air conditioner'
       const inspector = page.getByTestId('system-inspector')
-      if (await inspector.getByRole('button', { name: 'Expand', exact: true }).isVisible()) {
-        await inspector.getByRole('button', { name: 'Expand', exact: true }).click()
+      if (await inspector.getByRole('button', { name: 'Expand System Inspector', exact: true }).isVisible()) {
+        await inspector.getByRole('button', { name: 'Expand System Inspector', exact: true }).click()
       }
       await page.getByTestId('inspector-tab-devices').click()
       await inspector.locator('[data-device-id="ac_1"]')
         .getByRole('button', { name: originalLabel, exact: true }).click()
-      await inspector.getByRole('button', { name: 'Collapse', exact: true }).click()
+      await inspector.getByRole('button', { name: 'Collapse System Inspector', exact: true }).click()
 
       const node = page.locator('[data-node-id="ac_1"]')
       await node.click()
@@ -324,10 +324,10 @@ test.describe('board edit undo and redo', () => {
       process.cwd(), '..', 'docs', 'examples', 'default-fire-evacuation-scene.json'
     )
     await page.getByTestId('scene-import-file').setInputFiles(scenePath)
-    const confirmation = page.getByRole('dialog', { name: 'Confirm Full Scene Replacement' })
-    await expect(confirmation).toContainText('1 undo/redo history')
+    const confirmation = page.getByRole('dialog', { name: 'Replace the current scene?' })
+    await expect(confirmation).toContainText('1 undo/redo entries')
     await confirmation
-      .getByRole('button', { name: 'Replace in full' })
+      .getByRole('button', { name: 'Replace scene' })
       .click()
 
     await expect(undoButton(page)).toBeDisabled({ timeout: 60_000 })

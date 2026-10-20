@@ -23,8 +23,9 @@ describe('label legibility', () => {
     expect(nameAt).toBeGreaterThan(-1)
     const row = source.slice(nameAt - 1400, nameAt + 1600)
 
-    // The button stacks: name on one line, qualifier chips on the next.
-    expect(row).toContain('flex-col')
+    // The block name precedes a separate metadata row.
+    expect(row).toMatch(/board-inventory-name block[^>]*:data-full-text="device.name"/)
+    expect(row).toContain('board-device-meta')
     // Both qualifiers live below the name rather than beside it.
     expect(row).toContain(':data-full-text="device.type"')
     expect(row).toContain(':data-full-text="device.state"')
@@ -47,29 +48,25 @@ describe('label legibility', () => {
     expect(grid).toContain('auto-fill')
   })
 
-  it('wraps guidance sentences instead of truncating them to a fragment', () => {
+  it('keeps template format guidance in contextual help without truncating it', () => {
     const source = read('ControlCenter.vue')
     const hint = source.slice(
       source.indexOf('app.deviceTemplateSchemaHint') - 700,
       source.indexOf('app.deviceTemplateSchemaHint') + 200
     )
 
-    // A name's prefix still identifies it; a sentence cut at 26% breaks off mid-word.
-    expect(hint).toContain('line-clamp-3')
+    expect(hint).toContain('<InfoTooltip :text="t(\'app.deviceTemplateSchemaHint\')"')
+    expect(hint).toContain('test-id="template-format-help"')
     expect(hint).not.toMatch(/class="[^"]*\btruncate\b[^"]*"[^>]*>\s*\{\{ t\('app\.deviceTemplateSchemaHint'\)/)
   })
 
-  it('drops the inspector tab icon before the label that names the section', () => {
-    const source = read('SystemInspector.vue')
-
-    // Derived from the panel's own resizable width (240–520px), never the viewport: a viewport query
-    // would hide the icon on a wide screen with a narrow panel and show it on the reverse.
-    expect(source).toMatch(/const tabIconsFit = computed\(\(\) => resolvedPanelWidth\.value >= \d+\)/)
-    const tabAt = source.indexOf('role="tab"')
-    const tabButton = source.slice(tabAt, tabAt + 2200)
-    expect(tabButton).toContain('v-if="tabIconsFit"')
-    // The label itself is never conditional — it is what identifies the section.
-    expect(tabButton).toContain(':data-full-text="tab.label"')
-    expect(tabButton).not.toMatch(/v-if="tabIconsFit"[^>]*>\{\{ tab\.label \}\}/)
+  it('prioritizes section names over decorative tab icons', () => {
+    for (const component of ['ControlCenter.vue', 'SystemInspector.vue']) {
+      const source = read(component)
+      const tabAt = source.indexOf('role="tab"')
+      const tabButton = source.slice(tabAt, source.indexOf('</button>', tabAt))
+      expect(tabButton).toContain('board-section-tab__label')
+      expect(tabButton).not.toContain('material-symbols-outlined')
+    }
   })
 })

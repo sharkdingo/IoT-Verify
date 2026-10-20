@@ -15,7 +15,6 @@ import {
   hasRecommendationSceneChanged,
   hasFrozenBundledTokenSource,
   invalidateFuzzingResultRequests,
-  isAccountDeletionOutcomeUncertain,
   isPersistedHistoryDataInvalid,
   persistedHistoryInvalidRecordId,
   loadBoardResultWithRetry,
@@ -25,7 +24,7 @@ import {
   prepareBoardChatInteraction,
   revalidateHistoricalPlaybackAdmission,
   retainSessionUnavailableHistoryItems,
-  requestScenarioRecommendationWithTargets,
+  buildScenarioRecommendationTargetRequest,
   runAdmittedBoardMutation,
   runTrackedBoardMutation,
   resolveCurrentBoardNode,
@@ -650,10 +649,8 @@ describe('Board scenario recommendation targets', () => {
     return value
   }
 
-  it('sends every explicit minimum and maximum target to the recommendation API', async () => {
-    const recommend = vi.fn().mockResolvedValue({ objectiveStatus: 'COMPLETE' })
-
-    await requestScenarioRecommendationWithTargets(
+  it('builds every explicit minimum and maximum target for the recommendation API', () => {
+    const request = buildScenarioRecommendationTargetRequest(
       {
         minDevices: 2,
         minRules: 1,
@@ -665,12 +662,10 @@ describe('Board scenario recommendation targets', () => {
         userRequirement: 'Night safety'
       },
       validateCount,
-      field => new Error(`invalid ${field} range`),
-      recommend
+      field => new Error(`invalid ${field} range`)
     )
 
-    expect(recommend).toHaveBeenCalledOnce()
-    expect(recommend).toHaveBeenCalledWith({
+    expect(request).toEqual({
       minDevices: 2,
       minRules: 1,
       minSpecs: 1,
@@ -683,9 +678,7 @@ describe('Board scenario recommendation targets', () => {
   })
 
   it('rejects a minimum above its maximum before calling the API', () => {
-    const recommend = vi.fn().mockResolvedValue({})
-
-    expect(() => requestScenarioRecommendationWithTargets(
+    expect(() => buildScenarioRecommendationTargetRequest(
       {
         minDevices: 7,
         minRules: 1,
@@ -697,14 +690,57 @@ describe('Board scenario recommendation targets', () => {
         userRequirement: ''
       },
       validateCount,
-      field => new Error(`invalid ${field} range`),
-      recommend
+      field => new Error(`invalid ${field} range`)
     )).toThrow('invalid devices range')
-    expect(recommend).not.toHaveBeenCalled()
   })
 })
 
 describe('Board node snapshot reconciliation', () => {
+  it('adopts authoritative ordering and membership even when retained node values are equal', () => {
+    const first = { id: 'a', position: { x: 1, y: 2 }, width: 100, height: 80 }
+    const second = { ...first, id: 'b', position: { x: 3, y: 4 } }
+    const current = [first, second]
+    const reordered = reconcileBoardNodeSnapshot(current, structuredClone([second, first]), new Map(), new Set())
+    expect(reordered).not.toBe(current)
+    expect(reordered).toEqual([second, first])
+    expect(reordered[0]).toBe(second)
+    expect(current).toEqual([first, second])
+    const removed = reconcileBoardNodeSnapshot(current, [structuredClone(second)], new Map(), new Set())
+    expect(removed).toEqual([second])
+    expect(removed[0]).toBe(second)
+  })
+
+  it('retains equal nested runtime records while adopting layout snapshots', () => {
+    const current = {
+      id: 'a', label: 'Device A', position: { x: 1, y: 2 }, width: 100, height: 80,
+      variables: [{ name: 'temperature', value: '20', trust: null as string | null }],
+      privacies: [{ name: 'photo', privacy: 'public' }]
+    }
+    const incoming = structuredClone(current)
+    incoming.position = { x: 10, y: 20 }
+    const variables = current.variables
+    const privacies = current.privacies
+    const [result] = reconcileBoardNodeSnapshot([current], [incoming], new Map(), new Set())
+
+    expect(result).toBe(current)
+    expect(result).toEqual(incoming)
+    expect(result.variables).toBe(variables)
+    expect(result.privacies).toBe(privacies)
+    expect(result.position).not.toBe(incoming.position)
+    const acknowledged = [current]
+    expect(reconcileBoardNodeSnapshot(acknowledged, [structuredClone(current)], new Map(), new Set()))
+      .toBe(acknowledged)
+
+    const changed = structuredClone(incoming)
+    changed.variables[0] = { name: 'temperature', value: '21', trust: 'untrusted' }
+    changed.privacies[0].privacy = 'private'
+    reconcileBoardNodeSnapshot([current], [changed], new Map(), new Set())
+    expect(current).toEqual(changed)
+    expect(current.variables).not.toBe(variables)
+    expect(current.privacies).not.toBe(privacies)
+    expect(incoming.variables[0].value).toBe('20')
+  })
+
   it('preserves object identity and every pending or active layout while merging server fields', () => {
     const first = { id: 'a', label: 'Old A', position: { x: 1, y: 2 }, width: 100, height: 80 }
     const second = { id: 'b', label: 'Old B', position: { x: 3, y: 4 }, width: 110, height: 90 }
@@ -1106,21 +1142,6 @@ describe('Board invalidation ownership', () => {
   })
 })
 
-describe('account deletion outcome classification', () => {
-  it('keeps explicit client rejections retryable in the current session', () => {
-    expect(isAccountDeletionOutcomeUncertain({ response: { status: 400 } })).toBe(false)
-    expect(isAccountDeletionOutcomeUncertain({ response: { status: 401 } })).toBe(false)
-    expect(isAccountDeletionOutcomeUncertain({ response: { status: 409 } })).toBe(false)
-    expect(isAccountDeletionOutcomeUncertain({ response: { status: 429 } })).toBe(false)
-  })
-
-  it('treats missing responses and server failures as an unknown commit outcome', () => {
-    expect(isAccountDeletionOutcomeUncertain(new Error('network disconnected'))).toBe(true)
-    expect(isAccountDeletionOutcomeUncertain({ response: { status: 500 } })).toBe(true)
-    expect(isAccountDeletionOutcomeUncertain({ response: { status: 503 } })).toBe(true)
-  })
-})
-
 describe('Board model-token provenance', () => {
   it('localizes a shared environment token only when every declaring provider is bundled', () => {
     expect(collectBundledEnvironmentNames([
@@ -1166,6 +1187,12 @@ describe('Board narrow-panel focus isolation', () => {
     expect(shouldRedirectNarrowPanelFocus(true, scrim, panel, scrim)).toBe(false)
     expect(shouldRedirectNarrowPanelFocus(true, navButton, panel, scrim)).toBe(false)
     expect(shouldRedirectNarrowPanelFocus(true, modalButton, panel, scrim)).toBe(false)
+    const preview = document.createElement('section')
+    preview.dataset.testid = 'template-preview-1'
+    preview.append(document.createElement('button'))
+    root.append(preview)
+    expect(shouldRedirectNarrowPanelFocus(true, preview, panel, scrim)).toBe(false)
+    expect(shouldRedirectNarrowPanelFocus(true, preview.firstElementChild, panel, scrim)).toBe(false)
     expect(shouldRedirectNarrowPanelFocus(true, backgroundButton, panel, scrim)).toBe(true)
     expect(shouldRedirectNarrowPanelFocus(false, backgroundButton, panel, scrim)).toBe(false)
 

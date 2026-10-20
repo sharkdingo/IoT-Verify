@@ -3,9 +3,11 @@ package cn.edu.nju.Iot_Verify.component.aitool.board;
 import cn.edu.nju.Iot_Verify.component.ai.model.LlmToolSpec;
 import cn.edu.nju.Iot_Verify.component.aitool.AbstractAiTool;
 import cn.edu.nju.Iot_Verify.component.aitool.spec.SpecificationToolPresenter;
+import cn.edu.nju.Iot_Verify.component.aitool.template.TemplateToolPresenter;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
 import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
+import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import cn.edu.nju.Iot_Verify.exception.BaseException;
@@ -21,9 +23,11 @@ import org.springframework.stereotype.Component;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 @Slf4j
 @Component
@@ -44,10 +48,16 @@ public class BoardOverviewTool extends AbstractAiTool {
     @Override
     public LlmToolSpec getDefinition() {
         FunctionParameterSchema schema = new FunctionParameterSchema(
-                "object", Collections.emptyMap(), Collections.emptyList()
+                "object", Map.of("detail", Map.of("type", "boolean", "description",
+                        "Return complete active-device manifests (default true). Use false for counts or configured links only.")),
+                Collections.emptyList()
         );
 
-        return LlmToolSpec.of(getName(), "Get an overview of the current board: device runtime values, the shared environment pool, rule-derived edges, rules, and specifications.", schema);
+        return LlmToolSpec.of(getName(), "Get current device runtime values, the shared environment pool, rule-derived edges, rules and specifications. "
+                + "directRuleTargets indexes directed condition-to-command dependencies; shared inputs do not connect their targets. "
+                + "Includes full active-template manifests by default in templates, so analyze API effects, transitions and reading labels from this same snapshot. "
+                + "Use detail=false for counts or configured links only; list_templates can read other templates. "
+                + "Copy ruleId and specId exactly; rule order is command priority, and templateId is not a specification id.", schema);
     }
 
     @Override
@@ -59,14 +69,15 @@ public class BoardOverviewTool extends AbstractAiTool {
             } catch (ArgParseException e) {
                 return e.getErrorResponse();
             }
-            requireOnlyFields(args, "arguments", Collections.emptySet());
+            requireOnlyFields(args, "arguments", Set.of("detail"));
+            boolean detail = booleanArg(args, "detail", true);
 
-            List<DeviceNodeDto> nodes = safeList(boardStorageService.getNodes(userId));
-            List<DeviceTemplateDto> templates = safeList(boardStorageService.getDeviceTemplates(userId));
-            List<BoardEnvironmentVariableDto> environmentVariables =
-                    safeList(boardStorageService.getEnvironmentVariables(userId));
-            List<RuleDto> rules = safeList(boardStorageService.getRules(userId));
-            List<SpecificationDto> specs = safeList(boardStorageService.getSpecs(userId));
+            BoardSemanticSnapshotDto snapshot = boardStorageService.getSemanticSnapshot(userId);
+            List<DeviceNodeDto> nodes = snapshot.nodes();
+            List<DeviceTemplateDto> templates = snapshot.deviceTemplates();
+            List<BoardEnvironmentVariableDto> environmentVariables = snapshot.environmentVariables();
+            List<RuleDto> rules = snapshot.rules();
+            List<SpecificationDto> specs = snapshot.specifications();
             Map<String, BoardNodeRef> nodeRefs = indexNodeRefs(nodes);
             SpecificationFormulaPreview.Context presentationContext =
                     SpecificationToolPresenter.context(nodes, templates);
@@ -95,13 +106,50 @@ public class BoardOverviewTool extends AbstractAiTool {
             }).toList();
             overview.put("devices", deviceSummaries);
             overview.put("environmentVariables", environmentVariables);
+            if (detail) {
+                Set<String> activeNames = nodes.stream().filter(Objects::nonNull)
+                        .map(DeviceNodeDto::getTemplateName).filter(Objects::nonNull)
+                        .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+                List<DeviceTemplateDto> activeTemplates = templates.stream().filter(Objects::nonNull)
+                        .filter(template -> activeNames.contains(template.getName()) && template.getManifest() != null).toList();
+                Set<String> availableNames = activeTemplates.stream().map(DeviceTemplateDto::getName)
+                        .collect(java.util.stream.Collectors.toSet());
+                overview.put("templates", activeTemplates.stream()
+                        .map(template -> TemplateToolPresenter.present(template, objectMapper)).toList());
+                overview.put("unavailableBehaviorDeviceIds", nodes.stream().filter(Objects::nonNull)
+                        .filter(node -> !availableNames.contains(node.getTemplateName()))
+                        .map(DeviceNodeDto::getId).toList());
+            }
 
             overview.put("edges", edgeSummaries);
+
+            Map<String, Set<String>> directRuleTargets = new LinkedHashMap<>();
+            Set<String> behaviorDeviceIds = new LinkedHashSet<>();
+            for (Map<String, Object> edge : edgeSummaries) {
+                String sourceId = (String) edge.get("from");
+                String targetId = (String) edge.get("to");
+                directRuleTargets.computeIfAbsent(sourceId, ignored -> new LinkedHashSet<>()).add(targetId);
+                behaviorDeviceIds.add(sourceId);
+                behaviorDeviceIds.add(targetId);
+            }
+            for (RuleDto rule : rules) {
+                if (rule == null || rule.getCommand() == null) continue;
+                RuleDto.Command command = rule.getCommand();
+                if (hasText(command.getDeviceName())) {
+                    behaviorDeviceIds.add(resolveNodeRef(command.getDeviceName(), nodeRefs).id());
+                }
+                if (hasText(command.getContentDevice())) {
+                    behaviorDeviceIds.add(resolveNodeRef(command.getContentDevice(), nodeRefs).id());
+                }
+            }
+            overview.put("directRuleTargets", directRuleTargets);
+            overview.put("behaviorDeviceIds", behaviorDeviceIds);
 
             List<Map<String, Object>> ruleSummaries = rules.stream()
                     .filter(Objects::nonNull)
                     .map(r -> {
                 Map<String, Object> rs = new LinkedHashMap<>();
+                rs.put("ruleId", r.getId());
                 List<RuleDto.Condition> conditions = r.getConditions() == null ? List.of() : r.getConditions();
                 List<Map<String, Object>> conditionRows = conditions.stream()
                         .filter(Objects::nonNull)
@@ -119,13 +167,20 @@ public class BoardOverviewTool extends AbstractAiTool {
 
             List<Map<String, Object>> specSummaries = specs.stream()
                     .filter(Objects::nonNull)
-                    .map(s -> {
-                Map<String, Object> ss = new LinkedHashMap<>(
-                        SpecificationToolPresenter.present(s, presentationContext));
-                ss.remove("specId");
-                return ss;
-            }).toList();
+                    .map(s -> SpecificationToolPresenter.present(s, presentationContext)).toList();
             overview.put("specs", specSummaries);
+            overview.put("message", "Runtime values alone are not complete device behavior. "
+                    + (detail ? "templates contains full manifests for active devices from this same snapshot, with only UI icons omitted. "
+                        + "unavailableBehaviorDeviceIds explicitly identifies missing definitions; do not invent their effects. "
+                        : "detail=false omits manifests for this lightweight read; use detail=true for behavior analysis. ")
+                    + "directRuleTargets is computed from the displayed rules: a condition source points to its command target, "
+                    + "not to another condition source or a peer target. All conditions must hold; this index alone does not prove execution. "
+                    + "For API preconditions/effects, transitions, variable trust/privacy or compromise declarations, "
+                    + "use the included templates first; if a needed definition is absent, read list_templates with detail=true and deviceIds copied from devices[].id, including intermediate "
+                    + "and content-source devices. An intentionally lightweight read is not missing platform data; an unavailable saved "
+                    + "definition must be resolved before claims about its effects. behaviorDeviceIds includes all automation condition sources, command targets "
+                    + "and content sources for a complete behavior audit. Counts and configured links do not need that extra read. "
+                    + (detail ? TemplateToolPresenter.SEMANTIC_NOTE : ""));
 
             return objectMapper.writeValueAsString(overview);
         } catch (ArgValidationException e) {
@@ -166,6 +221,7 @@ public class BoardOverviewTool extends AbstractAiTool {
 
                 BoardNodeRef source = resolveNodeRef(condition.getDeviceName(), nodeRefs);
                 Map<String, Object> summary = new LinkedHashMap<>();
+                summary.put("ruleId", rule.getId());
                 summary.put("from", source.id());
                 summary.put("to", target.id());
                 summary.put("fromLabel", source.label());

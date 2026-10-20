@@ -55,6 +55,8 @@ class FixDtoSerializationTest {
     void externalFixDtosHideInternalRuleAndConditionLocators() throws Exception {
         ParameterAdjustment parameter = ParameterAdjustment.builder()
                 .targetId("param_abcdefghijklmnopqrstuvwx")
+                .rulePosition(4)
+                .deviceLabel("Kitchen Sensor")
                 .ruleIndex(3)
                 .conditionIndex(4)
                 .attribute("temperature")
@@ -68,6 +70,8 @@ class FixDtoSerializationTest {
                 .build();
         ParameterTarget parameterTarget = ParameterTarget.builder()
                 .targetId("param_zyxwvutsrqponmlkjihgfedc")
+                .rulePosition(12)
+                .deviceLabel("Hall Sensor")
                 .ruleIndex(11)
                 .conditionIndex(12)
                 .attribute("workingState")
@@ -124,6 +128,10 @@ class FixDtoSerializationTest {
         assertTrue(json.contains("Kitchen light"));
         assertTrue(json.contains("removedRuleDescriptions"));
         assertTrue(json.contains("Adjust the kitchen temperature threshold"));
+        assertTrue(json.contains("\"rulePosition\":4"));
+        assertTrue(json.contains("\"rulePosition\":12"));
+        assertTrue(json.contains("\"deviceLabel\":\"Kitchen Sensor\""));
+        assertTrue(json.contains("\"deviceLabel\":\"Hall Sensor\""));
         assertTrue(json.contains("\"modelTokenSource\":\"BUNDLED\""));
         assertTrue(json.contains("\"modelTokenSource\":\"CUSTOM\""));
     }

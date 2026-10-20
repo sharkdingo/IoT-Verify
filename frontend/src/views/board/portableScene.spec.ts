@@ -134,6 +134,39 @@ describe('scene specification variable conditions', () => {
 })
 
 describe('scene device identity', () => {
+  const sceneWithDeviceId = (id: string) => {
+    const scene = JSON.parse(readFileSync(join(process.cwd(), '..', 'docs', 'examples', 'default-away-mode-unlock-scene.json'), 'utf8'))
+    const previousId = scene.devices[0].id
+    scene.devices[0].id = id
+    for (const rule of scene.rules) {
+      for (const source of rule.sources) if (source.fromId === previousId) source.fromId = id
+      if (rule.toId === previousId) rule.toId = id
+      if (rule.contentDevice === previousId) rule.contentDevice = id
+    }
+    for (const spec of scene.specs) {
+      for (const condition of [...spec.aConditions, ...spec.ifConditions, ...spec.thenConditions]) {
+        if (condition.deviceId === previousId) condition.deviceId = id
+      }
+    }
+    return scene
+  }
+
+  it('preserves canonical device ids when normalizing a valid scene', () => {
+    const scene = sceneWithDeviceId('canonical_id')
+    const normalized = codec.normalizeSceneFile(scene)
+    expect(normalized.devices.map(device => device.id)).toEqual(scene.devices.map((device: { id: string }) => device.id))
+  })
+
+  it.each(['canonical_id', 'internal space', 'internal\u0085space', 'internal\uFEFFspace'])('preserves legal id %j including internal whitespace', id => {
+    expect(codec.normalizeSceneFile(sceneWithDeviceId(id)).devices[0].id).toBe(id)
+  })
+
+  it.each([[' ', ''], ['', ' '], [' ', ' '], ['\t', ''], ['', '\n'], ['\uFEFF', ''], ['', '\uFEFF'], ['\u0085', ''], ['', '\u0085']])('rejects surrounding whitespace %j/%j instead of renaming a valid device id', (prefix, suffix) => {
+    const scene = sceneWithDeviceId(prefix + 'audit_node' + suffix)
+    expect(() => codec.normalizeSceneFile(scene))
+      .toThrow(/sceneImportIdentifierWhitespace/)
+  })
+
   it('rejects duplicate device ids instead of silently keeping the last one', () => {
     const devices = [
       { id: 'dup', label: 'A' },
@@ -175,6 +208,63 @@ describe('integer range validation', () => {
 })
 
 describe('canonicalization', () => {
+  const authoredScene = () => {
+    const raw = JSON.parse(readFileSync(join(__dirname, '../../../../docs/examples/dynamic-home-repair-scene.json'), 'utf8'))
+    const device = raw.devices[0]
+    const manifest = raw.templates.find((template: { name: string }) => template.name === device.templateName).manifest
+    manifest.InternalVariables.push(...['setpoint', 'audit'].map(Name => ({
+      Name, IsInside: true, FalsifiableWhenCompromised: false,
+      LowerBound: 0, UpperBound: 30, Trust: 'trusted', Privacy: 'public'
+    })))
+    device.variables = [
+      { name: 'setpoint', value: '20', trust: 'trusted' },
+      { name: 'audit', value: '1', trust: 'untrusted' }
+    ]
+    device.privacies = [
+      { name: 'setpoint', privacy: 'public' },
+      { name: 'audit', privacy: 'private' }
+    ]
+    return codec.normalizeSceneFile(raw)
+  }
+
+  it('serializes imports without moving authored fields or conditions', () => {
+    const scene = authoredScene()
+    const portable = codec.serializeSceneFile(scene)
+    expect(portable.templates.map(template => template.name)).toEqual(scene.templates.map(template => template.name))
+    expect(portable.devices.map(device => device.id)).toEqual(scene.devices.map(device => device.id))
+    expect(portable.environmentVariables).toEqual(scene.environmentVariables)
+    expect(portable.devices[0].variables).toEqual(scene.devices[0].variables)
+    expect(portable.devices[0].privacies).toEqual(scene.devices[0].privacies)
+    const ruleOrder = (rules: typeof portable.rules | typeof scene.rules) => rules.map(rule => ({
+      sources: rule.sources.map(source => [source.fromId, source.fromApi]), toId: rule.toId, toApi: rule.toApi
+    }))
+    const specificationOrder = (specs: typeof portable.specs | typeof scene.specs) => specs.map(spec => ({
+      templateId: spec.templateId,
+      conditions: [spec.aConditions, spec.ifConditions, spec.thenConditions]
+        .map(conditions => conditions.map(condition => [condition.deviceId, condition.key, condition.value]))
+    }))
+    expect(ruleOrder(portable.rules)).toEqual(ruleOrder(scene.rules))
+    expect(specificationOrder(portable.specs)).toEqual(specificationOrder(scene.specs))
+  })
+
+  it('keeps canonical exports stable when unordered collections change order', () => {
+    const scene = authoredScene()
+    const reordered = {
+      ...scene,
+      templates: [...scene.templates].reverse(),
+      devices: [...scene.devices].reverse().map(device => ({
+        ...device,
+        ...(device.variables ? { variables: [...device.variables].reverse() } : {}),
+        ...(device.privacies ? { privacies: [...device.privacies].reverse() } : {})
+      })),
+      environmentVariables: [...scene.environmentVariables].reverse()
+    }
+    const canonical = codec.canonicalizeSceneFile(scene)
+    expect(JSON.stringify(canonical)).toBe(JSON.stringify(codec.canonicalizeSceneFile(reordered)))
+    expect(canonical.devices.find(device => device.id === scene.devices[0].id)?.variables?.map(variable => variable.name))
+      .toEqual(['audit', 'setpoint'])
+  })
+
   it('is stable under key order so an exported scene round-trips byte-identically', () => {
     const a = codec.canonicalizeSceneFile(minimalScene() as any)
     const reordered = {

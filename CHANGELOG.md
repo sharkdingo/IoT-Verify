@@ -15,6 +15,2039 @@ history into a technical spec. The spec content itself now lives under
 
 ## [Unreleased]
 
+### 2026-10-21 (model fingerprints and CI coverage)
+
+#### Fixed
+
+- Model fingerprints retain referenced templates whose names match presentation fields, such as
+  `icon` or `description`. Changes to their semantics now invalidate verification, simulation,
+  and exploration comparisons while edits to their descriptions and icons remain presentation-only.
+
+#### Changed
+
+- Full CI increases the total time budget for the expanded E2E suite while retaining individual
+  test deadlines and failures for flaky tests.
+
+### 2026-10-20 (workspace background refresh and panel navigation)
+
+#### Fixed
+
+- Hidden assistant session refreshes coalesce overlapping timer and focus requests and retain one
+  follow-up. Responses slower than the polling interval can update background observations instead
+  of being continually invalidated; queued refreshes remain scoped to the account and app lifecycle.
+- Side-panel collapse controls identify Control Center or System Inspector in their localized
+  accessible names and tooltips, including when the panel heading is hidden.
+
+### 2026-10-20 (canvas zoom geometry reads)
+
+#### Fixed
+
+- Each zoom command shares one fresh canvas-frame measurement across zoom bounds, center
+  preservation and panning, avoiding repeated layout reads. Rendering geometry and its zoom
+  constraint also share one measurement; subsequent commands still read current geometry.
+
+### 2026-10-20 (successive canvas dragging and zoom styling)
+
+#### Fixed
+
+- Repeated node drags retain equal runtime data and unchanged node collections when reconciling
+  layout acknowledgements, preventing repeated synchronous model serialization from blocking
+  the next drag. Server changes, active previews, pending layouts and immediate semantic
+  invalidation retain their existing ownership rules.
+- Canvas node, content and resize-handle styles skip equal declaration blocks and apply changed
+  declarations together, reducing CSS property writes during zoom while preserving geometry,
+  responsive content, playback styling and pointer hit regions.
+
+### 2026-10-19 (canvas input ownership)
+
+#### Fixed
+
+- Node keyboard commands and context menus are unavailable during an active pointer drag or resize, preventing early
+  layout saves, overwritten keyboard edits and detail/delete actions during a held preview.
+- Board undo/redo respects the same pointer ownership at admission and execution, keeping server
+  history unchanged until the gesture is released or cancelled. Pending undo/redo also locks new
+  node interactions until the authoritative result is reconciled.
+
+### 2026-10-19 (canvas zoom handle styling)
+
+#### Fixed
+
+- Canvas zoom updates resize handles through direct dimensions and corner margins instead of
+  inherited custom properties, reducing pseudo-element style invalidation while retaining the
+  same hit regions, artwork, borders and corner placement.
+- Content counter-scaling and label-line limits stay within card content, avoiding unrelated
+  resize-handle and node-decoration style updates when zooming below full size.
+
+### 2026-10-19 (canvas release coordinates)
+
+#### Fixed
+
+- Dragging and resizing include newer pointer-release coordinates even when no matching movement
+  event was delivered, so the displayed and saved layout settles at the release position.
+- Stationary releases preserve the last sample's zoom; cancellation, lost capture, locking and
+  unmount still discard queued or painted drag previews without saving.
+
+### 2026-10-19 (canvas navigation rendering)
+
+#### Fixed
+
+- Canvas panning and zooming update non-inherited grid background properties, avoiding style
+  invalidation throughout every node before live viewport geometry reads.
+- Zoom, resize and focus changes reuse unchanged node wording and icons while preserving
+  reactivity to runtime values, templates, locale and display callback inputs.
+- Node content scale stops updating after counter-scaling reaches full size, and resize dimensions
+  stay on their handles, avoiding unrelated card style invalidation during zoom.
+- Canvas world layers translate independently for panning while SVG zoom retains non-scaling
+  strokes, reducing delays while waiting for compositor commits.
+- Canvas navigation reuses viewport geometry captured after layout instead of synchronously
+  remeasuring it on every render. Node, panel, shell and viewport changes refresh the captured
+  geometry; navigation commands retain live bounds checks.
+- Control-wheel events with zero vertical displacement no longer zoom in, including horizontal
+  scrolls and coalesced opposite vertical samples.
+
+### 2026-10-19 (canvas drag rendering)
+
+#### Fixed
+
+- Node dragging merges pointer samples into one preview update per animation frame and flushes
+  the final pending sample before release. Cancellation, lost pointer capture, locking and unmount
+  discard pending previews without saving them.
+- Canvas nodes reuse unchanged presentation and rendered content during dragging and panning,
+  while runtime values, templates, locale, playback, focus, resizing and read-only state remain reactive.
+
+### 2026-10-19 (history decoding under contention)
+
+#### Fixed
+
+- Verification trace summaries and counterexample-search run metadata use immutable constructor
+  projections, reducing repeated dynamic-proxy work without loading additional evidence columns.
+- Verification run details and full trace collections, simulation history lists and details, and
+  counterexample-search run details return standalone database connections before decoding captured
+  evidence. Related rows remain captured together; ownership checks, validation, ordering, and
+  rollback propagation into an enclosing transaction are preserved.
+
+### 2026-10-19 (concurrent Board and history captures)
+
+#### Fixed
+
+- Standalone Board snapshot reads share user-row ownership instead of serializing behind the
+  per-user JVM monitor and an exclusive database lock. Writes remain exclusive, and captures
+  inside existing transactions retain their original ownership and visibility of uncommitted edits.
+- Verification and counterexample-search history lists release standalone read connections before
+  JSON validation and DTO assembly, while capturing related rows together and preserving corrupt-data
+  handling, ownership checks, and ordering.
+- Authentication reuses its immutable JWT parser instead of rediscovering classpath providers on
+  every request, while retaining per-request signature, expiry, revocation, and credential-version checks.
+
+### 2026-10-18 (concurrent history reads)
+
+#### Fixed
+
+- Counterexample-search history extracts its specification and token-source presentation from
+  one validated, materialized JSON envelope per selected run, reducing repeated database parsing
+  while preserving ownership, version checks, and unavailable-data handling.
+- Opening or switching to completed run history no longer issues a second model-fingerprint
+  request alongside the history loader's existing read; explicit later refreshes remain fresh.
+- Opening a saved exploration result reuses its awaited fingerprint read without starting
+  another during presentation; newly completed tasks still refresh their comparison state.
+
+### 2026-10-18 (workspace reload initialization)
+
+#### Fixed
+
+- Board reloads read model fingerprints and undo availability once after accepting the semantic
+  snapshot, avoiding duplicate watcher requests. Restoring a saved layout no longer writes it back.
+- Saved viewport and panel restoration waits for board data without being held up by task-inbox
+  reads; background task recovery continues independently.
+- Failed layout reads retain unknown state and pause automatic saves, with a persistent retry
+  action. A later panel change cannot overwrite the unread saved layout with defaults, and retry
+  preserves edits made before hydration.
+- Layout saves retain their initiating session token and board account. Switching accounts cannot
+  flush an old board's pending layout into the new account or rebind its queued writes.
+
+### 2026-10-18 (verification and simulation preprocessing)
+
+#### Fixed
+
+- Verification and simulation trace parsing uses a state-local device index and skips regex
+  matches that cannot apply to a line, reducing repeated scans and temporary allocations while
+  preserving device order, sparse-state reconstruction, loop markers, and state isolation.
+- Main-module generation reuses selected rule branches within one build across state, trust,
+  privacy, and execution-probe assignments. Each later build retains independent inputs and
+  warnings; rule priority, attack choices, parameterized search, and emitted model semantics remain intact.
+
+### 2026-10-18 (concurrent panel and history reads)
+
+#### Fixed
+
+- Board snapshots capture all persisted collections under the existing user/database lock, then
+  decode their scalar and JSON fields outside the capture lock and standalone transaction.
+  Concurrent panel reads no longer retain that lock or connection during pure DTO mapping.
+- Verification trace summaries sort after mapping; verification-run and simulation-history queries
+  resolve SMV presence through primary-key scalar subqueries. MySQL sorting no longer carries full
+  trajectory or SMV payloads, while history ordering, pagination, ownership, and unavailable items remain intact.
+
+### 2026-10-18 (backend history and panel reads)
+
+#### Fixed
+
+- Verification history reads counterexample metadata and frozen token provenance in one query,
+  preserving unavailable placeholders and ordering while avoiding a second scan of the same traces.
+- Verification and simulation progress queries select only progress/status and retain ownership
+  checks and existing local/persisted/terminal fallback behavior.
+- Board undo/redo availability uses one aggregate query without loading journal snapshots.
+  Current-model fingerprint reads reuse canonicalization for both identities while preserving
+  persisted hash values and the captured Board snapshot.
+
+### 2026-10-18 (canvas and inventory performance)
+
+#### Fixed
+
+- Canvas resizing and display-name updates no longer serialize the semantic scene on each pointer
+  update. Semantic edits still invalidate pending model comparisons immediately.
+- Playback indexes sparse variable readings alongside device snapshots, retaining alias order,
+  previous readings, frozen token sources, and unobserved-value semantics without repeated history scans.
+- Canvas template aliases and bundled-icon fallbacks use indexes instead of repeated list scans.
+  Inspector tab counts no longer format rules and specification formulas in inactive inventories.
+
+### 2026-10-18 (repair focus and composer resizing)
+
+#### Fixed
+
+- Applying an automatic repair returns focus to the still-open verification result if its original
+  repair entry disappears. Its apply receipt appears inline without covering the title or Close.
+  Undo/Redo button activation retains an available history control without moving focus after a
+  subsequent user interaction; keyboard shortcuts retain their original focus.
+- The assistant's bottom input grows upward from a top-edge handle. Pointer dragging and
+  Up/Down/Home/End keyboard controls preserve the draft within the existing height limits, with
+  Chinese and English accessible instructions. The native bottom-corner resize grip is removed.
+
+### 2026-10-18 (history and playback keyboard focus)
+
+#### Fixed
+
+- Opening counterexample, exploration-finding or simulation playback focuses its toolbar without
+  automatically opening a button hint. Escape in playback controls or its terminal exits playback;
+  hiding and restoring terminal details retains its existing focus behavior.
+- Results and replays retain the focus origin before history rows or result controls disappear.
+  Closing a surface restores its available opener or the relevant tool entry; a history entry
+  remains the return target when the result was opened directly from history. Conditional dialog
+  removal no longer suppresses deferred focus restoration through its stale visible prop. The
+  first lazy exploration-result load keeps history available until the dialog has actually mounted.
+
+### 2026-10-18 (result and template-preview focus)
+
+#### Fixed
+
+- Exploration and automatic-repair results initially focus their labelled container, preventing an
+  automatic Close hint while retaining keyboard navigation and focus restoration. Reverse Tab
+  from a modal container now stays inside the dialog.
+- Template details focus their content when opened or switched, close with Escape, and return focus
+  to the corresponding template. Changing the editor or collapsing its panel dismisses the preview
+  without taking focus from the new context. Narrow layouts allow focus in this portaled preview,
+  which remains visible above the sidebar and navigation.
+- Expanding either authoring sidebar focuses its selected tab instead of revealing a Collapse hint.
+- Closing simulation errors returns to the available retry action. Result dismissal also restores
+  focus when its toolbar entry becomes available after rendering, without stealing a new focus target.
+- Destructive confirmations focus their content rather than the destructive action, so opening a
+  confirmation and pressing Enter does not immediately submit it.
+
+### 2026-10-17 (task cancellation and panel focus)
+
+#### Fixed
+
+- Opening a non-modal canvas tool panel focuses its labelled region instead of its close button,
+  preventing the Close tooltip from appearing automatically. Keyboard navigation, hover hints,
+  Escape-to-close and focus restoration remain available.
+- Verification results also focus their labelled dialog. A late cancellation response no longer
+  covers the matching visible verification or simulation result with a redundant completion notice.
+  Simulation completion also avoids a second notification over its opened timeline.
+- Newly completed saved simulation playback records its run address, so refresh restores the same
+  trajectory; local-only playback does not retain an unrelated run address.
+
+### 2026-10-17 (background-task progress navigation)
+
+#### Fixed
+
+- Watching an existing verification or simulation task opens its progress panel, matching exploration.
+  Running panels show the task's submitted parameters instead of the local settings draft. The compact
+  task indicator no longer repeats controls over an open workflow panel. Pending cancellation remains
+  visible during progress updates. Cancellation uses the visible task status in open task panels;
+  the canvas receives one confirmation toast, avoiding repeated messages and covered panel headers.
+- History lists scrolled to their end retain the bottom reading position when the viewport becomes
+  shorter, including long failed-task diagnostics.
+
+### 2026-10-17 (run-history reading context)
+
+#### Fixed
+
+- Returning from a saved result or replay preserves the history list's filter, expanded details and
+  scroll position within the current signed-in board session. Summary refreshes retain existing cards
+  instead of clearing the list. Language and viewport changes retain the visible reading position.
+  A different filter or history layer starts at the top, and reopening the panel restores keyboard
+  focus to its close control.
+
+### 2026-10-17 (scrolling panels and dialogs)
+
+#### Fixed
+
+- Run history uses a compact run-type selector and omits decorative tab icons on narrow or short
+  screens, leaving the first result's title and timestamp visible in either interface language.
+  Roomy screens retain the direct filter buttons; both controls use the same selection.
+
+### 2026-10-17 (device instance configuration scrolling)
+
+#### Fixed
+
+- Device-instance headings and Save actions scroll with their section instead of covering the
+  initial-state label and selector. The heading group has a clear gap before its fields.
+
+### 2026-10-17 (parameter and condition repair workflows)
+
+#### Fixed
+
+- Condition repair proposals give their explanations the full card width, removing duplicate action
+  icons and badges that squeezed device names into fragmented lines on narrow screens. The explanation
+  still identifies the rule, change and complete condition in either interface language.
+- English repair-scope counts read correctly for a single related rule.
+- Starting verification after undo/redo clears earlier completion receipts even when settings stayed
+  open, so the new result remains readable.
+
+### 2026-10-17 (repair workflow completion feedback)
+
+#### Fixed
+
+- Opening run settings or repair details clears earlier completion toasts. Undo and redo replace
+  prior completion receipts with the latest result, keeping repair confirmations and verification
+  results readable during consecutive actions while preserving warnings and errors.
+
+### 2026-10-17 (footer action layout)
+
+#### Fixed
+
+- Narrow dialog footers distribute space by label width and wrap whole actions, keeping English
+  confirmation labels readable. Buttons and icons stay within the action region.
+- Device details group Rename and Delete as secondary actions before Close. The existing deletion
+  confirmation retains its destructive action. Automatic-fix footer actions share the trailing row
+  rather than separating Close from the primary action across the dialog width.
+
+### 2026-10-17 (shared header alignment)
+
+#### Fixed
+
+- Tool panels center their close controls with the heading and icon. Dialogs place the heading,
+  icon and close control in one centered row, with subtitles in a separate row so short headings
+  and wrapped translations retain the same alignment.
+
+### 2026-10-17 (run-panel grouping)
+
+#### Fixed
+
+- Exploration keeps its start action and workload feedback outside the scrolling parameters. Long
+  budget rejections stay beside the fields with a short footer prompt, preserving room to edit even
+  on short screens. Narrow parameter fields stack, and the introductory caveat moves to contextual help
+  while result limitations remain visible.
+- Exploration strategy and selection labels omit redundant qualifiers. History uses a concise
+  exploration filter label with the full accessible name, reducing narrow-screen filter rows.
+- Exploration vertically centers its heading and help badge with the section icon, including
+  wrapped English headings on narrow screens.
+
+### 2026-10-17 (editor field grouping)
+
+#### Fixed
+
+- Device variable names and default-value hints wrap independently in instance editing, single-device
+  creation and template-drop dialogs, keeping names readable at narrow widths.
+- Rule names use the same block-label spacing as the other rule fields.
+- Specification condition dialogs give validation feedback its own footer row so Cancel and Add stay
+  together without splitting short button labels. Source explanations no longer repeat the selection
+  instruction already shown by the blocking feedback, in either language.
+
+### 2026-10-16 (exclusive device-list input methods)
+
+#### Changed
+
+- JSON and CSV device imports explicitly choose between file selection and pasted content. Each
+  format and input method retains its own draft; only the selected source supplies the preview and
+  import. File input displays the filename and a removal command. Switching input methods invalidates
+  pending file reads so a late result cannot overwrite another draft.
+- English device-deletion confirmations describe related rule and specification counts without
+  incorrect plural forms for a single item.
+- The input-method choice keeps the standard group spacing above the file controls or pasted-text
+  label instead of touching the following field.
+
+### 2026-10-16 (device-list file encodings)
+
+#### Fixed
+
+- Device-list file decoding rejects invalid bytes instead of silently creating garbled Chinese names.
+  CSV provides an explicit UTF-8 or GB18030/GBK choice with localized retry guidance. JSON remains UTF-8.
+  Encoding changes preserve pasted drafts and invalidate pending reads.
+- CSV physical line locations now count CR-only newlines inside quoted cells correctly.
+
+### 2026-10-16 (device-list import validation clarity)
+
+#### Fixed
+
+- JSON and CSV import errors retain parsed device names and identify entries or file lines.
+  Shared-variable conflicts now share one concise alert and an explicit whole-batch blocker,
+  instead of repeating the same instruction for each field.
+- Duplicate-name previews describe a future rename. CSV help explains that a source-label
+  override requires the corresponding value, and missing values identify the CSV column.
+  Stateless-device errors direct users to readings.
+- Returning to the device importer clears earlier completion toasts so they cannot obscure format
+  help or the next preview. Error and warning notices are preserved.
+
+### 2026-10-16 (independent equivalent device imports)
+
+#### Changed
+
+- JSON and CSV are separate sub-options within device Import, each with its own file filter,
+  paste prompt, help and download. Switching preserves both drafts and invalidates stale file reads.
+- CSV now supports initial states, source/sensitivity labels and variable values through named
+  columns. Both formats share runtime validation, Environment Pool handling and atomic creation.
+  The CSV starter file now matches the configuration in the JSON starter.
+
+### 2026-10-16 (device imports and inventory readability)
+
+#### Changed
+
+- Device-list import offers separate downloadable JSON and CSV starter files, with their supported
+  fields described beside each link. The textarea has a short instruction instead of sample content.
+- Template details show all modes, working states, variables and actions in a scrollable preview;
+  inert overflow counters and ellipsized entry names no longer hide template contents.
+- Rule cards use the editor's trigger-condition and action terminology, visually separate the two
+  stages and pair the target device with its command. Saved specification cards label their description
+  separately from the formula, matching the specification editor.
+- Both side panels use “Specs” as the English tab label to avoid splitting “Specifications” mid-word.
+
+### 2026-10-16 (configuration entry labels)
+
+#### Fixed
+
+- Stale verification results, exploration results and historical candidate evidence use
+  “Configure current board verification” in both interface languages for actions that open
+  verification settings. The empty-board scene recommendation entry also says it opens the
+  recommendation panel; execution labels remain on the actual submit controls.
+- Verification and simulation label synchronous mode “Wait for result” instead of “Run now”;
+  selecting a mode only updates configuration. Busy feedback no longer calls it an immediate run.
+
+### 2026-10-16 (real-page non-AI acceptance)
+
+#### Fixed
+
+- Back/Forward between a replay and its parent result exits the previous playback without clearing
+  the selected run address. A restored result no longer leaves replay locks blocking verification.
+- Specification source/sensitivity-label choices, drafts and saved explanations follow the interface
+  language for bundled and custom templates. Condition previews and draft rows identify which label
+  is constrained instead of presenting it as a device state value. Stored label values remain canonical.
+- Bundled NuSMV playback states such as `takingphoto` use the same readable translation as their
+  manifest names; custom and unknown-provenance identifiers remain untouched.
+- Rule-removal confirmations use a labeled count instead of displaying “1 rules” in English.
+- A lazy-panel module load failure offers document reload instead of a render retry that reopens
+  the canvas but leaves the failed panel import cached after reconnection.
+
+### 2026-10-16 (authentication browser navigation)
+
+#### Fixed
+
+- Browser Back between login and registration releases the abandoned form's pending state. Late
+  authentication responses cannot sign in, navigate or attach errors to the replacement form, and
+  cannot unlock a newer submission. Pending state and error feedback remain localized after switching languages.
+
+### 2026-10-16 (account and global failure feedback)
+
+#### Fixed
+
+- Account profile reads, rename recovery and rejected username/password changes retain technical
+  diagnostics without replacing localized feedback with service prose. An uncertain rename followed
+  by a successful profile refresh uses a warning instead of an error tone.
+- Login and registration reject repeated submissions while awaiting a response or recovering workspace
+  navigation. Authentication responses with unusable credentials or account identity cannot establish
+  an authenticated workspace; declared rejection envelopes keep their existing error handling.
+- Sign-out and permanent account deletion retain localized action names and busy state while pending.
+  Capacity messages name the account service consistently across authentication and account changes.
+- The compact account return control uses the shared tooltip. Long account diagnostics wrap within
+  their column, and global render-error details preserve field diagnostics in a bounded reading area.
+
+### 2026-10-16 (replay and history feedback)
+
+#### Fixed
+
+- Replay timelines identify the recorded run scene even with the bottom terminal hidden. Shared hints
+  cover previous/next state, state groups and the compact Exit control in both languages.
+- History and task-list loading errors follow language changes and keep raw causes and field errors
+  in one collapsed technical disclosure. Failed historical result openers use localized failure copy.
+- History load failures no longer imply that only some sources failed or that unrelated results are
+  stale. Retained rows from a failed source keep their refresh warning, and an empty failed read is
+  distinct from an empty history.
+- A pending history deletion identifies deletion as the reason actions are locked instead of claiming
+  that playback is running. Long diagnostics can shrink within their feedback column.
+
+### 2026-10-16 (automatic-fix lifecycle feedback)
+
+#### Fixed
+
+- Automatic-fix localization and search errors follow language changes, preserving service diagnostics
+  in technical details. Unknown outcomes, confirmed cancellation and completed requests without a
+  result no longer share a misleading failure heading or error tone.
+- Search recovery feedback has one alert owner instead of repeated progress announcements. Retry
+  controls reference their visible blocking explanation, and search-setting help does not claim that
+  a request with an unknown outcome is still executing.
+- Typed apply-preflight unavailability or a busy formal-operation permit asks users to retry the
+  retained signed proposal; confirmed
+  model drift still requires a new verification. Other infrastructure failures retain write-outcome
+  reconciliation. Failure acknowledgements omit an identical body summary beneath their title.
+- The fix dialog uses the shared close tooltip and lets long failure diagnostics shrink within their
+  column without displacing adjacent content.
+- The undo/redo blocking message names both actions and includes open dialogs among its blocking conditions.
+
+### 2026-10-16 (run failure and recovery feedback)
+
+#### Fixed
+
+- Simulation, verification and counterexample-exploration failures follow language changes, including
+  task-limit counts and next steps. Raw service diagnostics stay in a single technical disclosure;
+  generic failure headings are not repeated in the body.
+- Completed tasks with unreadable results ask users to reopen history. Status-polling exhaustion no
+  longer claims execution timed out. Resuming tracking clears old failure and exploration notices.
+- Failed cancellation requests restore the known phase without replacing newer polling evidence;
+  cancellation responses that confirm completion or failure display that terminal status immediately.
+- Retained run-failure notifications update their heading, summary and actions after language changes.
+  Exploration progress places budget help beside the percentage and lets long statuses wrap independently.
+
+### 2026-10-16 (global terminology and workflow feedback review)
+
+#### Fixed
+
+- Duplicate-rule precheck and restored exploration-setting notices follow language changes without
+  rerunning checks or changing drafts and historical target scope. Duplicate rejection headlines
+  and visible exploration-recovery notices are no longer repeated.
+- History distinguishes a pending model comparison from unavailable comparison data and uses the
+  shared keyboard-accessible tooltip for result refresh. Empty-history guidance refers to saved
+  results for verification, counterexample exploration and simulation alike.
+- Shared plain hints open on keyboard focus and close on blur, preserving the control's Enter/Space
+  action and click-through behavior over nearby controls.
+- English specification navigation uses the same full term as specification lists. Exploration
+  settings guidance uses simpler wording without promising an identical rerun.
+
+### 2026-10-16 (account and global error feedback review)
+
+#### Fixed
+
+- Login, registration and account feedback updates with the interface language without clearing
+  inputs or repeating requests. A failed profile refresh explains disabled edits once.
+- Login distinguishes incorrect credentials from other failures. A lost or server-failed registration
+  response asks the user to try signing in before registering again, preserving its uncertain outcome.
+- Technical disclosures omit an already displayed error headline while preserving other diagnostics.
+  Login errors and global render-error details respect the available width on narrow screens.
+- Account deletion links its confirmation field to the visible input requirement for assistive technology.
+
+### 2026-10-16 (historical replay and timeline review)
+
+#### Fixed
+
+- Editing a replay state number pauses playback without seeking on each keystroke. Enter,
+  change or blur commits the position; empty and out-of-range values normalize to the actual selection.
+- Historical device and rule differences are readable captions. A missing rule identifier is no
+  longer presented as a deleted rule, and absent current-board rules still replay their frozen connections.
+- Replay omits the misleading missing-connection explanation for commands whose delivery animation
+  is suppressed, including compromised links. Simulation drift guidance identifies the saved scene
+  without requiring a rerun to view history.
+- A single Run info section fills the terminal width instead of leaving an empty second column.
+
+### 2026-10-16 (automatic-fix application and undo review)
+
+#### Fixed
+
+- Applying an automatic fix adopts the returned ordered rules and undo availability through the
+  shared semantic commit, including canvas edges and inspector focus. It no longer performs a
+  redundant rules read that could present an already applied fix as a load failure.
+- Strategy selection, alternatives, parameter ranges and search actions stay locked while apply
+  is pending. Late apply responses from an old authentication session cannot affect the current one.
+- Rule-removal confirmation lists the exact reviewed rules as text and preserves the proposal on
+  cancellation. Long condition changes and rule names wrap in narrow layouts; long confirmation
+  lists scroll while the confirmation controls remain outside the scroll area.
+- Applied-fix feedback is concise; verification scope and remaining violations stay with the proposal.
+
+### 2026-10-15 (run configuration and history feedback review)
+
+#### Fixed
+
+- Verification and simulation show attack-configuration errors once beside their fields, with the
+  disabled run action referencing that explanation. Independent scene-read errors remain visible.
+- Exploration history distinguishes an early time limit from a spent iteration budget and shares
+  duration formatting with results, including runs shorter than one second. Progress names candidate paths.
+- History mode and model-comparison help supports keyboard and touch interaction; important model-change
+  warnings stay visible. Exploration summary metrics stack on narrow screens and wrap long values.
+- Unconfirmed simulation and verification saves ask users to refresh and review history before rerunning,
+  without claiming that a background refresh has already succeeded.
+
+### 2026-10-15 (editor and scene-file workflow review)
+
+#### Fixed
+
+- Rule creation requires adding or clearing an extra condition draft instead of silently omitting it
+  from the saved rule. Clearing those inputs preserves added conditions and the target action.
+- Device-list import provides a keyboard-accessible file command and a labeled input. Invalid-row
+  diagnostics and automatic name adjustments wrap in narrow panels instead of requiring hover.
+- Specification template selection explains when changing it will clear the current conditions.
+  Scene export size guidance accounts for the complete file rather than only template icons.
+
+### 2026-10-15 (non-AI workflow feedback)
+
+#### Fixed
+
+- Verification, simulation, and exploration progress updates immediately when the interface language
+  changes, including initialization and pending cancellation.
+- Exploration omits repeated run failures and stale-target warnings. Target recovery no longer
+  expands unrelated advanced settings, and its labels describe only the explorable specifications
+  selected by the action.
+
+### 2026-10-15 (AI recommendation worker diagnostics and JVM launch)
+
+#### Fixed
+
+- Unexpected AI worker errors retain their original type and server-side request context instead
+  of being misclassified as temporary service unavailability. Unexpected checked failures use the
+  masked internal-error response; typed runtime failures retain their existing semantics.
+- Rule recommendation logs distinguish model completion from validation and report kept/filtered
+  counts without candidate content.
+- Provider HTTP failures identify a recognized `model_not_found` error type or code in server
+  diagnostics without logging upstream prose or arbitrary error fields; stream diagnostics
+  include the effective request model.
+- Maven development runs use normal tiered compilation and code-cache capacity, avoiding the
+  startup optimization's reduced cache during long-running sessions.
+
+### 2026-10-15 (fix and recommendation review)
+
+#### Fixed
+
+- Automatic fix distinguishes unavailable fault localization from a confirmed empty result.
+  Remaining-violation guidance describes the requirements that still fail without understating
+  what the verified option may repair.
+- All four AI recommendation panels use the available viewport height and keep their header and
+  close action outside the scrolling content. Scene recommendations omit a duplicate verification
+  caveat from the header while retaining it with the candidates.
+- Escape dismisses an open help tooltip before closing the enclosing panel or dialog.
+
+### 2026-10-15 (run parameters and result feedback)
+
+#### Fixed
+
+- Simulation step help distinguishes transitions from the initial state; exploration labels explicitly
+  count states per path. Simulation and verification use consistent run-mode and modeling labels.
+- Desktop run settings give long option labels more room while retaining compact viewport limits.
+  Disabled-action explanations appear inline without duplicate tooltips.
+- Verification request failures have an error heading and tone instead of an inconclusive-result
+  description. Saved simulation notifications no longer imply every run used a background task.
+- Exploration seed help states the reproducibility boundary. Results avoid repeated no-candidate
+  explanations and report sub-second durations without displaying zero seconds.
+
+### 2026-10-15 (editor fields and confirmation flows)
+
+#### Fixed
+
+- Device creation and details consistently distinguish device templates from device names.
+  Missing creation fields and local rename conflicts explain disabled actions inline.
+- Rule and specification editors share comparison wording, numeric range validation, and set-input
+  guidance. Invalid numeric conditions cannot be added or previewed; corrections clear field errors.
+  Rule creation shows each current missing-field explanation once and states that blank names are
+  generated automatically.
+- Device renaming provides a visible, accessible field label and keeps name conflicts inline.
+- Shared confirmation icons render at their intended size, close controls remain reachable, and
+  confirmation widths fit 320px screens. Device actions avoid splitting their labels midword;
+  discard prompts omit a repeated explanation.
+
+### 2026-10-15 (cross-page wording and responsive feedback)
+
+#### Fixed
+
+- English settings, task status, results, history, and assistant feedback consistently name
+  Counterexample Exploration. Quota guidance names the actual Background Tasks tab.
+- History quantities use correct singular forms or labeled counts. Empty results name the selected
+  run type and offer all results when other history exists. Background-task lifecycle guidance moves
+  to accessible contextual help instead of repeating in the empty state.
+- Environment initial-value guidance appears only with editable values. Snapshot loading reserves
+  space above side-panel headings on desktop and narrow screens.
+
+### 2026-10-15 (account access and feedback)
+
+#### Fixed
+
+- Login and registration focus on the form, keeping the animated model in the product overview.
+  Input names remain separate from validation descriptions. Phone-shaped usernames fail locally.
+  Registration uniqueness errors identify the affected field
+  through stable backend reason codes and localized messages; raw diagnostics expand on demand.
+- Account settings remove duplicate success and sign-out explanations. Password and deletion copy
+  describe the actual consequences; the deletion export note covers only scene-referenced templates.
+  An unconfirmed deletion keeps recovery instructions on the sign-in page instead of a transient toast.
+- Empty inspector sections and the canvas overview show snapshot loading or unavailability until an
+  empty collection is confirmed.
+
+### 2026-10-15 (exploration, scene files, and device templates)
+
+#### Fixed
+
+- Exploration places target selection and budgets before optional input-range details. Results show
+  each target once and disclose an early time limit beside the outcome, rather than calling it a
+  fully consumed iteration budget or hiding it in capability details.
+- Scene import confirmation compares current and incoming counts in a table, keeps irreversible
+  replacement and undo-history loss visible, and expands template/rule handling on demand. The
+  confirmation fits short narrow screens without clipping its actions.
+- Template import supports keyboard activation. Format and drag guidance use contextual help;
+  help targets leave the adjacent download action clickable, including in Chinese narrow layouts.
+  The import button's hover and focus states stay inside its container. Loading no longer claims
+  to prepare defaults. Reset counts include unchanged definitions without
+  calling them changes, and deletion names the operation, target, and blocking devices separately.
+
+### 2026-10-15 (simulation, verification, repair, and AI recommendations)
+
+#### Fixed
+
+- Verification results place counterexample actions and requirement outcomes before the model
+  download.
+- AI recommendations show the proposed rule or requirement directly. Optional rationale and
+  generation accounting expand on demand; contextual help explains the request, while the
+  unverified-candidate notice remains visible before applying.
+- Automatic repair distinguishes an inapplicable numeric strategy from a search that has not run.
+  Parameter edits identify their frozen rule order and device, including signed API metadata;
+  verified edits precede optional range controls, and scope/range explanations use heading help.
+  Related-rule rows omit repeated trigger
+  descriptions while keeping conflict evidence visible.
+- Shared help poppers appear above their owning recommendation panels and nested repair dialogs,
+  while remaining below confirmation dialogs.
+
+### 2026-10-15 (device, specification, history, and assistant workflows)
+
+#### Fixed
+
+- Device details explain stateless templates once, omit empty state tables, and distinguish the
+  template's starting state from instance configuration. Conceptual explanations use heading help
+  controls; validation and draft conflicts remain inline.
+- Specification authors see the complete template explanation and natural-language requirement.
+  Device-linked requirements use the same descriptions, without repeating the formula's language
+  prefix. Technical formulas expand on demand, and comparison fields appear after selecting a device.
+- History actions name their actual destination: settings review and verification of the current
+  board. Candidate evidence retains the verification scope notice. Complete simulations omit the
+  redundant model badge; omissions stay visible, and date metadata matches the displayed timestamp.
+- Assistant presets focus an editable draft without sending it. Confirmation cards and decision
+  messages name the authorized operation and its target instead of repeating generic protection text.
+  Formal-removal confirmations list the affected rules, and repair summaries no longer incorrectly
+  describe an undoable Board edit as permanent.
+
+### 2026-10-14 (evidence-first results and contextual help)
+
+#### Changed
+
+- Exploration results show candidate evidence and target outcomes before run metadata. Reproduction
+  settings, snapshot counts, and detailed boundaries expand on demand; seed metadata is shown once,
+  and requirement text wraps without hiding distinguishing conditions. Narrow layouts wrap candidate
+  actions and place the settings-reuse control below its reproduction heading.
+- Rule conjunction, content-label propagation, and exploration target explanations use contextual
+  help controls. Verification modes retain one visible explanation instead of duplicate hover hints.
+- Model comparison and omitted-target warnings stay visible. Unavailable candidate evidence now
+  explains why its replay and verification actions are disabled.
+
+### 2026-10-14 (page workflows and contextual previews)
+
+#### Fixed
+
+- Rule authoring labels shared conditions as device-reported values. Rule and specification
+  previews render complete drafts; empty requirements no longer display placeholder formulas or
+  invented condition values, and missing condition devices block saving.
+- Simulation settings show manual history saving only for synchronous runs. Verification logs
+  are collapsed for ordinary outcomes and open for incomplete or inconclusive results. Results
+  omit repeated snapshot and stale notices, and exploration omits empty finding sections and
+  repair advice when no candidate exists.
+- Template actions, view reset, requirement descriptions, task and environment feedback use
+  direct wording in both languages. Budget arithmetic stays available in advanced settings.
+  Element Plus confirmation controls follow the active interface language.
+
+### 2026-10-14 (contextual copy and optional device metadata)
+
+#### Fixed
+
+- Device and template details omit empty descriptions and follow the current manifest when
+  descriptions are cleared. State and content tables retain description columns only when useful.
+  API cards no longer infer a user trigger from the schema's always-null Trigger field.
+- State effects describe the next variable update rather than an immediate state/value invariant.
+  Environment values are named as model values; affect-only variables retain explicit label-check
+  capability. Variable-source selection uses one capability-specific explanation.
+- Local value validation in single-device creation keeps the edited field's error visible at the
+  panel edge while preserving input focus; valid and unfocused edits do not move the viewport.
+- Rule authoring uses condition terminology. Assistant presets address the current scene, and
+  no-rule scenario notices preserve autonomous device and environment behavior. Saved-model read
+  progress keeps page coverage while omitting agent instructions from user-facing status text.
+
+### 2026-10-14 (interface copy and model semantics)
+
+#### Fixed
+
+- Chinese and English copy consistently names device templates, rule priority, candidate
+  counterexamples, and modeled compromise. Specification descriptions distinguish next-state
+  requirements from eventual responses that can already hold, and clarify grouped control sources.
+- Verification and repair messages scope conclusions to checked requirements and the run model,
+  retain partial evidence and model omissions, and describe rule removal as undoable. Scene import
+  diagnostics describe rejected unused inputs rather than suggesting a lossy import.
+- Shorter setup, recommendation, environment, and assistant guidance retains actionable next steps
+  and unknown outcomes. Session-expiry notices distinguish saved data from unsaved edits.
+
+### 2026-10-14 (assistant reply-check diagnostics)
+
+#### Fixed
+
+- Reply checks retain the exact intercepted public sentence, matched text, and missing-evidence
+  reason in the owning conversation's execution trace. Live and refreshed history expose
+  the same escaped, collapsed original quotation and localized explanation, without treating
+  a check as a successful tool action or logging user text and private provider reasoning.
+- Empty completed-run records, negative history lookups, and completed static analysis no longer masquerade as new
+  platform operations in the reply check. Actual operation claims remain checked in mixed
+  sentences, and replacement notices name the missing evidence before the confirmed results.
+
+### 2026-10-14 (complete assistant behavior context)
+
+#### Fixed
+
+- Board overview supplies deduplicated full active-device manifests from the same snapshot,
+  including intermediate devices and payload sources. A lightweight counts-only read remains
+  available; missing saved definitions stay explicit. Full template readers share one
+  projection and interpretation note, preserving all behavior fields while omitting UI icons.
+- Normal tool answers now receive the existing compact presentation rules used by separate
+  summaries, preserving requested coverage without repeated tables and caveats. Absent
+  completed/saved records no longer look like new-operation claims; repeated identical
+  evidence notices appear once while unsupported statements remain withheld.
+
+### 2026-10-14 (reasoning-capable assistant transport)
+
+#### Fixed
+
+- GPT-6 tool inference uses streaming Responses while preserving the full action catalog,
+  output budgets, cancellation, and the existing bounded interruption continuation.
+  Completed provider items remain intact across tool rounds; encrypted reasoning stays
+  out of chat history, public JSON, and diagnostic strings. Incomplete responses never
+  authorize tool execution.
+- Project system instructions are sent explicitly through Responses, preventing a relay's
+  unrelated default agent instructions from adding prompt overhead or changing the task context.
+  Later evidence reminders retain their original order.
+- Protocol and reasoning effort can be selected for custom model deployments. Analysis
+  retains the configured effort; bounded authorization classification reserves its output
+  budget for the decision. Enabling reasoning omits incompatible temperature settings.
+
+### 2026-10-14 (assistant behavior evidence)
+
+#### Fixed
+
+- Board overview results distinguish runtime summaries from full behavior definitions
+  and point chain analysis to saved-device manifests with the actual device id path.
+  Available API effects and reading labels must be inspected before calling them missing
+  information; shared trigger inputs do not establish an indirect device chain.
+- Full template results explain shared versus local ownership, reading versus effect,
+  and current Environment Pool labels versus template defaults. Assistant analysis
+  follows those model semantics rather than inventing separate actuator readings or
+  leaving available behavior checks to the user.
+- Board overview includes a rule-derived directed target index and the complete set of
+  automation behavior references, including command targets and content sources. Chain
+  analysis checks the actual direction instead of connecting peer targets through a
+  shared condition, and full behavior audits use the reference set.
+
+### 2026-10-13 (assistant stop feedback)
+
+#### Fixed
+
+- An SSE connection ending between an explicit Stop request and its acknowledgement no
+  longer reports a duplicate transport error to the detached request. Stop still settles
+  from authoritative activity/history, and unexpected EOF on a current request remains
+  an incomplete-stream failure.
+
+### 2026-10-13 (assistant simulation scope)
+
+#### Fixed
+
+- Saved simulation list/detail responses and assistant prompts distinguish the simulated
+  model's specification scope from configured Board requirements. Simulation does not
+  check those requirements; their outcomes require formal verification. State-change
+  explanations require trajectory details rather than list metadata.
+
+### 2026-10-13 (assistant search-only write boundary)
+
+#### Fixed
+
+- Ordinary assistant Board writes now check the current human request before dispatch,
+  preventing a search-only repair request from directly editing saved rules and calling
+  that experiment a repair search. Unavailable authorization does not permit a write.
+- Read, verification, saved simulation, repair-search and preview capabilities remain
+  available. Authorization is evaluated only when an ordinary Board write is attempted
+  and is reused within that turn; exact signed confirmations retain their existing guards.
+
+### 2026-10-13 (assistant gateway recovery and chain evidence)
+
+#### Fixed
+
+- Upstream HTTP 502, 503, and 504 use the existing single continuation per chat turn,
+  preserving completed actions and checking cancellation before resuming. Provider SDK
+  retries remain disabled; rejected requests and malformed results retain their failures.
+- Targeted rule edits and formal repair apply the existing authoring bounds to changed
+  rules without blocking edits over an untouched oversized stored rule.
+- Chain analysis requires the behavior and explicit content source of intermediate
+  devices and separates shared environmental values from device-reported readings.
+- Saved-device template inspection accepts exact Board device ids and reads their actual
+  behavior from one current snapshot, avoiding confusion between instance labels and
+  template names. Invalid or missing devices reject the read without a partial result.
+
+### 2026-10-13 (assistant rule editing and semantic lookup)
+
+#### Fixed
+
+- The assistant can edit an existing rule in place, retaining its identity, execution
+  position, omitted label and other rules. Edits share creation's strict admission,
+  reject stale rule previews at the atomic write boundary and participate in undo/redo.
+  Saving an edit does not imply formal verification.
+- Template lookup errors identify unavailable names and return the actual available
+  template names. Instance labels are distinguished from behavior templates; the
+  assistant is instructed to correct lookup errors and inspect declared API effects
+  and explicit content sources before explaining a data chain.
+- Quantified descriptions of already saved objects are distinguished from claims of
+  new writes without relaxing checks on actual performed actions.
+
+### 2026-10-13 (assistant incomplete-draft correction)
+
+#### Fixed
+
+- Rejected scene specification conditions identify their side, position, and validation
+  cause while preserving whole-specification rejection. Scene prompts distinguish state,
+  mode, reading-source, and label-scope fields without changing their semantics.
+- Attempted actions retain their complete argument schemas after partial or failed results.
+  The assistant can use validation evidence to correct an incomplete coupled draft while
+  preserving requested targets and keeping it separate from the saved Board.
+
+### 2026-10-13 (assistant connection reuse)
+
+#### Fixed
+
+- Healthy completed model requests reuse the managed transport connection, avoiding
+  repeated connection establishment between tool results and the final reply. Stopping
+  an unfinished response still cancels it without exposing its partial result to a later
+  request. Stop cancels the owning network call before closing the SDK stream, preventing
+  a blocked reader from delaying it. Connection diagnostics distinguish reuse from new
+  connection establishment. Request-scoped SDK cleanup preserves the shared dispatcher
+  and pool, which remain owned by the provider until shutdown.
+
+### 2026-10-13 (assistant tool preparation and reset continuation)
+
+#### Fixed
+
+- Planning starts with complete schemas for every domain action, and offers preparation only
+  on later requests where a schema can actually be missing. This removes an unnecessary initial
+  preparation request and its conflicting tool description. Later requests retain used, prepared,
+  and confirmed protected actions, with every other capability still discoverable.
+- A detected HTTP/2 stream reset selects the alternative HTTP/1 transport only for that
+  turn's remaining requests, retaining cancellation, complete generation, and the single
+  evidence-preserving continuation. Other failures and new turns keep normal selection.
+- Preparation progress uses ordinary action wording and never implies a board mutation.
+
+### 2026-10-13 (assistant connection and response latency)
+
+#### Fixed
+
+- Stalled model connection establishment has a separate cancellation budget, while
+  established generation retains its full request deadline. Planning and final replies
+  share cancellable streaming before response headers; SDK retries no longer multiply
+  the chat workflow's single evidence-preserving continuation.
+- Coupled scene generation accepts an explicit template scope and uses the complete
+  selected capabilities for both prompting and validation, avoiding a redundant full
+  catalog when the requested device types are already known.
+- Assistant prompts start with a short public update and place complete analysis after
+  the necessary evidence. Unrecovered connection interruptions identify the unfinished
+  turn and ask users to review completed steps before continuing.
+
+### 2026-10-13 (assistant scene-preview disclosure)
+
+#### Fixed
+
+- Scene-replacement previews disclose their environment-source and privacy modeling
+  assumptions from the canonical pending result even when the model omits them.
+- The assistant repair regression now checks the documented counterexample entry
+  behavior: pause at the violating step, then explicitly seek to the first step before replay.
+
+### 2026-10-13 (assistant evidence-notice layout)
+
+#### Fixed
+
+- Evidence notices appear after the remaining reply instead of interrupting Markdown
+  table cells. The streamed reply and restored history retain identical text.
+- Conversation-history progress distinguishes recorded draft saves, confirmation
+  previews, and past changes without presenting them as newly executed actions.
+
+### 2026-10-13 (assistant context and model-reading flow)
+
+#### Fixed
+
+- Current-scene analysis can request exact template names and full relevant manifests
+  instead of loading the entire catalog. Catalog browsing remains available.
+- Scene and specification generation now share explicit guidance distinguishing device
+  reports from physical environment values, preserving which value the user requested.
+- The reply evidence guard no longer mistakes a saved verification record's noun phrase
+  for a claim that a new operation completed. Real unsupported write claims remain blocked.
+- Saved verification lookups and exact model excerpts show factual progress with page
+  coverage and incomplete-model limits, without claiming a new verification or mutation.
+
+### 2026-10-13 (assistant workflow navigation and history)
+
+#### Fixed
+
+- Board overview keeps exact saved rule and specification references for follow-up
+  tools, avoiding guessed ids during attack selection and candidate exploration.
+- Verification detail retains its own lightweight counterexample references, including
+  unavailable records. The assistant can select a real trace directly instead of
+  confusing the verification-run id with the trace id.
+- The assistant can page through canonical conversation operation evidence beyond its
+  recent context window. Recommendations, previews, applied changes, failed steps, and
+  uncertain outcomes remain distinct; missing history never proves that nothing happened.
+  Historical evidence cannot restore a confirmation or authorize another write.
+- Comparison planning reuses matching saved baselines when their model and requested
+  settings agree, while keeping explicit reruns and changed scenes separate.
+
+### 2026-10-13 (assistant repair proposals)
+
+#### Fixed
+
+- The assistant now selects a saved repair option by a stable reference. Its original signed
+  proposal and preferred ranges stay on the server, preventing model transcription errors
+  from blocking the application preview. Explicit confirmation, signature expiry, conversation
+  ownership, and current-model checks continue to protect every application.
+- Formal-fix proposals use the certified application workflow for rule removal as well as
+  other strategies, rather than being reinterpreted as ordinary rule deletion.
+- Verification, simulation, and counterexample-search task queries share bounded, cancellable
+  waiting. Simulation no longer rejects the waiting option already supported by verification,
+  and a task still running at the wait limit remains active rather than becoming a timeout error.
+- Stopping an assistant repair analysis now interrupts its synchronous search and releases
+  native solver work, allowing the conversation to become available for a new request sooner.
+  A finished cancellation scope cannot interrupt later work on the same reused thread.
+  The cancelled analysis is recorded as stopped, so a later retry does not mistake it for a timeout.
+- Saved counterexamples and unapplied repair suggestions now have precise progress summaries.
+  The reply evidence guard can substitute those confirmed details and continue the remaining
+  analysis instead of cutting a successful read short because its display summary was missing.
+
+### 2026-10-13 (assistant workflow evidence)
+
+#### Added
+
+- The assistant can inspect exact saved NuSMV model text in bounded pages, using the
+  existing verification/simulation ownership checks. A model excerpt remains historical
+  evidence and does not imply the current Board was checked.
+
+#### Fixed
+
+- Scene replacement previews return the exact pending draft as well as current/replacement
+  counts and edit-history impact. The reply guard retains valid preview evidence while
+  continuing to reject claims that an unconfirmed replacement already happened.
+- Repair progress retains proposed threshold values, and replacement replies use recent
+  evidence so a long analysis does not omit its final suggestion.
+- Tool descriptions distinguish persisted rule/specification ids from display order and
+  template ids when selecting damaged automation links or bounded-search targets.
+
+### 2026-10-13 (verification and assistant navigation)
+
+#### Fixed
+
+- A stale verification result now offers **Verify current Board** beside **Close**. The action
+  clears the old result address and opens verification settings without submitting a task,
+  so users can review their settings before checking an applied repair or another board edit.
+- Collapsed assistant history no longer exposes offscreen conversation controls to keyboard
+  focus or reading order. Opening the assistant starts on a visible control, and expanding
+  history restores its controls. Selecting a conversation or resizing a compact panel returns
+  history focus to the visible toggle when the sidebar closes.
+
+### 2026-10-12 (continuous scene replacement)
+
+#### Fixed
+
+- Importing a scene onto an existing canvas now writes its submitted Environment Pool
+  without first checking the previous scene's values against the incoming device domains.
+  Valid imports with changed enum values or numeric bounds no longer fail with an unrelated
+  field error. Invalid submitted values still reject the complete replacement atomically.
+- Scene import preserves authored collection order, so rejected fields point to their position
+  in the selected file rather than a client-sorted request. Canonical export ordering is unchanged.
+
+### 2026-10-12 (care-scene repair blockers)
+
+#### Fixed
+
+- Automatic repair distinguishes safety requirements already violated at the initial state
+  from requirements that existing rules cannot affect. The dialog keeps an explained disabled
+  search action, removes irrelevant threshold controls, and directs users to a new verification.
+- Pool-value repair scope follows the selected variable's physical writers instead of every
+  reading on its sensor, avoiding exhaustive searches over unrelated rules. Single-state
+  liveness cycles still search dormant rules.
+- The elderly-care scene now checks lighting as a triggered response and declares a separate
+  ventilation-window template with an explicit CO2 effect. Its camera privacy defect remains
+  a repair exercise, with lighting and ventilation protected during repair.
+
+### 2026-10-12 (feedback-cycle repair and propagated faults)
+
+#### Fixed
+
+- Condition repair no longer discards useful relay-state guards merely because a feedback
+  chain can produce those states later. Possible propagation continues through the cycle,
+  while pruning requires an unambiguous command outcome. Proposed edits still pass complete
+  verification against the target and every previously satisfied requirement.
+
+#### Added
+
+- Importable forked-camera and relay-cycle scenes, with regressions for coordinated path cuts,
+  feedback-loop condition repair, and preservation of existing lighting and alarm responses.
+
+### 2026-10-12 (verification result refresh)
+
+#### Fixed
+
+- Newly completed, saved verification results retain their run address, so refresh restores the
+  same verdict without first reopening history. Sync and async completion share result adoption
+  and invalidate older history reads; background completions and active replay retain their own
+  surface. Results with an unconfirmed save remain explicitly local.
+- Counterexample replay opened from a saved verification result now retains the selected trace
+  address, so refresh restores replay instead of reopening the parent verdict. It shares history's
+  ownership and mutation checks; unsaved evidence retains immediate local replay.
+
+### 2026-10-12 (dynamic repair scenarios and recovery guidance)
+
+#### Added
+
+- Importable changing-input home, conflicting emergency-policy and entry-to-camera chain scenes,
+  with repair regressions that protect existing responses, opposing-rule behavior and alarm chains.
+
+#### Fixed
+
+- Affordable finite repair searches prefer complete enumeration over the usual attempt and choice
+  limits, using one measured cost policy shared by all strategies. Larger searches keep bounded
+  waiting, cancellation and explicit incomplete outcomes.
+- Rejected condition changes explain that they can break requirements that previously passed.
+  After all repair strategies return rejection, inapplicability, or a search-budget outcome without
+  an option, the dialog explains what to review and how to continue with a new verification.
+  Unfinished searches retain their uncertainty, and advice names actions available in the interface.
+
+### 2026-10-12 (house-scale repair and waiting feedback)
+
+#### Fixed
+
+- Shared occupancy or sleep guards are probed across a property's several actuators, so
+  an away-lighting repair can cover every affected light before unrestricted condition
+  search. An importable Salus house reconstruction and cumulative real-NuSMV regression
+  exercise six safety problems while preserving alarm responses and useful occupied lighting.
+- Quick automatic repairs spend a shorter minimum window comparing alternatives after
+  a candidate passes full verification, and expose that observed phase in the waiting panel.
+  Incomplete alternative searches remain explicit; full verification is unchanged.
+
+### 2026-10-11 (automatic-fix cancellation, retry and feedback)
+
+#### Fixed
+
+- Condition repair uses a newly broken, previously satisfied property's counterexample to
+  prioritize combined rule edits across areas sharing an environment. The existing candidate
+  budget and complete verification remain authoritative, so consecutive repairs can preserve
+  earlier fixes without relying solely on an exponential joint search.
+- Automatic repair now searches relevant idle rules, including Salus §5.1's late ventilation
+  trigger, rather than stopping when no contributing rule fired before the violation. An
+  importable paper-derived ventilation scene pins discovery and complete rechecking; the
+  §5.2 heating regression also checks useful behavior with an occupied room after repair.
+- Fixed condition switches are generated as constants, so learned rejection constraints
+  also simplify before symbolic solving. This removes the exponential rechecking cost seen
+  during consecutive repairs while preserving rejection of proposals that break earlier fixes.
+- Repair progress and incomplete-search messages now use plain language and clear next steps;
+  an empty executed-rule list uses a neutral information state rather than a success icon.
+- Cancelled formal workers now release their owner-fenced Redis admission slot and publish the terminal interactive status before restoring the thread interrupt, preventing stale running status and delayed retries caused by interrupted Redis cleanup.
+- Deterministic condition-fix probes now substitute their already-fixed guard switches before symbolic model construction, avoiding redundant free-value comparisons while retaining complete witness variables and the unrestricted joint search.
+- Parameter and condition repair search try bounded primary/backup groups before the
+  unrestricted product, avoiding a large joint solve as the only path to a coordinated
+  repair. Every listed suggestion still passes complete-model verification, including
+  originally satisfied response specifications; budget exhaustion remains explicit.
+- Condition and removal searches prioritize commands involving the violated property's devices.
+  Condition search reserves deterministic probe capacity for coordinated edits; removal retains
+  smallest-set-first enumeration and the original attempt budget, reaching target-area backup
+  combinations before unrelated ones consume the bounded pair search.
+- Fix requests expose their real waiting phase while distributed admission is being confirmed,
+  avoiding an initial polling 404. Cancellation during admission prevents search execution and
+  releases any late owner-fenced lease; stopped workers do not publish stale progress.
+- Refreshing or leaving the board sends an unload-safe cancellation for the initiating fix
+  request, including when an ordinary stop is already pending. Only confirmed cancellation or
+  terminal evidence releases local tracking; page leave alone is not treated as completion.
+- Fix search outcomes distinguish incomplete or unsuccessful searches from service failures,
+  announce server-observed stages to screen readers, and explain that removal can include backup
+  rules within the property's repair scope.
+- Narrow fix dialogs keep all three strategy choices and long rule descriptions inside the scroll
+  area in both themes, instead of clipping them inside nested cards. Search, apply and
+  next-strategy footer buttons use compact mobile wording while retaining their full accessible
+  action labels and explicit permanent-removal confirmation. The narrow removal label names the
+  destructive action without redundant application wording, keeping the action on one line at 320px.
+
+### 2026-10-11 (automatic-fix completion race)
+
+#### Fixed
+
+- Automatic-fix searches serialize their successful completion fence with cancellation polling
+  and local stops. Releasing ownership after success no longer turns a verified repair into
+  HTTP 503 while its response is returning. Cancellation accepted before completion and genuine
+  distributed ownership loss still stop the search without publishing a successful result.
+
+### 2026-10-11 (selection and field consistency)
+
+#### Changed
+
+- Single-choice menus share the workspace's field typography, theme surfaces, selected marker,
+  hover/focus feedback and bounded option list through native customizable-select styling where
+  supported. Long closed values truncate without covering the arrow; opened options wrap in full.
+  Selected labels follow option text updates, including language changes, without changing field values.
+  Multiple-selection listboxes keep native keyboard interaction and use theme colors when focused
+  or disabled. Native values, labels and field change events remain intact.
+- Rule and device editors remove repeated field icons, local arrows and disabled opacity overrides.
+  Template search shares the inspector's clear-control target; specification relation/value fields
+  keep readable columns and stack on narrow screens. Invalid fields keep their error focus outline.
+  Single and batch device-creation fields are associated with their visible labels.
+
+### 2026-10-11 (assistant response latency)
+
+#### Changed
+
+- Tool-aware inference now streams public assistant text through the existing evidence guards and
+  produces the complete answer in the same response when no tools remain, removing the normal turn's
+  separate answer-generation request. Tool arguments still require a fully assembled, normally
+  finished response before execution; interrupted text retains its explicit partial status.
+- The assistant keeps a compact activity and elapsed-time line visible while generating a response,
+  beside Stop in the fixed composer, including when execution details are collapsed or long answers
+  scroll. The inactive draft field yields its space. A pause without updates shows an honest waiting
+  hint; incoming text or progress clears it.
+- Transient provider stream interruptions allow one evidence-preserving continuation per turn, with
+  visible recovery feedback and fresh, complete tool arguments. Repeated failure stays partial, and
+  explicit cancellation, quota errors and malformed responses do not trigger continuation.
+- Assistant prompts ask for concise answers and complete rule conditions before describing opposing
+  actions as simultaneous conflicts. They distinguish different predicates from proof of mutual
+  exclusion, preserve observed trace order and specification timing, and request independent reads
+  with known arguments together.
+- Follow-ups distinguish historical snapshots from current Board facts and request fresh read evidence
+  for current links and specifications, keeping the planning prompt aligned with the reply guard.
+- Evidence-dependent pre-tool text waits for the completed tool decision and its results, preventing
+  the streaming guard from cancelling reads before they can run. Claims without usable evidence remain
+  hidden. Replies distinguish automation rules from configured specifications and verified properties.
+- Verification status reads can briefly wait for completion, reducing repeated model round trips.
+  Valid active-task waits no longer trip the no-progress guard while NuSMV is still running;
+  cancellation, malformed/failed reads, and the emergency execution limit remain enforced.
+- Trace tools expose exact changes between adjacent saved snapshots, including across page boundaries,
+  and guide the assistant to check state order and remaining pages before explaining temporal causes.
+- Verification trace reads default to the complete state/value view, leaving repetitive trust/privacy
+  label snapshots to an explicit detail read. This preserves more trajectory steps within the same byte
+  budget. Passed implications do not imply that every antecedent was reachable or actually activated.
+- Topology prompts favor compact chain tables and one inspection list, and keep specification antecedents
+  distinct from downstream automation states. Evidence corrections use a direct, localized notice while
+  retaining the existing warning and authoritative execution record.
+- Unchanged trace trust/privacy label lists reference an earlier state within the same returned
+  page instead of repeating the full lists. Each page starts with full labels, and changed labels
+  remain explicit, preserving the complete liveness cycle within the tool byte budget in measured
+  multi-device traces.
+- Trace states begin with a compact observed value snapshot to make state order easier to read without
+  label clutter. Formal-analysis prompts request indexed evidence, keep initial-state failures separate
+  from later commands, and distinguish generation omissions from abstractions or specification gaps.
+  Later tool rounds avoid repeating the task scope and full-audit inventories appear once.
+  Formal-audit priorities separate applicable configured specifications from related automation rules
+  and proposed properties, and keep causes beside indexed evidence instead of retelling the same chains.
+  A single reminder after current tool results prevents earlier assistant prose from overriding fresh
+  evidence and forbids invented ordering between changes observed at the same state index.
+
+### 2026-10-11 (assistant failure recovery)
+
+#### Fixed
+
+- Tool planning receives upstream SSE instead of waiting for a complete buffered response.
+  Tool arguments are assembled before execution; incomplete, truncated and filtered responses
+  fail explicitly.
+- Planning requests a brief handoff when no tools remain, avoiding a discarded full answer before
+  the final streamed reply.
+- Inference rounds use fresh connections instead of reusing idle relay connections. Visible replies
+  reject premature EOF and abnormal finish markers rather than presenting an incomplete answer as complete.
+- A failed streamed reply preserves the text already shown together with its failure notice in
+  history, and reports a partial outcome instead of replacing the answer with only an error.
+- Answers cover each explicitly requested device and explain the evidence for inspection priorities,
+  distinguishing existing automation from proposed missing links.
+- The assistant can be reopened after a failed Board refresh, while new requests remain locked until
+  authoritative synchronization succeeds.
+- Assistant component failures show a reachable floating recovery panel with retry, reload and
+  keyboard dismissal. Recovery retains saved conversations and pending reconciliation.
+- AI service failures no longer incorrectly blame the configured endpoint. Provider diagnostics
+  retain transport cause types without logging upstream messages or credentials.
+
+### 2026-10-10 (run settings and result spacing)
+
+#### Fixed
+
+- Verification and simulation settings keep their header and run action visible while options scroll
+  in short windows. Removed redundant card shadows and unified selection, disabled controls,
+  slider targets, steppers and cancellation actions.
+- Floating-panel close controls no longer grow to 64px in narrow layouts. Panel and dialog dismissal
+  retain compact hover faces and full interaction targets.
+- Narrow verification results keep summary labels inside their cells and wrap the SMV download
+  action before it squeezes the model description. Counterexample actions use shared button sizes
+  and emphasis, with readable wrapping and keyboard-accessible technical disclosures.
+- Verification, simulation and history failure notices share readable text and inner spacing;
+  simulation diagnostics remain inside the same error notice as its headline.
+- Shared help and hover hints can fall back across all four sides and stay within viewport insets.
+  Long explanations wrap and scroll in short windows instead of being cropped at the screen edge.
+
+### 2026-10-10 (replay control spacing)
+
+#### Fixed
+
+- Simulation, formal counterexample and exploration replay share compact transport, tab and
+  run-action styling. Button faces and seek fields retain inner spacing in both themes,
+  including narrow layouts, hover and disabled states, while keeping full interaction targets.
+- Violation location text no longer touches its hover background edge. History close,
+  refresh and delete now reuse the same compact icon controls as side panels.
+- History filters keep complete labels and full click targets instead of forcing English
+  words to split inside equal-width columns; narrow panels wrap the controls as needed.
+- Replay and running-tool status stays inside the action button border instead of continuously
+  expanding a tinted background beyond it, including while simulation playback is paused.
+
+### 2026-10-10 (hover and selection content spacing)
+
+#### Fixed
+
+- Canvas overview heading text and chevron keep inner spacing from the hover surface,
+  which now matches the compact zoom controls while retaining its full click and keyboard target.
+- Both side-panel tab groups reserve space around labels inside hover and selected backgrounds.
+  Shared column sizing and reduced narrow-group gaps keep long English labels readable at the
+  minimum panel width without reducing the font or interaction targets.
+- The template repository toolbar wraps when space is limited, keeping Reset Defaults and the
+  template count inside the card instead of clipping them beyond the panel edge.
+
+### 2026-10-10 (canvas overview space allocation)
+
+#### Changed
+
+- Canvas overview combines its heading and zoom controls into one compact row and enlarges
+  the working map. Controls retain full click targets with the shared quiet faces; redundant
+  nested frames are removed. Overview height adapts to short viewports.
+- Shared workflow panel headers use less vertical padding, leaving more room for forms and results.
+
+#### Fixed
+
+- Map navigation and fit-to-content remain usable while a narrow side panel overlays the canvas.
+- Narrow side-panel tabs reduce outer padding and distribute width by label, keeping English
+  words and Chinese labels on one line without reducing text or click-target sizes.
+
+### 2026-10-10 (inspector navigation and rule readability)
+
+#### Changed
+
+- Canvas overview stays in the inspector's bottom dock while inventories scroll.
+  It can be collapsed by pointer or keyboard and starts collapsed in short viewports.
+  Each inventory begins directly below its tabs and returns to its heading when selected.
+- Rule cards separate each required condition, target action and content-label source.
+  Execution order remains visible; reorder controls are grouped apart from deletion.
+
+### 2026-10-10 (inspector inventory redesign)
+
+#### Changed
+- Environment variables now have a fourth inspector tab, with persisted desktop selection,
+  search, initial-value summaries, separate reading/affecting devices, and disclosures
+  for model evolution and shared trust/privacy labels.
+- Device, rule and specification inventories use compact, aligned information rows.
+  Rule conditions and target actions remain fully readable; temporal properties lead
+  with their natural-language meaning and keep formulas available on demand.
+- Both side panels keep their four tabs in one row and share neutral card hover/focus
+  feedback, denser section headers,
+  and small painted icon buttons with full, non-overlapping interaction targets.
+  Redundant inventory accordions and decorative card layers are removed.
+- Device instance validation reasons stay with the sticky Save control, preventing
+  the control bar from covering its own disabled explanation on narrow screens.
+- Focused environment-field errors remain visible in the inspector scroll region
+  without moving keyboard focus.
+
+### 2026-10-10 (control states and creation wording)
+
+#### Changed
+
+- Device, rule and specification creation headings, entry hints and submit labels
+  use consistent wording; device import labels identify importing rather than creating.
+- Account and sign-in fields, appearance choices, canvas rule hints and recovery
+  actions use the shared type scale. Removed duplicate field and button styles.
+- Search-clear, template, inspector and simulation controls keep 44px targets on
+  narrow and desktop screens. Inspector entity actions remain visible without hover.
+  Disabled fields and actions retain readable opaque labels, and hover and keyboard
+  focus follow the shared theme states.
+- Run-setting switches keep a compact track inside a 44px target and preserve
+  their on/off position with opaque disabled styling and keyboard focus.
+- Assistant controls share the focus ring, and disabled suggestions, history actions,
+  confirmation controls and text input retain opaque readable labels. Icon targets
+  remain 44px on desktop and touch screens; session deletion and message actions
+  remain discoverable without hover. The desktop composer reserves space for the
+  resize handle so it cannot cover Send.
+- Password validation shows each reason once and links disabled submission to the
+  existing field guidance when it already explains the restriction.
+
+### 2026-10-10 (consistent workspace typography)
+
+#### Changed
+
+- Control Center editors, the inspector, device details and workflow forms now
+  share heading, label, field and action styles. Repeated local borders, shadows,
+  uppercase actions and focus rings were removed; supporting copy and assistant
+  text use the shared type scale. Fields and actions keep a 44px minimum target
+  across narrow and desktop layouts, with the existing theme colours. Dialogs,
+  Element Plus confirmations, recommendation cards, run results and assistant
+  controls, help/hover tooltips and message feedback use the same role scale.
+  Section markers follow their headings; status badges and key numeric metrics
+  remain distinct from body copy.
+- Assistant hints close with the assistant panel instead of remaining over the workspace.
+- Hover hints preserve Enter and Space activation of their wrapped controls.
+  Dense device-variable tables scroll horizontally to keep short names readable.
+- Transient messages stay centred within viewport margins and wrap long text.
+  Opening the assistant no longer changes message styling or clips messages on narrow screens.
+
+### 2026-10-10 (inline rule creation)
+
+#### Changed
+
+- Rule creation now lives in the Control Center's Rules tab alongside the other
+  creation tools. The narrow-panel layout keeps conditions, target action, optional
+  content and preview in one scroll region, with theme-aware fields and actions.
+  Drafts survive tab changes and panel collapse; confirmed saves reset the form,
+  while failures retain the draft and bring correction details into view. The inspector opens the
+  same inline editor, and hidden/read-only editors retire pending prechecks.
+
+### 2026-10-10 (feedback ownership and correction)
+
+#### Fixed
+
+- Login, registration and account-deletion rejections retain their declared causes in
+  the form. A failed workspace navigation after authentication reopens its saved
+  destination in a fresh document without repeating authentication. Initial route-loading
+  failures offer page reload instead of leaving a blank screen.
+  Late authentication responses cannot replace a session established in another tab.
+- Failed conversation and task reads retain one error with Retry. Task failures do not
+  claim an empty inbox, and previously loaded task rows are marked unrefreshed.
+  Superseded reads cannot acknowledge unread failures.
+- Failed initial Board and result-history reads retain declared causes and fields beside
+  Retry without a duplicate message. Superseded result reads cannot acknowledge unread
+  results or reconcile an open result against old lists.
+- Exact duplicate rules and rejected recommendation applications retain correction
+  feedback in their existing editing area instead of an acknowledgement-only popup
+  or a disappearing generic message.
+- Environment and device-local values follow the declared template domain before save;
+  environment values are required while omitted local overrides still use defaults.
+  An unconfirmed runtime save distinguishes a refreshed difference from an unknown
+  outcome after a failed read, instead of claiming that the write was rejected.
+  The device runtime Save action remains visible while editing a long configuration.
+- Single-device creation validates local values before submission and retains server
+  field rejections beside the unchanged draft, bringing the current cause and creation
+  button into view without repeating generic correction advice.
+  Late responses cannot clear newer drafts
+  or replace another account's state; unconfirmed creation outcomes ask for a state check.
+- Ordinary rule, specification and runtime save rejections show their concrete cause
+  without generic resubmission advice; declared duplicates retain their specific guidance.
+- Updated Environment Pool values and recommendation Added markers provide confirmation
+  without a duplicate success message; uncertain outcomes retain their warning.
+- Applying the only recommendation no longer warns about nonexistent remaining candidates.
+  When other candidates are discarded after the Board changes, a neutral note explains that
+  change separately from the retained Added marker.
+- Run failures appear once. Failures arriving during replay remain available to view
+  or discard without replacing that replay or fabricating saved history.
+- New scene-file selections and account/view changes retire late file reads and their
+  errors before scene replacement admission.
+
+### 2026-10-09 (failure recovery in the editing area)
+
+#### Fixed
+
+- Correction fields and declared failure causes are visible without opening technical
+  details. Guidance describes the next action without listing unrelated possible causes.
+- Template import feedback stays beside the file control, leaving catalog Retry reachable
+  after a confirmed import. File selection and late responses belong to the selecting account.
+- Device JSON import distinguishes unreadable files from malformed JSON and retains
+  verified parser coordinates beside the import controls.
+- Scenario recommendation counts show invalid ranges beside the inputs and disable
+  generation until corrected, without starting an AI request.
+- Rejected rule/specification saves retain the draft and the server's field diagnostics
+  in the editor, including invalid values and references removed by another entry point.
+  Duplicate guidance is reserved for the server's declared duplicate reason codes.
+  Specification failure feedback precedes the description/formula preview so the reason
+  and correction advice remain visible in the editing area.
+- Sending to a conversation that is still processing a previous turn explains that
+  state and preserves the draft instead of showing only HTTP 409.
+- Repair results clear superseded fault-loading errors. Confirmed terminal request status
+  removes the uncertain retry advice, and late cancellation responses cannot warn over
+  a finished or newer search.
+
+### 2026-10-09 (actionable failure diagnostics)
+
+#### Fixed
+
+- Scene import conflicts distinguish duplicate rules, duplicate specifications and
+  template mismatches, with advice for the actual rejection instead of guessing from
+  the HTTP status. Import validation reports coordinates in the portable file.
+- Scene and template JSON failures remain visible until dismissed, retain the parser
+  cause and report line/column only when the parser supplies a verifiable location.
+- A confirmed template import followed by a failed catalog refresh reports the committed
+  import separately from the unavailable catalog, avoiding advice to repeat the write.
+  Valid JSON rejected by template validation is no longer described as a syntax error.
+- Recommendation failures retain their cause and next step in the owning panel instead
+  of becoming an empty successful result. Missing responses remain uncertain while
+  the existing request-status recovery runs.
+- Verification, simulation, exploration, cancellation and automatic-fix failure
+  surfaces preserve technical diagnostics alongside localized guidance. Unconfirmed
+  mutations still reconcile current state before any retry decision.
+
+### 2026-10-09 (device identity and state restoration)
+
+#### Fixed
+
+- Targeted device HTTP commands pass the exact node id as query data, preserving ids
+  containing URL delimiters and dot segments through layout, runtime, rename, deletion
+  preview, and confirmed deletion. Missing or repeated ids are rejected rather than
+  combined into a different device reference; a single literal comma remains part of the id.
+- AI identity fields reject malformed raw ids before lookup or model-name conversion;
+  they no longer trim an invalid id into another device reference.
+- Model-fingerprint invalidation clears the obsolete request's loading state, so a
+  failed Board refresh remains visibly unavailable after all requests have settled.
+- Undo/redo restores a rule's original server-recorded creation time across direct
+  rule edits, device deletion cascades, and automatic-fix rule-set changes. A history
+  entry missing that restoration metadata is rejected without consuming the edit.
+- New rule creation uses the database's timestamp precision, keeping creation responses,
+  journal snapshots, reloads, and redo metadata identical after an abandoned redo branch.
+
+### 2026-10-09 (scene admission and model authority)
+
+#### Fixed
+
+- Portable scene admission rejects unknown fields and incorrect scalar types before
+  conversion, and rejects comparison fields on API event conditions without silently
+  changing their meaning or rewriting invalid state attributes. Device ids with boundary
+  whitespace are refused consistently
+  instead of creating records that targeted endpoints cannot address.
+- Rule and specification recommendations validate observable capabilities and explicit
+  variable-source scope through the same semantic validator used by Board admission.
+- Portable scene replacement now invalidates other tabs through the existing Board
+  broadcast path, including their current snapshot and undo availability.
+- Historical counterexample repair requires a confirmed unchanged current model in
+  both result and history actions. Loading or unavailable comparisons show their reason
+  while preserving historical playback.
+- AI overview, rule-list, and specification-list tools resolve all referenced data from
+  one atomic Board snapshot. Snapshot failures remain errors.
+- Maven CI jobs provision a dedicated MySQL test database and fail if required MySQL
+  integration coverage cannot run.
+
+### 2026-10-09 (interface copy)
+
+#### Changed
+
+- Removed redundant section introductions, form hints and placeholders, and repeated
+  recommendation instructions across account settings, authentication, authoring, run
+  panels, history and AI chat. Validation reasons are shown once with their accessible
+  field associations; constraints, domain semantics and action consequences remain visible.
+- Tool-result progress keeps its outcome and concrete details without adding a generic
+  success sentence when there is no additional information to report.
+
+### 2026-10-09 (user center)
+
+#### Added
+
+- A user center in the workspace navigation, with authoritative account information
+  and separate username and password forms. Both credential changes verify the current
+  password; username changes preserve the workspace and synchronize between tabs.
+- Typed account-change errors, stale-username checks, and account-change throttling.
+
+#### Changed
+
+- The user center is now a dedicated account page. One workspace account entry replaces
+  separate account and sign-out controls; the page groups profile, password, and session
+  actions, with permanent deletion separated from the sign-out confirmation.
+- Account settings now open as compact read-only rows. Explicit edit actions reveal
+  credential forms, and username changes verify the current password only at confirmation.
+  Internal account ids, registration metadata, and decorative numbered sections are hidden.
+- Account navigation restores the complete workspace artifact address, settles local
+  recommendations and fix searches before leaving, and protects pending credential changes
+  from browser Back. Local results without a confirmed save require explicit agreement
+  before leaving the workspace.
+- Password changes atomically advance a persisted credential version, invalidating all
+  older login tokens independently of Redis. Tokens without this version require a new
+  login. Separate logins receive distinct token identities.
+- Account forms distinguish definite rejection from an unconfirmed network outcome;
+  password changes return to login while preserving the workspace return address.
+
+#### Fixed
+
+- Exploration findings opened from the result dialog now retain their replay address,
+  so returning from the account page or refreshing restores the selected finding.
+- Queued authentication notifications preserve newer local logins and profile changes;
+  expiry checks no longer erase another tab's newer session before its notification arrives.
+- Authentication infrastructure failures retain a server-error response rather than
+  expiring a valid session. Late account responses cannot overwrite a session switch
+  already visible in shared browser storage.
+- A background `401` arriving before a password-change response reports the change as
+  unconfirmed, signs out immediately, and preserves the workspace return address.
+- Registration and username changes use the same identifier namespaces. Unicode
+  usernames are no longer rejected solely because the phone column's collation
+  equates their characters with another account's phone number.
+
+### 2026-10-08 (runtime defaults and assistant result contracts)
+
+#### Fixed
+
+- Counterexample exploration and random-state previews derive omitted device-local
+  initial values through the same manifest semantics as formal verification and
+  simulation. Explicit empty or out-of-domain values remain invalid.
+- Protected assistant confirmations display the readable target captured with their
+  preview while keeping stable internal identities for authorization. Replaced or
+  cancelled confirmation commands now explain that the preview must be refreshed,
+  instead of reporting an unspecified system failure.
+- Device recommendations distinguish shared scene inputs from instance-local
+  capabilities; a suggested room or label cannot create an independent sensor reading.
+- Assistant trace and finding pages honor the tool-result byte budget by returning
+  fewer complete states with an exact continuation offset. Model context remains
+  intact, finding input events follow the returned window, and an oversized single
+  state still produces an explicit unavailable result.
+- Confirmation queries reject unreadable action records and scenario drafts without
+  enlisting cleanup writes in a read-only transaction. Expired replacement previews
+  leave still-valid drafts available for a fresh preview; existing expiry cleanup
+  and subsequent preview or draft writes handle unusable records.
+- Assistant conversation summaries label `PARTIAL` as "View execution details"
+  instead of inferring partly completed work without a trace. Message traces still
+  distinguish zero-tool replies from partly executed operations.
+
+### 2026-10-08 (current schema and remaining execution ownership fixes)
+
+#### Changed
+
+- Removed historical startup upgrades, orphan cleanup, trace-count backfill, and the
+  offline provenance migration. Current entities and one schema initializer establish
+  required keys, trace counts, ownership cascades, and username identity semantics.
+- Synchronous and asynchronous verification use one generation, execution, and parsing
+  implementation. Run context and frozen playback data are assigned once per result;
+  cancellation, worker leases, and atomic result persistence retain their own boundaries.
+- Board storage, model admission, and AI validation share manifest domain predicates
+  while retaining their distinct admission policies and error contracts. Runtime edits
+  reuse decoded templates, renames reuse the saved specification result, and rule reorder
+  and undo update order columns without rewriting authored rule semantics.
+- Task-status tools obtain progress and status from one ownership-checked snapshot.
+  Removed the chat service's message-codec forwarding method and obsolete text-marker
+  interpretation in the client.
+- Run requests reject ignored legacy attack fields instead of silently running a
+  different model. Logout cleanup remains bound to the credentials that started it.
+- Simulation state derives from its result artifact. Arriving runs respect the active
+  historical replay; unsaved synchronous verification and simulation results remain
+  available through explicit Open or Discard actions instead of overwriting playback
+  or disappearing behind a history-save warning.
+
+### 2026-10-08 (typed recommendations and run-owned trace context)
+
+#### Changed
+
+- REST recommendations and rule checks call the same typed application implementations
+  as the chat tools. Removed request-to-tool JSON conversion, tool dispatch from REST,
+  and response JSON re-parsing in the Board controller. Provider validation, candidate
+  accounting, cancellation, and chat draft delivery retain their existing semantics.
+- Verification and simulation share frozen-model preparation, semantic validation,
+  environment expansion, and provenance capture while retaining their distinct request
+  and execution behavior.
+- Formal traces obtain model, attack, generation, and frozen request/template context
+  from their completed verification run. Removed duplicate trace persistence fields;
+  trace collections batch owner reads and decode each run context once. Trace-specific
+  evidence remains stored, and invalid ownership fails explicitly. Obsolete development
+  storage is rebuilt without historical readers or migration paths.
+- Task polling and run detail select presentation data without loading the frozen request,
+  template bundle, or full SMV text; model availability keeps the download boundary's
+  whitespace semantics and the existing persisted-integrity checks.
+
+#### Fixed
+
+- Specification recommendations return empty arrays for omitted inactive condition groups
+  after template and capability validation. Explicit null or malformed groups remain
+  rejected per candidate, and valid recommendations no longer fail the strict response
+  contract when the model follows the prompt's omission rules.
+
+### 2026-10-07 (authoritative snapshots and mutation ownership)
+
+#### Changed
+
+- Verification and simulation services capture the Board and its template manifests once;
+  AI entry points use the same capture path. Recommendations use one semantic snapshot
+  for prompt construction and candidate validation, then revalidate when saving.
+- Protected AI actions require the specific pending action's opaque confirmation identity.
+  Confirmation displays its tool and target, and cannot authorize a replacement draft or
+  a newly previewed action of the same kind. Confirmation controls expose localized accessible
+  names without decorative icon text.
+- Board persistence reconciles device/specification identities and writes Environment Pool
+  changes selectively instead of deleting and recreating complete collections.
+
+#### Fixed
+
+- Scene replacement and consumption of its confirmed AI draft commit or roll back together;
+  an unknown application outcome is reported explicitly for reconciliation.
+- Rule undo records the actual ordered-list position even when execution numbers have gaps.
+  Specification creation and scene replacement reject duplicate specification ids before
+  overwriting any existing data or history.
+- Chat's initial mount preserves background session observations and pending Board
+  reconciliation from the parent, including a session that finished during lazy loading.
+- An old logout response cannot clear a newer account session. Dismissing an earlier run's
+  result or error preserves another active replay and its history-loading state.
+- Simulation playback and history use the same saved-result projection, retaining model
+  availability, frozen input, initiator, and timestamps. Frontend rule and trace wire types
+  share their canonical definitions, and validated results are not rebuilt with guessed facts.
+- Fix analysis reuses the trace mapper's validated request instead of decoding persisted
+  request JSON twice. Removed unused history aliases, registration mapping, device-search
+  queries, and frontend progress/current-fingerprint wrappers.
+
+### 2026-10-06 (initial-state replay and exploration acceptance)
+
+#### Changed
+
+- Replay explicitly identifies the actual initial state, uses filled violation markers and a
+  selected-violation caption, and hides unnecessary group navigation for short paths. Locate and
+  Exit align in the canvas strip; compact layouts retain separate Locate and Restore targets.
+- Model coverage remains in Run info without a duplicate terminal-header action. Removed the
+  repeated initial-state explanation from Changes, preserving one accessible summary.
+
+#### Fixed
+
+- Exploration replay keeps its candidate notice visible across terminal views and no longer
+  claims that candidate evidence came from an incomplete formal model.
+- Exploration configuration displays each unsupported specification and its reason even when
+  none can be selected.
+- Shared asynchronous cancellation reads the committed task status under its row lock, avoiding
+  a stale `RUNNING` response after another transaction already cancelled the task.
+- Timeline scrollports retain the full state numbers below their markers.
+- Long replay timelines shrink after resizing instead of covering Restore with offscreen markers.
+- Exploration outcome icons retain square containers instead of inheriting the glyph's narrow width.
+
+### 2026-10-05 (persistent timeline and integrated run information)
+
+#### Changed
+
+- Counterexample and simulation timelines now share the canvas-top playback controls and remain
+  visible while changing terminal views or hiding the terminal. The strip adapts to the available
+  canvas corridor, with a second timeline row in narrow layouts.
+- Replaced the Timeline tab with Run info. Counterexample and successful-simulation details now
+  live in the terminal; coverage status and concise navigation help occupy the header. Kept run
+  scope, diagnostics, checked expressions and model-download access, while removing duplicate
+  state tables, repeated totals, internal ids and explanatory filler.
+- Simulation run information names the executed model and attack budget without implying formal
+  specification checking; its submission scope lists devices and rules.
+
+### 2026-10-05 (stable playback terminal layout)
+
+#### Fixed
+
+- All playback terminal tabs share one responsive height. Switching views preserves the canvas
+  frame and viewport instead of resizing the dock or fitting the scene again.
+- Each tab scrolls independently beneath the shared header, retaining its reading position when
+  switching views. Counterexamples, exploration findings, and simulations use the same terminal.
+
+### 2026-10-04 (playback terminal responsibilities and navigation)
+
+#### Changed
+
+- Timeline focuses on state navigation and violation location; executed automations appear once in
+  Step changes. State details groups device state-machine values and reported readings, actual
+  environment values, and security facts. The run's checked expression remains in technical details.
+- Long paths use bounded, numbered marker windows with group navigation, exact state seeking,
+  and keyboard Home/End. Timeline uses less dock space, while evidence tabs retain more reading room.
+- Collapse is in the terminal's upper-right corner; the canvas strip restores hidden content and
+  keeps playback, seeking and Exit available. Removed nine superseded bilingual playback messages.
+
+#### Fixed
+
+- Multi-mode devices show each state-machine name beside its value instead of disconnected
+  semicolon lists; step changes name only the modes that changed. Current-state specification labels
+  no longer repeat a translated mode name.
+- Specification-result headings use the inspector's concrete requirements. Older results without
+  captured conditions explicitly identify unavailable interpretation rather than showing template prose.
+
+### 2026-10-03 (consistent specification results and device resizing)
+
+#### Fixed
+
+- Verification results retain the checked specification conditions, device labels, and token
+  provenance in persisted history. Later Board edits no longer change the reading-source labels
+  or requirement interpretation of an earlier run. Missing historical interpretation is explicit.
+- Every unlocked device keeps a usable resize grip at low zoom, including narrow and short nodes,
+  so users can resize them without enlarging the entire canvas.
+
+#### Changed
+
+- Verification requirements share the inspector's natural-language headings, folded formula
+  previews, and language badges. Oversized device cards center a bounded content group.
+- Removed 40 unused bilingual message groups and simplified dense confirmations and model hints.
+  Translation guards now check production usage, locale parameters, syntax, and duplicate definitions.
+
+### 2026-10-03 (task model comparison and readable history)
+
+#### Fixed
+
+- Verification and simulation capture a canonical Board-content fingerprint with the accepted
+  input and frozen template manifests. Tasks and reopened history now detect semantic edits even
+  when item counts stay equal; reload and undo retain meaningful comparisons.
+- Current comparison failures and older records without recorded fingerprints remain explicit
+  unknown states. Moving, resizing, or renaming a device does not invalidate its model; specification
+  edits affect verification/exploration without making simulations stale.
+
+#### Changed
+
+- Run history opens on results and names its lifecycle view Background tasks. Verification,
+  exploration, and simulation cards share a compact reading order, theme surfaces, spacing, and
+  actions. Run parameters and counterexample evidence expand on demand, preserving complete names,
+  diagnostics, downloads, replay, and repair controls.
+
+### 2026-10-03 (readable device cards)
+
+#### Changed
+
+- Device cards use their available width for names instead of a capped, absolute bottom-corner
+  label. Cards share the ordinary action radius and theme surfaces; names no longer have a
+  separate raised badge, and wide cards place artwork beside their text.
+- Short overview cards prioritize the name; micro overviews retain artwork and the full
+  accessible name and title. Medium cards show their current state, while larger cards show
+  runtime readings and security labels with typography that remains readable below 100% zoom.
+- Removed duplicate node-content layout rules and nested state/icon decoration that consumed
+  reading space. Attack indicators remain outside the clipped card content.
+
+#### Fixed
+
+- Compact playback places sidebar headers below the transport strip, so opening the
+  inspector or control panel cannot accidentally activate Exit playback.
+
+### 2026-10-03 (mobile playback navigation)
+
+#### Fixed
+
+- Narrow and short windows place Fit-to-content below the playback strip, preventing the
+  transport from intercepting its clicks. The action uses shared button radius, surface and hover
+  tokens instead of a separate circular, blurred floating treatment.
+- Fit-to-content limits padding to one eighth of the available frame per side, so narrow and
+  short overviews retain more room for the topology instead of losing half their limiting dimension.
+
+### 2026-10-02 (complex playback navigation)
+
+#### Fixed
+
+- Manual playback zoom and pan retain their scale and viewed world center when sidebars,
+  the terminal or the window change size. Fit-to-content resumes automatic overview fitting;
+  another historical scene starts with its own fitted overview.
+- Compact and condensed canvas device names keep an 11px screen minimum, including fitted
+  overviews below 40% zoom, instead of shrinking to unreadable text. Overflow remains within
+  the node; complete names remain available through its title and State details.
+
+### 2026-10-02 (playback terminal)
+
+#### Changed
+
+- Unified simulation, formal counterexample and exploration replay into one bottom terminal
+  with Timeline, Step changes and State details tabs, persistent transport controls and shared
+  theme tokens. Removed the floating change inspector and its drag/dismiss/restore layout.
+- Hiding the terminal preserves autoplay, state, selected tab and the saved-run URL while
+  returning space to the canvas. A persistent canvas-top strip exposes reopen and Exit playback.
+- Moved playback and state seeking into that strip, removed duplicate position and hide controls,
+  and left only one tab row above terminal content. Increased the normal content area, retained
+  compact short-window sizing and raised evidence typography to the shared 12–13px reading scale.
+- Kept playback controls and tabs within the actual canvas corridor when sidebars are expanded;
+  sidebar and tool-dock layout changes adapt the frozen playback viewport.
+- Compact terminal tabs use less padding, keep their active label visible after resizing,
+  and avoid a second scrollbar row. Header action hit areas no longer overlap the help badge.
+- Reduced painted timeline markers and help badges to 20px while retaining 44px marker hit
+  targets; compact violation glyphs replace overlapping rail labels. Plain hints no longer
+  intercept nearby controls, and opening or restoring a long rail reveals its selected state.
+
+### 2026-10-02 (responsive playback)
+
+#### Fixed
+
+- Simulation replay headings scroll with the panel, keeping manual state controls operable in
+  short windows instead of covering them after scrolling.
+- Frozen playback refits after window resizing, keeping nodes inside the current canvas area
+  when expanded sidebars return and preserving the live board's pan and zoom.
+- Read-only inspector panels keep navigation accessible instead of marking their panel toggles,
+  device navigation and canvas map controls as disabled along with editing actions.
+
+### 2026-10-02 (workspace audit corrections)
+
+#### Fixed
+
+- Current exploration fingerprints update already-open result and history surfaces after loading;
+  semantic edits and failed refreshes continue to show an unknown current fingerprint.
+- Logout confirmation initially focuses Cancel instead of the permanent account-deletion entry,
+  and dismissing it restores the mobile overflow trigger's focus.
+- Narrow workspace headers keep preferences and logout reachable through the overflow menu.
+- Fit-to-content includes the whole scene in the available canvas frame and preserves overview
+  zoom when saving and reloading the layout.
+- Exploration results and history distinguish specifications sharing a template with frozen
+  conditions; exploration and formal history localize only recorded bundled tokens.
+- Specification condition fields have associated labels; an empty condition asks for a device
+  instead of displaying a deleted-device warning.
+- Escape inside the assistant panel closes it and restores focus without stopping a response.
+- Assistant drag and resize gestures use the window's current geometry, preserving its size when an
+  opening or viewport animation is still in progress.
+- Assistant syntax highlighting retains its paired background, restoring readable code contrast.
+
+### 2026-10-02 (card states and dynamic theme classes)
+
+#### Fixed
+
+- Cancelled task badges and rule-type fallback chips follow the current palette and mode.
+- Card defaults no longer override explicit muted text, dashed borders or hover boundaries.
+- Disabled recommendation and device-creation actions share readable, inactive fills. Read-only panels
+  no longer fade their button labels; removed a redundant dark-theme context-menu override.
+
+### 2026-10-01 (theme ownership inside cards and dialogs)
+
+#### Fixed
+
+- Migrated nested device, rule, specification, result, history and playback surfaces to shared neutral
+  roles. Removed class-keyed theme repairs and obsolete result/device dialog wrapper classes.
+- Form fields share readable borders and theme-aware paper, focus and placeholder colors. Defaults
+  stay below utility state overrides so validation and selection remain visible.
+- Recommendation progress cards and diagnostic output follow the current theme. Template counts use
+  neutral roles; playback indicators retain their on-fill paint instead of inheriting a surface repair.
+- Switch thumbs remain distinct from off and semantic on tracks in both palettes and modes.
+- Disabled counterexample replay keeps readable neutral labels while another playback is active.
+
+#### Changed
+
+- Raised cards use the shared elevation token. Device artwork, status colors and syntax highlighting
+  retain their own color semantics.
+
+### 2026-10-01 (delayed rule hints and consistent tool controls)
+
+#### Fixed
+
+- Removed obsolete white-text overrides that hid inline workflow titles and subtitles on light header
+  surfaces. Simulation now uses the same heading tier as the other workflow panels.
+- Toolbar entries share one neutral surface and interaction treatment. Open panels use a separate short
+  marker instead of an inset shadow; removed superseded button tiers and their duplicate styles.
+
+#### Changed
+
+- Canvas rule details wait for deliberate pointer hover. Leaving, switching edges, deleting the edge or
+  pressing Escape cancels pending hints; keyboard focus remains immediate.
+
+### 2026-10-01 (semantic colors and readable model details)
+
+#### Changed
+
+- Monochrome controls keep brand, device artwork, syntax and meaningful status colors. Removed whole-panel
+  desaturation, lightened node grounds and reduced canvas-grid contrast across palettes.
+- Canvas rule details show every condition, action and selected content-label source without ellipsis.
+  Cards follow the interface language, open beside the pointer, flip at boundaries and remain within
+  the available canvas frame; long content can be scrolled and selected.
+- Saved specifications use beginner-readable bilingual requirements as their headings. Formula previews
+  start collapsed, with CTL/LTL separate from the expression. The inspector and editor share the same
+  explanation logic, including actual/reported readings, action events and control-source semantics.
+
+### 2026-10-01 (workspace rendering and narrow-panel regressions)
+
+#### Fixed
+
+- Aligned SVG connections and HTML nodes at one canvas origin. Reverse connections now keep their
+  endpoints on both node boundaries at every direction, size and zoom.
+- Corrected navigation and playback reservations used by canvas fitting and the map.
+- Bounded sidebar labels and made headings, nested forms, template cards and rule actions adapt to
+  the panel width. Navigation retains its layout while panels collapse.
+- Removed toolbar-layout hover hints that overlapped functional hints; plain hints no longer stay
+  open when crossed by the pointer. Search tooltips mount only with their controls.
+
+#### Changed
+
+- Brightened copper and monochrome light surfaces, strengthened dark-theme ink and surface separation,
+  and reduced heavy shadows. Shared cards and overlays use opaque grounds; risk colors remain semantic.
+
+### 2026-10-01 (example geometry and device transitions)
+
+#### Changed
+
+- Public example nodes and directed rules share a responsive layout; arrowheads and bends retain their
+  proportions, and bilingual state changes keep node cards stable. Selected steps retain their emphasis on hover.
+- Example and workspace device readings share a quiet cross-fade without an empty phase, using the same
+  motion tokens and reduced-motion behavior. Removed unused legacy trace-card and looping pulse styles.
+
+### 2026-10-01 (appearance and canvas presentation)
+
+#### Changed
+
+- Welcome, authentication, workspace, dialogs and chat share warm paper/charcoal surfaces and a copper
+  accent. Legacy neutral utilities, native controls and teleported library controls consume the same
+  color tokens.
+- Run history review and replay actions use quiet neutral controls. Canvas nodes and connections use
+  three copper tones instead of eight unrelated hues; status colors remain reserved for outcomes and risks.
+- Added an independent monochrome palette for light, dark and system modes, with a shared keyboard-accessible
+  appearance picker. Ordinary UI and illustrations use grayscale; danger and warning signals retain meaning.
+- The public example now uses workspace artwork, node palette helpers and directed rule connections. Replay
+  updates device readings, artwork, delivered rules and violation feedback together, with pause and step controls.
+- Canvas strokes, hit regions, arrowheads and hover labels remain legible across zoom; focused and changed
+  states use quieter, distinct cues. Removed unused trace-badge, previous-value and legacy hue-hover styles.
+- Generated device placeholders share neutral artwork; broken-icon fallback reuses it with self-contained
+  SVG paint instead of unresolved host CSS variables.
+
+### 2026-10-01 (workspace copy and replay details)
+
+#### Changed
+
+- Reviewed bilingual interface copy against its callers; shortened modeling and operation help,
+  corrected undo, response-template and environment-evolution descriptions, and retained essential
+  warnings and the boundary between candidate evidence and formal conclusions.
+- Tool headers, run metadata, input previews and fix sections share neutral surfaces. Suggestion
+  categories use names and icons; selection and actions share one accent palette.
+- Side panels preserve toggle focus and fade content at its expanded width during collapse.
+- Replay controls wrap consistently, use full-size markers and scroll long sequences. Counterexamples
+  can jump to a known violation or violating-loop start; motion preferences also govern keyboard reveal.
+
+#### Fixed
+
+- Manual replay seeking pauses autoplay so the timer cannot advance past the state being inspected.
+- Side panels can manage collapse when no parent supplies the state; tooltip attributes no longer
+  replace the toggle's expanded state.
+
+### 2026-10-01 (workspace refinement)
+
+#### Changed
+
+- Both workspace side panels share headers, collapse controls and section navigation styles.
+  Inspector navigation stays outside scrolling content; narrow panels preserve labels by stacking counts.
+- Zoom controls form one theme-aware group with responsive wrapping and a visible field focus ring.
+  Empty-canvas entries use shared action styles and remain scrollable in short viewports; template drops
+  use the accent role rather than a warning.
+- Node hover retains connection alignment; opaque nodes no longer request backdrop blur.
+- Simplified bilingual modeling help and removed historical commentary from the locale catalog,
+  preserving diagnostic, provenance and verification distinctions.
+
+#### Fixed
+
+- Inspector search tooltips no longer mount without a clear-search trigger when the field is empty.
+
+### 2026-09-30 (public pages and workspace design)
+
+#### Changed
+
+- Welcome and authentication now share the canvas's light/dark theme, blue accent, typography
+  and topology mark. A labeled model example replaces the video backdrop and glass effects;
+  authentication occupies the same layout and stacks naturally on narrow screens.
+- Public pages expose theme controls. Workspace navigation uses a solid surface and lighter
+  branding; the neutral canvas background and quieter grid give device content more emphasis.
+- Welcome and desktop authentication show a shared CSS 3D topology with finite connection
+  animation and damped mouse tilt. Replay preserves the scene and keyboard focus while
+  restarting connections; reduced-motion mode keeps a static example.
+- The public example illustrates porch motion unlocking a door while nobody is home,
+  with device states, the occupancy safety specification and a preset counterexample path.
+- Theme/language controls share one geometry and state stylesheet across public pages,
+  workspace navigation and its overflow menu. The compact language pair no longer overflows
+  an icon-sized button, and page-specific control shadows are removed.
+- Workspace actions and the 404 page align their corners, surfaces and hover treatment with
+  the authentication design.
+- Public pages and workspace navigation share spacing, control-size, text-size and motion
+  tokens. Safety-specification terminology and workspace entry labels now agree across pages.
+- The assistant shares the product's body font, panel surfaces and shadow scale. Recovery
+  actions and warning text follow the theme's semantic colors.
+
+#### Fixed
+
+- Reduced motion stops decorative public-page animation while keeping authentication
+  progress visible through a slowed spinner.
+
 ### 2026-09-30 (canvas geometry and playback cost)
 
 #### Fixed

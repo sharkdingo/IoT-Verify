@@ -1,10 +1,9 @@
 # Frontend Integration Guide
 
 How the Vue 3 frontend calls the backend: the HTTP client, the API modules and their
-real shapes, SSE streaming, and where the TypeScript types live. This replaces the
-old `frontend/API-DOCUMENTATION.md`, which had drifted from the code.
+real shapes, SSE streaming, and where the TypeScript types live.
 
-Verified against code on 2026-08-01. Source: `frontend/src/api/`,
+Verified against code on 2026-10-18 (workspace reload, failure ownership, account settings, and run lifecycle). Source: `frontend/src/api/`,
 `frontend/src/types/`, `frontend/src/components/ChatView.vue`,
 `frontend/src/views/Board.vue`, `frontend/src/App.vue`, and `frontend/src/router/index.ts`.
 
@@ -24,11 +23,6 @@ frontend/src/
 │   └── fuzzing.ts       # default-export object: bounded exploration tasks/runs/findings
 └── types/          # one module per domain — ls the directory rather than trusting a list here
 ```
-
-The `api/` set above is exhaustive and worth stating, because *which* module owns a call is the thing
-people get wrong. `types/` is not listed file by file: it grows with the domain, and a hand-copied
-inventory there was already nine files out of date. The naming is predictable (`rule.ts`, `spec.ts`,
-`verify.ts`, …); the two exceptions that are *not* predictable are called out below.
 
 > There is **no** `api/verify.ts` and **no** `types/trace.ts`. Verification calls live
 > in `board.ts`; trace types (`Trace`, `TraceState`, `TraceDevice`, …) live in
@@ -52,13 +46,8 @@ Axios instance:
   consolidation; do not reintroduce compatibility routes during the current development
   phase.
 
-> **Base URL is uniform and relative by default.** Both `http.ts` (axios, most modules)
-> and `chat.ts` (SSE) derive their base URL from `import.meta.env.VITE_API_BASE_URL`.
-> When it is empty (the default), requests go to a relative `/api`, which the Vite dev
-> server proxies (`vite.config.ts`) and a production reverse proxy (Nginx) forwards —
-> so dev and same-origin prod work with no config. Set an absolute
-> `VITE_API_BASE_URL` only for cross-origin deployments. See
-> [../getting-started/configuration.md](../getting-started/configuration.md#frontend-vite).
+Both HTTP and SSE use `VITE_API_BASE_URL`; deployment values belong in the
+[configuration reference](../getting-started/configuration.md#frontend-vite).
 
 The endpoint columns below are **client-relative** paths passed to this axios instance
 (`/auth/login`, `/board/nodes`, and so on). The actual HTTP paths on the backend include
@@ -66,9 +55,36 @@ the `/api` prefix, for example `/api/auth/login`; the authoritative backend inde
 [../api/rest-endpoints.md](../api/rest-endpoints.md).
 
 Current routes are deliberately small: `/` is the public landing page with integrated
-login/register modes, `/board` is the authenticated application, `/404` is public, and
+login/register modes, `/board` is the authenticated workspace, `/account` is the
+authenticated account page, `/404` is public, and
 all unknown routes redirect to `/404` under hash history. Direct non-hash URLs are
 normalized to hash URLs during app startup.
+
+### Workspace reload
+
+The auth store initializes from browser storage before the first route guard. The guard
+checks locally visible JWT expiry; backend authentication remains authoritative for each
+request. A board mount starts the semantic snapshot, task inbox, and saved layout reads
+concurrently. Accepting a snapshot explicitly refreshes the model fingerprints and undo
+availability once; semantic-change watchers do not duplicate an already pending fingerprint
+read for that revision.
+
+Layout restoration waits for the semantic snapshot so a narrow viewport can fit its devices,
+but does not wait for the task inbox. Task recovery can therefore finish independently of
+restoring the user's viewport and panels. Initial hydration and failed-layout recovery follow
+the [board layout contract](../api/board.md). History result lists and full run details remain
+lazy; an incoming run deep link is restored after semantic board data is ready.
+
+Opening or refreshing a history layer reads current model fingerprints once. Result loading
+uses the fingerprint read already owned by the fuzzing-history loader; task loading starts its
+own read. A later explicit refresh still requests fresh fingerprints.
+Opening a saved exploration result also keeps its awaited fingerprint read; displaying that
+result does not start another one. Newly completed exploration tasks still refresh before
+presenting their result.
+
+Layout saves pin the initiating session token and belong to the board component's account.
+Pending writes and late completions lose authority when that ownership changes; ordinary
+navigation within the same session can still flush pending layout changes.
 
 ---
 
@@ -97,37 +113,112 @@ Exported as an object `authApi` (not named functions):
 | :--- | :--- | :--- | :--- |
 | `authApi.login(data)` | POST | `/auth/login` | `Result<LoginResponse>` |
 | `authApi.register(data)` | POST | `/auth/register` | `Result<RegisterResponse>` |
-| `authApi.logout()` | POST | `/auth/logout` | `Result<void>` |
-| `authApi.deleteAccount(data)` | DELETE | `/auth/account` | `Result<void>` |
+| `authApi.logout(authToken)` | POST | `/auth/logout` | `Result<void>` |
+| `authApi.getAccount(authToken)` | GET | `/auth/account` | `Result<AccountProfile>` |
+| `authApi.updateUsername(data, authToken)` | PATCH | `/auth/account/username` | `Result<AccountProfile>` |
+| `authApi.changePassword(data, authToken)` | POST | `/auth/account/password` | `Result<void>` |
+| `authApi.deleteAccount(data, authToken)` | DELETE | `/auth/account` | `Result<void>` |
 
-`LoginResponse` carries `userId`, `phone`, `username`, `token` (all camelCase). See
-[../api/overview.md](../api/overview.md) for the general `Result<T>` envelope,
-and the backend `dto/auth/` for request field rules. Login uses `identifier`
-(phone number or username) plus `password`; registration still validates phone,
-username, and password separately.
-`deleteAccount` sends `{ password, confirmation }`; the backend requires the password
-to match and `confirmation` to equal the current username or phone number. On success,
-clear local auth state and send the user back to the landing page.
+Request and response fields belong in the [auth contract](../api/auth.md).
+Login and registration rejection retain declared causes and fields beside the form.
+Once authentication succeeds, a destination-page loading failure preserves the session
+and offers Retry without repeating the authentication request. Retry reopens the saved
+destination in a fresh browser document, retaining its query/hash and the session;
+a failed native module import cannot reliably be retried within the same document.
+When an initial lazy route fails before any page has mounted, the existing application
+error boundary offers page reload instead of leaving a blank screen. A later navigation
+failure remains owned by the mounted page. Module addresses stay in collapsed technical
+details rather than replacing the user-facing recovery explanation.
+Authentication responses are adopted only while their initiating session and page still
+own the request; a later sign-in in another tab takes precedence over a late response.
+On successful account deletion, clear local auth state and return to the landing page.
 An explicit `4xx` deletion response is a definite rejection and leaves the form available
-for correction. A missing response or `5xx` has an unknown commit outcome: clear only the
+for correction, with its diagnostics inside the open deletion form. A missing response or `5xx` has an unknown commit outcome: clear only the
 matching local session, return to login, and ask the user to sign in again to determine
 whether the account still exists instead of retrying the destructive request.
 The destructive dialog enables confirmation only after the user actually types, pastes,
 or composes the identifier in that opening. A browser/password-manager autofill that merely
 populates the matching value is not treated as deliberate confirmation.
-`logout` stops active AI-chat responses before revoking the current token; background
+The account page pins the initiating token through chat settlement and the logout or
+deletion request. Each continuation checks the same page, user, and token; only the
+matching local session is cleared and routed to login.
+It stops active AI-chat responses before revoking that token; background
 verification/simulation/exploration tasks are not cancelled. `deleteAccount` is the destructive path: it cancels active tasks,
 serializes in-flight writes with account deletion, and removes user-owned data.
 
 Authentication changes propagate between tabs through one JSON storage event
 containing token and user together. Other tabs apply that record atomically and validate the
-token before entering the logged-in state; they do not react independently to the legacy
+token before entering the logged-in state; they do not react independently to the separate
 token and user keys, which could otherwise expose a half-login or half-logout snapshot.
+Queued notifications apply only while their payload still matches the current shared
+sync record. A delayed clear notification rechecks the current stored session, so neither
+can undo a newer login or profile update performed in the receiving tab.
+An expiry precheck clears only the session that still owns the shared token. If
+another tab has already changed it, the store rechecks the current stored session
+before the route guard decides whether to allow entry.
 Private route components are keyed by authenticated user id, so switching accounts unmounts
 the previous Board request/timer/subscription scope before loading the new account. The
 assistant synchronously aborts and clears its selected conversation on the same boundary.
 Cross-tab logout hides private content immediately and routes to the integrated login panel;
 refreshing a token for the same user does not remount the workspace.
+
+The account page is a private lazy route with a single workspace entry on desktop and
+in the narrow navigation menu. `returnTo` carries the complete Board artifact address;
+`router/accountReturn.ts` accepts only internal `/board` targets. The account Back action
+restores that address, while browser Back/Forward use ordinary route history. Sign-out
+and password-change login destinations retain the same Board address rather than
+returning to a stale form. This parameter contains no credentials or form values.
+
+Leaving the Board for the account page settles local recommendations and fix searches,
+waits for queued writes, and makes a bounded layout flush. Accepted background
+verification, simulation, and exploration tasks remain server-owned. A local result
+without a confirmed save requires explicit agreement before the Board unmounts;
+it cannot be silently relegated to history. The assistant conversation remains mounted
+but hidden for the same account; navigation alone does not stop its accepted work or
+discard its conversation. Assistant Board changes notify other tabs through invalidation,
+and this tab loads the authoritative workspace state when the Board mounts again.
+
+Account reads and mutations explicitly pin the initiating token. A late response must
+still belong to that user, token, and page lifetime before updating visible state.
+Guarded writes also check the token currently visible in shared browser storage, so
+a session switch that precedes delivery of its storage event cannot be overwritten
+by a late response. This is an observable ownership check, not an atomic browser lock.
+The auth store owns the current username; a successful profile refresh or rename uses
+its guarded user-update operation and broadcasts the same token with the authoritative
+profile identity. It does not simulate a new login or publish a Board invalidation.
+
+Username edits keep their original server baseline until submitted or explicitly
+reviewed again after a conflict. Another tab's rename may update the displayed current
+name but cannot silently rewrite an active draft's precondition. An unconfirmed rename
+is followed by a profile read and a persistent review notice, not an automatic retry.
+
+The account page starts in read-only mode. Only one credential editor is open at a time;
+cancelling or switching editors clears secrets. Starting a new username edit refreshes a
+profile whose name differs from the current auth identity before using its baseline.
+Continuing freezes the requested name, expected server name, and initiating session for
+the password confirmation. Only that confirmation submits the existing username command;
+there is no separate password-verification request or reusable reauthentication token.
+Cancelling the confirmation keeps the name draft but clears its password. Incorrect-password
+rejections stay inside the confirmation. Name conflicts return to the visible editor for
+review; they do not silently replace its precondition or resubmit the command.
+
+The Board-to-account boundary owns recommendation/fix settlement and layout flushing;
+password submission does not run a second Board preflight. Before password change,
+sign-out, or deletion, the account page rechecks and settles active AI-chat work,
+including work started in another tab. Failed reconciliation blocks the request with a
+persistent explanation; declining an uncertain-outcome warning is ordinary cancellation.
+A confirmed password
+change clears only the initiating local session and returns to login with the Board's
+full return address. A missing response or `5xx` uses the same guarded sign-out but
+shows an unconfirmed-outcome notice. A definite field rejection retains the form and
+login. While the password POST is pending, a private token-scoped intent lets the
+shared HTTP interceptor label an earlier background `401` as an unconfirmed password
+change. It still clears the session immediately; the late POST cannot reclaim it.
+While an account mutation is pending, buttons and the route-leave guard block ordinary
+Back/Forward navigation until the request and any reconciliation finish. Session loss or
+replacement can still leave immediately; late responses cannot reclaim that session. Password values live
+only in the form and request body; they are cleared on page unmount or session loss and
+never stored in the auth store, browser storage, or URL.
 
 Example:
 
@@ -135,7 +226,7 @@ Example:
 import { authApi } from '@/api/auth';
 
 const res = await authApi.login({ identifier: 'testuser', password: '123456' });
-if (res.code === 200) {
+if (res.code === 200 && res.data) {
   const { userId, token } = res.data; // note: res.data, not res
 }
 ```
@@ -145,7 +236,10 @@ if (res.code === 200) {
 ## Board + verification + fix — `api/board.ts`
 
 `board.ts` default-exports one object that covers board CRUD **and** verification/fix.
-Its methods return already-unwrapped values. Non-exhaustive:
+Its methods return already-unwrapped values. A failed initial semantic snapshot read keeps
+editing unavailable and retains the declared cause and fields beside Retry until an
+authoritative read succeeds. It does not also announce the same failure in a message.
+Non-exhaustive:
 
 - Board CRUD: `getNodes`/`addNodes`/`updateNodeLayout`/`updateNodeRuntime`/
   `renameNode`/`deleteNode`,
@@ -161,6 +255,11 @@ Its methods return already-unwrapped values. Non-exhaustive:
   two-step command: render the preview's itemized type/device/environment effects and
   blockers, then submit its `impactToken`. Reconcile both `currentTemplates` and
   `environmentVariables` from the committed response; do not infer success from a count.
+  After a confirmed template import, a failed catalog read marks template state unavailable
+  and reports the committed import beside the file control. The page's Retry control
+  reloads the catalog without repeating the write. The notice clears only when the
+  authoritative catalog contains the confirmed template id. File reads, writes and
+  late catalog responses remain fenced to the selecting account.
 - Control Center template UI is split into **Create Template** and **Template Repository**.
   Clicking a template card opens its detail preview; dragging a template card to the
   canvas opens a device-instance naming dialog and only saves after confirmation. While
@@ -175,13 +274,15 @@ Its methods return already-unwrapped values. Non-exhaustive:
   an asynchronous impact preview that finishes later must not reopen it.
 - Clicking a canvas device opens the device detail/runtime dialog. Its visible instance
   actions include rename and confirmed delete; rename must not depend on discovering a
-  hidden mouse gesture. Mouse right-click opens the same device context actions, while
+  hidden mouse gesture. The runtime section keeps its title and single Save action visible
+  while its fields scroll; the longer explanation stays in normal flow and must not cover
+  correction feedback. Mouse right-click opens the same device context actions, while
   the Context Menu key or `Shift+F10` provides the keyboard equivalent. Runtime edits
   (`state`, `currentStateTrust`, `currentStatePrivacy`, device-local `variables`, and
   device-local `privacies`) use the same validation helpers as single-device creation and JSON/CSV
-  import, then replace the complete runtime subresource through
-  `PUT /board/nodes/{nodeId}/runtime`. Moving/resizing uses the separate complete layout
-  subresource at `PUT /board/nodes/{nodeId}/layout`. The Board serializes create, layout,
+  import, then replace the complete runtime subresource through the targeted device
+  commands defined in the [Board API](../api/board.md#canvas-storage). Moving/resizing
+  uses the separate complete layout command. The Board serializes create, layout,
   runtime, rename, and confirmed-delete calls before applying their authoritative
   `currentNodes` snapshots; a late response therefore cannot roll back a later device
   action. Environment
@@ -189,7 +290,21 @@ Its methods return already-unwrapped values. Non-exhaustive:
   the documented [Environment Pool compare-and-set contract](../api/board.md#boardenvironmentvariabledto).
   Keep the baseline from the latest authoritative read until the mutation settles, and
   refresh a stale row before retrying rather than silently overwriting another tab.
+  Environment values are required and use their template's declared integer or enum domain.
+  Device-local overrides use the same domain validation but may be omitted to use the
+  template default. Rejections stay beside the relevant draft without replacing canonical state.
+  An unconfirmed runtime write is reconciled before another submission: a successful
+  read distinguishes a matching configuration from a difference; a failed read leaves
+  the write outcome explicitly unknown and asks the user to reload before resubmitting.
 - Device creation supports single, batch, and JSON/CSV import modes in the Devices tab.
+  Single-device local values use the shared template-domain validation before submission;
+  invalid values retain an inline field reason and block creation, while omitted values
+  continue to use defaults. A definitive server rejection retains its declared fields in
+  the form without a duplicate message. Once submission settles, focus the failure and
+  bring its cause and creation button into view only if they still belong to the current draft.
+  Editing or leaving that draft retires its feedback;
+  a late successful save must not clear a newer draft. An unconfirmed creation refreshes
+  the affected state before reporting an observed device or an explicitly unknown outcome.
   Batch/import are frontend conveniences over the targeted `addNodes` contract: parse,
   preview, generate unique labels, then append the accepted devices once. Device create,
   layout/runtime/rename/delete, rule/spec create/delete/reorder, Environment Pool edits,
@@ -199,7 +314,8 @@ Its methods return already-unwrapped values. Non-exhaustive:
   response cannot overwrite a newer local action. This is frontend response ordering,
   not a claim that separate ordinary REST calls form one transaction; only one batch
   replacement request is atomic as a group.
-  Every successful axios mutation of Board semantics and every completed assistant Board
+  Every successful axios mutation of Board semantics, including portable scene import
+  through `/board/scene`, and every completed assistant Board
   refresh publishes a same-user `BroadcastChannel` invalidation. Receiving tabs enqueue one
   coalesced full semantic snapshot refresh through that same mutation queue; an invalidation
   received while hidden or while another refresh is running remains pending. Visibility and
@@ -296,10 +412,16 @@ Its methods return already-unwrapped values. Non-exhaustive:
   nodes/rules/specs and an empty environment pool through the same batch authority. Its
   destructive confirmation explicitly states that the device-template catalog, run
   history, and AI conversations are outside the scene and remain intact.
-  A `422 ValidationException` carries every field problem under `data.errors`. A single
-  problem uses the compact toast; multiple scene problems open a diagnostic list with
-  user-facing item coordinates plus the JSON field path. No failed validation mutates
-  the current scene.
+  Rejected local files and server validation remain in a diagnostic dialog until
+  dismissed, with item coordinates, file field paths and the actual cause. Syntax
+  errors retain parser-supplied coordinates; template-definition failures do not
+  become syntax errors. Structured conflict reasons select the appropriate correction
+  advice; see the [board import contract](../api/board.md) and
+  [error conventions](../api/overview.md). A missing mutation response still requires
+  authoritative reconciliation before describing whether the scene changed.
+  A file read belongs to its selection, account and mounted Board. A newer selection
+  retires an older read, including its late errors; the same owner guards replacement
+  preview and confirmation before a write is dispatched.
 - Recommendation: `recommendRelatedDevices`, `recommendSpecifications`, and
   `recommendScenario`. `recommendScenario` returns a canonical, importable but unverified
   `iot-verify.board-scene` draft for the Action Dock scene workflow; applying it should use the same scene-import
@@ -363,9 +485,10 @@ Its methods return already-unwrapped values. Non-exhaustive:
   board" only after the authoritative response, or after reconciliation proves the item
   exists. Application state is scoped to the recommendation response epoch, so a late
   completion cannot mark the same array position in a regenerated list. Once application
-  changes the Board, the panel keeps only that committed candidate as confirmation, labels
-  the retained view explicitly, and removes candidate-accounting metadata from the obsolete
-  response. Closing the panel does not cancel reconciliation of an unknown write outcome;
+  changes the Board, the panel keeps only that committed candidate with its Added marker
+  and removes candidate-accounting metadata from the obsolete response. A neutral note
+  explains discarded candidates only when the previous result actually contained others.
+  Closing the panel does not cancel reconciliation of an unknown write outcome;
   the authoritative Board collection still refreshes if the original authentication subject
   remains current.
 - Scene import/clear acquires an interaction lock before showing its destructive
@@ -374,12 +497,11 @@ Its methods return already-unwrapped values. Non-exhaustive:
   simulation stay blocked through response reconciliation. A streaming assistant must
   stop or finish first because aborting SSE cannot revoke a tool call already started.
 - Verification: `verify(req)`, `verifyAsync(req): Promise<VerificationTask>`, `getTasks`,
-  `getTask`, `getTaskProgress`, `cancelTask`, and trace list/detail/delete.
-- Counterexample exploration: `fuzzingApi.getCurrentModelFingerprint()`,
-  `startAsync(req)`, task polling/cancellation, and run list/detail/delete. Replay lazily
-  loads the owning full `FuzzRunDto` once and resolves the requested finding id from that
-  run's validated embedded findings; it never joins an independently returned finding with
-  another response's model snapshot. The accepted task is authoritative; the client never
+  `getTask`, `cancelTask`, and trace list/detail/delete. Polling reads each full task snapshot.
+- Counterexample exploration: `startAsync(req)`, task polling/cancellation, and run
+  list/detail/delete. Replay lazily loads `getFinding(findingId)` and checks the requested
+  parent run id against its closed replay envelope. Finding evidence, frozen playback
+  scene, and model snapshot come from that same validated response. The accepted task is authoritative; the client never
   sends a Board/model payload or fabricates a task ID.
 - Fix: `getFaultRules(traceId)`,
   `fixTrace(traceId, request?, { authToken, requestId?, signal? })`,
@@ -397,7 +519,10 @@ Its methods return already-unwrapped values. Non-exhaustive:
   or permit a new request id. It also keeps that owner bound to its trace, so opening another trace
   cannot mix old suggestions with the new trace id. Any current `FINISHED` status terminates a POST
   transport that never settled, and request-id fencing prevents its later `finally` block from
-  clearing a newer search. Status and cancellation transports use a 2.5-second timeout so retry and
+  clearing a newer search. Terminal evidence updates an uncertain failure notice without inventing
+  a repair result; a late cancellation response cannot restore that obsolete warning. A trusted
+  fix result replaces an earlier fault-loading error, including a valid empty fault-rule array.
+  Status and cancellation transports use a 2.5-second timeout so retry and
   logout loops cannot inherit the ordinary 100-second API timeout. Route teardown still retries
   owner-authenticated cancellation before aborting the POST transport.
 
@@ -409,17 +534,26 @@ Its methods return already-unwrapped values. Non-exhaustive:
 > errors) or service-unavailable errors, no pollable task id exists for the UI flow;
 > show the submit error and do not start polling.
 
-Rules sent through `addRule`, `checkDuplicateRule`, `verify`, or `simulate` must have
+Rules sent through `addRule` or `checkDuplicateRule` must have
 at least one concrete trigger source. The frontend stores new rule source/target device
 references as canonical board node ids, and `board.ts` maps them to backend
 `RuleDto.conditions` / `command`. `RuleSource.itemType` is required and maps directly to
 backend `targetType`.
-Before `verify`, `verifyAsync`, `simulate`, or `simulateAsync`, the board request
-builder converts those board node ids to model `varName` values for devices, rules, and
-specifications, filters device runtime fields to local variables only, and sends the
-current `/board/environment` values as top-level `environmentVariables`. Do not send raw
-board ids directly to model endpoints, and do not put environment values into
-`devices[].variables`.
+Definitive `400`/`422` rule/specification save rejections retain the submitted draft and
+declared field diagnostics in the editor, including invalid values and references removed
+by another entry point. Guidance identifies a duplicate only from its declared reason code.
+Specification save feedback appears after the editable conditions and before the generated
+description/formula preview, so correction takes priority over the preview.
+Concurrent duplicate rule/specification rejections keep the submitted draft and correction
+feedback in the editor. They reconcile the corresponding authoritative collection and undo
+availability, since another entry point may have created the item. Read failure leaves that
+collection unavailable rather than describing the rejected save as successful. Late partial
+reads cannot publish into a different account or a disposed Board view.
+Verification/simulation request builders send only run options. The backend captures the saved
+Board and converts device references to model `varName` values. `utils/modelRequest.ts`
+normalizes local references and builds run options; model comparison reads the authoritative
+identities from `boardApi.getModelFingerprints()`.
+See [model input authority](../architecture/data-authority-model.md#model-request-boundary).
 
 The rule builder must keep source conditions and target commands separate. Source
 `itemType="api"` is a signal event and should list only template APIs with
@@ -548,7 +682,7 @@ Board layout and visual shell rules:
   to inspect what it points at. At narrow widths the inspector collapses to a rail and
   the map is not rendered. Keep the map compact, theme-aware, and neutral; red remains
   reserved for warnings, violations, and destructive actions.
-- The Environment Pool in `SystemInspector` is another overview surface. It groups
+- The Environment Pool in `SystemInspector` has its own Environment tab alongside devices, rules, and specifications. It groups
   current board variables returned by `/board/environment`, using templates to explain
   which devices read or affect each variable, and displays the user-facing variable name,
   range, shared value, trust, and privacy. Backend-only NuSMV names such as `a_<name>`
@@ -559,9 +693,9 @@ Board layout and visual shell rules:
   authoritative pool, and refreshes the affected row after the documented stale conflict.
   It says whether the selected field changed and never rebuilds a whole
   row from possibly stale props. Device creation/deletion triggers a refresh so the backend can insert
-  defaulted required variables and prune unneeded ones. The pool is collapsed by
-  default to protect inspector scanability, but still shows the variable count and
-  a compact name summary. Clicking a source device is a navigation affordance only;
+  defaulted required variables and prune unneeded ones. The tab count includes each shared name once;
+  its searchable rows expose details on demand. Layout and interaction conventions live in
+  [frontend UI conventions](./frontend-ui-conventions.md#13-workspace-shell-and-concise-copy). Clicking a source device is a navigation affordance only;
   source devices do not store the environment value. Simulation and verification
   timelines use the same user-facing names from `TraceStateDto.envVariables`; generated
   NuSMV aliases are not displayed or matched as a frontend contract. Runtime NuSMV
@@ -590,6 +724,14 @@ Board layout and visual shell rules:
   recovery controls from rendering.
 - Recommendation panels must use i18n keys for labels, counts, empty states, and action
   buttons. They are opened in real-browser tests under both English and Chinese locales.
+  Scenario counts use one validated request projection for inline errors and submission;
+  invalid count fields are linked to the visible reason and generation remains disabled
+  until corrected. Invalid criteria never claim request ownership or call the AI endpoint.
+  Request failures retain localized guidance, visible causes/field errors and expandable logs in
+  the owning panel, separate from a successful empty candidate list. Unknown requests
+  remain under the existing status-recovery owner; after confirmed termination without
+  a result, the panel explains that no complete result was received. Scene/request
+  generation guards prevent late failures from restoring a discarded panel context.
   Rule/spec/device recommendation calls pass the active locale as `language`; backend
   fallback/success messages and LLM natural-language fields should follow that language.
   When recommendation responses include `filteredCount > 0`, surface a neutral validation
@@ -642,10 +784,18 @@ history has two user layers, not three peer artifact tabs:
 
 1. **Task Status** uses `GET /api/verify/tasks`, `GET /api/simulate/tasks`, and
    `GET /api/fuzz/tasks`. These lists contain active work plus failed/cancelled tasks
-   that produced no result.
+   that produced no result. A failed read retains diagnostics and Retry; previous rows
+   are marked unrefreshed, and failure is distinct from a successful empty list.
+   Board's `loadTaskInbox()` returns `true` only after that request applies the current
+   authoritative lists; failed or superseded reads return `false` and cannot acknowledge
+   unread failed-task notifications.
 2. **History Results** combines `GET /api/verify/runs`, `GET /api/fuzz/runs`, and saved
    simulation runs from `GET /api/simulate/traces`. One completed run is one top-level
-   history item.
+   history item. Failed sources retain their declared cause, fields and Retry in the
+   history panel without a duplicate message; a failed source is not an empty list.
+   Superseded list reads cannot acknowledge completed-result notifications or reconcile
+   an open result against the old lists. Hidden result reads still announce failures
+   when the panel cannot present them.
 
 Completed work is excluded from the task-status lists. Verification counterexamples are
 nested evidence under their owning verification result and keep replay/fix actions when
@@ -719,6 +869,10 @@ development data rather than rendered with a weaker comparison.
 Device, rule, specification, environment, and template snapshot replacement invalidates
 the cached fingerprint immediately. In-flight fingerprint responses are revision-guarded,
 so an older response cannot mark a newly edited Board as matching historical work.
+Invalidation also withdraws that request's loading state. If the subsequent Board refresh
+fails before a new fingerprint request starts, the comparison remains unavailable;
+it does not keep reporting an obsolete request as running. A newer request owns its own
+loading state, which an older response cannot clear.
 
 Treat task `status` as execution lifecycle only. A task's direct polling endpoint may
 return `COMPLETED` so the submitter can obtain the result, but the history UI then moves
@@ -742,8 +896,8 @@ because it preserves navigation, exposes real phases, and supports cancellation;
 synchronous option remains available when a user deliberately wants to wait in place.
 Before verification, simulation, or exploration captures immutable input, the Board waits
 for pending fix reconciliation and its mutation queue to drain, then rechecks the current
-devices/rules/specifications. Verification/simulation build a client model request;
-exploration sends only its budget/target selection and the backend captures the Board.
+devices/rules/specifications. All three run kinds send only their run options; the backend
+captures the saved Board.
 A run includes edits whose save was already started; later edits cannot rewrite the
 captured run snapshot.
 
@@ -816,8 +970,11 @@ empty `specResults` when generation emitted no specifications, or with
 emitted property; do not present either case as a property violation or as "all
 specifications satisfied".
 
-Verification requests (`verify` and `verifyAsync`) must include at least one specification.
-Simulation remains the no-spec workflow.
+`verify` and `verifyAsync` require a saved board with at least one specification.
+Simulation remains the no-spec workflow. Both submit run parameters only; the server
+captures the scene. Task and history comparison use the
+[authoritative model identity](../api/board.md#current-model-fingerprints); no browser-only
+scene signature determines whether a persisted result still describes the current Board.
 
 Contracts for board storage and board recommendation endpoints live in
 [../api/board.md](../api/board.md). Contracts for verification, traces, and fix live in
@@ -851,7 +1008,7 @@ Remote Markdown images render as alt text instead of being fetched automatically
 ## Simulation — `api/simulation.ts`
 
 Default-export object: `simulate`, `simulateAsync (→ Promise<SimulationTask>)`, `getTasks`,
-`getTask`, `getTaskProgress`, `cancelTask`, `simulateAndSave`, `getUserSimulations`,
+`getTask`, `cancelTask`, `simulateAndSave`, `getUserSimulations`,
 `getSimulation`, `deleteSimulation`. Same unwrap convention as `board.ts`.
 Like `verifyAsync`, `simulateAsync` resolves to the authoritative accepted task, whose
 server-generated `id` is used for polling. If the promise rejects with validation or
@@ -872,6 +1029,10 @@ confirmed, but do not discard the trajectory, claim it was saved, or retry autom
 Synchronous verification uses the same contract: preserve the formal conclusion while
 presenting its separate run-history persistence status. Offer automatic Fix only when the
 status is `SAVED` and the trace's `verificationTaskId` matches that status's `runId`.
+Every result/history Fix entry additionally requires an `UNCHANGED` comparison of the
+frozen model with current Board fingerprints. Loading and unavailable comparisons keep
+their explanation visible beside the result; they do not admit repair. Replay continues
+to use the frozen scene regardless of that comparison.
 For users, present simulation modes as "preview now" versus "save in background": plain
 `simulate` previews immediately and does not persist a trace, `simulateAndSave` previews
 and stores the synchronous trace, and `simulateAsync` stores the trace automatically when
@@ -907,8 +1068,9 @@ axios; **streaming does not**.
 the newest bounded page, and `ChatView` passes `nextBeforeId` back as `beforeId` when the
 user loads older messages. Older pages are prepended while preserving scroll position.
 If the initial history request fails, the selected session remains selected and the message
-composer stays disabled behind an explicit Retry action; the UI does not reinterpret a
-network error as an empty conversation. New-session clicks are single-flight, and a failed
+composer stays disabled behind one persistent error with its cause and an explicit Retry
+action; the UI does not reinterpret a failed read as an empty conversation or add a
+duplicate toast. New-session clicks are single-flight, and a failed
 or incomplete create response is shown without closing the mobile session list or detaching an
 existing live conversation. The current SSE transport is detached only after the destination
 session has been created successfully. A later explicit row selection made while creation is
@@ -1070,8 +1232,10 @@ Backend↔frontend field alignment worth noting:
   `key`, `relation`, `value`) and `Specification`
   (`aConditions`/`ifConditions`/`thenConditions`/`devices`) match the backend
   `SpecConditionDto` / `SpecificationDto` shape. For board storage, spec `deviceId`
-  fields are raw board node ids. For model requests, the request builder converts them
-  to normalized `varName` values. `deviceLabel` is only a display snapshot and is not
+  fields are raw board node ids. The backend converts them to normalized `varName`
+  values in its captured scene. The frontend compares returned model identities rather
+  than independently rebuilding a model fingerprint.
+  `deviceLabel` is only a display snapshot and is not
   used for resolution. See
   [../architecture/device-identity.md](../architecture/device-identity.md).
 - Spec `formula` and `devices[]` are derived display caches, not authority. Manual
@@ -1080,26 +1244,24 @@ Backend↔frontend field alignment worth noting:
   `buildSpecFormula(spec, { nodes, deviceTemplates })` so the preview mirrors NuSMV
   state tuples, environment variables, and trust/privacy resolution. `board.ts`
   `toBackendSpecificationWriteDto` strips `templateLabel`, `formula`, `devices[]`, and
-  condition display/UI fields from targeted and batch writes. Model requests likewise
-  submit structured conditions as authority; only a run result's checked expression says
-  what the checker actually evaluated.
+  condition display/UI fields from targeted and batch writes. Run requests submit options
+  only; the backend captures those persisted structured conditions. Only a run result's
+  checked expression says what the checker actually evaluated.
 - `types/verify.ts` holds `VerificationRequest`, `VerificationResult`,
   `VerificationTask`, generation warning counts, and the trace types.
 - `types/fix.ts` holds fix-related types.
 - **Runtime option lists** (`relationOperators`, `targetTypes`, `specTemplateDetails`)
   live only in `assets/config/specTemplates.ts` — that is the single source components
   import. Do not reintroduce copies in `types/spec.ts`.
-- **Known intentional parallelism**: `types/simulation.ts` (`SimulationState` /
-  `SimulationDevice` / `SimulationVariable` / `SimulationTrustPrivacy`) and the
-  `types/verify.ts` trace types both mirror the backend `TraceStateDto` tree. They are
-  kept as two near-identical trees on purpose (verification vs simulation consumers);
-  this is deliberate parallelism, not accidental duplication. They are **not fully
-  isomorphic** — e.g. `TraceTrustPrivacy.trust` is `boolean | null` and `privacy` is
-  required (closely mirroring backend `TraceTrustPrivacyDto`: `Boolean trust`, `String
-  privacy`), whereas `SimulationTrustPrivacy` uses the looser `trust?: boolean` /
-  `privacy?: string`. When a **backend field** changes, keep the shared shape aligned on
-  both sides; but each side may keep its own optionality/nullability to suit its
-  consumers.
+- Simulation, verification, and exploration use the shared `TraceState` tree in
+  `types/verify.ts`, including `TraceVariable.observed` and nullable security labels.
+  Their result and evidence types remain distinct. `board/simulationResult.ts` adapts a
+  saved trajectory for playback and projects its history summary without dropping artifact
+  availability, frozen context, or the original initiator and timestamp.
+- Live Board responses and frozen playback rules share `RuleDto` in `types/rule.ts`.
+  `RuleForm` remains an editable draft with string UI identities and source/target fields.
+  Complete run results are validated at the API boundary; presentation uses their supplied
+  outcomes, omission counts, and step counts without deriving replacements from logs or traces.
 
 When a backend DTO changes, update the corresponding `types/*.ts` and this guide in
 the same PR (see [../../CONTRIBUTING.md](../../CONTRIBUTING.md)).

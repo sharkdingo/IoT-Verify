@@ -27,7 +27,7 @@ import java.util.List;
 @AllArgsConstructor
 @Builder
 @EqualsAndHashCode(onlyExplicitlyIncluded = true)
-public class VerificationTaskPo implements TaskView {
+public class VerificationTaskPo implements TaskView, VerificationResultView {
 
     public enum TaskStatus {
         PENDING, RUNNING, COMPLETED, FAILED, CANCELLED
@@ -83,6 +83,14 @@ public class VerificationTaskPo implements TaskView {
     @Builder.Default
     private Boolean enablePrivacy = false;
 
+    @Column(name = "request_json", columnDefinition = "JSON")
+    @JsonIgnore
+    private String requestJson;
+
+    @Column(name = "template_snapshots_json", columnDefinition = "JSON")
+    @JsonIgnore
+    private String templateSnapshotsJson;
+
     @Column(name = "model_snapshot_json", columnDefinition = "TEXT")
     @JsonIgnore
     private String modelSnapshotJson;
@@ -119,14 +127,8 @@ public class VerificationTaskPo implements TaskView {
     private String nusmvOutput;
 
     /**
-     * The exact SMV model this run checked.
-     *
-     * <p>Also stored per counterexample on {@link TracePo}, but that is not a duplicate that can
-     * disagree — it is the same model, and the trace copy is what makes a counterexample
-     * self-contained after its run is deleted. This copy exists because a run where every
-     * specification holds produces no counterexample at all, so a trace-keyed download left the model
-     * of a *passing* run unreachable — the one case where a reader most wants to confirm what was
-     * actually proved.
+     * The exact checked model, retained for run downloads even when verification produces no trace.
+     * The run owns this model; deleting a run also deletes its traces.
      */
     @Column(name = "smv_model_content", columnDefinition = "TEXT")
     private String smvModelContent;
@@ -148,6 +150,12 @@ public class VerificationTaskPo implements TaskView {
     @Column(name = "lease_expires_at")
     @JsonIgnore
     private LocalDateTime leaseExpiresAt;
+
+    @Override
+    @JsonIgnore
+    public Boolean getHasSmvModel() {
+        return smvModelContent != null && !smvModelContent.isBlank();
+    }
 
     @Override
     public boolean isTerminalStatus() {

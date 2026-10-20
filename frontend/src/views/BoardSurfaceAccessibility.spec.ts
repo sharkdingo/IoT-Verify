@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import postcss from 'postcss'
 
 const currentDirectory = dirname(fileURLToPath(import.meta.url))
 const boardSource = readFileSync(resolve(currentDirectory, 'Board.vue'), 'utf8')
@@ -86,25 +87,7 @@ describe('Board surface accessibility contracts', () => {
     expect(narrowBackground).toContain(':inert="showNarrowPanelScrim ? true : undefined"')
     expect(narrowBackground).toContain(':aria-hidden="showNarrowPanelScrim ? \'true\' : undefined"')
 
-    // The two assertions that used to sit here pinned class-keyed `!important` remaps for
-    // `.bg-amber-100` and `.text-amber-950` inside the board panels. Those rules existed only because
-    // components declared raw hues that dark theme then had to rewrite; with every component on
-    // theme-aware roles the selectors could never match, so they were deleted along with the rest of
-    // that block. The property they were protecting — panel status colours stay legible in dark — is
-    // now owned by the roles and enforced in `styles/__tests__/semanticColourOwnership.spec.ts`.
     expect(boardCss).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*\.board-side-panel[\s\S]*\.animate-ping/)
-
-    // The result dialogs' status colours come from theme-aware role classes, so no class-keyed
-    // override is needed to make them legible in dark. This used to assert the overrides themselves —
-    // 28 `!important` selectors and their exact hex values — which made the test a copy of the CSS: it
-    // failed on a change that improved the very thing it was protecting. What matters is the property,
-    // so assert that: the roles are used, and the per-theme rewriting is gone.
-    const resultDialogTheme = boardCss.slice(
-      boardCss.indexOf('.dark .board-result-dialog-surface'),
-      boardCss.indexOf('.iot-board .modern-panel')
-    )
-    expect(resultDialogTheme).not.toMatch(/\.text-(red|amber|green|emerald|indigo|violet|fuchsia|orange|cyan)-\d{3}/)
-    expect(resultDialogTheme).not.toContain('.iot-board')
 
     // The verdict decision table maps each outcome to a role, never to a hue ramp. The window starts at the
     // tone helper because the role class names are now built there from one tone name per outcome, rather than
@@ -123,58 +106,31 @@ describe('Board surface accessibility contracts', () => {
     )
     expect(verificationResultStatus).not.toContain('bg-gradient-to-r')
 
-    expect(boardCss).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*\.board-result-dialog-surface,\s*\.board-result-dialog-surface \*/)
-    expect(boardCss).not.toContain('.iot-board .board-result-dialog-surface')
+    const reducedMotion = new Map<string, Record<string, string>>()
+    postcss.parse(boardCss).walkAtRules('media', media => {
+      if (media.params !== '(prefers-reduced-motion: reduce)') return
+      media.walkRules(rule => {
+        const values: Record<string, string> = {}
+        rule.walkDecls(decl => { values[decl.prop] = decl.value })
+        for (const selector of rule.selectors) reducedMotion.set(selector, values)
+      })
+    })
+    for (const selector of ['.iot-dialog', '.iot-dialog *']) {
+      expect(reducedMotion.get(selector), selector).toMatchObject({
+        'scroll-behavior': 'auto',
+        'transition-delay': '0ms',
+        'transition-duration': '0.01ms'
+      })
+    }
   })
 
-  it('keeps the playback change inspector beside the timeline in short landscape viewports', () => {
-    expect(boardSource).toContain("'has-playback-change-popover': showPlaybackChangePopover")
-
-    const shortLandscapePlayback = boardCss.slice(
-      boardCss.indexOf('A short landscape viewport cannot stack the change inspector'),
-      boardCss.indexOf('/* ==========', boardCss.indexOf('A short landscape viewport cannot stack the change inspector'))
-    )
-    expect(shortLandscapePlayback).toContain('@media (min-width: 640px) and (max-height: 599.98px)')
-    expect(shortLandscapePlayback).toContain('.iot-board.has-playback-change-popover .board-playback-change-popover')
-    expect(shortLandscapePlayback).toContain('width: min(22rem, 42vw)')
-    /*
-     * The timeline half is keyed off the host's own attribute, not off `.iot-board.has-…`.
-     *
-     * This assertion used to require the descendant form — and the comment below already recorded why that
-     * cannot work: the hosts are *siblings* of `.iot-board`. So this test pinned a selector that matched
-     * nothing, and the block delivered half its contract. The popover half *is* inside the board, so it
-     * narrowed to 42vw on cue while the timeline kept the full corridor: the surface that gives away space
-     * obeyed, the surface that was supposed to take it did not, and on a short landscape viewport the two
-     * overlapped anyway. `boardShellStyle` established the pattern of mirroring board state onto these
-     * hosts; the attribute is the same channel, applied by both hosts (Board.vue's trace bar and
-     * SimulationTimeline's, which already receives `changePanelVisible`).
-     */
-    expect(shortLandscapePlayback, 'the timeline yields via an attribute the host can actually match')
-      .toContain(".board-timeline-host[data-playback-change-popover='true']")
-    expect(shortLandscapePlayback, 'and not via a board descendant selector, which reaches no host')
-      .not.toContain('.iot-board.has-playback-change-popover .board-timeline-host')
-    expect(boardSource, 'the trace host publishes the state the rule reads')
-      .toContain(':data-playback-change-popover="String(showPlaybackChangePopover)"')
-    expect(
-      readFileSync(resolve(currentDirectory, '../components/SimulationTimeline.vue'), 'utf8'),
-      'and so does the simulation host, whose bar shares the rule'
-    ).toContain(':data-playback-change-popover="String(changePanelVisible === true)"')
-    /*
-     * The contract is the geometry — the timeline yields the inspector's width plus a gap on each side.
-     *
-     * Asserted without the fallback that used to sit inside the `var()`. The reason recorded here was **wrong**:
-     * it claimed `--board-floating-gap` is declared at `:root`, so `, 1rem` could never be reached. It is
-     * declared on `.iot-board` (`board.css:557`), and the two timeline hosts are *siblings* of that element, not
-     * descendants — so inside them the variable did not resolve, `calc()` became invalid, and `left`/`right` fell
-     * back to `auto`. A fixed box with both set to `auto` shrink-wraps at its static position: the trace overlay
-     * sat flush against x=0 with the whole right side of the screen empty, and on a 101-state trace the
-     * shrink-wrap reached 3258px and pushed the play button off-screen at 1440x900.
-     *
-     * The fallback was load-bearing for exactly these two elements, and removing it is what exposed that. The fix
-     * was not to restore it — `boardShellStyle` now injects the variable onto the hosts, so they are positioned by
-     * values they can actually see, and `boardDockGeometry.spec.ts` pins the two readers together.
-     */
-    expect(shortLandscapePlayback).toContain('right: calc(min(22rem, 42vw) + (var(--board-floating-gap) * 2))')
+  it('keeps changes inside the same terminal in every viewport', () => {
+    expect(boardSource).not.toContain('showPlaybackChangePopover')
+    expect(boardCss).not.toContain('board-playback-change-popover')
+    const terminal = readFileSync(resolve(currentDirectory, '../components/PlaybackTerminal.vue'), 'utf8')
+    expect(terminal).toContain('role="tablist"')
+    expect(terminal).toContain('<slot name="changes" />')
+    expect(boardCss).toContain('.playback-terminal__body')
   })
 
   it('pairs disabled formal-run controls with visible reasons', () => {
@@ -183,7 +139,7 @@ describe('Board surface accessibility contracts', () => {
         boardSource.indexOf(`data-testid="run-${kind}"`) - 150,
         boardSource.indexOf(`data-testid="${kind}-run-blocked-reason"`) + 350
       )
-      expect(button).toContain(`:aria-describedby="${kind}RunBlockedReason`)
+      expect(button).toContain(`:aria-describedby="${kind}RunBlockedDescriptionId"`)
       expect(button).toContain(`id="${kind}-run-blocked-reason"`)
       expect(button).toContain(`{{ ${kind}RunBlockedReason }}`)
     }

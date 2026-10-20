@@ -6,7 +6,7 @@ scenario into NuSMV. Request and response field tables live in
 [spec-templates.md](spec-templates.md); identity rules live in
 [device-identity.md](device-identity.md).
 
-Verified against code on 2026-07-31. Primary sources:
+Verified against code on 2026-10-18. Primary sources:
 `SmvGenerator`, `DeviceSmvDataFactory`, `SmvModelValidator`,
 `SmvDeviceModuleBuilder`, `SmvMainModuleBuilder`, `SmvSpecificationBuilder`, and
 `SmvTraceParser`, `NusmvExecutor`, and `NusmvTempArtifactCleaner`.
@@ -77,7 +77,7 @@ a NuSMV probe generation. Invalid templates are rejected, not partially imported
 | `InternalVariables[].IsInside=true` | Device-local variable, emitted as `device.variable` |
 | `InternalVariables[].IsInside=false` | Shared environment value, stored once in the board environment pool and emitted internally as `a_<name>` |
 | `InternalVariables[].Reads=true` | This device reads the shared value: it gets a `device.name := a_name` read mirror and its rules/specs may use the value as a condition source |
-| `InternalVariables[].Reads=false` | This device only *affects* the shared value: it contributes the domain and its declared effect, but gets no read mirror and no rule/spec source capability |
+| `InternalVariables[].Reads=false` | This device only *affects* the shared value: it contributes the domain and its declared effect, but gets no read mirror or value-condition source capability. Source and sensitivity labels remain specification subjects; see [shared value semantics](shared-value-semantics.md#4-capabilities-read-and-affect) |
 | `ImpactedVariables[]` | Shared environment value the device may change; this declares a modeled effect, not a modeled read or any authorization |
 | `FalsifiableWhenCompromised=true` | The compromise model may replace this reported value with any value in its declared domain and marks its trust label untrusted |
 
@@ -125,6 +125,11 @@ being in the state rather than entering it — so step 0 cannot contradict itsel
 state declares nothing does the template default (first enum literal, lower bound) apply, and a
 `Transitions` assignment on the same variable disqualifies the derivation, because transition branches
 precede the state branches in the same `case` and therefore override what the state declares.
+
+`DeviceManifestModes.localInitialValue` owns this missing-value derivation for Board
+creation, formal model generation, and bounded exploration. Omitted local runtime
+overrides use it; the explorer still rejects present null, blank, or out-of-domain
+values rather than replacing them with defaults.
 
 The guarantee is about step 0, not about every step. The state branches read the **unprimed** mode inside
 `next()`, so after a step in which the mode changes the variable still carries the value the previous
@@ -566,6 +571,16 @@ emit internal `param_*`/`lambda_*` frozen variables. Public fix requests use sta
 `targetId`/`adjustmentId`; users and AI tools do not submit those generated names or
 rule/condition indexes.
 
+An internal deterministic condition probe supplies fixed lambda values through
+`ParameterizationConfig.fixedConditionLambdas`. The main builder rejects unknown keys
+and null values, emits the fixed switches as `DEFINE` constants, and folds the corresponding guarded
+clauses to the validated original expression or `TRUE`. Constants also simplify learned
+exclusions before decision-diagram construction; constraining symbolic switches with `INVAR`
+left those exclusions exponentially expensive. Free switches and candidate values remain
+`FROZENVAR`s, and the constants are reported in traces for complete witness extraction.
+An empty fixed map retains symbolic guards;
+search ordering and completeness are owned by [auto-fix.md](auto-fix.md#strategy-2--condition-adjustment-conditionadjuststrategy).
+
 ### What a run costs
 
 **One run is one NuSMV process over one model file holding every requested property, under a
@@ -600,10 +615,11 @@ rather than workarounds:
   for variables whose independent evolution is not what the scene demonstrates. Writers still
   change it; only autonomous drift stops.
 
-Specification count is close to free while the state space is small and expensive once it is
+Specification count is cheap while the state space is small and expensive once it is
 large, because each property is its own fixpoint over that space and only reachability is
-shared. Model construction costs nothing measurable: NuSMV does no work until it checks a
-property. Attack modelling multiplies the cost again — the compromised-point booleans and the
+shared. Java model rendering and solver execution have separate time and allocation costs;
+measure both rather than treating model construction as free. Attack modelling multiplies
+the solving cost again — the compromised-point booleans and the
 budget invariant add non-deterministic bits independently of the budget *number*, so budget 1
 and budget 3 cost about the same and both cost far more than an attack-free run.
 
@@ -614,6 +630,23 @@ bounded and does not inherit these numbers ([fuzzing flow](fuzzing-flow.md)).
 
 Concrete second-counts are machine-specific and deliberately absent here; measure on the
 target host when the answer matters.
+
+### Java generation and trace reconstruction
+
+Each main-module build groups rules by their resolved target once and computes the selected
+first-match branches once per target and mode. State transitions, trust/privacy transitions,
+and execution probes reuse those branches. The branch index belongs to that single build;
+later requests and parameterized builds recompute it from their own inputs and warning context.
+This removes repeated guard construction without changing priority, attack delivery guards,
+parameter choices, or generated assignments.
+
+Trace parsing indexes devices within the current delta state while keeping first-encounter
+order in the returned list. Device lookup for `A` assignments and `D` devices therefore changes
+from `O(A * D)` list scans to expected `O(A)` lookups with an `O(D)` index. The index is cleared
+at each state boundary; complete state reconstruction still copies devices, variables, and
+labels so updating a later state cannot mutate an earlier one. Necessary token-prefix checks
+avoid regex work on unrelated lines; the existing patterns still decide which lines match,
+including state headers, loop markers, and environment values containing a dot.
 
 ## Execution artifacts and output bounds
 

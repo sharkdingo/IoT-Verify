@@ -1,6 +1,7 @@
 <script setup lang="ts">
+import FieldSelect from '@/components/common/FieldSelect.vue'
 import HintTooltip from '@/components/common/HintTooltip.vue'
-import { ref, reactive, computed, watch } from 'vue'
+import { ref, reactive, computed, watch, onUnmounted } from 'vue'
 import { COLLAPSED_PANEL_RAIL_CSS } from '@/constants/boardLayout'
 import type { DeviceNode } from '../types/node'
 import type { DeviceTemplate, InternalVariable, WorkingState } from '../types/device'
@@ -12,7 +13,8 @@ import type { RuleForm } from '../types/rule'
 import type { Specification } from '../types/spec'
 import { specTemplateDetails } from '../assets/config/specTemplates'
 import { useI18n } from 'vue-i18n'
-import { buildSpecFormula } from '@/utils/spec'
+import { buildSpecFormulaPreview } from '@/utils/spec'
+import { describeSpecification, presentRule } from '@/utils/modelPresentation'
 import { verdictVariableSourceKeys } from '@/views/board/verdictVariableSource'
 import {
   canonicalNaturalChangeRate,
@@ -22,16 +24,20 @@ import {
 import {
   getTemplateVariableDefaultValue,
   templateVariableHasEnumValues,
-  templateVariableUsesNumericBounds
+  templateVariableUsesNumericBounds,
+  validateTemplateVariableValue
 } from '@/utils/deviceRuntime'
+import FailureDetails from '@/components/FailureDetails.vue'
+import type { ApiErrorDetails } from '@/utils/userMessage'
+import { useAuth } from '@/stores/auth'
 import { formatBuiltInModelToken } from '@/utils/modelTokenDisplay'
 import { hasModeledStateMachine, resolveEffectiveNodeState } from '@/utils/canvas/nodeState'
 import InfoTooltip from '@/components/common/InfoTooltip.vue'
 import { useRovingTablist } from '@/composables/useRovingTablist'
 import { notifyBlocked } from '@/utils/feedback'
-import { normalizeModelRelation } from '@/utils/modelRequest'
 
 const { t, te } = useI18n()
+const { getToken } = useAuth()
 
 // Props
 interface Props {
@@ -58,6 +64,7 @@ interface Props {
    * banner disambiguates it, but the empty state should not assert something it does not know.
    */
   dataUnavailable?: boolean
+  dataLoading?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -67,12 +74,19 @@ const props = withDefaults(defineProps<Props>(), {
   rules: () => [],
   specifications: () => [],
   width: 320,
+  // Vue otherwise casts an absent Boolean prop to false and treats it as controlled.
+  collapsed: undefined,
   readOnly: false,
   readOnlyMessage: '',
   environmentSaving: false,
   rulesReordering: false,
-  dataUnavailable: false
+  dataUnavailable: false,
+  dataLoading: false
 })
+
+const emptyDataStatusKey = computed(() => props.dataUnavailable
+  ? 'app.boardDataUnavailableShort'
+  : props.dataLoading ? 'app.boardSnapshotLoading' : null)
 
 const ensureWritable = (): boolean => {
   if (!props.readOnly) return true
@@ -85,9 +99,9 @@ const mutationTitle = (fallback: string): string =>
 
 // Panel state
 const localCollapsed = ref(typeof window !== 'undefined' && window.innerWidth < 768)
-const environmentPoolExpanded = ref(false)
 const expandedEnvironmentVariables = ref<Set<string>>(new Set())
-type InspectorSection = 'devices' | 'rules' | 'specs'
+const panelBody = ref<HTMLElement | null>(null)
+type InspectorSection = 'devices' | 'rules' | 'specs' | 'environment'
 
 const isEnvironmentVariableExpanded = (name: string) =>
   expandedEnvironmentVariables.value.has(name)
@@ -103,54 +117,25 @@ const toggleEnvironmentVariable = (name: string) => {
 }
 
 const localActiveSection = ref<InspectorSection>('devices')
-const sectionExpanded = reactive<Record<InspectorSection, boolean>>({
-  devices: true,
-  rules: true,
-  specs: true
-})
 const sectionSearch = reactive<Record<InspectorSection, string>>({
-  devices: '',
-  rules: '',
-  specs: ''
+  devices: '', rules: '', specs: '', environment: ''
 })
-
-// 防抖的搜索查询，减少重新计算频率
 const debouncedSectionSearch = reactive<Record<InspectorSection, string>>({
-  devices: '',
-  rules: '',
-  specs: ''
+  devices: '', rules: '', specs: '', environment: ''
 })
-
-let searchDebounceTimers: Record<InspectorSection, ReturnType<typeof setTimeout> | null> = {
-  devices: null,
-  rules: null,
-  specs: null
+const searchDebounceTimers: Partial<Record<InspectorSection, ReturnType<typeof setTimeout>>> = {}
+for (const section of ['devices', 'rules', 'specs', 'environment'] as const) {
+  watch(() => sectionSearch[section], value => {
+    clearTimeout(searchDebounceTimers[section])
+    searchDebounceTimers[section] = setTimeout(() => {
+      debouncedSectionSearch[section] = value
+    }, 200)
+  })
 }
-
-// 监听搜索输入并应用防抖
-watch(() => sectionSearch.devices, (newValue) => {
-  if (searchDebounceTimers.devices) clearTimeout(searchDebounceTimers.devices)
-  searchDebounceTimers.devices = setTimeout(() => {
-    debouncedSectionSearch.devices = newValue
-  }, 200)
-})
-
-watch(() => sectionSearch.rules, (newValue) => {
-  if (searchDebounceTimers.rules) clearTimeout(searchDebounceTimers.rules)
-  searchDebounceTimers.rules = setTimeout(() => {
-    debouncedSectionSearch.rules = newValue
-  }, 200)
-})
-
-watch(() => sectionSearch.specs, (newValue) => {
-  if (searchDebounceTimers.specs) clearTimeout(searchDebounceTimers.specs)
-  searchDebounceTimers.specs = setTimeout(() => {
-    debouncedSectionSearch.specs = newValue
-  }, 200)
-})
+onUnmounted(() => Object.values(searchDebounceTimers).forEach(clearTimeout))
 
 const isInspectorSection = (value?: string): value is InspectorSection =>
-  value === 'devices' || value === 'rules' || value === 'specs'
+  value === 'devices' || value === 'rules' || value === 'specs' || value === 'environment'
 
 // Emits
 const emit = defineEmits<{
@@ -161,7 +146,7 @@ const emit = defineEmits<{
   'open-rule-builder': []
   'open-control-section': [section: 'devices' | 'rules' | 'specs']
   'device-click': [deviceId: string]
-  'save-environment': [variables: EnvironmentVariableUpdateRequest[]]
+  'save-environment': [variables: EnvironmentVariableUpdateRequest[], complete: (saved: boolean, failure?: ApiErrorDetails) => void]
   'update:collapsed': [value: boolean]
   'update:active-section': [value: InspectorSection]
 }>()
@@ -179,21 +164,6 @@ const resolvedPanelWidth = computed(() =>
 
 const panelWidth = computed(() => `${resolvedPanelWidth.value}px`)
 
-/**
- * Whether a tab can show its icon without squeezing its label.
- *
- * Derived from the panel's own width rather than the viewport, because this panel is resizable
- * (240–520px) and a viewport query would hide the icon on a wide screen with a narrow panel and show
- * it on a narrow screen with a wide one — both wrong.
- *
- * The arithmetic, for one of three `grid-cols-3` tabs: the panel spends 32px on its own padding and
- * 8px on the tablist's, leaving `(width - 40) / 3` per tab; each tab spends 16px on `px-2`, 12px on two
- * gaps and about 20px on the count badge. The widest label ("Devices" at 43px, "规则" narrower) needs
- * roughly 48px of comfortable room, so the icon's 14px only fits from about 370px up. Below that the
- * label had 28px and read as "De…", which is worse than no icon.
- */
-const tabIconsFit = computed(() => resolvedPanelWidth.value >= 370)
-
 const activeSection = computed<InspectorSection>({
   // `activeSection` is optional: when a parent controls it, the prop is authoritative;
   // when it is absent the panel owns its own selection. Without this the uncontrolled
@@ -204,6 +174,10 @@ const activeSection = computed<InspectorSection>({
     emit('update:active-section', value)
   }
 })
+
+watch(activeSection, () => {
+  if (panelBody.value) panelBody.value.scrollTop = 0
+}, { flush: 'post' })
 
 // Convert authoritative device nodes to display format.
 const displayDevices = computed(() => {
@@ -500,6 +474,8 @@ const environmentVariables = computed(() => {
       const privacy = normalizePrivacy(saved?.privacy || variable.definition.Privacy)
       return {
         ...variable,
+        readers: variable.sources.filter(source => source.role === 'read'),
+        writers: variable.sources.filter(source => source.role === 'impact'),
         displayName: variable.bundled ? formatModelToken(variable.name) : variable.name,
         // No "mixed ranges" fallback: two declarations that render different ranges necessarily differ
         // in domain shape or bounds, which `environmentDefinitionIncompatibility` already reports above
@@ -563,6 +539,38 @@ const getEnvironmentSourceTitle = (source: EnvironmentSource) =>
   `${source.role === 'impact' ? t('app.affectsEnvironment') : t('app.readsEnvironment')}: ${source.label}`
 
 type EnvironmentVariableEdit = Partial<Record<'value' | 'trust' | 'privacy', string>>
+const environmentEdits = reactive<Record<string, { value?: string, failure?: ApiErrorDetails }>>({})
+let environmentEditorActive = true
+onUnmounted(() => { environmentEditorActive = false })
+watch(() => getToken(), () => {
+  for (const name of Object.keys(environmentEdits)) delete environmentEdits[name]
+})
+watch(environmentVariables, variables => {
+  for (const name of Object.keys(environmentEdits)) {
+    const variable = variables.find(item => item.name === name)
+    if (!variable || (environmentEdits[name].value !== undefined && variable.value === environmentEdits[name].value)) {
+      delete environmentEdits[name]
+    }
+  }
+})
+
+const editEnvironmentValue = (name: string, value: string) => {
+  environmentEdits[name] = { value }
+}
+const environmentValueFailures = computed(() => Object.fromEntries(environmentVariables.value.map(variable => {
+  const edit = environmentEdits[variable.name]
+  const reason = edit?.value === undefined ? '' : !edit.value.trim() ? t('app.variableValueRequired')
+    : validateTemplateVariableValue(variable.definition, edit.value, t)
+  return [variable.name, reason ? { cause: reason, details: [], fields: {} } : edit?.failure]
+})))
+
+// Keep the focused field's diagnostic visible without moving keyboard focus.
+watch(environmentValueFailures, () => {
+  const field = document.activeElement
+  if (!panelBody.value?.contains(field) || !field?.matches('[aria-invalid="true"]')) return
+  field.closest('label')?.querySelector<HTMLElement>('[role="alert"]')
+    ?.scrollIntoView({ block: 'nearest' })
+}, { flush: 'post' })
 
 const updateEnvironmentVariable = (
   name: string,
@@ -571,6 +579,14 @@ const updateEnvironmentVariable = (
   if (!ensureWritable()) return
   const displayed = environmentVariables.value.find(variable => variable.name === name)
   if (!displayed?.editable) return
+  if (patch.value !== undefined) {
+    editEnvironmentValue(name, patch.value)
+    const reason = !patch.value.trim() ? t('app.variableValueRequired')
+      : validateTemplateVariableValue(displayed.definition, patch.value, t)
+    if (reason) {
+      return
+    }
+  }
   const saved = environmentPoolByName.value.get(normalizeLookupName(name))
   const authoritativeValue = typeof saved?.value === 'string' ? saved.value.trim() : ''
   if (!authoritativeValue) return
@@ -588,7 +604,14 @@ const updateEnvironmentVariable = (
       desired[field] = next
     }
   }
-  emit('save-environment', [{ name, expected, desired }])
+  environmentEdits[name] = { value: environmentEdits[name]?.value }
+  const edit = environmentEdits[name]
+  const requestToken = getToken()
+  emit('save-environment', [{ name, expected, desired }], (saved, failure) => {
+    if (!environmentEditorActive || getToken() !== requestToken || environmentEdits[name] !== edit) return
+    if (saved && (patch.value !== undefined || edit.value === undefined)) delete environmentEdits[name]
+    else if (failure) edit.failure = failure
+  })
 }
 
 const eventValue = (event: Event) =>
@@ -596,36 +619,6 @@ const eventValue = (event: Event) =>
 
 const formatEnvironmentValue = (variable: EnvironmentGroup, value: string) =>
   variable.bundled ? formatModelToken(value) : value
-
-/**
- * A relation as a reading glyph, keyed on the canonical form rather than on an enum that never arrives.
- *
- * The map used to be keyed on `EQ`/`GTE`/`LTE`. Nothing persists those: `RuleBuilderDialog` authors symbol form
- * (`'>='`, `'in'`) and `BoardStorageServiceImpl` canonicalises to symbols on save, so every enum key was dead and
- * only the `|| relation` fallthrough ran — which is why this panel printed a raw `>=` while `FixResultDialog`
- * printed "Greater or equal" for the same condition. In a product where the condition text *is* the claim being
- * verified, three renderings of one operator is three chances to misread it.
- *
- * `normalizeModelRelation` already accepts both spellings and returns the symbol, so it goes in front and this
- * map only has to turn a symbol into its glyph.
- */
-const getRelationLabel = (relation: string): string => {
-  const canonical = normalizeModelRelation(relation) ?? relation
-  const glyphs: Record<string, string> = {
-    '=': '=',
-    '!=': '≠',
-    '>': '>',
-    '>=': '≥',
-    '<': '<',
-    '<=': '≤',
-    'in': '∈',
-    'not in': '∉'
-  }
-  return glyphs[canonical] || canonical
-}
-
-const hasConditionValue = (value: unknown) =>
-  value !== null && value !== undefined && value !== ''
 
 // 创建设备索引以优化查找性能
 const devicesById = computed(() => {
@@ -639,38 +632,23 @@ const devicesById = computed(() => {
 const resolveDevice = (ref?: string) =>
   ref ? devicesById.value.get(ref) : undefined
 
-const isValueBasedRuleSource = (sourceType?: string) =>
-  sourceType === 'variable' || sourceType === 'mode' || sourceType === 'state'
+const modelPresentationContext = () => ({
+  t,
+  resolveDevice,
+  formatToken: (id: string, value: unknown) => isBundledDevice(resolveDevice(id))
+    ? formatModelToken(value) : String(value ?? ''),
+  modeCount: (id: string) => {
+    const device = resolveDevice(id)
+    return device ? findTemplateForDevice(device)?.manifest.Modes?.length || 0 : 0
+  }
+})
 
 // Convert real rules to display format
 const displayRules = computed(() => {
   return props.rules.map((rule, index) => {
     const targetNode = resolveDevice(rule.toId)
     
-    // 构建更详细的源设备描述
-    const sourceDescriptions = rule.sources.map(s => {
-      const sourceNode = resolveDevice(s.fromId)
-      const localizeSource = isBundledDevice(sourceNode)
-      const sourceProperty = localizeSource ? formatModelToken(s.fromApi) : s.fromApi
-      const sourceValue = localizeSource ? formatModelToken(s.value) : s.value
-      let desc = `${sourceNode?.label || t('app.unknown')}`
-      
-      // 如果有 itemType、relation、value 信息，显示更完整
-      const sourceType = s.itemType
-      if (isValueBasedRuleSource(sourceType) && s.relation && hasConditionValue(s.value)) {
-        desc += ` ${sourceProperty} ${getRelationLabel(s.relation)} ${sourceValue}`
-      } else if (sourceType === 'api') {
-        desc += ` ${t('app.triggers')} ${sourceProperty}`
-      } else {
-        // 如果有 relation 和 value，也显示
-        if (s.relation && hasConditionValue(s.value)) {
-          desc += ` ${sourceProperty} ${getRelationLabel(s.relation)} ${sourceValue}`
-        } else {
-          desc += ` ${sourceProperty}`
-        }
-      }
-      return desc
-    })
+    const presentation = presentRule(rule, modelPresentationContext())
 
     return {
       originalId: rule.id, // 保留原始id用于删除操作
@@ -679,20 +657,11 @@ const displayRules = computed(() => {
       isLast: index === props.rules.length - 1,
       id: rule.id ? rule.id.replace('rule_', '') : 'unknown',
       name: rule.name || t('app.ruleFrom', { source: (rule.id ? rule.id.replace('rule_', '') : '').split('_')[1] || t('app.unknown') }),
-      description: t('app.ifThenDescription', {
-        source: sourceDescriptions.join(` ${t('app.and')} `),
-        target: targetNode?.label || t('app.unknown'),
-        action: isBundledDevice(targetNode)
-          ? formatModelToken(rule.toApi || t('app.notAvailableShort'))
-          : rule.toApi || t('app.notAvailableShort')
-      }),
-      status: t('app.active'),
-      color: 'blue' as const,
-      enabled: true, // Add enabled status
+      ...presentation,
       searchText: [
         rule.id,
         rule.name,
-        sourceDescriptions.join(' '),
+        presentation.conditions.join(' '),
         targetNode?.id,
         targetNode?.label,
         rule.toApi,
@@ -704,27 +673,6 @@ const displayRules = computed(() => {
   })
 })
 
-const getSpecificationDeviceInfo = (spec: Specification): string => {
-  const namedRefs = (spec.devices || [])
-    .map(device => device.deviceLabel || device.deviceId)
-    .filter(Boolean)
-
-  if (namedRefs.length > 0) {
-    return namedRefs.join(', ')
-  }
-
-  const conditionRefs = [
-    ...(spec.aConditions || []),
-    ...(spec.ifConditions || []),
-    ...(spec.thenConditions || [])
-  ]
-    .map(condition => condition.deviceLabel || condition.deviceId)
-    .filter(Boolean)
-
-  const uniqueRefs = Array.from(new Set(conditionRefs))
-  return uniqueRefs.length > 0 ? uniqueRefs.join(', ') : t('app.global')
-}
-
 // Convert real specifications to display format
 const displaySpecs = computed(() => {
   return props.specifications.map(spec => {
@@ -733,26 +681,24 @@ const displaySpecs = computed(() => {
       ? t(template.labelKey)
       : spec.templateLabel || template?.label || t('app.unknown')
 
-    const deviceInfo = ` (${getSpecificationDeviceInfo(spec)})`
+    const preview = buildSpecFormulaPreview(spec, { nodes: props.devices })
 
     return {
       id: spec.id,
-      name: `${specType}${deviceInfo}`,
-      formula: buildSpecFormula(spec, {
-        nodes: props.devices
-      }),
+      type: specType,
+      formula: preview.expression,
+      formulaKind: preview.kind,
+      description: describeSpecification(spec, modelPresentationContext()),
       // The formula alone renders the two readings as one differing token in a monospace string, and an
       // unrecorded one as a literal `<unresolved>`. This is the surface where a user scans their whole
       // specification set, so it names the reading in the same words the editor and verdict rows use.
       variableSourceLabels: verdictVariableSourceKeys(spec)
         .map(key => ({ key, label: t(key), unresolved: key === 'app.specVariableSourceUnresolvedShort' })),
-      status: t('app.active'),
       searchText: [
         spec.id,
         spec.templateId,
         spec.templateLabel,
         specType,
-        deviceInfo,
         ...(spec.devices || []).flatMap(device => [device.deviceId, device.deviceLabel, ...(device.selectedApis || [])]),
         ...(spec.aConditions || []).flatMap(condition => [condition.deviceId, condition.deviceLabel, condition.targetType, condition.propertyScope, condition.variableSource, condition.key, condition.relation, condition.value]),
         ...(spec.ifConditions || []).flatMap(condition => [condition.deviceId, condition.deviceLabel, condition.targetType, condition.propertyScope, condition.variableSource, condition.key, condition.relation, condition.value]),
@@ -779,42 +725,58 @@ const filteredRules = computed(() =>
 
 const filteredSpecs = computed(() =>
   displaySpecs.value.filter(spec =>
-    matchesEntitySearch([spec.id, spec.name, spec.formula, spec.searchText], debouncedSectionSearch.specs)
+    matchesEntitySearch([spec.id, spec.description, spec.formulaKind, spec.formula, spec.searchText], debouncedSectionSearch.specs)
   )
 )
 
-const sectionCounts = computed(() => ({
-  devices: { total: displayDevices.value.length, filtered: filteredDevices.value.length },
-  rules: { total: displayRules.value.length, filtered: filteredRules.value.length },
-  specs: { total: displaySpecs.value.length, filtered: filteredSpecs.value.length }
+const filteredEnvironmentVariables = computed(() =>
+  environmentVariables.value.filter(variable => matchesEntitySearch([
+    variable.name, variable.displayName, variable.rangeLabel, variable.valueLabel,
+    variable.trustLabel, variable.privacyLabel, ...variable.sources.map(source => source.label)
+  ], debouncedSectionSearch.environment))
+)
+
+// Tab totals do not need the descriptions and formulas of inactive inventories.
+const sectionTotals = computed(() => ({
+  devices: props.devices.length,
+  rules: props.rules.length,
+  specs: props.specifications.length,
+  environment: environmentVariables.value.length
 }))
+
+const filteredSectionCount = computed(() => {
+  switch (activeSection.value) {
+    case 'devices': return filteredDevices.value.length
+    case 'rules': return filteredRules.value.length
+    case 'specs': return filteredSpecs.value.length
+    case 'environment': return filteredEnvironmentVariables.value.length
+  }
+})
 
 const clearSectionSearch = (section: InspectorSection) => {
   sectionSearch[section] = ''
-}
-
-const toggleEntitySection = (section: InspectorSection) => {
-  sectionExpanded[section] = !sectionExpanded[section]
 }
 
 const inspectorTabs = computed(() => [
   {
     id: 'devices' as const,
     label: t('app.devicesTool'),
-    icon: 'devices',
-    count: sectionCounts.value.devices.total
+    count: sectionTotals.value.devices
   },
   {
     id: 'rules' as const,
     label: t('app.rulesTool'),
-    icon: 'rule',
-    count: sectionCounts.value.rules.total
+    count: sectionTotals.value.rules
   },
   {
     id: 'specs' as const,
-    label: t('app.specificationsTool'),
-    icon: 'fact_check',
-    count: sectionCounts.value.specs.total
+    label: t('app.specificationsShort'),
+    count: sectionTotals.value.specs
+  },
+  {
+    id: 'environment' as const,
+    label: t('app.environmentTool'),
+    count: sectionTotals.value.environment
   }
 ])
 
@@ -892,64 +854,50 @@ const syncFullTextTitle = (event: PointerEvent | FocusEvent) => {
 </script>
 
 <template>
-  <!-- Collapsed width comes from COLLAPSED_PANEL_RAIL_CSS, the same constant ControlCenter and Board.vue's
-       canvas-fit math read. It was a `3.5rem` literal in each of the two panels plus a `56` in Board.vue,
-       agreeing only by way of comments pointing at each other — and the CSS token that shared the job had
-       already drifted to 48px, which is what the rationale in the constant records. -->
   <aside
     data-testid="system-inspector"
-    class="absolute right-0 top-0 bottom-0 glass-panel board-side-panel z-40 flex flex-col overflow-hidden border-l transition-all duration-300 ease-in-out"
+    class="absolute right-0 top-0 bottom-0 glass-panel board-side-panel z-40 flex flex-col overflow-hidden border-l"
     :class="isCollapsed ? 'is-collapsed' : 'is-expanded'"
-    :aria-disabled="props.readOnly ? 'true' : undefined"
-    :style="{ width: isCollapsed ? COLLAPSED_PANEL_RAIL_CSS : panelWidth }"
+    :style="{ width: isCollapsed ? COLLAPSED_PANEL_RAIL_CSS : panelWidth, '--board-panel-expanded-width': panelWidth }"
     @pointerover="syncFullTextTitle"
     @focusin="syncFullTextTitle"
   >
     <div
-      class="board-panel-header relative overflow-hidden border-b"
-      :class="isCollapsed ? 'p-0.5' : 'p-4'"
+      class="board-panel-header border-b"
     >
-      <div v-if="!isCollapsed" class="flex items-center justify-between w-full">
-        <div class="flex min-w-0 items-center gap-3">
-          <HintTooltip :content="t('app.collapse')">
+      <div class="board-panel-heading">
+        <HintTooltip :content="t(isCollapsed ? 'app.expandPanel' : 'app.collapsePanel', { panel: t('app.systemInspector') })">
+          <span class="inline-flex shrink-0">
             <button
               type="button"
               @click="togglePanel"
-              class="board-panel-toggle inline-flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-lg board-text-muted transition-all hover:board-control-hover hover:board-text-strong"
-              :aria-label="t('app.collapse')"
+              class="board-panel-toggle"
+              data-testid="system-inspector-toggle"
+              :aria-label="t(isCollapsed ? 'app.expandPanel' : 'app.collapsePanel', { panel: t('app.systemInspector') })"
+              :aria-expanded="!isCollapsed"
             >
-              <span class="material-symbols-outlined text-base" aria-hidden="true">dock_to_left</span>
+              <span class="material-symbols-outlined" aria-hidden="true">{{ isCollapsed ? 'dock_to_left' : 'dock_to_right' }}</span>
             </button>
-          </HintTooltip>
-          <div class="p-2 board-surface-info rounded-lg shadow-sm">
-            <span class="material-symbols-outlined board-text-info">fact_check</span>
+          </span>
+        </HintTooltip>
+        <div v-if="!isCollapsed" class="board-panel-heading__identity">
+          <div class="board-panel-icon" aria-hidden="true">
+            <span class="material-symbols-outlined">fact_check</span>
           </div>
           <div class="min-w-0">
-            <h2 class="board-panel-title text-sm font-bold leading-none truncate" :data-full-text="t('app.systemInspector')">{{ t('app.systemInspector') }}</h2>
-            <p class="board-panel-subtitle text-[length:var(--iot-font-min)] font-medium mt-0.5 truncate" :data-full-text="t('app.currentBoardContent')">{{ t('app.currentBoardContent') }}</p>
+            <h2 class="board-panel-title" :data-full-text="t('app.systemInspector')">{{ t('app.systemInspector') }}</h2>
           </div>
         </div>
       </div>
-      <div v-else class="flex items-center justify-center">
-        <HintTooltip :content="t('app.expand')">
-          <button
-            type="button"
-            @click="togglePanel"
-            class="board-panel-toggle inline-flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-lg board-text-muted transition-all hover:board-control-hover hover:board-text-strong"
-            :aria-label="t('app.expand')"
-          >
-            <span class="material-symbols-outlined text-base" aria-hidden="true">dock_to_left</span>
-          </button>
-        </HintTooltip>
-      </div>
     </div>
 
+    <Transition name="board-panel-content" @before-leave="element => element.setAttribute('inert', '')">
     <div
       v-if="!isCollapsed"
-      class="board-panel-body flex-1 iot-scroll-region transition-all duration-300 p-4 space-y-4"
+      class="board-panel-tabs border-b"
     >
       <div
-        class="board-segmented grid grid-cols-3 gap-1 rounded-xl border p-1"
+        class="board-segmented board-section-tabs"
         role="tablist"
         :aria-label="t('app.currentBoardContent')"
       >
@@ -961,771 +909,428 @@ const syncFullTextTitle = (event: PointerEvent | FocusEvent) => {
           role="tab"
           :data-testid="`inspector-tab-${tab.id}`"
           :aria-selected="activeSection === tab.id"
+          :aria-label="tab.id === 'environment' ? t('app.environmentVariables') : tab.label"
           :aria-controls="activeSection === tab.id ? `inspector-panel-${tab.id}` : undefined"
           :tabindex="activeSection === tab.id ? 0 : -1"
           @click="activeSection = tab.id"
           @keydown="handleInspectorTabKeydown($event, tab.id)"
-          :class="[
-            // min-h-11: the tabs measured 33px, and a tab strip is a primary navigation target.
-            'min-w-0 min-h-11 rounded-lg px-2 py-2 text-[11px] font-bold transition-all flex items-center justify-start gap-1.5',
-            activeSection === tab.id
-              ? 'bg-[color:var(--accent-fill)] text-white shadow-sm'
-              : 'text-slate-500 hover:bg-white hover:text-slate-800'
-          ]"
+          class="board-section-tab board-section-tab--stacked"
         >
-          <!--
-            The icon is hidden below the width where the label fits beside it.
-
-            Budget in this 320px panel: three `grid-cols-3` tabs get ~96px each, and `px-2` (16px) plus
-            the icon (14px), two gaps (12px) and the count badge (~20px) left the label **28px** where
-            "Devices" needs 43px — so the tab that names the section rendered as "De…". The icon and the
-            label say the same thing, and only the label says it unambiguously, so the icon yields.
-            It is `aria-hidden` either way, so nothing is lost to assistive technology.
-          -->
-          <span v-if="tabIconsFit" class="material-symbols-outlined text-sm" aria-hidden="true">{{ tab.icon }}</span>
-          <span class="min-w-0 flex-1 truncate text-left" :data-full-text="tab.label">{{ tab.label }}</span>
-          <!--
-            The ACTIVE badge darkens its ground instead of lightening it.
-
-            Measured on a 12-device board: `bg-white/20 text-white` puts white text on the accent fill lightened by
-            20% white — **3.62:1**, under the 4.5 floor that applies because this text is 11px. Lightening a fill and
-            then writing white on it moves both sides toward each other, so `white/30` is worse still (3.02:1).
-            `black/20` darkens the same fill instead: **7.24:1**, and it reads as a recessed pill rather than a
-            washed-out one, which is also the more honest depth cue for a count sitting inside its tab.
-
-            The inactive badge measures 4.54:1 (`rgb(97,113,135)` on `rgb(241,245,249)`) and needed no change — I
-            changed it first on a class-name guess before measuring the computed colours, which is what identified the
-            active badge as the real offender.
-
-            It took a dense board to surface at all: the count is the whole point of the badge — how a reader knows a
-            section holds twelve devices without opening it — and with two devices the digit is easy to overlook.
-          -->
-          <span
-            class="shrink-0 rounded-full px-1.5 py-0.5 text-[length:var(--iot-font-min)] leading-none"
-            :class="activeSection === tab.id ? 'bg-black/20 text-white' : 'bg-slate-200 text-slate-600'"
-          >
-            {{ tab.count }}
+          <span class="board-section-tab__label" :data-full-text="tab.label">{{ tab.label }}</span>
+          <span class="board-section-tab__count">
+            {{ emptyDataStatusKey && tab.count === 0 ? '—' : tab.count }}
           </span>
         </button>
       </div>
+    </div>
 
-      <slot name="overview" />
-
-      <!-- Uses the shared warning role rather than raw amber utilities. The previous
-           `board-chip-warning` had no dark counterpart for the tint, so on a near-black ground it
-           composited into the "muddy brown/olive" surface two dark-theme reviews flagged as
-           looking like a light-theme panel carried over. The role is theme-aware. -->
-      <section
-        data-testid="environment-pool"
-        aria-labelledby="environment-pool-title"
-        class="board-surface-info rounded-xl p-3 shadow-sm"
-      >
-        <div class="mb-2 flex items-start gap-2">
-          <button
-            type="button"
-            data-testid="toggle-environment-pool"
-            class="flex min-w-0 flex-1 items-start justify-between gap-3 rounded-lg text-left transition-colors hover:bg-[color-mix(in_srgb,var(--warning)_10%,transparent)] focus:outline-none focus:ring-2 focus:ring-[color:var(--warning-border)]"
-            :aria-expanded="environmentPoolExpanded"
-            @click="environmentPoolExpanded = !environmentPoolExpanded"
-          >
-          <div class="min-w-0 p-1">
-            <div class="flex min-w-0 items-center gap-2">
-              <span class="material-symbols-outlined board-text-info text-base" aria-hidden="true">public</span>
-              <!--
-                `tracking-widest` on an all-caps heading pushed this 3px past its 167px row, so it
-                rendered as "ENVIRONMENT PO…" -- named in every visual review of the inspector. The
-                wide tracking bought nothing at this size; `tracking-wide` fits and still reads as a
-                section label. Colour comes from the warning role rather than raw amber utilities,
-                which had a light-only value for the icon.
-              -->
-              <!--
-                The id exists so the enclosing <section> can point at this heading. A bare <section> is an implicit
-                `region` landmark, and an unnamed region is invisible in a screen reader's landmark list — measured, it
-                was the one unnamed landmark on the board. Labelling by reference rather than with an aria-label keeps
-                one translated string instead of two that can drift apart.
-              -->
-              <h3 id="environment-pool-title" class="board-text-info truncate text-xs font-bold uppercase tracking-wide" :data-full-text="t('app.environmentPool')">
-                {{ t('app.environmentPool') }}
-              </h3>
-            </div>
-            <p v-if="environmentPoolExpanded" class="mt-1 text-[11px] font-medium leading-snug board-text-info">
-              {{ t('app.environmentPoolShortHint') }}
-            </p>
-            <div
-              v-else-if="environmentVariables.length > 0"
-              class="mt-1 flex max-w-full flex-wrap gap-1"
-              :title="environmentVariables.map(variable => variable.displayName).join(', ')"
-            >
-              <span
-                v-for="variable in environmentVariables.slice(0, 3)"
-                :key="variable.name"
-                class="max-w-[6.5rem] truncate board-chip-info rounded-full px-1.5 py-0.5 text-[length:var(--iot-font-min)] font-bold"
-              >
-                {{ variable.displayName }}
-              </span>
-              <span
-                v-if="environmentVariables.length > 3"
-                class="board-chip-info rounded-full px-1.5 py-0.5 text-[length:var(--iot-font-min)] font-bold"
-              >
-                +{{ environmentVariables.length - 3 }}
-              </span>
-            </div>
-          </div>
-          <span class="mt-1 inline-flex shrink-0 items-center gap-1 rounded-full board-chip-info px-2 py-0.5 text-[length:var(--iot-font-min)] font-bold board-text-info">
-            {{ environmentVariables.length }}
-            <span class="material-symbols-outlined text-sm" aria-hidden="true">
-              {{ environmentPoolExpanded ? 'expand_less' : 'expand_more' }}
+    </Transition>
+    <Transition name="board-panel-content" @before-leave="element => element.setAttribute('inert', '')">
+    <div v-if="!isCollapsed" ref="panelBody" class="board-panel-body flex-1 iot-scroll-region p-3 space-y-3">
+      <section v-if="activeSection === 'environment'" id="inspector-panel-environment" role="tabpanel"
+        aria-labelledby="inspector-tab-environment" data-testid="inspector-section-environment">
+        <section data-testid="environment-pool" aria-labelledby="environment-pool-title">
+          <div class="board-inventory-toolbar">
+            <h3 id="environment-pool-title" class="board-section-title">{{ t('app.environmentVariables') }}</h3>
+            <span class="board-caption board-text-muted board-inventory-count">{{ emptyDataStatusKey && !sectionTotals.environment ? '—' : `${filteredSectionCount}/${sectionTotals.environment}` }}</span>
+            <span class="board-inventory-help">
+              <InfoTooltip :text="t('app.environmentPoolHint')" :label="t('app.showHelpFor', { topic: t('app.environmentVariables') })"
+                placement="left" test-id="environment-pool-help" />
             </span>
-          </span>
-          </button>
-          <InfoTooltip
-            :text="t('app.environmentPoolHint')"
-            :label="t('app.showHelpFor', { topic: t('app.environmentPool') })"
-            placement="left"
-            test-id="environment-pool-help"
-          />
-        </div>
-
-        <div v-if="environmentPoolExpanded && environmentVariables.length > 0" class="space-y-2">
-          <article
-            v-for="variable in environmentVariables"
-            :key="variable.name"
-            class="rounded-lg border border-white/70 bg-white/85 p-2.5 shadow-sm dark:border-slate-700 dark:bg-slate-900/80"
-          >
-            <button
-              type="button"
-              class="flex w-full min-w-0 items-center justify-between gap-2 rounded-md p-1 text-left transition-colors hover:board-chip-info focus:outline-none focus:ring-2 focus:ring-[color:var(--accent-border)] dark:hover:bg-[color:var(--warning-surface)]"
-              :aria-expanded="isEnvironmentVariableExpanded(variable.name)"
-              @click="toggleEnvironmentVariable(variable.name)"
-            >
-              <span class="flex min-w-0 items-center gap-2">
-                <span class="material-symbols-outlined text-sm board-text-info" aria-hidden="true">
-                  {{ isEnvironmentVariableExpanded(variable.name) ? 'expand_less' : 'expand_more' }}
-                </span>
-                <span class="min-w-0">
-                  <span class="block truncate text-sm font-extrabold text-slate-800 dark:text-slate-100" :data-full-text="variable.displayName">
-                    {{ variable.displayName }}
-                  </span>
-                </span>
-              </span>
-              <span class="flex shrink-0 items-center gap-1.5">
-                <span class="max-w-[5.5rem] truncate rounded-full bg-slate-100 px-2 py-0.5 text-[length:var(--iot-font-min)] font-bold text-slate-500 dark:bg-slate-800 dark:text-slate-300" :data-full-text="variable.rangeLabel">
-                  {{ variable.rangeLabel }}
-                </span>
-                <span class="max-w-[4.5rem] truncate rounded-full board-chip-info px-2 py-0.5 text-[length:var(--iot-font-min)] font-bold board-text-info" :data-full-text="variable.valueLabel">
-                  {{ variable.valueLabel }}
-                </span>
-              </span>
+          </div>
+          <p v-if="environmentVariables.length" class="board-caption board-text-muted mb-2">{{ t('app.environmentInspectorHint') }}</p>
+        <label class="board-inventory-search relative block">
+          <span class="material-symbols-outlined pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-sm board-text-muted" aria-hidden="true">search</span>
+          <input v-model="sectionSearch.environment" data-testid="inspector-search-environment"
+            type="search" class="board-field board-field--clearable pl-8 pr-12"
+            :placeholder="t('app.searchEnvironmentVariables')" :aria-label="t('app.searchEnvironmentVariables')" />
+          <HintTooltip v-if="sectionSearch.environment" :content="t('app.clearSearch')">
+            <button type="button" class="board-field-clear" :aria-label="t('app.clearSearch')" @click="clearSectionSearch('environment')">
+              <span class="material-symbols-outlined text-sm" aria-hidden="true">close</span>
             </button>
-
-            <div v-if="isEnvironmentVariableExpanded(variable.name)" class="mt-2 space-y-2">
-              <div class="grid grid-cols-1 gap-2 text-[length:var(--iot-font-min)]">
-                <label class="min-w-0 rounded-md bg-slate-50 p-1.5 dark:bg-slate-800">
-                  <span class="block font-bold uppercase text-slate-500">{{ t('app.modelInitialValue') }}</span>
-                  <select
+          </HintTooltip>
+        </label>
+          <div class="board-inventory-list">
+            <article v-for="variable in filteredEnvironmentVariables" :key="variable.name"
+              :data-environment-name="variable.name" class="board-inventory-card">
+              <button type="button" class="board-inventory-open board-environment-summary"
+                :aria-expanded="isEnvironmentVariableExpanded(variable.name)"
+                :aria-controls="isEnvironmentVariableExpanded(variable.name) ? `environment-details-${encodeURIComponent(variable.name)}` : undefined"
+                @click="toggleEnvironmentVariable(variable.name)">
+                <span class="board-environment-summary__identity">
+                  <span class="board-section-title board-inventory-name" :data-full-text="variable.displayName">{{ variable.displayName }}</span>
+                  <span class="board-caption board-text-muted" :data-full-text="variable.rangeLabel">{{ t('app.range') }}: {{ variable.rangeLabel }}</span>
+                </span>
+                <span class="board-environment-summary__value">
+                  <span class="board-caption board-text-muted">{{ t('app.modelInitialValue') }}</span>
+                  <span class="board-section-title" :data-full-text="variable.valueLabel">{{ variable.valueLabel }}</span>
+                </span>
+                <span class="material-symbols-outlined board-inventory-chevron" aria-hidden="true">{{ isEnvironmentVariableExpanded(variable.name) ? 'expand_less' : 'expand_more' }}</span>
+              </button>
+              <div class="board-environment-labels board-caption board-text-muted">
+                <span>{{ variable.trustLabel }} · {{ variable.privacyLabel }}</span>
+                <span>{{ t('app.environmentParticipants', { readers: variable.readers.length, writers: variable.writers.length }) }}</span>
+              </div>
+              <div v-if="isEnvironmentVariableExpanded(variable.name)" :id="`environment-details-${encodeURIComponent(variable.name)}`"
+                class="board-environment-details">
+                <label class="min-w-0 block">
+                  <span class="board-form-label block">{{ t('app.modelInitialValue') }}</span>
+                  <FieldSelect
                     v-if="variable.enumValues.length > 0"
                     :data-testid="`environment-value-${variable.name}`"
-                    :value="variable.value"
+                    :value="environmentEdits[variable.name]?.value ?? variable.value"
                     :aria-label="`${variable.displayName} ${t('app.modelInitialValue')}`"
+                    :aria-invalid="environmentValueFailures[variable.name] ? 'true' : undefined"
+                    :aria-describedby="environmentValueFailures[variable.name] ? `environment-value-failure-${encodeURIComponent(variable.name)}` : undefined"
                     :disabled="props.readOnly || props.environmentSaving || !variable.editable"
                     :aria-busy="props.environmentSaving ? 'true' : undefined"
-                    class="mt-1 w-full rounded border border-slate-200 bg-white px-2 py-1 font-semibold text-slate-700 outline-none focus:border-[color:var(--accent-border)] disabled:cursor-wait disabled:opacity-60 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                    class="mt-1"
                     @change="updateEnvironmentVariable(variable.name, { value: eventValue($event) })"
                   >
                     <option v-for="option in variable.enumValues" :key="option" :value="option">
                       {{ formatEnvironmentValue(variable, option) }}
                     </option>
-                  </select>
+                  </FieldSelect>
                   <input
                     v-else
                     :data-testid="`environment-value-${variable.name}`"
                     :type="variable.lowerBound !== undefined || variable.upperBound !== undefined ? 'number' : 'text'"
                     :min="variable.lowerBound"
                     :max="variable.upperBound"
-                    :value="variable.value"
+                    :value="environmentEdits[variable.name]?.value ?? variable.value"
                     :title="variable.valueTitle"
                     :aria-label="`${variable.displayName} ${t('app.modelInitialValue')}`"
+                    :aria-invalid="environmentValueFailures[variable.name] ? 'true' : undefined"
+                    :aria-describedby="environmentValueFailures[variable.name] ? `environment-value-failure-${encodeURIComponent(variable.name)}` : undefined"
                     :disabled="props.readOnly || props.environmentSaving || !variable.editable"
                     :aria-busy="props.environmentSaving ? 'true' : undefined"
-                    class="mt-1 w-full rounded border border-slate-200 bg-white px-2 py-1 font-semibold text-slate-700 outline-none focus:border-[color:var(--accent-border)] disabled:cursor-wait disabled:opacity-60 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                    class="board-field mt-1"
+                    @input="editEnvironmentValue(variable.name, eventValue($event))"
                     @change="updateEnvironmentVariable(variable.name, { value: eventValue($event) })"
                   />
+                  <div
+                    v-if="environmentValueFailures[variable.name]"
+                    :id="`environment-value-failure-${encodeURIComponent(variable.name)}`"
+                    :data-testid="`environment-value-failure-${variable.name}`"
+                    role="alert"
+                    class="mt-1 text-sm board-text-danger"
+                  >
+                    <FailureDetails v-bind="environmentValueFailures[variable.name]" suggestion="" />
+                  </div>
                   <p
                     v-if="variable.conflicts.length > 0"
                     :data-testid="`environment-conflict-${variable.name}`"
-                    class="mt-1 text-[length:var(--iot-font-min)] leading-4 board-text-danger"
+                    class="mt-1 text-xs leading-4 board-text-danger"
                   >
                     {{ t('app.environmentDefinitionConflict', { reasons: variable.conflicts.join('; ') }) }}
                   </p>
                   <p
                     v-else-if="!variable.editable"
                     :data-testid="`environment-not-editable-${variable.name}`"
-                    class="mt-1 text-[length:var(--iot-font-min)] leading-4 board-text-info"
+                    class="board-caption mt-1 leading-4 board-text-muted"
                   >
                     {{ t('app.environmentValueNotEditable') }}
                   </p>
                 </label>
-                <div
-                  :data-testid="`environment-evolution-${variable.name}`"
-                  class="rounded-md border border-slate-200 bg-white/70 p-2 text-[length:var(--iot-font-min)] leading-4 text-slate-500 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-300"
-                >
-                  <p class="font-bold uppercase text-slate-500">{{ t('app.modelEvolution') }}</p>
-                  <p>{{ t('app.naturalChangeRate') }}: <strong>{{ variable.naturalChangeRateLabel }}</strong></p>
-                  <ul v-if="variable.evolutionEffects.length > 0" class="mt-1 space-y-0.5">
-                    <li v-for="effect in variable.evolutionEffects" :key="`${effect.deviceId}:${effect.state}:${effect.value}`">
-                      {{ effect.deviceLabel }} · {{ effect.stateLabel }}: {{ effect.value }}
-                    </li>
-                  </ul>
-                  <p v-else class="mt-1">{{ t('app.environmentNoDeviceEffects') }}</p>
-                  <p class="mt-1 text-slate-500">{{ t('app.environmentEvolutionHint') }}</p>
+                <div v-if="variable.sources.length" class="board-environment-sources">
+                  <div v-for="group in [{ title: t('app.environmentReaders'), items: variable.readers }, { title: t('app.environmentWriters'), items: variable.writers }]"
+                    :key="group.title" v-show="group.items.length">
+                    <h4 class="board-form-label">{{ group.title }}</h4>
+                    <div class="board-source-links">
+                      <HintTooltip v-for="source in group.items" :key="`${source.deviceId}:${source.role}`" :content="getEnvironmentSourceTitle(source)">
+                        <button type="button" class="board-source-link" @click="handleDeviceClick(source.deviceId)">
+                          <span>{{ source.label }}</span>
+                          <span class="material-symbols-outlined" aria-hidden="true">north_east</span>
+                        </button>
+                      </HintTooltip>
+                    </div>
+                  </div>
                 </div>
-                <details class="rounded-md border border-slate-200 bg-white/70 p-1.5 dark:border-slate-700 dark:bg-slate-900/60">
-                  <summary class="cursor-pointer text-[length:var(--iot-font-min)] font-bold text-slate-500">{{ t('app.advancedTrustPrivacyOverrides') }}</summary>
-                  <p class="mt-1 text-[length:var(--iot-font-min)] leading-4 text-slate-500">{{ t('app.environmentTrustOverrideHint') }}</p>
-                  <div class="mt-1.5 grid grid-cols-2 gap-1.5">
-                  <label class="min-w-0 rounded-md bg-slate-50 p-1.5 dark:bg-slate-800">
-                    <span class="block font-bold uppercase text-slate-500">{{ t('app.trust') }}</span>
-                    <select
+                <details class="board-inventory-disclosure" :data-testid="`environment-evolution-${variable.name}`">
+                  <summary class="board-caption board-text-muted">{{ t('app.modelEvolution') }}</summary>
+                  <div class="board-caption board-text-muted board-inventory-disclosure__body">
+                    <p><span v-if="variable.lowerBound != null && variable.upperBound != null">{{ t('app.naturalChangeRate') }}: </span>{{ variable.naturalChangeRateLabel }}</p>
+                    <ul v-if="variable.evolutionEffects.length" class="space-y-1">
+                      <li v-for="effect in variable.evolutionEffects" :key="`${effect.deviceId}:${effect.state}:${effect.value}`">
+                        {{ effect.deviceLabel }} · {{ effect.stateLabel }}: {{ effect.value }}
+                      </li>
+                    </ul>
+                    <p v-else>{{ t('app.environmentNoDeviceEffects') }}</p>
+                    <p>{{ t('app.environmentEvolutionHint') }}</p>
+                  </div>
+                </details>
+                <details class="board-inventory-disclosure">
+                  <summary class="board-caption board-text-muted">{{ t('app.advancedTrustPrivacyOverrides') }}</summary>
+                  <p class="board-caption mt-1 leading-4 board-text-muted">{{ t('app.environmentTrustOverrideHint') }}</p>
+                  <div class="board-field-grid mt-1.5">
+                  <label class="min-w-0">
+                    <span class="board-form-label block">{{ t('app.trust') }}</span>
+                    <FieldSelect
                       :data-testid="`environment-trust-${variable.name}`"
                       :value="variable.trust"
                       :aria-label="`${variable.displayName} ${t('app.trust')}`"
                       :disabled="props.readOnly || props.environmentSaving || !variable.editable"
-                      :aria-busy="props.environmentSaving ? 'true' : undefined"
-                      class="mt-1 w-full rounded border border-slate-200 bg-white px-2 py-1 font-semibold text-slate-700 outline-none focus:border-[color:var(--accent-border)] disabled:cursor-wait disabled:opacity-60 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                      :aria-busy="props.environmentSaving ? 'true' : undefined" class="mt-1"
                       @change="updateEnvironmentVariable(variable.name, { trust: eventValue($event) })"
                     >
                       <option value="trusted">{{ t('app.trusted') }}</option>
                       <option value="untrusted">{{ t('app.untrusted') }}</option>
-                    </select>
+                    </FieldSelect>
                   </label>
-                  <label class="min-w-0 rounded-md bg-slate-50 p-1.5 dark:bg-slate-800">
-                    <span class="block font-bold uppercase text-slate-500">{{ t('app.privacy') }}</span>
-                    <select
+                  <label class="min-w-0">
+                    <span class="board-form-label block">{{ t('app.privacy') }}</span>
+                    <FieldSelect
                       :data-testid="`environment-privacy-${variable.name}`"
                       :value="variable.privacy"
                       :aria-label="`${variable.displayName} ${t('app.privacy')}`"
                       :disabled="props.readOnly || props.environmentSaving || !variable.editable"
-                      :aria-busy="props.environmentSaving ? 'true' : undefined"
-                      class="mt-1 w-full rounded border border-slate-200 bg-white px-2 py-1 font-semibold text-slate-700 outline-none focus:border-[color:var(--accent-border)] disabled:cursor-wait disabled:opacity-60 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                      :aria-busy="props.environmentSaving ? 'true' : undefined" class="mt-1"
                       @change="updateEnvironmentVariable(variable.name, { privacy: eventValue($event) })"
                     >
                       <option value="public">{{ t('app.public') }}</option>
                       <option value="private">{{ t('app.private') }}</option>
-                    </select>
+                    </FieldSelect>
                   </label>
                   </div>
                 </details>
               </div>
+            </article>
+          </div>
+        <div v-if="environmentVariables.length === 0" class="board-inventory-empty">
+          <p>{{ t(emptyDataStatusKey || 'app.noEnvironmentVariables') }}</p>
+        </div>
+        <div v-else-if="filteredEnvironmentVariables.length === 0" class="board-inventory-empty">
+          <p>{{ t('app.noMatchingEnvironmentVariables') }}</p>
+          <p class="board-caption">{{ t('app.tryDifferentSearchTerm') }}</p>
+        </div>
+        </section>
+      </section>
 
-              <div class="flex flex-wrap gap-1">
-                <!-- The `v-for` sits on the wrapper: `source` comes from the loop, so a tooltip hoisted above it
-                     would reference a variable that is out of scope there. -->
-                <HintTooltip
-                  v-for="source in variable.sources"
-                  :key="`${source.deviceId}:${source.role}`"
-                  :content="getEnvironmentSourceTitle(source)"
-                >
-                  <button
-                    type="button"
-                    class="board-chip-info max-w-full truncate rounded-full px-2 py-0.5 text-[length:var(--iot-font-min)] font-bold transition-colors"
-                    @click="handleDeviceClick(source.deviceId)"
-                  >
-                    {{ source.label }}
-                  </button>
-                </HintTooltip>
-              </div>
-            </div>
+      <section v-if="activeSection === 'devices'" id="inspector-panel-devices" role="tabpanel"
+        aria-labelledby="inspector-tab-devices" data-testid="inspector-section-devices">
+        <div class="board-inventory-toolbar">
+          <h3 class="board-section-title">{{ t('app.devicesTool') }}</h3>
+          <span class="board-caption board-text-muted board-inventory-count">{{ emptyDataStatusKey && !sectionTotals.devices ? '—' : `${filteredSectionCount}/${sectionTotals.devices}` }}</span>
+          <HintTooltip :content="mutationTitle(t('app.createDevice'))">
+            <button type="button" data-testid="inspector-add-device"
+              class="board-panel-icon-action" :aria-label="t('app.createDevice')"
+              :disabled="props.readOnly" @click="handleAddDevice">
+              <span class="material-symbols-outlined" aria-hidden="true">add</span>
+            </button>
+          </HintTooltip>
+        </div>
+        <label class="board-inventory-search relative block">
+          <span class="material-symbols-outlined pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-sm board-text-muted" aria-hidden="true">search</span>
+          <input v-model="sectionSearch.devices" data-testid="inspector-search-devices"
+            type="search" class="board-field board-field--clearable pl-8 pr-12"
+            :placeholder="t('app.searchDevice')" :aria-label="t('app.searchDevice')" />
+          <HintTooltip v-if="sectionSearch.devices" :content="t('app.clearSearch')">
+            <button type="button" class="board-field-clear" :aria-label="t('app.clearSearch')" @click="clearSectionSearch('devices')">
+              <span class="material-symbols-outlined text-sm" aria-hidden="true">close</span>
+            </button>
+          </HintTooltip>
+        </label>
+        <div class="board-inventory-list">
+          <article v-for="device in filteredDevices" :key="device.id" :data-device-id="device.id"
+            class="board-inventory-card board-device-row" :class="{ 'is-focused': device.id === props.focusedDeviceId }">
+            <button type="button" class="board-inventory-open board-device-identity" :aria-label="device.name" @click="handleDeviceClick(device.id)">
+              <span class="board-inventory-symbol material-symbols-outlined" aria-hidden="true">devices_other</span>
+              <span class="min-w-0">
+                <span class="board-section-title board-inventory-name block" :data-full-text="device.name">{{ device.name }}</span>
+                <span class="board-device-meta board-caption board-text-muted">
+                  <span :data-full-text="device.type">{{ device.type }}</span>
+                  <span v-if="device.state" class="board-inventory-chip" :data-full-text="device.state">{{ device.state }}</span>
+                </span>
+              </span>
+            </button>
+            <HintTooltip :content="mutationTitle(t('app.removeDevice'))">
+              <button type="button" class="board-panel-icon-action board-panel-icon-action--danger" :disabled="props.readOnly"
+                :aria-label="t('app.removeDevice')" @click.stop="handleDeleteDevice(device.id)">
+                <span class="material-symbols-outlined" aria-hidden="true">delete</span>
+              </button>
+            </HintTooltip>
           </article>
         </div>
-
-        <div v-else-if="environmentPoolExpanded" class="rounded-lg border-dashed board-surface-info px-3 py-4 text-center text-xs font-medium">
-          {{ t('app.noEnvironmentVariables') }}
+        <div v-if="displayDevices.length === 0" class="board-inventory-empty">
+          <p>{{ t(emptyDataStatusKey || 'app.noDevicesOnCanvas') }}</p>
+          <button type="button" class="board-action-inline-subtle" :disabled="props.readOnly" @click="handleAddDevice">{{ t('app.createDevice') }}</button>
+        </div>
+        <div v-else-if="filteredDevices.length === 0" class="board-inventory-empty">
+          <p>{{ t('app.noMatchingDevices') }}</p>
+          <p class="board-caption">{{ t('app.tryDifferentSearchTerm') }}</p>
         </div>
       </section>
 
-      <!-- Device List Section -->
-      <div
-        v-if="activeSection === 'devices'"
-        id="inspector-panel-devices"
-        role="tabpanel"
-        aria-labelledby="inspector-tab-devices"
-        data-testid="inspector-section-devices"
-      >
-        <div class="mb-3 flex items-center justify-between gap-2">
-          <button
-            type="button"
-            data-testid="inspector-section-toggle-devices"
-            class="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-lg px-1 py-1 text-left transition-colors hover:bg-slate-100 dark:hover:bg-slate-800"
-            :aria-expanded="sectionExpanded.devices"
-            @click="toggleEntitySection('devices')"
-          >
-            <span class="material-symbols-outlined text-slate-400" aria-hidden="true">
-              {{ sectionExpanded.devices ? 'expand_more' : 'chevron_right' }}
-            </span>
-            <span class="material-symbols-outlined text-slate-400" aria-hidden="true">devices</span>
-            <h3 class="min-w-0 truncate text-xs font-bold uppercase tracking-widest text-slate-500" :data-full-text="t('app.devicesTool')">
-              {{ t('app.devicesTool') }}
-            </h3>
-            <span class="ml-auto shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[length:var(--iot-font-min)] font-bold text-slate-500">
-              {{ sectionCounts.devices.filtered }}/{{ sectionCounts.devices.total }}
-            </span>
-          </button>
-          <!-- A 44px target. Measured at **26×36px**, the smallest control in this panel and the primary way to
-               add a device to the board — `p-1.5` around a `text-sm` glyph gives whatever size the glyph happens
-               to be, which is not a target size. -->
-          <HintTooltip :content="mutationTitle(t('app.openDeviceCreator'))">
-            <button
-              type="button"
-              data-testid="inspector-add-device"
-              @click="handleAddDevice"
-              :disabled="props.readOnly"
-              class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-slate-500 transition-all hover:board-text-info hover:board-chip-info"
-              :aria-label="t('app.openDeviceCreator')"
-            >
-              <span class="material-symbols-outlined text-sm">add</span>
-            </button>
-          </HintTooltip>
-        </div>
-
-        <div v-if="sectionExpanded.devices" class="space-y-2.5">
-          <label class="relative block">
-            <span class="material-symbols-outlined pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-sm text-slate-400" aria-hidden="true">search</span>
-            <input
-              v-model="sectionSearch.devices"
-              data-testid="inspector-search-devices"
-              type="search"
-              class="w-full min-h-11 rounded-lg border border-slate-200 bg-white py-2 pl-8 pr-8 text-xs font-semibold text-slate-700 outline-none transition focus:border-[color:var(--accent-border)] focus:ring-2 focus:ring-[color:var(--accent-border)] dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
-              :placeholder="t('app.searchDevice')"
-              :aria-label="t('app.searchDevice')"
-            />
-            <HintTooltip :content="t('app.clearSearch')">
-              <button
-                v-if="sectionSearch.devices"
-                type="button"
-                class="absolute right-1.5 top-1/2 inline-flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md board-text-muted hover:board-control-hover hover:board-text-strong"
-                :aria-label="t('app.clearSearch')"
-                @click="clearSectionSearch('devices')"
-              >
-                <span class="material-symbols-outlined text-sm" aria-hidden="true">close</span>
-              </button>
-            </HintTooltip>
-          </label>
-
-          <div
-            v-for="device in filteredDevices"
-            :key="device.id"
-            :data-device-id="device.id"
-            class="group relative p-4 rounded-xl bg-white border border-slate-200/60 hover:border-[color:var(--accent)]/50 shadow-sm hover:shadow-md transition-all"
-            :class="device.id === props.focusedDeviceId ? 'ring-2 ring-[color:var(--accent-border)] board-border-subtle board-chip-info shadow-md' : ''"
-          >
-            <!-- Hover gradient background -->
-            <div class="pointer-events-none absolute inset-0 bg-[color:var(--accent-surface)] opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
-
-            <div class="relative flex min-w-0 items-center justify-between gap-2">
-              <!--
-                The name gets its own line; the qualifiers get the next one.
-
-                Three items competed for one 320px row before this — name, template chip, state chip —
-                and the name lost every time. It carried `flex-1`, i.e. `flex-basis: 0`, so it entered
-                the squeeze at zero width and grew only from whatever the chips left over, while each
-                chip sized from its own content first. Measured at 1440px: "Air Conditioner" was given
-                **23px of the 102px it needs (77% lost)**, rendering as "A…", with "Window" at 23/55px.
-                An earlier pass tried to fix this by re-ranking the flex factors, but no ranking wins
-                when the row cannot hold all three: at 320px the chips' own ceilings (4.5rem + 4rem)
-                plus the icon and delete button already consume the width.
-
-                Reviews across six passes, both themes, both locales, desktop and mobile, all reported
-                the same thing — unidentifiable device names. `title` and `data-full-text` were present
-                throughout, which is why it kept being recorded as "recoverable" and left alone. A
-                tooltip is not identification: it answers one device at a time, on hover, and never
-                helps a keyboard or touch user scanning a list for the one they want.
-              -->
-              <HintTooltip :content="device.name">
-                <button
-                  type="button"
-                  class="flex min-h-11 min-w-0 flex-1 flex-col items-start justify-center gap-0.5 rounded-md py-1 text-left focus-visible:outline focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent)]"
-                  :aria-label="device.name"
-                  @click="handleDeviceClick(device.id)"
-                >
-                  <span class="flex min-w-0 max-w-full items-center gap-2">
-                    <span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-md board-surface-info board-text-info">
-                      <span class="material-symbols-outlined text-base" aria-hidden="true">devices_other</span>
-                    </span>
-                    <span class="min-w-0 truncate text-sm font-semibold text-slate-700 group-hover:board-text-info transition-colors" :data-full-text="device.name">
-                      {{ device.name }}
-                    </span>
-                  </span>
-                  <!--
-                    Secondary line, indented to the name's text edge. The chips keep `data-full-text` for
-                    the inspector's on-demand tooltip, but now they truncate against the full panel width
-                    instead of against whatever the name did not take.
-                  -->
-                  <span v-if="device.type || device.state" class="flex min-w-0 max-w-full items-center gap-1 pl-9">
-                    <span v-if="device.type" class="min-w-0 shrink truncate px-2 py-0.5 rounded-full text-[length:var(--iot-font-min)] font-medium bg-slate-100 text-slate-500 border border-slate-200" :data-full-text="device.type">
-                      {{ device.type }}
-                    </span>
-                    <span v-if="device.state" class="min-w-0 shrink truncate px-2 py-0.5 rounded text-[length:var(--iot-font-min)] font-medium board-surface-info board-text-info" :data-full-text="device.state">
-                      {{ device.state }}
-                    </span>
-                  </span>
-                </button>
-              </HintTooltip>
-              <HintTooltip :content="mutationTitle(t('app.removeDevice'))">
-                <button
-                  type="button"
-                  @click.stop="handleDeleteDevice(device.id)"
-                  :disabled="props.readOnly"
-                  class="relative z-10 inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-slate-500 opacity-0 transition-all hover:board-chip-danger hover:board-text-danger focus:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
-                  :aria-label="t('app.removeDevice')"
-                >
-                  <span class="material-symbols-outlined text-sm">close</span>
-                </button>
-              </HintTooltip>
-            </div>
-          </div>
-
-          <div v-if="displayDevices.length === 0" class="text-center py-6 text-slate-500 border border-dashed border-slate-200 rounded-lg">
-            <span class="material-symbols-outlined text-3xl mb-1 block opacity-50">devices</span>
-            <!-- "No devices" is a claim about the board. During a failed load the panel does not know
-                 whether the board is empty, so it says what it actually knows instead. -->
-            <p v-if="props.dataUnavailable" class="text-xs mb-3">{{ t('app.boardDataUnavailableShort') }}</p>
-            <p v-else class="text-xs mb-3">{{ t('app.noDevicesOnCanvas') }}</p>
-            <button
-              type="button"
-              @click="handleAddDevice"
-              :disabled="props.readOnly"
-              class="mx-auto inline-flex items-center gap-1.5 rounded-lg bg-[color:var(--accent-fill)] px-3 py-1.5 text-xs font-bold text-white shadow-sm hover:bg-[color:var(--accent-fill-hover)]"
-            >
-              <span class="material-symbols-outlined text-sm">add</span>
-              {{ t('app.openDeviceCreator') }}
-            </button>
-          </div>
-          <div v-else-if="filteredDevices.length === 0" class="text-center py-6 text-slate-500 border border-dashed border-slate-200 rounded-lg">
-            <span class="material-symbols-outlined text-3xl mb-1 block opacity-50">search_off</span>
-            <p class="text-xs font-semibold">{{ t('app.noMatchingDevices') }}</p>
-            <p class="mt-1 text-[11px]">{{ t('app.tryDifferentSearchTerm') }}</p>
-          </div>
-        </div>
-      </div>
-
-      <!-- Active Global Rules Section -->
-      <div
-        v-if="activeSection === 'rules'"
-        id="inspector-panel-rules"
-        role="tabpanel"
-        aria-labelledby="inspector-tab-rules"
-        data-testid="inspector-section-rules"
-      >
-        <div class="mb-3 flex items-center justify-between gap-2">
-          <button
-            type="button"
-            data-testid="inspector-section-toggle-rules"
-            class="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-lg px-1 py-1 text-left transition-colors hover:bg-slate-100 dark:hover:bg-slate-800"
-            :aria-expanded="sectionExpanded.rules"
-            @click="toggleEntitySection('rules')"
-          >
-            <span class="material-symbols-outlined text-slate-400" aria-hidden="true">
-              {{ sectionExpanded.rules ? 'expand_more' : 'chevron_right' }}
-            </span>
-            <span class="material-symbols-outlined text-slate-400" aria-hidden="true">rule</span>
-            <h3 class="min-w-0 truncate text-xs font-bold uppercase tracking-widest text-slate-500" :data-full-text="t('app.rulesTool')">
-              {{ t('app.rulesTool') }}
-            </h3>
-            <span class="ml-auto shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[length:var(--iot-font-min)] font-bold text-slate-500">
-              {{ sectionCounts.rules.filtered }}/{{ sectionCounts.rules.total }}
-            </span>
-          </button>
+      <section v-if="activeSection === 'rules'" id="inspector-panel-rules" role="tabpanel"
+        aria-labelledby="inspector-tab-rules" data-testid="inspector-section-rules">
+        <div class="board-inventory-toolbar">
+          <h3 class="board-section-title">{{ t('app.rulesTool') }}</h3>
+          <span class="board-caption board-text-muted board-inventory-count">{{ emptyDataStatusKey && !sectionTotals.rules ? '—' : `${filteredSectionCount}/${sectionTotals.rules}` }}</span>
           <HintTooltip :content="mutationTitle(t('app.createRule'))">
-            <button
-              type="button"
-              data-testid="inspector-add-rule"
-              @click="handleAddRule"
-              :disabled="props.readOnly"
-              class="text-slate-500 hover:board-text-info hover:board-chip-info p-1.5 rounded-lg transition-all"
-              :aria-label="t('app.createRule')"
-            >
-              <span class="material-symbols-outlined text-sm">add</span>
+            <button type="button" data-testid="inspector-add-rule"
+              class="board-panel-icon-action" :aria-label="t('app.createRule')"
+              :disabled="props.readOnly" @click="handleAddRule">
+              <span class="material-symbols-outlined" aria-hidden="true">add</span>
             </button>
           </HintTooltip>
         </div>
-
-        <div v-if="sectionExpanded.rules" class="space-y-3">
-          <label class="relative block">
-            <span class="material-symbols-outlined pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-sm text-slate-400" aria-hidden="true">search</span>
-            <input
-              v-model="sectionSearch.rules"
-              data-testid="inspector-search-rules"
-              type="search"
-              class="w-full min-h-11 rounded-lg border border-slate-200 bg-white py-2 pl-8 pr-8 text-xs font-semibold text-slate-700 outline-none transition focus:border-[color:var(--accent-border)] focus:ring-2 focus:ring-[color:var(--accent-border)] dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
-              :placeholder="t('app.searchRules')"
-              :aria-label="t('app.searchRules')"
-            />
-            <HintTooltip :content="t('app.clearSearch')">
-              <button
-                v-if="sectionSearch.rules"
-                type="button"
-                class="absolute right-1.5 top-1/2 inline-flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md board-text-muted hover:board-control-hover hover:board-text-strong"
-                :aria-label="t('app.clearSearch')"
-                @click="clearSectionSearch('rules')"
-              >
-                <span class="material-symbols-outlined text-sm" aria-hidden="true">close</span>
-              </button>
-            </HintTooltip>
-          </label>
-
-          <div
-            v-if="displayRules.length > 1"
-            data-testid="rule-execution-order-hint"
-            class="flex items-start gap-2 rounded-lg board-surface-warning px-2.5 py-2 text-[11px] font-medium leading-4 board-text-warning"
-          >
-            <span class="material-symbols-outlined mt-0.5 text-sm" aria-hidden="true">low_priority</span>
-            <span>{{ t('app.ruleExecutionOrderHint') }}</span>
-          </div>
-
-          <div
-            v-for="rule in filteredRules"
-            :key="rule.id"
-            :data-rule-id="rule.originalId"
-            tabindex="-1"
-            class="p-3 rounded-lg relative transition-all hover:shadow-md group board-surface-info hover:border-[color:var(--accent-border)]"
-            :class="rule.originalId && rule.originalId === props.focusedRuleId ? 'ring-2 ring-[color:var(--accent-border)] border-[color:var(--accent-border)] shadow-md' : ''"
-          >
-            <!-- 蓝色背景装饰 -->
-            <div class="absolute left-0 top-0 bottom-0 w-1 bg-[color:var(--accent)] rounded-l-lg"></div>
-            
-            <div class="flex items-start justify-between mb-2">
-              <div class="flex min-w-0 items-center gap-2">
-                <span class="material-symbols-outlined text-sm board-text-info">
-                  auto_awesome
-                </span>
-                <h4 class="min-w-0 truncate text-sm font-bold board-text-info" :data-full-text="rule.name">
-                  {{ rule.name }}
-                </h4>
-                <span
-                  class="shrink-0 rounded board-chip-info px-1.5 py-0.5 text-[length:var(--iot-font-min)] font-bold board-text-info"
-                  :title="t('app.ruleExecutionOrder')"
-                >
-                  #{{ rule.executionOrder }}
-                </span>
+        <label class="board-inventory-search relative block">
+          <span class="material-symbols-outlined pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-sm board-text-muted" aria-hidden="true">search</span>
+          <input v-model="sectionSearch.rules" data-testid="inspector-search-rules"
+            type="search" class="board-field board-field--clearable pl-8 pr-12"
+            :placeholder="t('app.searchRules')" :aria-label="t('app.searchRules')" />
+          <HintTooltip v-if="sectionSearch.rules" :content="t('app.clearSearch')">
+            <button type="button" class="board-field-clear" :aria-label="t('app.clearSearch')" @click="clearSectionSearch('rules')">
+              <span class="material-symbols-outlined text-sm" aria-hidden="true">close</span>
+            </button>
+          </HintTooltip>
+        </label>
+        <p v-if="displayRules.length > 1" data-testid="rule-execution-order-hint" class="board-caption board-text-muted mb-2">{{ t('app.ruleExecutionOrderHint') }}</p>
+        <p v-if="sectionSearch.rules && displayRules.length > 1" id="inspector-rule-order-blocked" class="board-caption board-text-muted mb-2">{{ t('app.ruleOrderSearchDisabled') }}</p>
+        <div class="board-inventory-list">
+          <article v-for="rule in filteredRules" :key="rule.originalId" :data-rule-id="rule.originalId" tabindex="-1"
+            class="board-inventory-card" :class="{ 'is-focused': rule.originalId === props.focusedRuleId }">
+            <div class="board-inventory-heading">
+              <span class="board-inventory-order board-caption board-text-muted" :title="t('app.ruleExecutionOrder')">#{{ rule.executionOrder }}</span>
+              <h4 class="board-section-title board-inventory-name">{{ rule.name }}</h4>
+            </div>
+            <dl class="board-rule-flow board-copy">
+              <div class="board-rule-step">
+                <dt class="board-form-label">{{ t(rule.conditions.length > 1 ? 'app.ruleAllConditions' : 'app.sourceDevices') }}</dt>
+                <dd>
+                  <ul class="board-rule-conditions" data-testid="inspector-rule-conditions">
+                    <li v-for="(condition, index) in rule.conditions" :key="index">{{ condition }}</li>
+                  </ul>
+                </dd>
               </div>
-
-              <div class="flex shrink-0 items-center gap-0.5">
+              <div class="board-rule-step board-rule-step--command">
+                <dt class="board-form-label">{{ t('app.thenAction') }}</dt>
+                <dd data-testid="inspector-rule-command" class="board-rule-command">
+                  <p class="board-rule-target">{{ rule.target }}</p>
+                  <p class="board-rule-command-action">{{ rule.action }}</p>
+                </dd>
+              </div>
+              <div v-if="rule.contentSource" class="board-rule-step">
+                <dt class="board-form-label board-text-muted">{{ t('app.contentSourceDevice') }}</dt>
+                <dd data-testid="inspector-rule-content-source">{{ rule.contentSource }}</dd>
+              </div>
+            </dl>
+            <div class="board-inventory-footer board-rule-actions">
+              <div class="board-rule-order-actions" role="group" :aria-label="t('app.ruleExecutionOrder')">
                 <HintTooltip :content="mutationTitle(sectionSearch.rules ? t('app.ruleOrderSearchDisabled') : t('app.moveRuleEarlier'))">
-                  <button
-                    type="button"
+                  <button type="button" class="board-panel-icon-action" :aria-label="t('app.moveRuleEarlier')"
                     :disabled="props.readOnly || props.rulesReordering || !!sectionSearch.rules || rule.isFirst"
-                    class="rounded p-1 board-text-info transition hover:board-chip-info disabled:cursor-not-allowed disabled:opacity-30"
-                    :aria-label="t('app.moveRuleEarlier')"
-                    @click.stop="rule.originalId && handleMoveRule(rule.originalId, 'up')"
-                  >
-                    <span class="material-symbols-outlined text-sm" aria-hidden="true">arrow_upward</span>
+                    :aria-describedby="sectionSearch.rules ? 'inspector-rule-order-blocked' : undefined"
+                    @click.stop="rule.originalId && handleMoveRule(rule.originalId, 'up')">
+                    <span class="material-symbols-outlined" aria-hidden="true">arrow_upward</span>
                   </button>
                 </HintTooltip>
                 <HintTooltip :content="mutationTitle(sectionSearch.rules ? t('app.ruleOrderSearchDisabled') : t('app.moveRuleLater'))">
-                  <button
-                    type="button"
+                  <button type="button" class="board-panel-icon-action" :aria-label="t('app.moveRuleLater')"
                     :disabled="props.readOnly || props.rulesReordering || !!sectionSearch.rules || rule.isLast"
-                    class="rounded p-1 board-text-info transition hover:board-chip-info disabled:cursor-not-allowed disabled:opacity-30"
-                    :aria-label="t('app.moveRuleLater')"
-                    @click.stop="rule.originalId && handleMoveRule(rule.originalId, 'down')"
-                  >
-                    <span class="material-symbols-outlined text-sm" aria-hidden="true">arrow_downward</span>
-                  </button>
-                </HintTooltip>
-                <HintTooltip :content="mutationTitle(t('app.deleteRule'))">
-                  <button
-                    type="button"
-                    @click.stop="rule.originalId && handleDeleteRule(rule.originalId)"
-                    :disabled="props.readOnly"
-                    class="rounded p-1 board-text-muted transition hover:board-chip-danger hover:board-text-danger"
-                    :aria-label="t('app.deleteRule')"
-                  >
-                    <span class="material-symbols-outlined text-sm" aria-hidden="true">delete</span>
+                    :aria-describedby="sectionSearch.rules ? 'inspector-rule-order-blocked' : undefined"
+                    @click.stop="rule.originalId && handleMoveRule(rule.originalId, 'down')">
+                    <span class="material-symbols-outlined" aria-hidden="true">arrow_downward</span>
                   </button>
                 </HintTooltip>
               </div>
-            </div>
-
-            <p class="ml-6 line-clamp-2 break-words text-[11px] font-medium leading-tight board-text-info" :data-full-text="rule.description">
-              {{ rule.description }}
-            </p>
-          </div>
-
-          <!-- Empty state when no rules -->
-          <div v-if="displayRules.length === 0" class="text-center py-6 text-slate-500 border border-dashed border-slate-200 rounded-lg">
-            <span class="material-symbols-outlined text-3xl mb-1 block opacity-50">rule</span>
-            <p class="text-xs mb-3">{{ t('app.noRulesActive') }}</p>
-            <button
-              type="button"
-              @click="handleAddRule"
-              :disabled="props.readOnly"
-              class="mx-auto inline-flex items-center gap-1.5 rounded-lg bg-[color:var(--accent-fill)] px-3 py-1.5 text-xs font-bold text-white shadow-sm hover:bg-[color:var(--accent-fill-hover)]"
-            >
-              <span class="material-symbols-outlined text-sm">add</span>
-              {{ t('app.createRule') }}
-            </button>
-          </div>
-          <div v-else-if="filteredRules.length === 0" class="text-center py-6 text-slate-500 border border-dashed border-slate-200 rounded-lg">
-            <span class="material-symbols-outlined text-3xl mb-1 block opacity-50">search_off</span>
-            <p class="text-xs font-semibold">{{ t('app.noMatchingRules') }}</p>
-            <p class="mt-1 text-[11px]">{{ t('app.tryDifferentSearchTerm') }}</p>
-          </div>
-        </div>
-      </div>
-
-      <!-- Specifications Section -->
-      <div
-        v-if="activeSection === 'specs'"
-        id="inspector-panel-specs"
-        role="tabpanel"
-        aria-labelledby="inspector-tab-specs"
-        data-testid="inspector-section-specs"
-      >
-        <div class="mb-3 flex items-center justify-between gap-2">
-          <button
-            type="button"
-            data-testid="inspector-section-toggle-specs"
-            class="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-lg px-1 py-1 text-left transition-colors hover:bg-slate-100 dark:hover:bg-slate-800"
-            :aria-expanded="sectionExpanded.specs"
-            @click="toggleEntitySection('specs')"
-          >
-            <span class="material-symbols-outlined text-slate-400" aria-hidden="true">
-              {{ sectionExpanded.specs ? 'expand_more' : 'chevron_right' }}
-            </span>
-            <span class="material-symbols-outlined text-slate-400" aria-hidden="true">fact_check</span>
-            <h3 class="min-w-0 truncate text-xs font-bold uppercase tracking-widest text-slate-500" :data-full-text="t('app.specificationsTool')">
-              {{ t('app.specificationsTool') }}
-            </h3>
-            <span class="ml-auto shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[length:var(--iot-font-min)] font-bold text-slate-500">
-              {{ sectionCounts.specs.filtered }}/{{ sectionCounts.specs.total }}
-            </span>
-          </button>
-          <HintTooltip :content="mutationTitle(t('app.openSpecificationCreator'))">
-            <button
-              type="button"
-              data-testid="inspector-add-spec"
-              @click="handleAddSpec"
-              :disabled="props.readOnly"
-              class="text-slate-500 hover:board-text-info hover:board-chip-info p-1.5 rounded-lg transition-all"
-              :aria-label="t('app.openSpecificationCreator')"
-            >
-              <span class="material-symbols-outlined text-sm">add</span>
-            </button>
-          </HintTooltip>
-        </div>
-
-        <div v-if="sectionExpanded.specs" class="space-y-3">
-          <label class="relative block">
-            <span class="material-symbols-outlined pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-sm text-slate-400" aria-hidden="true">search</span>
-            <input
-              v-model="sectionSearch.specs"
-              data-testid="inspector-search-specs"
-              type="search"
-              class="w-full min-h-11 rounded-lg border border-slate-200 bg-white py-2 pl-8 pr-8 text-xs font-semibold text-slate-700 outline-none transition focus:border-[color:var(--accent-border)] focus:ring-2 focus:ring-[color:var(--accent-border)] dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
-              :placeholder="t('app.searchSpecifications')"
-              :aria-label="t('app.searchSpecifications')"
-            />
-            <HintTooltip :content="t('app.clearSearch')">
-              <button
-                v-if="sectionSearch.specs"
-                type="button"
-                class="absolute right-1.5 top-1/2 inline-flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md board-text-muted hover:board-control-hover hover:board-text-strong"
-                :aria-label="t('app.clearSearch')"
-                @click="clearSectionSearch('specs')"
-              >
-                <span class="material-symbols-outlined text-sm" aria-hidden="true">close</span>
-              </button>
-            </HintTooltip>
-          </label>
-
-          <div
-            v-for="spec in filteredSpecs"
-            :key="spec.id"
-            :data-spec-id="spec.id"
-            tabindex="-1"
-            class="p-3 rounded-lg border board-border-subtle relative transition-all hover:shadow-md bg-white group"
-            :class="spec.id === props.focusedSpecId ? 'ring-2 ring-[color:var(--accent-border)] board-border-subtle shadow-md' : ''"
-          >
-
-            <div class="relative flex items-start justify-between mb-2">
-              <div class="flex min-w-0 items-center gap-2">
-                <span class="material-symbols-outlined text-sm board-text-info">policy</span>
-                <h4 class="min-w-0 truncate text-sm font-bold text-slate-800" :data-full-text="spec.name">
-                  {{ spec.name }}
-                </h4>
-              </div>
-              <HintTooltip :content="mutationTitle(t('app.deleteSpecification'))">
-                <button
-                  type="button"
-                  @click="handleDeleteSpec(spec.id)"
-                  :disabled="props.readOnly"
-                  class="text-slate-500 hover:board-text-danger p-1 rounded hover:board-chip-danger opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 transition-all"
-                  :aria-label="t('app.deleteSpecification')"
-                >
-                  <span class="material-symbols-outlined text-xs">delete</span>
+              <HintTooltip :content="mutationTitle(t('app.deleteRule'))">
+                <button type="button" class="board-panel-icon-action board-panel-icon-action--danger" :disabled="props.readOnly"
+                  :aria-label="t('app.deleteRule')" @click.stop="rule.originalId && handleDeleteRule(rule.originalId)">
+                  <span class="material-symbols-outlined" aria-hidden="true">delete</span>
                 </button>
               </HintTooltip>
             </div>
-
-            <div class="ml-7 mb-1 text-[length:var(--iot-font-min)] font-bold uppercase tracking-wide text-slate-500">
-              {{ t('app.formulaPreview') }}
-            </div>
-            <!-- No scroll region: this wraps. `whitespace-pre-wrap break-all` and horizontal scrolling
-                 are mutually exclusive, so the `overflow-x-auto` that used to be here never did
-                 anything — and converting it to the horizontal primitive would have added
-                 `overflow-y: hidden`, clipping any formula longer than one line. -->
-            <p class="ml-7 block max-w-full whitespace-pre-wrap break-all rounded border border-slate-100 bg-slate-50 p-1.5 font-mono text-[11px] leading-tight text-slate-600" :data-full-text="spec.formula">
-              {{ spec.formula }}
-            </p>
-            <!-- Which reading each variable condition asks about, in the user's words rather than as the
-                 `Environment.` / `<device>.` token inside the formula above. -->
-            <div v-if="spec.variableSourceLabels.length" class="ml-7 mt-1 flex flex-wrap gap-1">
-              <!-- An unresolved reading blocks the run, so it must not read as a neutral fact here. -->
-              <span
-                v-for="entry in spec.variableSourceLabels"
-                :key="entry.key"
-                class="rounded border px-1.5 py-0.5 text-[length:var(--iot-font-min)] font-semibold"
-                :class="entry.unresolved
-                  ? 'board-chip-danger board-text-danger border-[color:var(--danger-border)]'
-                  : 'border-slate-200 bg-slate-100 text-slate-600'"
-                data-testid="inspector-spec-variable-source"
-              >{{ entry.label }}</span>
-            </div>
-          </div>
-
-          <!-- Empty state when no specifications -->
-          <div v-if="displaySpecs.length === 0" class="text-center py-6 text-slate-500 border border-dashed border-slate-200 rounded-lg">
-            <span class="material-symbols-outlined text-3xl mb-1 block opacity-50">fact_check</span>
-            <p class="text-xs mb-3">{{ t('app.noSpecificationsVerified') }}</p>
-            <button
-              type="button"
-              @click="handleAddSpec"
-              :disabled="props.readOnly"
-              class="mx-auto inline-flex items-center gap-1.5 rounded-lg bg-[color:var(--accent-fill)] px-3 py-1.5 text-xs font-bold text-white shadow-sm hover:bg-[color:var(--accent-fill-hover)]"
-            >
-              <span class="material-symbols-outlined text-sm">add</span>
-              {{ t('app.openSpecificationCreator') }}
-            </button>
-          </div>
-          <div v-else-if="filteredSpecs.length === 0" class="text-center py-6 text-slate-500 border border-dashed border-slate-200 rounded-lg">
-            <span class="material-symbols-outlined text-3xl mb-1 block opacity-50">search_off</span>
-            <p class="text-xs font-semibold">{{ t('app.noMatchingSpecifications') }}</p>
-            <p class="mt-1 text-[11px]">{{ t('app.tryDifferentSearchTerm') }}</p>
-          </div>
+          </article>
         </div>
-      </div>
+        <div v-if="displayRules.length === 0" class="board-inventory-empty">
+          <p>{{ t(emptyDataStatusKey || 'app.noRulesActive') }}</p>
+          <button type="button" class="board-action-inline-subtle" :disabled="props.readOnly" @click="handleAddRule">{{ t('app.createRule') }}</button>
+        </div>
+        <div v-else-if="filteredRules.length === 0" class="board-inventory-empty">
+          <p>{{ t('app.noMatchingRules') }}</p>
+          <p class="board-caption">{{ t('app.tryDifferentSearchTerm') }}</p>
+        </div>
+      </section>
+
+      <section v-if="activeSection === 'specs'" id="inspector-panel-specs" role="tabpanel"
+        aria-labelledby="inspector-tab-specs" data-testid="inspector-section-specs">
+        <div class="board-inventory-toolbar">
+          <h3 class="board-section-title">{{ t('app.specificationsTool') }}</h3>
+          <span class="board-caption board-text-muted board-inventory-count">{{ emptyDataStatusKey && !sectionTotals.specs ? '—' : `${filteredSectionCount}/${sectionTotals.specs}` }}</span>
+          <HintTooltip :content="mutationTitle(t('app.createSpecification'))">
+            <button type="button" data-testid="inspector-add-spec"
+              class="board-panel-icon-action" :aria-label="t('app.createSpecification')"
+              :disabled="props.readOnly" @click="handleAddSpec">
+              <span class="material-symbols-outlined" aria-hidden="true">add</span>
+            </button>
+          </HintTooltip>
+        </div>
+        <label class="board-inventory-search relative block">
+          <span class="material-symbols-outlined pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-sm board-text-muted" aria-hidden="true">search</span>
+          <input v-model="sectionSearch.specs" data-testid="inspector-search-specs"
+            type="search" class="board-field board-field--clearable pl-8 pr-12"
+            :placeholder="t('app.searchSpecifications')" :aria-label="t('app.searchSpecifications')" />
+          <HintTooltip v-if="sectionSearch.specs" :content="t('app.clearSearch')">
+            <button type="button" class="board-field-clear" :aria-label="t('app.clearSearch')" @click="clearSectionSearch('specs')">
+              <span class="material-symbols-outlined text-sm" aria-hidden="true">close</span>
+            </button>
+          </HintTooltip>
+        </label>
+        <div class="board-inventory-list">
+          <article v-for="spec in filteredSpecs" :key="spec.id" :data-spec-id="spec.id" tabindex="-1"
+            class="board-inventory-card" :class="{ 'is-focused': spec.id === props.focusedSpecId }">
+            <div class="board-inventory-heading">
+              <span class="board-inventory-symbol material-symbols-outlined" aria-hidden="true">policy</span>
+              <h4 class="board-section-title board-inventory-name">{{ spec.type }}</h4>
+            </div>
+            <dl class="board-spec-description board-copy">
+              <dt class="board-form-label">{{ t('app.specificationDescription') }}</dt>
+              <dd data-testid="inspector-spec-description">{{ spec.description }}</dd>
+            </dl>
+            <div v-if="spec.variableSourceLabels.length" class="mt-2 flex flex-wrap gap-1">
+              <span v-for="entry in spec.variableSourceLabels" :key="entry.key" class="board-inventory-chip board-caption"
+                :class="{ 'board-chip-danger': entry.unresolved }" data-testid="inspector-spec-variable-source">{{ entry.label }}</span>
+            </div>
+            <div class="board-inventory-footer">
+              <details class="spec-formula-disclosure" data-testid="inspector-spec-formula-details">
+                <summary class="board-caption board-text-muted">
+                  <span class="material-symbols-outlined spec-formula-disclosure__chevron" aria-hidden="true">chevron_right</span>
+                  <span>{{ t('app.formulaPreview') }}</span>
+                  <span v-if="spec.formulaKind" class="board-inventory-chip font-mono" data-testid="inspector-spec-formula-kind">{{ spec.formulaKind }}</span>
+                </summary>
+                <p class="board-caption board-formula-preview font-mono board-text-muted" :data-full-text="spec.formula" data-testid="inspector-spec-formula">{{ spec.formula }}</p>
+              </details>
+              <HintTooltip :content="mutationTitle(t('app.deleteSpecification'))">
+                <button type="button" class="board-panel-icon-action board-panel-icon-action--danger" :disabled="props.readOnly"
+                  :aria-label="t('app.deleteSpecification')" @click="handleDeleteSpec(spec.id)">
+                  <span class="material-symbols-outlined" aria-hidden="true">delete</span>
+                </button>
+              </HintTooltip>
+            </div>
+          </article>
+        </div>
+        <div v-if="displaySpecs.length === 0" class="board-inventory-empty">
+          <p>{{ t(emptyDataStatusKey || 'app.noSpecificationsVerified') }}</p>
+          <button type="button" class="board-action-inline-subtle" :disabled="props.readOnly" @click="handleAddSpec">{{ t('app.createSpecification') }}</button>
+        </div>
+        <div v-else-if="filteredSpecs.length === 0" class="board-inventory-empty">
+          <p>{{ t('app.noMatchingSpecifications') }}</p>
+          <p class="board-caption">{{ t('app.tryDifferentSearchTerm') }}</p>
+        </div>
+      </section>
     </div>
+    </Transition>
+    <Transition name="board-panel-content" @before-leave="element => element.setAttribute('inert', '')">
+      <div v-if="!isCollapsed && $slots.overview" class="board-panel-footer iot-scroll-region" data-testid="inspector-overview-dock">
+        <slot name="overview" />
+      </div>
+    </Transition>
   </aside>
 
 </template>
 
 <style scoped>
-/* Glass panel effect */
-.glass-panel {
-  background: var(--board-panel-bg);
-  backdrop-filter: blur(16px);
-  border: 1px solid var(--board-border);
-}
 
 [data-full-text] {
   position: relative;
@@ -1734,13 +1339,6 @@ const syncFullTextTitle = (event: PointerEvent | FocusEvent) => {
 [data-full-text]:hover,
 [data-full-text]:focus-visible {
   z-index: 60;
-}
-
-.line-clamp-2 {
-  display: -webkit-box;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
 }
 
 /* Material Symbols font */

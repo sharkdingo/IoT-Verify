@@ -119,7 +119,7 @@ public class EditDeviceTool extends AbstractAiTool {
             requireOnlyFields(args, "arguments", Set.of(
                     "id", "field", "label", "state", "currentStateTrust", "currentStatePrivacy",
                     "variables", "privacies", "x", "y", "w", "h"));
-            String id = requiredTextField(args, "id", "arguments");
+            String id = requiredDeviceIdField(args, "id", "arguments");
             String field = requiredTextField(args, "field", "arguments").toLowerCase(Locale.ROOT);
 
             return switch (field) {
@@ -249,7 +249,7 @@ public class EditDeviceTool extends AbstractAiTool {
 
     private DeviceNodeDto requireDevice(Long userId, String id) {
         return safeList(boardStorageService.getNodes(userId)).stream()
-                .filter(node -> node != null && Objects.equals(trimToNull(node.getId()), id))
+                .filter(node -> node != null && Objects.equals(node.getId(), id))
                 .findFirst()
                 .orElseThrow(() -> new ResourceNotFoundException("Device", id));
     }

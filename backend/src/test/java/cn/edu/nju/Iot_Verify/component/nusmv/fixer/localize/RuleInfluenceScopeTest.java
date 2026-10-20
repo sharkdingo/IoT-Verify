@@ -56,6 +56,41 @@ class RuleInfluenceScopeTest {
     }
 
     @Test
+    void poolValueDoesNotSearchAnActuatorThatOnlyChangesAnotherReadingOfTheSameSensor() {
+        Map<String, DeviceSmvData> devices = devices("monitor", "purifier", "window");
+        DeviceManifest.InternalVariable co2 = DeviceManifest.InternalVariable.builder()
+                .name("carbonDioxide").isInside(false).lowerBound(0).upperBound(100).build();
+        DeviceManifest.InternalVariable air = DeviceManifest.InternalVariable.builder()
+                .name("airQuality").isInside(false).lowerBound(0).upperBound(100).build();
+        devices.get("monitor").getEnvVariables().put("carbonDioxide", co2);
+        devices.get("monitor").getEnvVariables().put("airQuality", air);
+        devices.get("purifier").getImpactedEnvironmentVariables().put("airQuality", air);
+        SpecConditionDto value = condition("monitor");
+        value.setTargetType("variable");
+        value.setVariableSource("environment");
+        value.setKey("carbonDioxide");
+        SpecificationDto spec = new SpecificationDto();
+        spec.setTemplateId("5");
+        spec.setIfConditions(List.of(value));
+        spec.setThenConditions(List.of(value));
+        List<RuleDto> rules = List.of(rule("window", "purifier"), rule("monitor", "window"));
+
+        assertEquals(Optional.of(Set.of()), RuleInfluenceScope.relevantRuleIndices(spec, rules, devices),
+                "Neither purifier nor the contact-only window changes CO2, so no rule edit can repair its value");
+        devices.get("window").getImpactedEnvironmentVariables().put("carbonDioxide", co2);
+        assertEquals(Optional.of(Set.of(0, 1)), RuleInfluenceScope.relevantRuleIndices(spec, rules, devices),
+                "Adding real ventilation makes the window rule searchable; its reads keep the conservative closure");
+        devices.get("window").getImpactedEnvironmentVariables().clear();
+        value.setVariableSource("reported");
+        assertEquals(Optional.of(Set.of(0, 1)), RuleInfluenceScope.relevantRuleIndices(spec, rules, devices),
+                "Reported-value dependencies still include the monitor's domains");
+        value.setVariableSource("environment");
+        spec.setTemplateId("7");
+        assertEquals(Optional.of(Set.of(0, 1)), RuleInfluenceScope.relevantRuleIndices(spec, rules, devices),
+                "Template 7 observes both the pool value and the device's propagated trust label");
+    }
+
+    @Test
     void contentProvenanceOfARelevantRuleIsRelevant() {
         Map<String, DeviceSmvData> devices = devices("display", "camera", "button");
         RuleDto showPhoto = RuleDto.builder()

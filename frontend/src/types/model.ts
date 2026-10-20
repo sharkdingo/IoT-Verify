@@ -1,5 +1,5 @@
 import type { NodePrivacyState, NodeVariableState } from './node'
-import type { RuleSourceItemType } from './rule'
+import type { RuleDto } from './rule'
 import type { Specification } from './spec'
 import type { DeviceNode } from './node'
 import type { ModelTokenSource } from './modelToken'
@@ -43,48 +43,10 @@ export interface EnvironmentVariableUpdateRequest {
   }>
 }
 
-export interface ModelRuleCondition {
-  deviceName: string
-  attribute: string
-  targetType: RuleSourceItemType
-  relation?: string
-  value?: string
-}
-
-export interface ModelRuleCommand {
-  deviceName: string
-  action: string
-  contentDevice?: string | null
-  content?: string | null
-}
-
-/**
- * A rule inside a frozen playback scene.
- *
- * This and `BackendRuleDto` in `api/board.ts` both mirror the backend's `RuleDto` — the playback scene carries
- * `List<RuleDto>` too — and they described it differently: `id?: number` versus `id: number | null`, and
- * `ruleString?: string` versus `string | null`. The nullable forms are the accurate ones: `RuleDto.id` is a
- * `Long` and `ruleString` is populated by `optionalText`, which returns null. So this type forbade a value the
- * server can actually send.
- *
- * No live misread came of it — `playbackScene.ts` uses `rule.id ?? ruleIndex` and `rule.id == null`, both of
- * which cover null and undefined — but the type was documenting a contract the server does not honour.
- * `RuleDto.createdAt` is deliberately still absent from both mirrors: it is on the wire and nothing reads it, so
- * declaring it would document an unused field rather than a used one.
- */
-export interface ModelRule {
-  // Persisted board identity used only to map trace rule snapshots back to current canvas rules.
-  // Portable scene rules and unsaved UI drafts omit it, so it is optional *and* nullable.
-  id?: number | null
-  conditions: ModelRuleCondition[]
-  command: ModelRuleCommand
-  ruleString?: string | null
-}
-
 /** Immutable visual context for replaying one run independently of the live board. */
 export interface ModelPlaybackScene {
   nodes: DeviceNode[]
-  rules: ModelRule[]
+  rules: RuleDto[]
 }
 
 export type ModelSpecification = Specification

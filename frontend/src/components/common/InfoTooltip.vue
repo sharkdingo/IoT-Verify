@@ -1,7 +1,17 @@
 <script setup lang="ts">
+import { ref } from 'vue'
 import { ElTooltip } from 'element-plus'
+import { tooltipPopperOptions } from './tooltip'
 import 'element-plus/theme-chalk/el-popper.css'
 import 'element-plus/theme-chalk/el-tooltip.css'
+
+const helpOpen = ref(false)
+const dismissHelp = (event: KeyboardEvent) => {
+  if (!helpOpen.value) return
+  event.preventDefault()
+  event.stopPropagation()
+  helpOpen.value = false
+}
 
 withDefaults(defineProps<{
   text: string
@@ -26,8 +36,10 @@ withDefaults(defineProps<{
 
 <template>
   <ElTooltip
+    v-model:visible="helpOpen"
     :content="text"
     :placement="placement"
+    :popper-options="tooltipPopperOptions"
     :trigger="['hover', 'focus', 'click']"
     :show-after="120"
     :hide-after="80"
@@ -35,6 +47,7 @@ withDefaults(defineProps<{
     :teleported="true"
     popper-class="iot-info-tooltip-popper"
   >
+    <template #content><div class="iot-tooltip-content">{{ text }}</div></template>
     <button
       type="button"
       class="iot-info-tooltip-trigger"
@@ -42,6 +55,7 @@ withDefaults(defineProps<{
       :data-testid="testId"
       :aria-label="label"
       @click.stop
+      @keydown.esc="dismissHelp"
     >
       <span class="material-symbols-outlined" aria-hidden="true">info</span>
     </button>
@@ -129,33 +143,4 @@ withDefaults(defineProps<{
    theme. The old `[data-theme='dark']` rule was more specific than :hover/:focus-visible, so it
    silently disabled both in dark mode. */
 
-/*
- * The surface, painted from this product's own tokens.
- *
- * Element Plus's `.el-popper.is-dark` sets `background` from `--el-popper-bg-color-dark`, which resolves through
- * `--el-text-color-primary` — a Chalk theme variable this project never defines, because it imports component CSS
- * piecemeal. So the tooltip rendered as floating text with no surface at all: measured `rgba(0, 0, 0, 0)` in both
- * themes.
- *
- * The `.el-popper` prefix is what makes this apply. `.el-popper.is-dark` is 0-2-0 and a bare
- * `.iot-info-tooltip-popper` is 0-1-0, so the single-class version lost. The tell was an asymmetry: `box-shadow`
- * took effect while `background` and `border` did not — Element Plus sets those two and not the shadow. Three
- * other explanations were measured and ruled out first (a component-scoped CSS import, a missing global import,
- * an undefined project token), none of which predicted that split.
- */
-:global(.el-popper.iot-info-tooltip-popper) {
-    max-width: min(24rem, calc(100vw - 2rem));
-    white-space: pre-line;
-    line-height: 1.5;
-    letter-spacing: 0;
-    background: var(--surface-elevated);
-    color: var(--text);
-    border: 1px solid var(--border);
-    box-shadow: var(--shadow-floating);
-}
-
-:global(.el-popper.iot-info-tooltip-popper .el-popper__arrow::before) {
-    background: var(--surface-elevated);
-    border: 1px solid var(--border);
-}
 </style>

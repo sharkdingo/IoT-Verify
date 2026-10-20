@@ -99,6 +99,7 @@ class AbstractAsyncTaskServiceCancelTest {
         private int progressWriteCount;
         private LocalExecutionStopResult additionalStop = LocalExecutionStopResult.NONE;
         private int additionalStopRequests;
+        private boolean rowLocked;
 
         TestAsyncTaskService() {
             super(new ObjectMapper(), "TestTask");
@@ -114,6 +115,10 @@ class AbstractAsyncTaskServiceCancelTest {
 
         private void reportProgress(int progress) {
             updateTaskProgress(task.id, progress, TaskProgressStage.STARTING);
+        }
+
+        private int readProgress(Integer persisted, boolean terminal) {
+            return resolveTaskProgress(task.id, persisted, terminal);
         }
 
         private String retainedDiagnosticOutput(String output) {
@@ -140,6 +145,12 @@ class AbstractAsyncTaskServiceCancelTest {
             return task.id.equals(id) && task.userId.equals(userId)
                     ? Optional.of(task)
                     : Optional.empty();
+        }
+
+        @Override
+        protected Optional<TestTask> findTaskByIdAndUserIdForUpdate(Long id, Long userId) {
+            rowLocked = true;
+            return findTaskByIdAndUserId(id, userId);
         }
 
         @Override
@@ -180,6 +191,7 @@ class AbstractAsyncTaskServiceCancelTest {
         assertEquals("CANCELLED", result.getTaskStatus());
         assertTrue(result.isExecutionMayStillBeStopping());
         assertTrue(service.markerVisibleDuringAtomicCancel);
+        assertTrue(service.rowLocked, "cancellation must read the committed status under a row lock");
         assertFalse(service.hasCancelMarker(7L), "marker should be cleared when no local worker owns the task");
     }
 
@@ -266,6 +278,16 @@ class AbstractAsyncTaskServiceCancelTest {
 
         assertEquals(2, service.progressWriteCount);
         assertEquals(13, service.task.progress);
+    }
+
+    @Test
+    void progressResolutionKeepsLocalThenPersistedThenTerminalPrecedence() {
+        TestAsyncTaskService service = new TestAsyncTaskService();
+        assertEquals(0, service.readProgress(null, false));
+        assertEquals(100, service.readProgress(null, true));
+        assertEquals(37, service.readProgress(37, true));
+        service.reportProgress(12);
+        assertEquals(12, service.readProgress(37, true));
     }
 
     @Test

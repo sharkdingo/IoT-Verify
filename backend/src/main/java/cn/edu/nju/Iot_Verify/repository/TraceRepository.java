@@ -3,6 +3,7 @@ package cn.edu.nju.Iot_Verify.repository;
 import cn.edu.nju.Iot_Verify.po.TracePo;
 import cn.edu.nju.Iot_Verify.repository.projection.TraceSummaryProjection;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.NativeQuery;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -30,12 +31,14 @@ public interface TraceRepository extends JpaRepository<TracePo, Long> {
      */
     List<TracePo> findByUserIdAndVerificationTaskId(Long userId, Long verificationTaskId);
 
-    @Query("SELECT t.id AS id, t.verificationTaskId AS verificationTaskId, "
-         + "t.violatedSpecId AS violatedSpecId, t.violatedSpecJson AS violatedSpecJson, "
-         + "t.stateCount AS stateCount, t.createdAt AS createdAt "
-         + "FROM TracePo t WHERE t.userId = :userId "
-         + "AND t.verificationTaskId IN :verificationTaskIds "
-         + "ORDER BY t.createdAt DESC, t.id DESC")
+    // The service sorts the small summaries. SQL filesort would carry the full trajectory JSON.
+    @NativeQuery(value = "SELECT id AS id, verification_task_id AS verificationTaskId, "
+         + "violated_spec_id AS violatedSpecId, CAST(violated_spec_json AS CHAR) AS violatedSpecJson, "
+         + "state_count AS stateCount, created_at AS createdAt, "
+         + "CASE WHEN JSON_VALID(states_json) THEN CAST(JSON_EXTRACT(states_json, '$[0].devices[*].deviceId') AS CHAR) END AS deviceIdsJson, "
+         + "CASE WHEN JSON_VALID(states_json) THEN CAST(JSON_EXTRACT(states_json, '$[0].devices[*].modelTokenSource') AS CHAR) END AS tokenSourcesJson "
+         + "FROM trace WHERE user_id = :userId AND verification_task_id IN :verificationTaskIds",
+            sqlResultSetMapping = "TraceSummary")
     List<TraceSummaryProjection> findSummariesByUserIdAndVerificationTaskIdIn(
             @Param("userId") Long userId,
             @Param("verificationTaskIds") List<Long> verificationTaskIds);

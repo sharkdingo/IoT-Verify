@@ -58,7 +58,8 @@ public class ModelRequestParser {
         final T request;
         try {
             request = objectMapper.readerFor(type)
-                    .with(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+                    .with(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,
+                            DeserializationFeature.FAIL_ON_IGNORED_PROPERTIES)
                     .readValue(objectMapper.treeAsTokens(body));
         } catch (UnrecognizedPropertyException exception) {
             throw new BadRequestException("Unknown field '" + exception.getPropertyName() + "' at '"

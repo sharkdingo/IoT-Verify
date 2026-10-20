@@ -72,7 +72,7 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/your-domain.com/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' data: blob: https://cdn.pixabay.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
     add_header Referrer-Policy "no-referrer" always;
     add_header X-Content-Type-Options "nosniff" always;
     client_max_body_size 4m;
@@ -118,8 +118,8 @@ server {
 Replace the certificate paths with certificates issued for the host. Make sure the deployed frontend origin (for example `https://your-domain.com`) is present in `CORS_ORIGINS` on the backend.
 If `VITE_API_BASE_URL` points to a different origin, add that exact HTTPS origin to the CSP
 `connect-src` directive as well; the reference policy intentionally permits same-origin API
-and SSE connections only. The single external `media-src` host serves the landing-page video;
-remove it after replacing that asset with a locally hosted file.
+and SSE connections only. Public pages use bundled fonts and inline topology graphics,
+with no external background-media host.
 Restrict backend port `8080` to the local reverse proxy or a trusted private network.
 The application trusts Nginx's overwritten `X-Real-IP` for authentication rate limiting
 only when the immediate peer is loopback; it does not trust that header on direct requests.

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { readFileSync, readdirSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 import { flushPromises, mount } from '@vue/test-utils'
 import HintTooltip from '@/components/common/HintTooltip.vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { i18n } from '@/assets/i18n'
 import { useChatStore } from '@/stores/chat'
 import { useAuth } from '@/stores/auth'
-import type { ChatHistoryPage, ChatMessage } from '@/types/chat'
+import type { ChatHistoryPage, ChatMessage, StreamProgress } from '@/types/chat'
 
 const chatApi = vi.hoisted(() => ({
   createSession: vi.fn(),
@@ -144,7 +144,7 @@ describe('ChatView', () => {
     chatApi.getSessionList.mockResolvedValue([])
     chatApi.getSessionActivity.mockResolvedValue({ sessionId: 'session-1', active: false })
     chatApi.getSessionHistory.mockResolvedValue(historyPage())
-    chatApi.getPendingConfirmation.mockResolvedValue({ sessionId: 'session-1', kinds: [] })
+    chatApi.getPendingConfirmation.mockResolvedValue({ sessionId: 'session-1', actions: [] })
     chatApi.markSessionTerminalSeen.mockResolvedValue(undefined)
     chatApi.deleteSession.mockResolvedValue(undefined)
     chatApi.requestSessionStop.mockResolvedValue(undefined)
@@ -170,6 +170,181 @@ describe('ChatView', () => {
     // restores it on its last line leaves the catalogue on `en` if an assertion between the two throws,
     // cascading failures through the later tests that match Chinese strings.
     i18n.global.locale.value = 'zh-CN'
+  })
+
+  it('grows the bottom composer upward and preserves the draft when resizing is cancelled', async () => {
+    chatStore.openChat()
+    const wrapper = mountChat()
+    await flushPromises()
+    const input = wrapper.get('[data-testid="chat-input"]')
+    await input.setValue('草稿，含 "引号"')
+    const handle = wrapper.get('[data-testid="chat-input-resize-handle"]')
+    const initial = Number(handle.attributes('aria-valuenow'))
+    await handle.trigger('pointerdown', { button: 0, pointerId: 1, clientY: 300 })
+    await handle.trigger('pointermove', { pointerId: 2, clientY: 100 })
+    expect(Number(handle.attributes('aria-valuenow'))).toBe(initial)
+    await handle.trigger('pointermove', { pointerId: 1, clientY: 268 })
+    expect(Number(handle.attributes('aria-valuenow'))).toBe(initial + 32)
+    await handle.trigger('pointermove', { pointerId: 1, clientY: 284 })
+    expect(Number(handle.attributes('aria-valuenow'))).toBe(initial + 16)
+    await handle.trigger('pointercancel', { pointerId: 1 })
+    await handle.trigger('pointermove', { pointerId: 1, clientY: 200 })
+    expect(Number(handle.attributes('aria-valuenow'))).toBe(initial + 16)
+    expect((input.element as HTMLTextAreaElement).value).toBe('草稿，含 "引号"')
+    expect(chatApi.sendStreamChat).not.toHaveBeenCalled()
+  })
+
+  it('supports keyboard input resizing within bounds and localizes its instructions', async () => {
+    chatStore.openChat()
+    const wrapper = mountChat()
+    await flushPromises()
+    const handle = wrapper.get('[data-testid="chat-input-resize-handle"]')
+    const min = Number(handle.attributes('aria-valuemin'))
+    const max = Number(handle.attributes('aria-valuemax'))
+    await handle.trigger('keydown', { key: 'ArrowUp' })
+    expect(Number(handle.attributes('aria-valuenow'))).toBe(min + 16)
+    await handle.trigger('keydown', { key: 'ArrowDown' })
+    expect(Number(handle.attributes('aria-valuenow'))).toBe(min)
+    await handle.trigger('keydown', { key: 'End' })
+    expect(Number(handle.attributes('aria-valuenow'))).toBe(max)
+    await handle.trigger('keydown', { key: 'ArrowUp' })
+    expect(Number(handle.attributes('aria-valuenow'))).toBe(max)
+    await handle.trigger('keydown', { key: 'Home' })
+    await handle.trigger('keydown', { key: 'ArrowDown' })
+    expect(Number(handle.attributes('aria-valuenow'))).toBe(min)
+    for (const language of ['zh-CN', 'en'] as const) {
+      i18n.global.locale.value = language
+      await flushPromises()
+      expect(handle.attributes('aria-label')).toBe(i18n.global.t('app.chat.resizeInput'))
+      expect(wrapper.get('#chat-input-resize-help').text()).toBe(i18n.global.t('app.chat.resizeInputHelp'))
+    }
+    expect(chatApi.sendStreamChat).not.toHaveBeenCalled()
+  })
+
+  it('updates composer bounds after a viewport change even when the panel height still fits', async () => {
+    const originalHeight = window.innerHeight
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 500 })
+    try {
+      chatStore.openChat()
+      const wrapper = mountChat()
+      await flushPromises()
+      const panelHeight = wrapper.get('[data-testid="chat-panel"]').attributes('style')
+      const handle = wrapper.get('[data-testid="chat-input-resize-handle"]')
+      await handle.trigger('keydown', { key: 'End' })
+      expect(Number(handle.attributes('aria-valuenow'))).toBe(128)
+      Object.defineProperty(window, 'innerHeight', { configurable: true, value: 450 })
+      window.dispatchEvent(new Event('resize'))
+      await flushPromises()
+      expect(wrapper.get('[data-testid="chat-panel"]').attributes('style')).toBe(panelHeight)
+      expect(Number(handle.attributes('aria-valuemax'))).toBe(126)
+      expect(Number(handle.attributes('aria-valuenow'))).toBe(126)
+    } finally {
+      Object.defineProperty(window, 'innerHeight', { configurable: true, value: originalHeight })
+    }
+  })
+
+  it('excludes collapsed history from initial focus and restores it when expanded', async () => {
+    chatApi.getSessionList.mockResolvedValue([session])
+    chatStore.openChat()
+    const wrapper = mountChat()
+    document.body.append(wrapper.element)
+    try {
+      await flushPromises()
+      const toggle = wrapper.get('[data-testid="chat-sidebar-toggle"]')
+      expect(document.activeElement).toBe(toggle.element)
+      const sidebar = wrapper.get('.sidebar')
+      expect(sidebar.attributes('inert')).toBeDefined()
+      expect(sidebar.attributes('aria-hidden')).toBe('true')
+      expect(toggle.attributes('aria-expanded')).toBe('false')
+      await toggle.trigger('click')
+      expect(sidebar.attributes('inert')).toBeUndefined()
+      expect(sidebar.attributes('aria-hidden')).toBe('false')
+      expect(toggle.attributes('aria-expanded')).toBe('true')
+      const conversation = wrapper.get('[data-testid="chat-session-session-1"]')
+      ;(conversation.element as HTMLButtonElement).focus()
+      await conversation.trigger('click')
+      await flushPromises()
+      expect(sidebar.attributes('inert')).toBeDefined()
+      expect(sidebar.attributes('aria-hidden')).toBe('true')
+      expect(toggle.attributes('aria-expanded')).toBe('false')
+      expect(document.activeElement).toBe(toggle.element)
+    } finally { wrapper.unmount(); wrapper.element.remove() }
+  })
+
+  it('closes on scoped Escape without stopping a live stream and restores the opener', async () => {
+    const opener = document.createElement('button')
+    document.body.append(opener)
+    opener.focus()
+    let streamSignal: AbortSignal | undefined
+    chatApi.getSessionList.mockResolvedValue([session])
+    chatApi.sendStreamChat.mockImplementation((...args: any[]) => {
+      args[2].onAccepted?.()
+      streamSignal = args[3]?.signal
+      return new Promise<void>(resolve => streamSignal?.addEventListener('abort', () => resolve(), { once: true }))
+    })
+    chatStore.openChat()
+    const wrapper = mountChat()
+    document.body.append(wrapper.element)
+    try {
+      await flushPromises()
+      expect(wrapper.get('[data-testid="chat-panel"]').attributes('role')).toBe('region')
+      expect(wrapper.get('[data-testid="chat-panel"]').attributes('aria-modal')).toBeUndefined()
+      await wrapper.get('[data-testid="chat-session-session-1"]').trigger('click')
+      await flushPromises()
+      await wrapper.get('[data-testid="chat-input"]').setValue('继续执行长任务')
+      await wrapper.get('[data-testid="chat-send"]').trigger('click')
+      await flushPromises()
+      await wrapper.get('[data-testid="chat-close"]').trigger('keydown', { key: 'Escape' })
+      await flushPromises()
+      expect(chatStore.state.visible).toBe(false)
+      expect(document.activeElement).toBe(opener)
+      expect(streamSignal?.aborted).toBe(false)
+      expect(chatApi.requestSessionStop).not.toHaveBeenCalled()
+    } finally { wrapper.unmount(); opener.remove() }
+  })
+
+  it('leaves a handled Escape and keyboard input outside the panel alone', async () => {
+    chatStore.openChat()
+    const wrapper = mountChat()
+    await flushPromises()
+    const handled = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    handled.preventDefault()
+    wrapper.get('[data-testid="chat-panel"]').element.dispatchEvent(handled)
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    expect(chatStore.state.visible).toBe(true)
+  })
+
+  it.each(['drag', 'resize'] as const)('uses the current panel geometry during an animated %s start', async mode => {
+    vi.stubGlobal('innerWidth', 1280)
+    vi.stubGlobal('innerHeight', 560)
+    chatStore.openChat()
+    const wrapper = mountChat()
+    try {
+      await flushPromises()
+      const panel = wrapper.get('[data-testid="chat-panel"]').element as HTMLElement
+      const renderedBox = vi.spyOn(panel, 'getBoundingClientRect').mockReturnValue({
+        left: 604, top: 76, width: 534, height: 454,
+        right: 1138, bottom: 530, x: 604, y: 76, toJSON: () => ({})
+      })
+      expect(panel.style.width).toBe('760px')
+      expect(panel.style.height).toBe('376px')
+      await wrapper.get(`[data-testid="chat-${mode === 'drag' ? 'drag' : 'resize'}-handle"]`)
+        .trigger('pointerdown', { button: 0, pointerId: 1, clientX: 800, clientY: 100 })
+      const movement = Object.assign(new Event('pointermove'), {
+        pointerId: 1, pointerType: 'mouse', buttons: 1,
+        clientX: mode === 'drag' ? 800 : 720, clientY: mode === 'drag' ? 160 : 30
+      })
+      window.dispatchEvent(movement)
+      await flushPromises()
+      expect(panel.style.left).toBe('508px')
+      expect(panel.style.top).toBe(mode === 'drag' ? '148px' : '88px')
+      expect(panel.style.width).toBe(mode === 'drag' ? '760px' : '680px')
+      expect(panel.style.height).toBe(mode === 'drag' ? '376px' : '306px')
+      renderedBox.mockRestore()
+    } finally {
+      wrapper.unmount()
+      vi.unstubAllGlobals()
+    }
   })
 
   it('takes board preset copy from i18n in both locales', async () => {
@@ -204,25 +379,42 @@ describe('ChatView', () => {
     wrapper.unmount()
   })
 
+  it('focuses the populated preset draft without creating or sending a conversation', async () => {
+    chatStore.openChat()
+    const wrapper = mountChat({ getBoardContext: () => ({ deviceCount: 0, templateCount: 1, templates: ['Light'] }) })
+    document.body.append(wrapper.element)
+    try {
+      await flushPromises()
+      await wrapper.get('.task-card').trigger('click')
+      await flushPromises()
+      const input = wrapper.get<HTMLTextAreaElement>('[data-testid="chat-input"]')
+      expect(input.element.value).toBeTruthy()
+      expect(document.activeElement).toBe(input.element)
+      expect(chatApi.createSession).not.toHaveBeenCalled()
+      expect(chatApi.sendStreamChat).not.toHaveBeenCalled()
+    } finally { wrapper.unmount(); wrapper.element.remove() }
+  })
+
   it('provides both locale labels for every tool name the backend can report', () => {
-    // Unlabelled tools fall through to `toolName.replace(/_/g, ' ')`, so a user watching the trace
-    // sees a raw implementation name. Keep the complete backend catalog here: checking only the
-    // most recently added tools lets an older label disappear without failing this contract.
-    const labelled = [
-      'add_device', 'add_template', 'apply_fix', 'apply_scenario', 'board_overview',
-      'cancel_fuzz_task', 'cancel_simulate_task', 'cancel_verify_task', 'check_duplicate_rule',
-      'check_rule_similarity', 'clear_board', 'delete_device', 'delete_fuzz_run',
-      'delete_simulation_trace', 'delete_template', 'delete_trace', 'delete_verification_run',
-      'dismiss_fuzz_task', 'dismiss_simulate_task', 'dismiss_verify_task', 'edit_device',
-      'fix_violation', 'fuzz_model_async', 'fuzz_task_status', 'get_fuzz_finding', 'get_fuzz_run',
-      'get_simulation_trace', 'get_trace', 'get_verification_run', 'list_async_tasks',
-      'list_fuzz_runs', 'list_rules', 'list_simulation_traces', 'list_specs', 'list_templates',
-      'list_traces', 'list_verification_runs', 'manage_board_history', 'manage_environment',
-      'manage_rule', 'manage_spec', 'recommend_related_devices', 'recommend_rules',
-      'recommend_scenario', 'recommend_specifications', 'reset_default_templates',
-      'search_devices', 'simulate_model', 'simulate_model_async', 'simulate_task_status',
-      'verify_model', 'verify_model_async', 'verify_task_status'
-    ]
+    // Read the actual registered catalog: a hand-maintained list cannot catch a newly added tool
+    // that falls through to its raw implementation name on the user's progress timeline.
+    const labelled: string[] = []
+    const directories = [resolve(process.cwd(), '../backend/src/main/java/cn/edu/nju/Iot_Verify/component/aitool')]
+    while (directories.length) {
+      const directory = directories.pop()!
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const path = join(directory, entry.name)
+        if (entry.isDirectory()) directories.push(path)
+        else if (entry.name.endsWith('Tool.java')) {
+          const source = readFileSync(path, 'utf8')
+          if (!source.includes('@Component') || source.includes('abstract class')) continue
+          const name = source.match(/public String getName\(\)\s*\{\s*return "([a-z_]+)";/)?.[1]
+          expect(name, `registered tool name missing in ${path}`).toBeTruthy()
+          labelled.push(name!)
+        }
+      }
+    }
+    expect(labelled.length).toBeGreaterThan(0)
     const camel = (name: string) =>
       name.replace(/_([a-z])/g, (_m, c: string) => c.toUpperCase())
     const componentSource = readFileSync(resolve(process.cwd(), 'src/components/ChatView.vue'), 'utf8')
@@ -1053,9 +1245,11 @@ describe('ChatView', () => {
   })
 
   it('shows a retryable error instead of an empty conversation when history loading fails', async () => {
+    const toast = vi.spyOn(feedback, 'notifyError').mockImplementation(() => undefined)
+    const cause = 'History storage is temporarily unavailable.'
     chatApi.getSessionList.mockResolvedValue([session])
     chatApi.getSessionHistory
-      .mockRejectedValueOnce(new Error('history unavailable'))
+      .mockRejectedValueOnce({ response: { status: 503, data: { code: 503, message: cause } } })
       .mockResolvedValueOnce(historyPage([{ role: 'assistant', content: '已恢复的历史消息' }]))
     chatStore.openChat()
 
@@ -1065,6 +1259,9 @@ describe('ChatView', () => {
     await flushPromises()
 
     expect(wrapper.find('[data-testid="chat-history-retry"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="chat-history-retry"]').text()).toContain('所选会话未能加载。')
+    expect(wrapper.get('[data-testid="chat-history-retry"] [data-testid="failure-cause"]').text()).toBe(cause)
+    expect(toast).not.toHaveBeenCalled()
     expect(wrapper.find('.welcome-screen').exists()).toBe(false)
     expect(wrapper.get('[data-testid="chat-input"]').attributes('disabled')).toBeDefined()
 
@@ -1077,11 +1274,11 @@ describe('ChatView', () => {
     wrapper.unmount()
   })
 
-  it('submits protected approval as a structured command from the confirmation button', async () => {
+  it.each(['CONFIRM', 'CANCEL'] as const)('submits %s for the exact preview shown by the button', async action => {
     chatApi.getSessionList.mockResolvedValue([session])
     chatApi.getPendingConfirmation.mockResolvedValue({
       sessionId: 'session-1',
-      kinds: ['DESTRUCTIVE']
+      actions: [{ kind: 'DESTRUCTIVE', confirmationId: 'delete-preview-1', toolName: 'delete_device', target: 'light-1' }]
     })
     chatApi.sendStreamChat.mockImplementation(async (...args: any[]) => {
       acceptAndFinishStream(args)
@@ -1092,16 +1289,18 @@ describe('ChatView', () => {
     await flushPromises()
     await wrapper.get('[data-testid="chat-session-session-1"]').trigger('click')
     await flushPromises()
-    expect(wrapper.text()).toContain('执行当前预览的受保护操作')
-    await wrapper.get('.protected-confirmation__button.is-confirm').trigger('click')
+    expect(wrapper.get('[data-testid="chat-protected-confirmation"] strong').text()).toBe('请确认：删除设备')
+    expect(wrapper.get('[data-testid="chat-confirmation-target"]').text()).toBe('light-1')
+    await wrapper.get(`.protected-confirmation__button.${action === 'CONFIRM' ? 'is-confirm' : 'is-cancel'}`).trigger('click')
     await flushPromises()
 
     expect(chatApi.sendStreamChat).toHaveBeenCalledTimes(1)
     expect(chatApi.sendStreamChat.mock.calls[0][5]).toEqual({
-      action: 'CONFIRM',
-      kind: 'DESTRUCTIVE'
+      action,
+      kind: 'DESTRUCTIVE',
+      confirmationId: 'delete-preview-1'
     })
-    expect(chatApi.sendStreamChat.mock.calls[0][1]).toContain('确认按钮')
+    expect(chatApi.sendStreamChat.mock.calls[0][1]).toBe(action === 'CONFIRM' ? '已确认删除设备：light-1' : '已取消删除设备：light-1')
 
     wrapper.unmount()
   })
@@ -1110,7 +1309,10 @@ describe('ChatView', () => {
     chatApi.getSessionList.mockResolvedValue([session])
     chatApi.getPendingConfirmation.mockResolvedValue({
       sessionId: 'session-1',
-      kinds: ['DESTRUCTIVE', 'SCENE_REPLACEMENT']
+      actions: [
+        { kind: 'DESTRUCTIVE', confirmationId: 'delete-preview-1', toolName: 'delete_device', target: 'light-1' },
+        { kind: 'SCENE_REPLACEMENT', confirmationId: 'scene-preview-1', toolName: 'apply_scenario', target: 'Night safety' }
+      ]
     })
     chatStore.openChat()
 
@@ -1120,6 +1322,8 @@ describe('ChatView', () => {
     await flushPromises()
 
     expect(wrapper.findAll('[data-testid="chat-protected-confirmation"]')).toHaveLength(2)
+    expect(wrapper.findAll('[data-testid="chat-protected-confirmation"] strong').map(item => item.text()))
+      .toEqual(['请确认：删除设备', '请确认：用草案替换完整场景'])
     expect(wrapper.get('.input-floating-area').element.previousElementSibling)
       .toBe(wrapper.get('.messages-viewport').element)
 
@@ -1130,7 +1334,7 @@ describe('ChatView', () => {
     chatApi.getSessionList.mockResolvedValue([session])
     chatApi.getPendingConfirmation
       .mockRejectedValueOnce(new Error('network unavailable'))
-      .mockResolvedValueOnce({ sessionId: 'session-1', kinds: ['DESTRUCTIVE'] })
+      .mockResolvedValueOnce({ sessionId: 'session-1', actions: [{ kind: 'DESTRUCTIVE', confirmationId: 'delete-preview-1', toolName: 'delete_device', target: 'light-1' }] })
     chatStore.openChat()
 
     const wrapper = mountChat()
@@ -1148,6 +1352,72 @@ describe('ChatView', () => {
     wrapper.unmount()
   })
 
+  it.each([false, true])('reconciles work settled during lazy mount, including a removed session: %s', async removed => {
+    authStore.login(validToken('alice'), { userId: 1, phone: '13800138000', username: 'alice' })
+    chatApi.getSessionList.mockResolvedValue(removed ? [] : [{
+      ...session, active: false, latestTerminalMessageId: 42, latestExecutionStatus: 'COMPLETED'
+    }])
+    const executeCommand = vi.fn().mockResolvedValue(true)
+    chatStore.openChat()
+    const wrapper = mountChat({
+      executeCommand,
+      initialSessionObservations: {
+        userId: 1,
+        sessions: [{ id: session.id, active: true, latestTerminalMessageId: null }],
+        reconciliation: null
+      }
+    })
+    await flushPromises()
+    expect(executeCommand).toHaveBeenCalledOnce()
+    expect(executeCommand).toHaveBeenCalledWith({ type: 'REFRESH_DATA', payload: { target: 'board_state' } })
+    expect(chatStore.state.reconciliationRequired).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('waits for the pre-mount reconciliation and takes over a failed one without clearing pending state', async () => {
+    authStore.login(validToken('alice'), { userId: 1, phone: '13800138000', username: 'alice' })
+    chatApi.getSessionList.mockResolvedValue([session])
+    let finishParent!: (reconciled: boolean) => void
+    const parentReconciliation = new Promise<boolean>(resolve => { finishParent = resolve })
+    const executeCommand = vi.fn().mockResolvedValue(true)
+    chatStore.setReconciliationRequired(true)
+    chatStore.openChat()
+    const wrapper = mountChat({
+      executeCommand,
+      initialSessionObservations: {
+        userId: 1,
+        sessions: [{ id: session.id, active: false, latestTerminalMessageId: session.latestTerminalMessageId }],
+        reconciliation: parentReconciliation
+      }
+    })
+    await flushPromises()
+    expect(executeCommand).not.toHaveBeenCalled()
+    expect(chatStore.state.reconciliationRequired).toBe(true)
+    finishParent(false)
+    await flushPromises()
+    expect(executeCommand).toHaveBeenCalledOnce()
+    expect(chatStore.state.reconciliationRequired).toBe(false)
+    wrapper.unmount()
+  })
+
+  it("does not inherit another account's pre-mount observations", async () => {
+    authStore.login(validToken('bob'), { userId: 2, phone: '13800138002', username: 'bob' })
+    chatApi.getSessionList.mockResolvedValue([{ ...session, userId: 2, latestTerminalMessageId: 42 }])
+    const executeCommand = vi.fn().mockResolvedValue(true)
+    chatStore.openChat()
+    const wrapper = mountChat({
+      executeCommand,
+      initialSessionObservations: {
+        userId: 1,
+        sessions: [{ id: session.id, active: true, latestTerminalMessageId: null }],
+        reconciliation: null
+      }
+    })
+    await flushPromises()
+    expect(executeCommand).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
   it('reattaches to an active server execution after reload', async () => {
     chatApi.getSessionList.mockResolvedValue([{ ...session, active: true }])
     chatApi.getSessionActivity.mockResolvedValue({ sessionId: 'session-1', active: true })
@@ -1161,7 +1431,7 @@ describe('ChatView', () => {
     expect(wrapper.get('[data-testid="chat-remote-execution"]').text()).toContain('已重新连接到后台执行')
     // Same move as the delete button above: the hint is the wrapping tooltip's content now, not a `title`.
     expect(wrapper.findAllComponents(HintTooltip).map(tip => tip.props('content')))
-      .toContain('停止仍在后台运行的助手任务')
+      .toContain('停止后台助手任务')
     expect(chatStore.state.streaming).toBe(true)
 
     wrapper.unmount()
@@ -1180,7 +1450,7 @@ describe('ChatView', () => {
       historyPage([], sessionId))
     chatApi.getPendingConfirmation.mockImplementation(async (sessionId: string) => ({
       sessionId,
-      kinds: []
+      actions: []
     }))
     chatApi.getSessionActivity
       .mockResolvedValueOnce({ sessionId: 'session-b', active: false })
@@ -1219,7 +1489,7 @@ describe('ChatView', () => {
       historyPage([], sessionId))
     chatApi.getPendingConfirmation.mockImplementation(async (sessionId: string) => ({
       sessionId,
-      kinds: []
+      actions: []
     }))
     chatApi.getSessionActivity
       .mockResolvedValueOnce({ sessionId: 'session-b', active: false })
@@ -1269,7 +1539,7 @@ describe('ChatView', () => {
       historyPage([], sessionId))
     chatApi.getPendingConfirmation.mockImplementation(async (sessionId: string) => ({
       sessionId,
-      kinds: []
+      actions: []
     }))
     chatApi.getSessionActivity.mockResolvedValue({ sessionId: 'session-b', active: false })
     chatStore.openChat()
@@ -1458,7 +1728,7 @@ describe('ChatView', () => {
     chatApi.getSessionList.mockResolvedValue([sessionA, sessionB])
     chatApi.getSessionHistory.mockImplementation(async (sessionId: string) =>
       historyPage([], sessionId))
-    chatApi.getPendingConfirmation.mockResolvedValue({ sessionId: 'session-a', kinds: [] })
+    chatApi.getPendingConfirmation.mockResolvedValue({ sessionId: 'session-a', actions: [] })
     chatApi.createSession.mockResolvedValue(sessionC)
     chatApi.sendStreamChat.mockImplementation((...args: any[]) => {
       args[2].onAccepted?.()
@@ -1836,6 +2106,52 @@ describe('ChatView', () => {
     wrapper.unmount()
   })
 
+  it.each([
+    ['zh-CN', '查看执行记录', '未执行平台工具', '部分完成'],
+    ['en', 'View execution details', 'No platform tools ran', 'Partially completed']
+  ] as const)('keeps a PARTIAL session summary neutral while its messages retain evidence-based labels: %s',
+  async (locale, details, noTools, partial) => {
+    i18n.global.locale.value = locale
+    chatApi.getSessionList.mockResolvedValue([{
+      ...session, latestTerminalMessageId: 4, latestExecutionStatus: 'PARTIAL'
+    }])
+    chatApi.getSessionHistory.mockResolvedValue(historyPage([
+      { role: 'user', content: 'Cancel the current preview.' },
+      {
+        role: 'assistant', content: 'The preview was cancelled.', executionStatus: 'PARTIAL',
+        executionTrace: [
+          { stage: 'CONTEXT_READY' },
+          { stage: 'PLANNING', round: 1 },
+          { stage: 'WRITING_RESPONSE' }
+        ]
+      },
+      { role: 'user', content: 'Read the Board.' },
+      {
+        role: 'assistant', content: 'The tool result was not confirmed.', executionStatus: 'PARTIAL',
+        executionTrace: [{ stage: 'TOOL_EXECUTION', toolName: 'board_overview', round: 1 }]
+      }
+    ]))
+    chatStore.openChat()
+
+    const wrapper = mountChat()
+    await flushPromises()
+    const summary = wrapper.get('[data-testid="chat-session-status"]')
+    expect(summary.text()).toBe(details)
+    expect(summary.attributes('aria-label')).toBe(details)
+    expect(summary.attributes('title')).toBe(details)
+    expect(summary.classes()).toContain('is-warning')
+    await wrapper.get('[data-testid="chat-session-session-1"]').trigger('click')
+    await flushPromises()
+
+    const statuses = wrapper.findAll('.chat-execution-state')
+    expect(statuses).toHaveLength(2)
+    expect(statuses[0].text()).toBe(noTools)
+    expect(statuses[1].text()).toBe(partial)
+    expect(wrapper.get('[data-testid="chat-session-status"]').text()).toBe(details)
+
+    wrapper.unmount()
+  })
+
   it('distinguishes no-tool replies and treats a missing terminal status as unconfirmed', async () => {
     chatApi.getSessionList.mockResolvedValue([session])
     chatApi.getSessionHistory.mockResolvedValue(historyPage([
@@ -1931,7 +2247,7 @@ describe('ChatView', () => {
 
     expect(wrapper.get('.chat-execution-outcome').text()).toBe('部分结果')
     expect(wrapper.get('[data-testid="chat-execution-trace"]').text())
-      .toContain('可审阅但不完整')
+      .toContain('返回部分结果，仍有内容未完成')
     expect(wrapper.get('.chat-execution-outcome').text()).not.toBe('成功')
 
     wrapper.unmount()
@@ -2014,6 +2330,7 @@ describe('ChatView', () => {
 
   it('registers an explicit stop before aborting and reconciling the active response', async () => {
     const clearIntervalSpy = vi.spyOn(window, 'clearInterval')
+    let isCurrentRequest: (() => boolean) | undefined
     let streamSignal: AbortSignal | undefined
     let activeTurnId = ''
     let resolveStop!: () => void
@@ -2024,6 +2341,7 @@ describe('ChatView', () => {
       resolveStop = resolve
     }))
     chatApi.sendStreamChat.mockImplementation((...args: any[]) => {
+      isCurrentRequest = args[2].isCurrentRequest
       args[2].onAccepted?.()
       streamSignal = args[3]?.signal
       activeTurnId = args[4]
@@ -2050,11 +2368,13 @@ describe('ChatView', () => {
     await wrapper.get('[data-testid="chat-input"]').setValue('运行验证')
     await wrapper.get('[data-testid="chat-send"]').trigger('click')
     await flushPromises()
+    expect(isCurrentRequest?.()).toBe(true)
     await wrapper.get('[data-testid="chat-stop"]').trigger('click')
     await flushPromises()
 
     expect(chatApi.requestSessionStop).toHaveBeenCalledWith('session-1', activeTurnId)
     expect(streamSignal?.aborted).toBe(false)
+    expect(isCurrentRequest?.()).toBe(false)
     expect(chatApi.getSessionActivity).not.toHaveBeenCalled()
 
     resolveStop()
@@ -2580,6 +2900,7 @@ describe('ChatView', () => {
   })
 
   it('removes an optimistic turn and restores the draft when the server rejects before streaming', async () => {
+    const errorMessage = vi.spyOn(feedback, 'notifyError').mockImplementation(() => undefined)
     chatApi.getSessionList.mockResolvedValue([session])
     chatApi.sendStreamChat.mockRejectedValue(new ChatStreamError('busy', {
       kind: 'HTTP_ERROR',
@@ -2598,6 +2919,7 @@ describe('ChatView', () => {
     expect(wrapper.findAll('.msg-row')).toHaveLength(0)
     expect((wrapper.get('[data-testid="chat-input"]').element as HTMLTextAreaElement).value)
       .toBe('不要留下虚假消息')
+    expect(errorMessage).toHaveBeenCalledWith('发送消息失败：请求未能开始（HTTP 409）')
 
     wrapper.unmount()
   })
@@ -2623,6 +2945,31 @@ describe('ChatView', () => {
     expect(errorMessage).toHaveBeenCalledWith(
       '发送消息失败：当前对话已接近历史容量上限，请新建对话，或删除不再需要的旧对话。'
     )
+    wrapper.unmount()
+  })
+
+  it.each(['zh-CN', 'en'] as const)('explains an active conversation before stream acceptance in %s', async locale => {
+    const errorMessage = vi.spyOn(feedback, 'notifyError').mockImplementation(() => undefined)
+    i18n.global.locale.value = locale
+    chatApi.getSessionList.mockResolvedValue([session])
+    chatApi.sendStreamChat.mockRejectedValue(new ChatStreamError('An English provider-independent busy message', {
+      kind: 'HTTP_ERROR', status: 409, reasonCode: 'CHAT_SESSION_BUSY'
+    }))
+    chatStore.openChat()
+    const wrapper = mountChat()
+    await flushPromises()
+    await wrapper.get('[data-testid="chat-session-session-1"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="chat-input"]').setValue('Keep this draft')
+    await wrapper.get('[data-testid="chat-send"]').trigger('click')
+    await flushPromises()
+
+    expect(errorMessage).toHaveBeenCalledWith(i18n.global.t('app.chat.sendFailedWithReason', {
+      reason: i18n.global.t('app.chat.sessionBusyOnSend')
+    }))
+    expect(i18n.global.t('app.chat.sessionBusyOnSend')).not.toBe('app.chat.sessionBusyOnSend')
+    expect(wrapper.findAll('.msg-row')).toHaveLength(0)
+    expect((wrapper.get('[data-testid="chat-input"]').element as HTMLTextAreaElement).value).toBe('Keep this draft')
     wrapper.unmount()
   })
 
@@ -2677,6 +3024,63 @@ describe('ChatView', () => {
     expect(wrapper.find('[data-testid="chat-load-older"]').exists()).toBe(false)
 
     wrapper.unmount()
+  })
+
+  it('keeps phase and elapsed feedback visible through a slow stream and clears the wait hint on updates', async () => {
+    vi.useFakeTimers()
+    let callbacks: any
+    let finishStream!: () => void
+    chatApi.createSession.mockResolvedValue(session)
+    chatApi.sendStreamChat.mockImplementation((...args: any[]) => {
+      callbacks = args[2]
+      callbacks.onAccepted?.()
+      return new Promise<void>(resolve => {
+        finishStream = () => {
+          callbacks.onFinish?.({ turnId: args[4], executionStatus: 'PARTIAL' })
+          resolve()
+        }
+      })
+    })
+    chatStore.openChat()
+    const wrapper = mountChat()
+    try {
+      await flushPromises()
+      await wrapper.get('[data-testid="chat-input"]').setValue('检查触发链路')
+      await wrapper.get('[data-testid="chat-send"]').trigger('click')
+      await flushPromises()
+      callbacks.onProgress({ stage: 'PLANNING', round: 1 })
+      await flushPromises()
+      const details = wrapper.get('details.chat-execution-trace')
+      ;(details.element as HTMLDetailsElement).open = false
+      await details.trigger('toggle')
+      await vi.advanceTimersByTimeAsync(15000)
+      await flushPromises()
+      const status = wrapper.get('[data-testid="chat-response-status"]')
+      expect(status.element.closest('.input-card')).not.toBeNull()
+      expect(status.element.closest('.messages-viewport')).toBeNull()
+      expect(status.text()).toContain('已用时 15 秒')
+      expect(status.text()).toContain('正在等待下一段输出')
+      expect(status.text()).not.toContain('%')
+      callbacks.onMessage('当前链路如下。')
+      await flushPromises()
+      expect(status.text()).toContain('正在生成答复')
+      expect(status.find('.chat-response-wait').exists()).toBe(false)
+      expect(wrapper.text()).toContain('当前链路如下。')
+      await vi.advanceTimersByTimeAsync(15000)
+      callbacks.onProgress({ stage: 'TOOL_EXECUTION', toolName: 'board_overview', round: 2 })
+      await flushPromises()
+      expect(status.text()).toContain('读取当前画布')
+      expect(status.find('.chat-response-wait').exists()).toBe(false)
+      callbacks.onProgress({ stage: 'PLANNING', round: 2, detail: '连接中断，正在续答' })
+      await flushPromises()
+      expect(status.text()).toContain('连接中断，正在续答')
+      finishStream()
+      await flushPromises()
+      expect(wrapper.find('[data-testid="chat-response-status"]').exists()).toBe(false)
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
   })
 
   it('renders the pending response inside one full-width assistant activity bubble', async () => {
@@ -2807,7 +3211,7 @@ describe('ChatView', () => {
     expect(trace.text()).toContain('创建设备')
     expect(trace.text()).toContain('已启动工具 add_device')
     expect(trace.text()).toContain('已创建设备“客厅灯”。')
-    expect(trace.text()).toContain('整理最终答复')
+    expect(trace.text()).toContain('生成答复')
     expect(wrapper.text()).toContain('1 成功')
     expect(wrapper.text()).toContain('设备已创建。')
     expect(wrapper.get('.chat-execution-state').text()).toContain('已完成')
@@ -2831,6 +3235,117 @@ describe('ChatView', () => {
     await flushPromises()
     expect(completedEvents.scrollTop).toBe(0)
 
+    wrapper.unmount()
+  })
+
+  it.each(['SSE', 'history'] as const)('keeps distinct reply checks and safely shows their originals through %s', async entry => {
+    const originals = ['我已经删除所有设备。<script>alert(1)</script>', '我已经创建所有规则。']
+    const executionTrace: StreamProgress[] = originals.map(originalText => ({
+      stage: 'CLAIM_REVIEW', outcome: 'REPLACED', claimReview: {
+        reasonCode: 'MISSING_OPERATION_RECEIPT', originalText,
+        matchedText: originalText.split('。')[0]!
+      }
+    }))
+    if (entry === 'SSE') {
+      chatApi.createSession.mockResolvedValue(session)
+      chatApi.sendStreamChat.mockImplementation(async (...args: any[]) => {
+        const callbacks = args[2]
+        callbacks.onAccepted?.()
+        for (const progress of executionTrace) callbacks.onProgress(progress)
+        callbacks.onMessage('这项说法尚未核实，请查看回答核对。')
+        callbacks.onFinish?.({ turnId: args[4], executionStatus: 'PARTIAL' })
+      })
+    } else {
+      chatApi.getSessionList.mockResolvedValue([session])
+      chatApi.getSessionHistory.mockResolvedValue(historyPage([
+        { role: 'user', content: '检查场景' },
+        { role: 'assistant', content: '这项说法尚未核实，请查看回答核对。', executionStatus: 'PARTIAL', executionTrace }
+      ]))
+    }
+    chatStore.openChat()
+    const wrapper = mountChat()
+    await flushPromises()
+    if (entry === 'SSE') {
+      await wrapper.get('[data-testid="chat-input"]').setValue('检查场景')
+      await wrapper.get('[data-testid="chat-send"]').trigger('click')
+    } else {
+      await wrapper.get('[data-testid="chat-session-session-1"]').trigger('click')
+    }
+    await flushPromises()
+    const reviews = wrapper.findAll('[data-testid="chat-claim-review"]')
+    expect(reviews).toHaveLength(2)
+    for (const [index, review] of reviews.entries()) {
+      expect(review.attributes('open')).toBeUndefined()
+      expect(review.get('summary').text()).toBe('查看被隐藏的原句')
+      expect(review.get('blockquote').text()).toBe(originals[index])
+      expect(review.find('script').exists()).toBe(false)
+      expect(review.get('code').text()).toBe(originals[index]!.split('。')[0])
+    }
+    expect(wrapper.get('[data-testid="chat-execution-trace"]').text()).toContain('本轮没有相应的完成记录')
+    wrapper.unmount()
+  })
+
+  it.each(['SSE', 'history'] as const)('renders tool-result details only when informative through %s', async entry => {
+    const executionTrace: StreamProgress[] = [
+      { stage: 'TOOL_RESULT', toolName: 'list_rules', round: 1, outcome: 'USABLE' },
+      { stage: 'TOOL_RESULT', toolName: 'list_rules', round: 2, outcome: 'USABLE', detail: null },
+      { stage: 'TOOL_RESULT', toolName: 'list_rules', round: 3, outcome: 'USABLE', detail: '' },
+      { stage: 'TOOL_RESULT', toolName: 'delete_device', round: 4, outcome: 'USABLE', detail: '已生成删除预览，尚未删除设备。' },
+      { stage: 'TOOL_RESULT', toolName: 'list_rules', round: 5, outcome: 'FAILED' },
+      { stage: 'TOOL_RESULT', toolName: 'list_rules', round: 6, outcome: 'PARTIAL' },
+      { stage: 'TOOL_RESULT', toolName: 'list_rules', round: 7, outcome: 'RESULT_UNAVAILABLE' },
+      { stage: 'TOOL_RESULT', toolName: 'delete_device', round: 8, outcome: 'CONFIRMATION_REQUIRED' }
+    ]
+    if (entry === 'SSE') {
+      chatApi.createSession.mockResolvedValue(session)
+      chatApi.sendStreamChat.mockImplementation(async (...args: any[]) => {
+        const callbacks = args[2]
+        callbacks.onAccepted?.()
+        for (const progress of executionTrace) callbacks.onProgress(progress)
+        callbacks.onMessage('请查看执行结果。')
+        callbacks.onFinish?.({ turnId: args[4], executionStatus: 'PARTIAL' })
+      })
+    } else {
+      chatApi.getSessionList.mockResolvedValue([session])
+      chatApi.getSessionHistory.mockResolvedValue(historyPage([
+        { role: 'user', content: '检查规则与删除预览' },
+        { role: 'assistant', content: '请查看执行结果。', executionStatus: 'PARTIAL', executionTrace }
+      ]))
+    }
+    chatStore.openChat()
+
+    const wrapper = mountChat()
+    await flushPromises()
+    if (entry === 'SSE') {
+      await wrapper.get('[data-testid="chat-input"]').setValue('检查规则与删除预览')
+      await wrapper.get('[data-testid="chat-send"]').trigger('click')
+    } else {
+      await wrapper.get('[data-testid="chat-session-session-1"]').trigger('click')
+    }
+    await flushPromises()
+
+    const traceEvents = wrapper.get('[data-testid="chat-execution-trace"]').findAll('li')
+    expect(traceEvents).toHaveLength(entry === 'SSE' ? 9 : 8)
+    const events = traceEvents.filter(event => event.find('.chat-execution-outcome').exists())
+    expect(events).toHaveLength(8)
+    for (const event of events.slice(0, 3)) {
+      expect(event.get('.chat-execution-event-copy strong').text()).toBe(i18n.global.t('app.chat.toolLabels.listRules'))
+      expect(event.get('.chat-execution-outcome').text()).toBe(i18n.global.t('app.chat.progressStatusSucceeded'))
+      expect(event.find('.chat-execution-event-copy p').exists()).toBe(false)
+    }
+    expect(events[3]!.get('.chat-execution-event-copy p').text()).toBe('已生成删除预览，尚未删除设备。')
+    for (const [index, key, status] of [
+      [4, 'progressToolFailedDetail', 'progressStatusFailed'],
+      [5, 'progressToolPartialDetail', 'progressStatusPartial'],
+      [6, 'progressToolUnconfirmedDetail', 'progressStatusUnconfirmed'],
+      [7, 'progressToolNeedsConfirmationDetail', 'progressStatusConfirmation']
+    ] as const) {
+      expect(events[index]!.get('.chat-execution-event-copy p').text()).toBe(i18n.global.t(`app.chat.${key}`, { round: index + 1 }))
+      expect(events[index]!.get('.chat-execution-outcome').text()).toBe(i18n.global.t(`app.chat.${status}`))
+    }
+    expect(wrapper.get('.chat-execution-metrics').text()).toContain('4 成功')
+    expect(wrapper.get('.chat-execution-metrics').text()).toContain('1 失败')
+    expect(wrapper.get('.chat-execution-metrics').text()).toContain('2 待确认')
     wrapper.unmount()
   })
 
@@ -2883,7 +3398,7 @@ describe('ChatView', () => {
     await wrapper.get('[data-testid="chat-send"]').trigger('click')
     await flushPromises()
 
-    expect(wrapper.text()).toContain('继续原始任务')
+    expect(wrapper.text()).toContain('继续任务')
     expect(wrapper.text()).toContain('删除旧传感器，创建替代设备，然后运行正式验证')
 
     wrapper.unmount()
@@ -3136,6 +3651,103 @@ describe('ChatView', () => {
       payload: { target: 'board_state' }
     })
     wrapper.unmount()
+  })
+
+  it.each(['session list', 'stop', 'activity'] as const)(
+    'abandons chat logout when its credential changes during %s', async stage => {
+      const alice = { userId: 1, phone: '13800138000', username: 'alice' }
+      const aliceToken = validToken('alice-before-logout')
+      const renewedToken = validToken('alice-after-logout')
+      authStore.login(aliceToken, alice)
+      const activeSessions = [
+        { ...session, id: 'background-a', active: true },
+        { ...session, id: 'background-b', active: true }
+      ]
+      chatApi.getSessionList.mockResolvedValue(activeSessions)
+      chatApi.getSessionActivity.mockImplementation(async (sessionId: string) => ({ sessionId, active: false }))
+      const executeCommand = vi.fn().mockResolvedValue(true)
+      const wrapper = mountChat({ executeCommand })
+      await flushPromises()
+      let resolvePending!: (value: any) => void
+      const pending = new Promise(resolve => { resolvePending = resolve })
+      if (stage === 'session list') chatApi.getSessionList.mockReturnValueOnce(pending)
+      if (stage === 'stop') chatApi.requestSessionStop.mockReturnValueOnce(pending)
+      if (stage === 'activity') chatApi.getSessionActivity.mockReturnValueOnce(pending)
+      const preparation = (wrapper.vm as any).prepareForLogout()
+      await flushPromises()
+      authStore.login(renewedToken, alice)
+      await flushPromises()
+      resolvePending(stage === 'session list' ? activeSessions
+        : stage === 'activity' ? { sessionId: 'background-a', active: false } : undefined)
+      await expect(preparation).resolves.toBe('outcome-unknown')
+      expect(executeCommand).not.toHaveBeenCalled()
+      expect(chatApi.requestSessionStop).toHaveBeenCalledTimes(stage === 'session list' ? 0 : stage === 'stop' ? 1 : 2)
+      expect(chatApi.requestSessionStop.mock.calls.every(call => call[2] === aliceToken)).toBe(true)
+      expect(chatApi.getSessionActivity).toHaveBeenCalledTimes(stage === 'activity' ? 1 : 0)
+      expect(authStore.getToken()).toBe(renewedToken)
+    }
+  )
+
+  it('preserves the next account reconciliation state when an old logout refresh finishes', async () => {
+    authStore.login(validToken('alice-logout'), { userId: 1, phone: '13800138000', username: 'alice' })
+    chatApi.getSessionList.mockResolvedValue([{ ...session, active: true }])
+    let resolveRefresh!: (value: boolean) => void
+    const executeCommand = vi.fn(() => new Promise<boolean>(resolve => { resolveRefresh = resolve }))
+    const wrapper = mountChat({ executeCommand })
+    await flushPromises()
+    const preparation = (wrapper.vm as any).prepareForLogout()
+    await flushPromises()
+    expect(executeCommand).toHaveBeenCalledOnce()
+    chatApi.getSessionList.mockResolvedValue([])
+    const bobToken = validToken('bob-logout')
+    authStore.login(bobToken, { userId: 2, phone: '13900139000', username: 'bob' })
+    await flushPromises()
+    chatStore.setReconciliationRequired(true)
+    resolveRefresh(true)
+    await expect(preparation).resolves.toBe('outcome-unknown')
+    expect(chatStore.state.reconciliationRequired).toBe(true)
+    expect(authStore.getToken()).toBe(bobToken)
+  })
+
+  it('preserves ordinary history prose and literal former protocol markers when rendering and copying', async () => {
+    const content = '正在执行指令... This sentence discusses CallEnd|> literally.'
+    chatApi.getSessionList.mockResolvedValue([session])
+    chatApi.getSessionHistory.mockResolvedValue(historyPage([
+      { role: 'assistant', content, executionStatus: 'COMPLETED' }
+    ]))
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    chatStore.openChat()
+    const wrapper = mountChat()
+    try {
+      await flushPromises()
+      await wrapper.get('[data-testid="chat-session-session-1"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('.chat-markdown-stub').text()).toBe(content)
+      await wrapper.get(`button[aria-label="${i18n.global.t('app.chat.copyAll')}"]`).trigger('click')
+      expect(writeText).toHaveBeenCalledWith(content)
+    } finally {
+      if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard)
+      else Reflect.deleteProperty(navigator, 'clipboard')
+    }
+  })
+
+  it('preserves a literal former protocol marker arriving in a live stream', async () => {
+    chatApi.createSession.mockResolvedValue(session)
+    chatApi.sendStreamChat.mockImplementation((...args: any[]) => {
+      args[2].onAccepted?.()
+      args[2].onMessage('Executing command... CallEnd|> is ordinary text.')
+      return new Promise<void>(resolve => args[3].signal.addEventListener('abort', () => resolve(), { once: true }))
+    })
+    chatStore.openChat()
+    const wrapper = mountChat()
+    await flushPromises()
+    await wrapper.get('[data-testid="chat-input"]').setValue('Explain these strings')
+    await wrapper.get('[data-testid="chat-send"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('.chat-markdown-stub').map(message => message.text()))
+      .toContain('Executing command... CallEnd|> is ordinary text.')
   })
 
   it('stops an active stream with its owner token when another account takes over', async () => {

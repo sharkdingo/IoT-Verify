@@ -4,7 +4,7 @@ This document is the project authority for board data contracts. The project is
 in active development: invalid legacy shapes should be fixed at the source or by
 clearing development data, not by adding fallback branches.
 
-Verified against code on 2026-08-13. Source: board/fuzz DTOs and services,
+Verified against code on 2026-10-08. Source: board/fuzz DTOs and services,
 `BoardDataConverter`, `modelRequest.ts`, scene import/export, fuzzing, and NuSMV generation.
 
 ## Principles
@@ -15,6 +15,9 @@ Verified against code on 2026-08-13. Source: board/fuzz DTOs and services,
   reference is the NuSMV-safe `varName` produced from `DeviceNode.id`.
 - Display labels never resolve identity. `label`, `deviceLabel`, and
   `deviceName` labels are readable snapshots only.
+- Verification-result requirements use the checked conditions and token provenance captured
+  with that result. Current Board specifications and template definitions cannot supply missing
+  historical interpretation; see [the result snapshot contract](../api/verification.md#specificationsnapshotdto).
 - Edges are derived display geometry from rules. There is no persisted edge
   endpoint or table in the current code path.
 - Downstream consumers fail fast on unknown references. A saved board rule/spec
@@ -80,12 +83,15 @@ Backend DTO: `DeviceNodeDto`. Frontend type: `DeviceNode`.
 | `variables[].name/value/trust` | User/runtime override, **except a value the device's state determines** (see below) | Device-local variable values and trust (`InternalVariables[].IsInside=true`) | NuSMV local variable init/trust, fix fingerprint |
 | `privacies[].name/privacy` | User/runtime override | Device-local variable sensitivity keyed by literal template variable name | Privacy modeling and fix fingerprint |
 
-The public update boundary follows those ownership columns. Canvas geometry is a
-complete `PUT /api/board/nodes/{id}/layout` subresource, and modeled device-local values
-are a separate complete `PUT /api/board/nodes/{id}/runtime` subresource. Neither command
+The public update boundary follows those ownership columns. Canvas geometry and modeled
+device-local values have separate complete update commands in the
+[Board API](../api/board.md#canvas-storage). Neither command
 accepts `id`, `templateName`, or `label`, and each persists only its own database columns.
 Renaming remains a dedicated command because it also rebuilds specification display
-labels. There is no whole-device update command: a stale drag response cannot overwrite
+labels. Its journal compares the original specifications with the canonical saved result
+without rereading the same collection. Runtime updates reuse one decoded template catalog
+for runtime validation, node canonicalization, and Board reference validation.
+There is no whole-device update command: a stale drag response cannot overwrite
 a newer runtime selection, and a runtime save cannot move or retype a device. The update
 response supplies before/after device snapshots, changed fields, and the current device
 collection so clients can verify that preserved fields really stayed preserved.
@@ -214,8 +220,8 @@ JSON still uses `a_temperature`, and the generated SMV environment identifier is
 `a_a_temperature`.
 
 NuSMV instance names are normalized by the backend `DeviceNameNormalizer`; the frontend
-`modelRequest.ts` mirrors the same function so requests built in the browser and requests
-built from saved board data use identical ids. The reserved-word list includes NuSMV
+`modelRequest.ts` mirrors the same function for local scene fingerprints and attack-point
+selection; the submitted request does not contain the scene. The reserved-word list includes NuSMV
 module sections and property keywords such as `FROZENVAR`, `INVAR`, `CTLSPEC`, and
 `LTLSPEC`; reserved ids are escaped with a leading `_`.
 
@@ -383,12 +389,11 @@ Frontend builder: `frontend/src/utils/modelRequest.ts`. Backend converter:
 **A run request carries run parameters only; the scene is read server-side from the caller's own
 persisted board.** `attackScenario`, `enablePrivacy`, and (for simulation) `steps` are the whole
 client contract. `devices`, `rules`, `specs`, `environmentVariables`, and `playbackNodes` are
-**rejected** by `ModelRequestParser` if a client sends them, because a run must describe the board
-the user saved: while they were client input, an account whose board held no devices could post a
-fabricated two-device scene and have the resulting `VIOLATED` verdict persisted into its own run
-history. Verification and simulation now call `BoardDataConverter.getModelInputSnapshot(userId)` —
-the same read fuzz and the AI tools already used — before freezing the request snapshot, so the
-persisted evidence deep-copies the board scene rather than aliasing live objects.
+**rejected** by `ModelRequestParser` if a client sends them. Verification and simulation
+services each call `BoardDataConverter.getModelInputSnapshot(userId)` once to capture
+both the scene and its referenced templates before deep-copying the scene into the
+frozen run snapshot. REST handlers and AI tools pass only run parameters to these
+ordinary service entry points; templates cannot come from an earlier tool-side read.
 
 The table below therefore describes the **frozen snapshot** the service builds from that board read
 and persists as run evidence, not fields a client may supply.
@@ -442,9 +447,8 @@ Backend DTOs: `TraceDto`, `TraceStateDto`, `TraceDeviceDto`,
 | `violatedSpec` | Parsed structured spec snapshot | Human-readable historical context | Trace details |
 | `checkedExpression` | Emitted-spec mapping | Exact CTL/LTL expression checked, distinct from the preview/cache | Trace details |
 | `states` | NuSMV parser | Counterexample/simulation states | Visualization/fix |
-| `requestJson` | Verification request snapshot | Internal fix context | Not serialized to API |
-| `isAttack` / `attackBudget` / `enablePrivacy` | Derived from request snapshot | Historical run context | History UI |
-| `modelSemantics` | Persisted from the immutable request snapshot | Machine-readable attack selection policy, exact selected points when applicable, trust/privacy assumptions, and distinct device, falsifiable-reading subset, link, and total countable attack points for that run. `attackEffects` lists only mechanisms present in the scene. Historical clients must not recompute these values from the current board | Result interpretation guard |
+| `isAttack` / `attackBudget` / `enablePrivacy` | Owning completed verification run | Project historical run context into trace detail | History UI |
+| `modelSemantics` | Owning completed verification run | Machine-readable attack selection policy, exact selected points when applicable, trust/privacy assumptions, and distinct device, falsifiable-reading subset, link, and total countable attack points for that run. `attackEffects` lists only mechanisms present in the scene. Historical clients must not recompute these values from the current board | Result interpretation guard |
 | `createdAt` | DB | Trace creation time | History sorting |
 | `TraceStateDto.stateIndex` | NuSMV parser | Step index | Timeline |
 | `TraceStateDto.devices` | NuSMV parser | Per-device state in this step | Visualization |
@@ -459,6 +463,30 @@ Backend DTOs: `TraceDto`, `TraceStateDto`, `TraceDeviceDto`,
 | `state` / `mode` | NuSMV parser | Current state/mode | Visualization |
 | `variables` | NuSMV parser | Per-variable values | Visualization/fix |
 | `trustPrivacy` / `privacies` | NuSMV parser | Structured `{ propertyScope, mode?, name, trust?/privacy? }` labels; state labels preserve literal mode and state separately | Visualization without generated `Mode_state` names |
+
+Verification trace storage owns only evidence: violated specification, checked expression, and
+state sequence/count. The owning `verification_task` stores the frozen request and versioned
+template/token-source bundle alongside model semantics/snapshot, attack/privacy parameters and
+counts, and generation omissions. The request and bundle are serialized once when validated input
+is captured, then saved on admission for async work or with the synchronous completed run,
+including results with no counterexample. Trace detail and fix mapping receive the completed owner
+explicitly, validate its id/user/completed status, and fail closed if it is missing or invalid.
+Collection reads batch owner context, decode its request/rules once per run, and build one frozen
+playback scene per run; the closed owner projection
+excludes SMV text and unrelated result diagnostics. The mapper does not query repositories or reconstruct history from the live Board.
+Task polling and run detail use a separate result view with the existing presentation fields.
+Their SQL selects no frozen request, template bundle, or model text; it computes model presence
+with the same Java whitespace semantics used by the download boundary. The entity and result
+view share the same mapper and persisted-integrity checks. Locked lifecycle writes and explicit
+model downloads retain their entity reads.
+Completion and deletion keep run and traces in one transaction, so verification evidence cannot
+outlive its owner. Simulation history differs: its saved `simulation_trace` is independently retained
+when a task is removed and therefore continues to own its frozen execution context.
+
+Development databases must use the current entity schema and frozen-context format.
+Obsolete development schemas are rebuilt rather than migrated or supported by fallback
+readers. A missing or malformed frozen context remains an integrity failure; current
+Board data cannot reconstruct it.
 
 ## Task
 
@@ -475,6 +503,8 @@ Backend DTOs: `VerificationTaskDto`, `VerificationTaskSummaryDto`,
 | `progress` | Backend lifecycle | 0-100 progress | Polling UI |
 | `errorMessage` | Backend lifecycle | Failure/cancel reason | UI feedback |
 | `outcome` | Verification or fuzz result | Verification: `SATISFIED`, `VIOLATED`, `INCONCLUSIVE`; fuzz: `FOUND_VIOLATION`, `BUDGET_EXHAUSTED`, `INCONCLUSIVE` | Result/history presentation |
+| `modelSnapshot` | Captured Board input and template manifests | Frozen scope and model identity; see [run snapshot contract](../api/verification.md#modelrunsnapshotdto) | Task/result relation to current Board content, including after reload |
+| Verification `requestJson` / `templateSnapshotsJson` | Validated frozen run input | One persisted request and exact versioned manifest/token-source bundle per run | Server-only replay/fix context; not DTO fields |
 | `modelComplete` | Generator/result reconciliation | Whether every requested rule/spec was modeled and parsed reliably | Verification history diagnostics |
 | `violatedSpecCount` | Verification result | Explicitly violated spec count | Verification history |
 | `disabledRuleCount` / `skippedSpecCount` | Generator/result | Model generation adjustments | UI diagnostics |
@@ -566,7 +596,7 @@ operation locator, so the client cannot alter what is written and never sees an 
 Contract and drift guards: [../api/verification.md](../api/verification.md).
 
 Persisted board rule ids cross the verification/simulation model boundary as correlation
-identity only: `modelRequest.ts` includes a positive database id so parsed
+identity only: the server's `BoardDataConverter` retains the positive database id so parsed
 `triggeredRules[].ruleId` and `compromisedAutomationLinks[].ruleId` can highlight the
 corresponding current canvas rule. Every non-null rule id in one model request must be
 positive and unique; repeated `null` values remain valid for unsaved rules, whose frozen

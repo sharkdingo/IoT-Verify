@@ -24,12 +24,12 @@ class DeviceNodeRepositoryTest {
     private DeviceNodeRepository repository;
 
     @Test
-    void searchByUserIdAndTemplateOrLabel_shouldApplyUserScopeToBothSidesOfOr() {
+    void findByUserId_returnsOnlyTheOwnersNodes() {
         repository.save(Objects.requireNonNull(node("n1", 1L, "Smart Light", "Kitchen Lamp")));
         repository.save(Objects.requireNonNull(node("n2", 1L, "Thermostat", "Living Light Sensor")));
         repository.save(Objects.requireNonNull(node("n3", 2L, "Camera", "Guest Light")));
 
-        List<DeviceNodePo> result = repository.searchByUserIdAndTemplateOrLabel(1L, "LIGHT");
+        List<DeviceNodePo> result = repository.findByUserId(1L);
 
         assertEquals(2, result.size());
         assertTrue(result.stream().allMatch(n -> n.getUserId().equals(1L)));

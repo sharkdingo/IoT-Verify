@@ -28,8 +28,8 @@ describe('violation evidence shortfall', () => {
   const dialog = (() => {
     const start = board.indexOf('data-testid="verification-result-dialog"')
     expect(start, 'the verification result dialog should exist').toBeGreaterThan(-1)
-    const end = board.indexOf('data-testid="trace-details-dialog"', start)
-    expect(end, 'the counterexample dialog should follow it').toBeGreaterThan(start)
+    const end = board.indexOf('<PlaybackTerminal', start)
+    expect(end, 'the playback terminal should follow it').toBeGreaterThan(start)
     return board.slice(start, end)
   })()
 

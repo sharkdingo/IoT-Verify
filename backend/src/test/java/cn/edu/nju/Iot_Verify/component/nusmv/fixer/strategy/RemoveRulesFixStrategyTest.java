@@ -19,6 +19,8 @@ import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -27,6 +29,9 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.util.List;
 import java.util.Map;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -125,6 +130,7 @@ class RemoveRulesFixStrategyTest {
         assertEquals("remove", suggestion.getStrategy());
         assertEquals(List.of(1), suggestion.getRemovedRuleIndices());
         assertEquals(List.of("rule1 (fault)"), suggestion.getRemovedRuleDescriptions());
+        assertEquals("Remove 1 automation rule(s): rule1 (fault)", suggestion.getDescription());
         assertFalse(suggestion.getDescription().contains("'rule1 (fault)'"));
     }
 
@@ -196,6 +202,68 @@ class RemoveRulesFixStrategyTest {
         assertEquals(1, suggestions.size());
         assertEquals(List.of(0, 1), suggestions.get(0).getRemovedRuleIndices());
         verify(nusmvExecutor, times(3)).executeRepairSearch(any(File.class), anyLong());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 4, 8})
+    void tryFix_reachesTheTargetPrimaryAndBackupWithinTheUnchangedBudget(int targetRule) throws Exception {
+        List<Integer> values = List.of(28, 29, 35, 36);
+        List<RuleDto> rules = IntStream.range(0, 12).mapToObj(index -> RuleDto.builder()
+                .ruleString("rule" + index)
+                .conditions(List.of(RuleDto.Condition.builder()
+                        .deviceName("sensor_1").attribute("temperature").targetType("variable")
+                        .relation(index % 4 == 2 ? "<=" : ">=").value(values.get(index % 4).toString()).build()))
+                .command(RuleDto.Command.builder().deviceName("heater_" + (index / 4 + 1))
+                        .action(index % 4 == 2 ? "off" : "heat").build())
+                .build()).toList();
+        Map<String, DeviceSmvData> deviceMap = new LinkedHashMap<>();
+        for (int index = 1; index <= 3; index++) {
+            DeviceSmvData heater = new DeviceSmvData();
+            heater.setVarName("heater_" + index);
+            deviceMap.put(heater.getVarName(), heater);
+        }
+        SpecificationDto target = new SpecificationDto();
+        target.setId("target");
+        target.setTemplateId("3");
+        SpecConditionDto condition = new SpecConditionDto();
+        condition.setDeviceId("heater_" + (targetRule / 4 + 1));
+        condition.setTargetType("mode");
+        condition.setKey("Mode");
+        condition.setRelation("=");
+        condition.setValue("heat");
+        target.setAConditions(List.of(condition));
+        FixContext context = FixContext.builder()
+                .faultRules(List.of(0, 4, 8).stream()
+                        .map(index -> FaultRuleDto.builder().ruleIndex(index).build()).toList())
+                .repairRuleIndices(List.of(0, 4, 8, 1, 2, 3, 5, 6, 7, 9, 10, 11))
+                .allRules(rules).devices(List.of()).specs(List.of(target)).deviceSmvMap(deviceMap)
+                .violatedSpecIndex(0).userId(1L).attackScenario(AttackScenarioDto.none()).maxAttempts(20).build();
+        List<List<Integer>> checked = new ArrayList<>();
+        when(smvGenerator.generateWithResolvedDeviceModel(
+                anyLong(), anyList(), anyList(), anyList(), anyList(), any(), anyBoolean(),
+                any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class), anyMap(), anyList()))
+                .thenAnswer(invocation -> {
+                    List<RuleDto> remaining = invocation.getArgument(3);
+                    checked.add(IntStream.range(0, rules.size()).filter(index -> !remaining.contains(rules.get(index))).boxed().toList());
+                    return targetModel();
+                });
+        when(nusmvExecutor.executeRepairSearch(any(File.class), anyLong())).thenAnswer(invocation -> {
+            List<Integer> removal = checked.get(checked.size() - 1);
+            return targetVerdict(removal.contains(targetRule) && removal.contains(targetRule + 1)
+                    && !removal.contains(targetRule + 3));
+        });
+
+        FixStrategy.StrategyOutcome outcome = strategy.tryFix(context);
+
+        assertEquals(List.of(List.of(targetRule, targetRule + 1)), outcome.suggestions().stream()
+                .map(FixSuggestionDto::getRemovedRuleIndices).toList());
+        assertEquals(20, context.strategySearchProgress("remove").attemptsUsed());
+        assertFalse(outcome.alternativesComplete(), "The remaining combinations were not checked");
+        assertTrue(checked.subList(0, 12).stream().allMatch(removal -> removal.size() == 1),
+                "Try every single removal before any pair, preserving the smallest-edit preference");
+        assertEquals(IntStream.range(0, 12).boxed().collect(java.util.stream.Collectors.toSet()),
+                checked.subList(0, 12).stream().map(removal -> removal.get(0)).collect(java.util.stream.Collectors.toSet()),
+                "Prioritization must not drop indirectly relevant rules from the scope");
     }
 
     @Test
@@ -403,7 +471,7 @@ class RemoveRulesFixStrategyTest {
         mockGenerateReturns(targetModel());
         when(nusmvExecutor.executeRepairSearch(any(File.class), anyLong())).thenReturn(targetVerdict(true));
 
-        FixStrategy.StrategyOutcome outcome = strategy.tryFix(targetedCtx(distinctRules(3), 2));
+        FixStrategy.StrategyOutcome outcome = strategy.tryFix(targetedCtx(distinctRules(10), 2));
 
         assertEquals(List.of(List.of(0), List.of(1)), outcome.suggestions().stream()
                 .map(FixSuggestionDto::getRemovedRuleIndices).toList());
@@ -411,16 +479,16 @@ class RemoveRulesFixStrategyTest {
     }
 
     @Test
-    void tryFix_stopsAtTheListingLimitWithoutClaimingCompleteness() throws Exception {
+    void tryFix_finishesAnAffordableSearchBeyondTheListingLimit() throws Exception {
         mockGenerateReturns(targetModel());
         when(nusmvExecutor.executeRepairSearch(any(File.class), anyLong())).thenReturn(targetVerdict(true));
 
         FixStrategy.StrategyOutcome outcome =
-                strategy.tryFix(targetedCtx(distinctRules(FixAlternatives.LIMIT + 1), 20));
+                strategy.tryFix(targetedCtx(distinctRules(FixAlternatives.LIMIT + 1), 2));
 
-        assertEquals(FixAlternatives.LIMIT, outcome.suggestions().size());
-        assertFalse(outcome.alternativesComplete());
-        verify(nusmvExecutor, times(FixAlternatives.LIMIT)).executeRepairSearch(any(File.class), anyLong());
+        assertEquals(FixAlternatives.LIMIT + 1, outcome.suggestions().size());
+        assertTrue(outcome.alternativesComplete());
+        verify(nusmvExecutor, times(FixAlternatives.LIMIT + 1)).executeRepairSearch(any(File.class), anyLong());
     }
 
     /** Every rule in the repair scope, violating the one specification the verdicts are about. */
@@ -430,6 +498,7 @@ class RemoveRulesFixStrategyTest {
         target.setTemplateId("1");
         return FixContext.builder()
                 .faultRules(List.of(FaultRuleDto.builder().ruleIndex(0).build()))
+                .deadline(java.time.Instant.now().plusSeconds(60))
                 .repairRuleIndices(java.util.stream.IntStream.range(0, allRules.size()).boxed().toList())
                 .allRules(allRules)
                 .devices(List.of())

@@ -24,7 +24,7 @@ public class ModelRunSnapshotDto {
     private int environmentVariableCount;
     private int deviceTemplateCount;
 
-    /** Canonical SHA-256 of the frozen semantic model; required for fuzz snapshots only. */
+    /** Canonical SHA-256 of the captured board model; null means comparison evidence was not recorded. */
     private String modelFingerprint;
 
     /** True when model generation reused the captured manifests instead of reading mutable templates again. */

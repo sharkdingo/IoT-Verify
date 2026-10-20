@@ -18,17 +18,31 @@ export interface ChatSessionActivity {
     active: boolean
 }
 
+export interface ChatSessionObservationBaseline {
+    userId: number
+    sessions: Array<Pick<ChatSession, 'id' | 'active' | 'latestTerminalMessageId'>>
+    reconciliation: Promise<boolean> | null
+}
+
 export type ChatConfirmationKind = 'DESTRUCTIVE' | 'DEFAULT_TEMPLATE_RESET' | 'SCENE_REPLACEMENT'
 export type ChatConfirmationAction = 'CONFIRM' | 'CANCEL'
 
 export interface ChatConfirmationCommand {
     action: ChatConfirmationAction
     kind: ChatConfirmationKind
+    confirmationId: string
+}
+
+export interface ChatProtectedAction {
+    kind: ChatConfirmationKind
+    confirmationId: string
+    toolName: string
+    target: string
 }
 
 export interface ChatPendingConfirmation {
     sessionId: string
-    kinds: ChatConfirmationKind[]
+    actions: ChatProtectedAction[]
 }
 
 export type ChatExecutionStatus =
@@ -142,6 +156,18 @@ type ToolResultOutcome =
 
 type ExecutionGuardOutcome = 'NO_PROGRESS' | 'EMERGENCY_LIMIT'
 
+export const CLAIM_REVIEW_REASONS = [
+    'MISSING_TOOL_EVIDENCE',
+    'MISSING_BOARD_SNAPSHOT',
+    'MISSING_OPERATION_RECEIPT'
+] as const
+
+export interface ClaimReview {
+    reasonCode: typeof CLAIM_REVIEW_REASONS[number]
+    originalText: string
+    matchedText: string
+}
+
 export type StreamProgress = StreamProgressBase & (
     | {
         stage: 'CONTEXT_READY' | 'TASK_RESUMED' | 'PLANNING' | 'REASONING' | 'TOOL_EXECUTION' | 'WRITING_RESPONSE'
@@ -149,6 +175,7 @@ export type StreamProgress = StreamProgressBase & (
       }
     | { stage: 'TOOL_RESULT'; outcome: ToolResultOutcome }
     | { stage: 'EXECUTION_GUARD'; outcome: ExecutionGuardOutcome }
+    | { stage: 'CLAIM_REVIEW'; outcome: 'REPLACED' | 'HIDDEN'; claimReview: ClaimReview }
 )
 
 export type ChatLogoutPreparation = 'ready' | 'outcome-unknown' | 'reconciliation-failed'

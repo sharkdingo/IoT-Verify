@@ -1,6 +1,6 @@
-import { defineComponent } from 'vue'
+import { defineComponent, nextTick } from 'vue'
 import { mount } from '@vue/test-utils'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import InfoTooltip from '@/components/common/InfoTooltip.vue'
 
@@ -16,6 +16,31 @@ const ElTooltipStub = defineComponent({
 })
 
 describe('InfoTooltip', () => {
+  it('dismisses open help before allowing Escape to reach its enclosing panel', async () => {
+    const closePanel = vi.fn()
+    const wrapper = mount(defineComponent({
+      components: { InfoTooltip },
+      setup: () => ({ closePanel }),
+      template: '<div @keydown.esc="closePanel"><InfoTooltip text="Model semantics" label="Show help" /></div>'
+    }), { attachTo: document.body })
+    try {
+      const trigger = wrapper.get('button')
+      await trigger.trigger('focus')
+      await new Promise(resolve => setTimeout(resolve, 250))
+      await nextTick()
+      const popper = document.querySelector<HTMLElement>('.iot-info-tooltip-popper')!
+      expect(popper.getAttribute('aria-hidden')).toBe('false')
+
+      await trigger.trigger('keydown', { key: 'Escape', code: 'Escape' })
+      expect(closePanel).not.toHaveBeenCalled()
+      await nextTick()
+      expect(popper.style.display).toBe('none')
+
+      await trigger.trigger('keydown', { key: 'Escape', code: 'Escape' })
+      expect(closePanel).toHaveBeenCalledOnce()
+    } finally { wrapper.unmount() }
+  })
+
   it('keeps long help behind an accessible icon trigger', () => {
     const wrapper = mount(InfoTooltip, {
       props: {

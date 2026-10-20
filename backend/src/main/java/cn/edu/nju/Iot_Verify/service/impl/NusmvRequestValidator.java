@@ -1,6 +1,8 @@
 package cn.edu.nju.Iot_Verify.service.impl;
 
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvRelationUtils;
+import cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics;
+
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvData;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.AttackSurface;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvDataFactory;
@@ -24,6 +26,9 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+
+import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics.findApi;
+import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics.hasSignalApi;
 
 final class NusmvRequestValidator {
 
@@ -582,7 +587,7 @@ final class NusmvRequestValidator {
                 continue;
             }
             DeviceSmvData smv = smvForDevice(condition.getDeviceId(), deviceSmvMap);
-            DeviceManifest.API api = signalApi(smv == null ? null : smv.getManifest(), condition.getKey());
+            DeviceManifest.API api = ManifestConditionSemantics.findSignalApi(smv == null ? null : smv.getManifest(), condition.getKey());
             if (api != null && !hasText(api.getEndState())) {
                 putError(errors, prefix + ".aConditions[" + i + "].key",
                         "Template 7 cannot derive a MEDIC control-source label for API '"
@@ -936,8 +941,7 @@ final class NusmvRequestValidator {
                                              String field,
                                              String relation,
                                              String label) {
-        if (!"=".equals(relation) && !"!=".equals(relation)
-                && !"in".equals(relation) && !"not in".equals(relation)) {
+        if (!SmvRelationUtils.isEnumRelation(relation)) {
             putError(errors, field, label + " conditions support only =, !=, IN, and NOT_IN");
         }
     }
@@ -962,7 +966,7 @@ final class NusmvRequestValidator {
             return;
         }
         for (String candidate : candidates) {
-            if (!isLegalStateCandidate(smv, candidate)) {
+            if (!ManifestConditionSemantics.isLegalState(candidate, smv.getModes(), smv.getModeStates())) {
                 putError(errors, field, "Illegal state value for device template: " + candidate);
                 return;
             }
@@ -1014,8 +1018,7 @@ final class NusmvRequestValidator {
             return;
         }
         for (String candidate : candidates) {
-            String normalized = candidate.trim();
-            boolean found = allowed.stream().anyMatch(v -> v.equalsIgnoreCase(normalized));
+            boolean found = ManifestConditionSemantics.matchesLiteral(candidate, allowed);
             if (!found) {
                 putError(errors, field, "Value must be " + label + ": " + candidate);
                 return;
@@ -1045,39 +1048,17 @@ final class NusmvRequestValidator {
 
         if (variable.getValues() != null && !variable.getValues().isEmpty()) {
             validateEnumRelation(errors, field, relation, "enum variable");
-            Set<String> allowed = new HashSet<>();
-            for (String value : variable.getValues()) {
-                if (hasText(value)) {
-                    allowed.add(cleanEnumLiteral(value));
-                }
-            }
-            for (String candidate : candidates) {
-                if (!allowed.contains(cleanEnumLiteral(candidate))) {
-                    putError(errors, field, "Illegal enum value for variable '" + variable.getName() + "': " + candidate);
-                    return;
-                }
-            }
-            return;
         }
-
-        if (variable.getLowerBound() != null && variable.getUpperBound() != null) {
-            int lower = variable.getLowerBound();
-            int upper = variable.getUpperBound();
-            for (String candidate : candidates) {
-                try {
-                    int parsed = Integer.parseInt(candidate.trim());
-                    if (parsed < lower || parsed > upper) {
-                        putError(errors, field, "Variable value out of range for '" + variable.getName()
-                                + "': " + candidate + " (allowed " + lower + ".." + upper + ")");
-                        return;
-                    }
-                } catch (NumberFormatException e) {
-                    putError(errors, field, "Variable value must be an integer for '" + variable.getName()
-                            + "': " + candidate);
-                    return;
-                }
-            }
-        }
+        ManifestConditionSemantics.ValueIssue issue =
+                ManifestConditionSemantics.firstInvalidVariableValue(variable, candidates);
+        if (issue == null) return;
+        String message = switch (issue.error()) {
+            case UNKNOWN_ENUM -> "Illegal enum value for variable '" + variable.getName() + "': " + issue.candidate();
+            case OUT_OF_RANGE -> "Variable value out of range for '" + variable.getName() + "': " + issue.candidate()
+                    + " (allowed " + variable.getLowerBound() + ".." + variable.getUpperBound() + ")";
+            case NOT_INTEGER -> "Variable value must be an integer for '" + variable.getName() + "': " + issue.candidate();
+        };
+        errors.putIfAbsent(field, message);
     }
 
     private static <T> void rejectNullItems(Map<String, String> errors,
@@ -1128,42 +1109,6 @@ final class NusmvRequestValidator {
 
     private static boolean hasApi(DeviceManifest manifest, String apiName) {
         return findApi(manifest, apiName) != null;
-    }
-
-    private static DeviceManifest.API findApi(DeviceManifest manifest, String apiName) {
-        if (manifest == null || manifest.getApis() == null || !hasText(apiName)) {
-            return null;
-        }
-        String trimmed = apiName.trim();
-        for (DeviceManifest.API api : manifest.getApis()) {
-            if (api != null && trimmed.equals(api.getName())) {
-                return api;
-            }
-        }
-        return null;
-    }
-
-    private static boolean hasSignalApi(DeviceManifest manifest, String apiName) {
-        if (manifest == null || manifest.getApis() == null || !hasText(apiName)) {
-            return false;
-        }
-        String trimmed = apiName.trim();
-        for (DeviceManifest.API api : manifest.getApis()) {
-            if (api != null && trimmed.equals(api.getName()) && Boolean.TRUE.equals(api.getSignal())) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static DeviceManifest.API signalApi(DeviceManifest manifest, String apiName) {
-        if (manifest == null || manifest.getApis() == null || !hasText(apiName)) return null;
-        String trimmed = apiName.trim();
-        return manifest.getApis().stream()
-                .filter(api -> api != null && trimmed.equals(api.getName())
-                        && Boolean.TRUE.equals(api.getSignal()))
-                .findFirst()
-                .orElse(null);
     }
 
     private static boolean hasContent(DeviceManifest manifest, String contentName) {
@@ -1319,44 +1264,6 @@ final class NusmvRequestValidator {
         return result;
     }
 
-    private static boolean isLegalStateCandidate(DeviceSmvData smv, String rawCandidate) {
-        if (smv == null || !hasText(rawCandidate)
-                || smv.getModes() == null || smv.getModes().isEmpty()
-                || smv.getModeStates() == null || smv.getModeStates().isEmpty()) {
-            return false;
-        }
-        String candidate = rawCandidate.trim();
-        if (candidate.contains(";")) {
-            String[] segments = candidate.split(";", -1);
-            if (segments.length != smv.getModes().size()) {
-                return false;
-            }
-            boolean hasConcreteSegment = false;
-            for (int i = 0; i < smv.getModes().size(); i++) {
-                String cleaned = DeviceSmvDataFactory.cleanStateName(segments[i]);
-                if (!hasText(cleaned) || "_".equals(cleaned)) {
-                    continue;
-                }
-                String mode = smv.getModes().get(i);
-                List<String> legalStates = smv.getModeStates().get(mode);
-                if (legalStates == null || !legalStates.contains(cleaned)) {
-                    return false;
-                }
-                hasConcreteSegment = true;
-            }
-            return hasConcreteSegment;
-        }
-        String cleaned = DeviceSmvDataFactory.cleanStateName(candidate);
-        int matches = 0;
-        for (String mode : smv.getModes()) {
-            List<String> states = smv.getModeStates().get(mode);
-            if (states != null && states.contains(cleaned)) {
-                matches++;
-            }
-        }
-        return matches == 1;
-    }
-
     private static String normalizeKnownRelation(String relation) {
         if (!hasText(relation)) {
             return null;
@@ -1382,10 +1289,6 @@ final class NusmvRequestValidator {
             return null;
         }
         return value.trim();
-    }
-
-    private static String cleanEnumLiteral(String value) {
-        return value == null ? "" : value.trim().replace(" ", "");
     }
 
     private static Set<String> deviceRefs(List<DeviceVerificationDto> devices) {

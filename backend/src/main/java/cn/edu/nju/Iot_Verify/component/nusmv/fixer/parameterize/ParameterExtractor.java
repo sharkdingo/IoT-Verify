@@ -7,9 +7,9 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Extracts FROZENVAR values from NuSMV counterexample output.
+ * Extracts repair parameter values from NuSMV counterexample output.
  *
- * <p>FROZENVAR variables appear in State 1.1 as top-level assignments.
+ * <p>Free FROZENVAR parameters and fixed DEFINE switches appear in State 1.1 as assignments.
  * This extractor uses lightweight regex matching on the raw NuSMV output
  * rather than full trace parsing.</p>
  */
@@ -21,10 +21,10 @@ public class ParameterExtractor {
             Pattern.compile("^\\s+(\\S+)\\s*=\\s*(\\S+)\\s*$", Pattern.MULTILINE);
 
     /**
-     * Extract specified FROZENVAR values from NuSMV raw output.
+     * Extract specified repair parameter values from NuSMV raw output.
      *
      * @param nusmvOutput    raw NuSMV stdout
-     * @param frozenVarNames list of FROZENVAR names to look for
+     * @param frozenVarNames list of parameter names to look for
      * @return map of varName → value (only includes found variables)
      */
     public static Map<String, String> extract(String nusmvOutput, List<String> frozenVarNames) {
@@ -33,7 +33,7 @@ public class ParameterExtractor {
             return result;
         }
 
-        // Extract the first state section (State 1.1) where FROZENVAR values appear
+        // Read the first state so a later assignment cannot replace the chosen repair.
         int stateStart = nusmvOutput.indexOf("-> State:");
         if (stateStart < 0) {
             // Try alternate format
@@ -63,7 +63,7 @@ public class ParameterExtractor {
         }
 
         if (result.size() < frozenVarNames.size()) {
-            log.debug("Extracted {}/{} FROZENVAR values from NuSMV output", result.size(), frozenVarNames.size());
+            log.debug("Extracted {}/{} repair parameter values from NuSMV output", result.size(), frozenVarNames.size());
         }
         return result;
     }

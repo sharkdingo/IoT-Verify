@@ -72,7 +72,10 @@ public class ConditionAdjustStrategy implements FixStrategy {
         PreparedData prep = prepareAugmentedRules(allRules, repairIndices, violatedSpec, deviceSmvMap);
         if (prep == null) return StrategyOutcome.none();
 
-        ctx.initializeStrategySearch(NAME, maxAttempts);
+        List<Long> domainSizes = new ArrayList<>(Collections.nCopies(prep.conditionLambdas.size(), 2L));
+        prep.candidateConditionValues.values().forEach(info -> domainSizes.add(info.getLowerBound() != null
+                ? (long) info.getUpperBound() - info.getLowerBound() + 1 : (long) info.getValues().size()));
+        ctx.initializeStrategySearch(NAME, maxAttempts, domainSizes);
         log.info("ConditionAdjustStrategy: created {} lambda variable(s)", prep.conditionLambdas.size());
         CounterexampleLemma lemma = CounterexampleLemma.plan(
                 prep.augmentedRules, prep.conditionLambdas, prep.candidateConditionValues);
@@ -83,19 +86,20 @@ public class ConditionAdjustStrategy implements FixStrategy {
         // supersetExclusion).
         FixAlternatives alternatives = new FixAlternatives(ctx);
         List<String> exclusionInvars = new ArrayList<>();
-        List<Set<String>> prioritizedConfigurations = maxAttempts > 1
-                ? prioritizedConfigurations(prep, deviceSmvMap, faultRules)
-                : List.of();
         int prioritizedBudget = maxAttempts > 1 ? Math.max(1, maxAttempts / 2) : 0;
+        List<Set<String>> prioritizedConfigurations = maxAttempts > 1
+                ? prioritizedConfigurations(prep, deviceSmvMap, faultRules, violatedSpec, prioritizedBudget)
+                : List.of();
         int prioritizedIndex = 0;
         boolean exhausted = false;
         // Set when a run failed without excluding anything (other than a refused permit), so the next
         // iteration would rebuild the identical model and can only repeat the failure.
         boolean failedWithoutProgress = false;
 
-        for (int attempt = 0; attempt < maxAttempts && !alternatives.full(); attempt++) {
+        for (int attempt = 0; ctx.hasStrategyAttemptsLeft(NAME) && !alternatives.full(); attempt++) {
             if (ctx.isExpired()) {
-                log.info("ConditionAdjustStrategy: deadline expired at attempt {}/{}", attempt + 1, maxAttempts);
+                log.info("ConditionAdjustStrategy: deadline expired at attempt {}/{}",
+                        attempt + 1, ctx.strategySearchProgress(NAME).attemptLimit());
                 break;
             }
             if (failedWithoutProgress) {
@@ -118,11 +122,11 @@ public class ConditionAdjustStrategy implements FixStrategy {
                 prioritizedIndex++;
             }
             List<String> attemptInvars = new ArrayList<>(exclusionInvars);
-            if (prioritizedIndex < prioritizedConfigurations.size()) {
-                attemptInvars.add(lambdaConfiguration(prep, prioritizedConfigurations.get(prioritizedIndex)));
-            }
             ParameterizationConfig config = ParameterizationConfig.builder()
                     .conditionLambdas(prep.conditionLambdas)
+                    .fixedConditionLambdas(prioritizedIndex < prioritizedConfigurations.size()
+                            ? lambdaConfiguration(prep, prioritizedConfigurations.get(prioritizedIndex))
+                            : Map.of())
                     .candidateConditionValues(prep.candidateConditionValues)
                     .negatedSpecIndex(violatedSpecIndex)
                     .exclusionInvars(attemptInvars.isEmpty() ? null : attemptInvars)
@@ -248,6 +252,9 @@ public class ConditionAdjustStrategy implements FixStrategy {
                     break;
                 }
                 if (learned != null) exclusionInvars.add(learned);
+                prioritizeProtectedProperty(prep, prioritizedConfigurations, prioritizedIndex,
+                        prioritizedBudget - attempt - 1, ir.changes, verification, violatedSpec,
+                        ctx.getSpecs(), deviceSmvMap);
                 log.info("ConditionAdjust attempt {}: forward verification did not accept the candidate, excluding it{}",
                         attempt + 1, learned != null ? " and the assignments its violation also refutes" : "");
 
@@ -618,7 +625,9 @@ public class ConditionAdjustStrategy implements FixStrategy {
     private static List<Set<String>> prioritizedConfigurations(
             PreparedData prep,
             Map<String, DeviceSmvData> deviceSmvMap,
-            List<FaultRuleDto> faultRules) {
+            List<FaultRuleDto> faultRules,
+            SpecificationDto violatedSpec,
+            int prioritizedBudget) {
         List<Set<String>> configurations = new ArrayList<>();
         Set<Integer> localizedRuleIndices = faultRules.stream()
                 .filter(Objects::nonNull)
@@ -656,15 +665,64 @@ public class ConditionAdjustStrategy implements FixStrategy {
                         ignored -> new LinkedHashSet<>()).add(key);
             }
         }
-        for (LinkedHashSet<String> keys : candidateKeysByShape.values()) {
+        Set<String> propertyDevices = FixStrategyUtils.propertyDeviceVariables(violatedSpec, deviceSmvMap);
+        List<LinkedHashSet<String>> groups = new ArrayList<>(candidateKeysByShape.values());
+        // Shared environment effects can broaden the scope to other rooms. Try commands on
+        // the property's own devices first, without removing any indirectly relevant group.
+        groups.sort(Comparator.comparingInt(keys -> {
+            RuleDto rule = prep.augmentedRules.get(ruleIndexForKey(keys.iterator().next()));
+            String target = FixStrategyUtils.resolveVarNameSafe(rule.getCommand().getDeviceName(), deviceSmvMap);
+            return propertyDevices.contains(target) ? 0 : 1;
+        }));
+        List<Set<String>> coordinated = new ArrayList<>();
+        for (LinkedHashSet<String> keys : groups) {
             long distinctRules = keys.stream()
                     .map(ConditionAdjustStrategy::ruleIndexForKey)
                     .filter(index -> index >= 0)
                     .distinct()
                     .count();
             if (distinctRules > 1) {
-                configurations.add(Set.copyOf(keys));
+                // A later same-action rule can be a required response. Guard the fault-first
+                // primary/backup pair before trying the whole group; keep joint search unchanged.
+                if (distinctRules > 2) {
+                    coordinated.add(keys.stream().limit(2)
+                            .collect(Collectors.toCollection(LinkedHashSet::new)));
+                }
+                coordinated.add(Set.copyOf(keys));
             }
+        }
+        // A policy such as "all lights off while away" protects several actuators. One
+        // occupancy guard must reach each of their rules; grouping by command target alone
+        // cannot propose that repair. Group shared context guards on the property's devices,
+        // excluding actuator-state guards that would couple one output to another.
+        Set<String> commandDevices = prep.augmentedRules.stream()
+                .filter(rule -> rule != null && rule.getCommand() != null)
+                .map(rule -> FixStrategyUtils.resolveVarNameSafe(rule.getCommand().getDeviceName(), deviceSmvMap))
+                .filter(Objects::nonNull).collect(Collectors.toSet());
+        Map<String, LinkedHashSet<String>> contextGroups = new LinkedHashMap<>();
+        for (String key : prep.conditionLambdas.keySet()) {
+            if (!isCandidateKey(prep, key)) continue;
+            RuleDto rule = prep.augmentedRules.get(ruleIndexForKey(key));
+            RuleDto.Condition condition = conditionForKey(prep, key);
+            String target = rule.getCommand() == null ? null
+                    : FixStrategyUtils.resolveVarNameSafe(rule.getCommand().getDeviceName(), deviceSmvMap);
+            if (!propertyDevices.contains(target) || condition == null || commandDevices.contains(
+                    FixStrategyUtils.resolveVarNameSafe(condition.getDeviceName(), deviceSmvMap))) continue;
+            String shape = FixStrategyUtils.conditionShapeFingerprint(condition, deviceSmvMap);
+            if (shape != null) contextGroups.computeIfAbsent(shape, ignored -> new LinkedHashSet<>()).add(key);
+        }
+        for (Set<String> keys : contextGroups.values()) {
+            if (keys.stream().map(ConditionAdjustStrategy::ruleIndexForKey).distinct().count() > 1
+                    && !coordinated.contains(keys)) coordinated.add(Set.copyOf(keys));
+        }
+        if (!coordinated.isEmpty()) {
+            // Many single guards must not consume the entire deterministic budget before a
+            // primary/backup repair gets a turn. Unrestricted search still covers every edit.
+            int singles = Math.min(configurations.size(), Math.max(1, prioritizedBudget / 2));
+            List<Set<String>> balanced = new ArrayList<>(configurations.subList(0, singles));
+            balanced.addAll(coordinated);
+            balanced.addAll(configurations.subList(singles, configurations.size()));
+            configurations = balanced;
         }
         // Keep expanded-rule additions reachable for unusual priority interactions, but place
         // them after the coordinated candidates that address the common backup-rule case.
@@ -686,6 +744,39 @@ public class ConditionAdjustStrategy implements FixStrategy {
         List<RuleDto.Condition> conditions = prep.augmentedRules.get(ruleIndex).getConditions();
         if (conditions == null || conditionIndex < 0 || conditionIndex >= conditions.size()) return null;
         return conditions.get(conditionIndex);
+    }
+
+    private static void prioritizeProtectedProperty(
+            PreparedData prep, List<Set<String>> configurations, int index, int remainingProbes,
+            Set<String> changes, FixStrategyUtils.Verification verification, SpecificationDto target,
+            List<SpecificationDto> specs, Map<String, DeviceSmvData> deviceSmvMap) {
+        FixStrategyUtils.Witness witness = verification.witness();
+        if (remainingProbes <= 0 || witness == null || Objects.equals(witness.specId(), target.getId())) return;
+        SpecificationDto protectedSpec = specs.stream()
+                .filter(spec -> spec != null && Objects.equals(spec.getId(), witness.specId()))
+                .findFirst().orElse(null);
+        Set<String> protectedDevices = FixStrategyUtils.propertyDeviceVariables(protectedSpec, deviceSmvMap);
+        List<Set<String>> combined = new ArrayList<>();
+        // A shared environment can make a target-only edit break an earlier property. Reuse the
+        // existing primary/backup groups on that property's devices; forward verification still decides.
+        for (Set<String> group : configurations) {
+            if (group.size() < 2 || !group.stream().allMatch(key -> {
+                if (!isCandidateKey(prep, key)) return false;
+                RuleDto rule = prep.augmentedRules.get(ruleIndexForKey(key));
+                return rule.getCommand() != null && protectedDevices.contains(
+                        FixStrategyUtils.resolveVarNameSafe(rule.getCommand().getDeviceName(), deviceSmvMap));
+            })) continue;
+            Set<String> proposal = new LinkedHashSet<>(changes);
+            proposal.addAll(group);
+            if (proposal.equals(changes) || configurations.contains(proposal) || combined.contains(proposal)) continue;
+            combined.add(Set.copyOf(proposal));
+            if (combined.size() >= remainingProbes) break;
+        }
+        configurations.addAll(index, combined);
+        if (!combined.isEmpty()) {
+            log.info("ConditionAdjust: prioritized {} combined probe(s) to preserve {}",
+                    combined.size(), witness.specId());
+        }
     }
 
     private static int ruleIndexForKey(String key) {
@@ -712,14 +803,14 @@ public class ConditionAdjustStrategy implements FixStrategy {
         return prep.originalCondCounts.getOrDefault(Integer.parseInt(matcher.group(1)), 0);
     }
 
-    private static String lambdaConfiguration(PreparedData prep, Set<String> changedKeys) {
-        List<String> assignments = new ArrayList<>();
+    private static Map<String, Boolean> lambdaConfiguration(PreparedData prep, Set<String> changedKeys) {
+        Map<String, Boolean> assignments = new LinkedHashMap<>();
         for (Map.Entry<String, String> lambda : prep.conditionLambdas.entrySet()) {
             boolean baseline = !isCandidateKey(prep, lambda.getKey());
             boolean selected = changedKeys.contains(lambda.getKey()) ? !baseline : baseline;
-            assignments.add(lambda.getValue() + "=" + (selected ? "TRUE" : "FALSE"));
+            assignments.put(lambda.getKey(), selected);
         }
-        return "(" + String.join(" & ", assignments) + ")";
+        return assignments;
     }
 
     // -------- Internal records --------

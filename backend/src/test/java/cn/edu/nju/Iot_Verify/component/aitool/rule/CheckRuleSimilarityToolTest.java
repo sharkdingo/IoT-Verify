@@ -4,6 +4,8 @@ import cn.edu.nju.Iot_Verify.component.ai.PromptCompletionService;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.security.UserContextHolder;
 import cn.edu.nju.Iot_Verify.service.BoardStorageService;
+import cn.edu.nju.Iot_Verify.service.recommendation.RecommendationResultParser;
+import cn.edu.nju.Iot_Verify.service.recommendation.RuleCheckService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -38,16 +40,77 @@ class CheckRuleSimilarityToolTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private CheckRuleSimilarityTool tool;
+    private RuleCheckService service;
 
     @BeforeEach
     void setUp() {
-        tool = new CheckRuleSimilarityTool(boardStorageService, promptCompletionService, objectMapper);
+        service = new RuleCheckService(boardStorageService, promptCompletionService,
+                objectMapper, new RecommendationResultParser(objectMapper));
+        tool = new CheckRuleSimilarityTool(service, objectMapper);
         UserContextHolder.setUserId(1L);
     }
 
     @AfterEach
     void tearDown() {
         UserContextHolder.clear();
+    }
+
+    @Test
+    void typedSimilarityRequiresReviewForHighScoreEvenWithoutModelFlags() {
+        when(boardStorageService.getRules(7L)).thenReturn(List.of(existingCameraRule()));
+        when(promptCompletionService.complete(anyString(), anyString(), anyDouble(), anyInt()))
+                .thenReturn("""
+                        {"isSimilar":false,"isDuplicate":false,"similarity":0.86,
+                         "mostSimilarWith":"candidate-1","reason":"overlapping trigger"}
+                        """);
+
+        var result = service.checkSimilarity(7L, existingCameraRule());
+
+        assertFalse(result.isSimilar());
+        assertFalse(result.isDuplicate());
+        assertTrue(result.isRequiresReview());
+        assertEquals("AI_HIGH_SCORE_REVIEW", result.getReasonCode());
+        assertEquals("Camera.capture", result.getMatchedRule());
+        verify(boardStorageService).getRules(7L);
+    }
+
+    @Test
+    void typedSimilarityCanonicalizesAliasesAndCaseWithoutChangingCaller() {
+        RuleDto candidate = existingCameraRule();
+        candidate.getConditions().get(0).setDeviceName(" Door Sensor ");
+        candidate.getConditions().get(0).setAttribute(" open ");
+        candidate.getConditions().get(0).setTargetType(" VARIABLE ");
+        candidate.getConditions().get(0).setRelation(" EQ ");
+        candidate.getConditions().get(0).setValue(" true ");
+        candidate.getCommand().setDeviceName(" Camera ");
+        candidate.getCommand().setAction(" capture ");
+        when(boardStorageService.getRules(7L)).thenReturn(List.of(existingCameraRule()));
+        when(promptCompletionService.complete(anyString(), anyString(), anyDouble(), anyInt()))
+                .thenAnswer(invocation -> {
+                    String prompt = invocation.getArgument(1);
+                    String candidateJson = prompt.substring(prompt.indexOf("## 新添加的规则") + "## 新添加的规则".length(),
+                            prompt.indexOf("## 现有规则列表")).trim();
+                    JsonNode submitted = objectMapper.readTree(candidateJson);
+                    JsonNode condition = submitted.path("conditions").get(0);
+                    assertEquals("variable", condition.path("targetType").asText());
+                    assertEquals("=", condition.path("relation").asText());
+                    assertEquals("Door Sensor", condition.path("deviceName").asText());
+                    assertEquals("open", condition.path("attribute").asText());
+                    assertEquals("true", condition.path("value").asText());
+                    assertEquals("Camera", submitted.path("command").path("deviceName").asText());
+                    assertEquals("capture", submitted.path("command").path("action").asText());
+                    return """
+                            {"isSimilar":false,"isDuplicate":false,"similarity":0.2,"reason":"different trigger"}
+                            """;
+                });
+
+        var result = service.checkSimilarity(7L, candidate);
+
+        assertEquals("AI_NO_SIGNIFICANT_SIMILARITY", result.getReasonCode());
+        assertEquals(" VARIABLE ", candidate.getConditions().get(0).getTargetType());
+        assertEquals(" EQ ", candidate.getConditions().get(0).getRelation());
+        assertEquals(" capture ", candidate.getCommand().getAction());
+        assertEquals(9L, candidate.getId());
     }
 
     @Test

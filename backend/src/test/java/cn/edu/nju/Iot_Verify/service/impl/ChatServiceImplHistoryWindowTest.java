@@ -11,6 +11,7 @@ import cn.edu.nju.Iot_Verify.component.aitool.AiToolManager;
 import cn.edu.nju.Iot_Verify.component.aitool.AiDestructiveActionGuard;
 import cn.edu.nju.Iot_Verify.component.aitool.scenario.AiScenarioDraftStore;
 import cn.edu.nju.Iot_Verify.configure.ChatExecutionConfig;
+import cn.edu.nju.Iot_Verify.dto.RequestLimits;
 import cn.edu.nju.Iot_Verify.dto.chat.ChatMessageResponseDto;
 import cn.edu.nju.Iot_Verify.dto.chat.ChatHistoryPageDto;
 import cn.edu.nju.Iot_Verify.dto.chat.ChatSessionResponseDto;
@@ -284,7 +285,7 @@ class ChatServiceImplHistoryWindowTest {
         when(chatMapper.toChatMessageDtoList(anyList()))
                 .thenReturn(List.of(new ChatMessageResponseDto(), new ChatMessageResponseDto()));
 
-        List<ChatMessageResponseDto> history = service.getHistory(1L, "s4");
+        List<ChatMessageResponseDto> history = service.getHistoryPage(1L, "s4", null, RequestLimits.MAX_CHAT_HISTORY_PAGE_SIZE).getMessages();
 
         assertEquals(2, history.size());
         verify(chatMapper).toChatMessageDtoList(chatMessageListCaptor.capture());
@@ -318,7 +319,7 @@ class ChatServiceImplHistoryWindowTest {
         when(chatMapper.toChatMessageDtoList(anyList()))
                 .thenReturn(List.of(new ChatMessageResponseDto(), new ChatMessageResponseDto(), new ChatMessageResponseDto()));
 
-        List<ChatMessageResponseDto> history = service.getHistory(1L, "s5");
+        List<ChatMessageResponseDto> history = service.getHistoryPage(1L, "s5", null, RequestLimits.MAX_CHAT_HISTORY_PAGE_SIZE).getMessages();
 
         assertEquals(3, history.size());
         verify(chatMapper).toChatMessageDtoList(chatMessageListCaptor.capture());
@@ -367,7 +368,7 @@ class ChatServiceImplHistoryWindowTest {
         assistantDto.setRole("assistant");
         when(chatMapper.toChatMessageDtoList(anyList())).thenReturn(List.of(userDto, assistantDto));
 
-        List<ChatMessageResponseDto> history = service.getHistory(1L, "trace-history");
+        List<ChatMessageResponseDto> history = service.getHistoryPage(1L, "trace-history", null, RequestLimits.MAX_CHAT_HISTORY_PAGE_SIZE).getMessages();
 
         assertEquals(2, history.size());
         assertNull(assistantDto.getExecutionElapsedSeconds());
@@ -406,7 +407,7 @@ class ChatServiceImplHistoryWindowTest {
         assistantDto.setRole("assistant");
         when(chatMapper.toChatMessageDtoList(anyList())).thenReturn(List.of(userDto, assistantDto));
 
-        service.getHistory(1L, "exact-trace-history");
+        service.getHistoryPage(1L, "exact-trace-history", null, RequestLimits.MAX_CHAT_HISTORY_PAGE_SIZE).getMessages();
 
         assertEquals(43, assistantDto.getExecutionElapsedSeconds());
         assertEquals(List.of("CONTEXT_READY", "TASK_RESUMED", "EXECUTION_GUARD"),

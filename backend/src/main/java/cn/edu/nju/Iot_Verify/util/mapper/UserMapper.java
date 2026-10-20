@@ -1,7 +1,6 @@
 package cn.edu.nju.Iot_Verify.util.mapper;
 
 import cn.edu.nju.Iot_Verify.dto.auth.AuthResponseDto;
-import cn.edu.nju.Iot_Verify.dto.auth.RegisterResponseDto;
 import cn.edu.nju.Iot_Verify.po.UserPo;
 import org.springframework.stereotype.Component;
 
@@ -10,17 +9,6 @@ import org.springframework.stereotype.Component;
  */
 @Component
 public class UserMapper {
-
-    public RegisterResponseDto toRegisterResponseDto(UserPo userPo) {
-        if (userPo == null) {
-            return null;
-        }
-        RegisterResponseDto dto = new RegisterResponseDto();
-        dto.setUserId(userPo.getId());
-        dto.setPhone(userPo.getPhone());
-        dto.setUsername(userPo.getUsername());
-        return dto;
-    }
 
     public AuthResponseDto toAuthResponseDto(UserPo userPo, String token) {
         if (userPo == null) {

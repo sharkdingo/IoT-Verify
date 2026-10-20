@@ -2,6 +2,8 @@ package cn.edu.nju.Iot_Verify.service;
 
 import cn.edu.nju.Iot_Verify.dto.model.InteractiveOperationStage;
 import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
+import cn.edu.nju.Iot_Verify.exception.InternalServerException;
+import cn.edu.nju.Iot_Verify.testutil.LogCapture;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -12,11 +14,13 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.Optional;
+import java.io.IOException;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -42,6 +46,38 @@ class InteractiveAiExecutionServiceTest {
     @AfterEach
     void tearDown() {
         executor.shutdown();
+    }
+
+    @Test
+    void workerErrorRetainsItsTypeAndLogsTheRequestAndStage() {
+        InternalError failure = new InternalError("CodeCache diagnostic");
+        try (LogCapture logs = LogCapture.forClass(InteractiveAiExecutionService.class)) {
+            assertSame(failure, assertThrows(InternalError.class,
+                    () -> service.execute(1L, "request-error", () -> {
+                        service.markStage(1L, "request-error", InteractiveOperationStage.VALIDATING_RESULT);
+                        throw failure;
+                    })));
+            var event = logs.events().stream().filter(entry -> entry.getThrowableProxy() != null)
+                    .findFirst().orElseThrow();
+            assertTrue(event.getFormattedMessage().contains("requestId=request-error"));
+            assertTrue(event.getFormattedMessage().contains("stage=VALIDATING_RESULT"));
+            assertEquals(InternalError.class.getName(), event.getThrowableProxy().getClassName());
+        }
+        assertDoesNotThrow(() -> service.execute(1L, "request-after-error", () -> null));
+    }
+
+    @Test
+    void unexpectedCheckedFailureIsAnInternalErrorWithItsOriginalCause() {
+        IOException failure = new IOException("Worker diagnostic");
+        try (LogCapture logs = LogCapture.forClass(InteractiveAiExecutionService.class)) {
+            InternalServerException error = assertThrows(InternalServerException.class,
+                    () -> service.execute(1L, "request-checked", () -> { throw failure; }));
+            assertSame(failure, error.getCause());
+            var event = logs.events().stream().filter(entry -> entry.getThrowableProxy() != null)
+                    .findFirst().orElseThrow();
+            assertEquals(IOException.class.getName(), event.getThrowableProxy().getClassName());
+        }
+        assertDoesNotThrow(() -> service.execute(1L, "request-after-checked", () -> null));
     }
 
     @Test

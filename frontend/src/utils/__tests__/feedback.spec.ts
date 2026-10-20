@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { nextTick, render, type VNode } from 'vue'
 
 const elementPlus = vi.hoisted(() => ({
   message: Object.assign(vi.fn(), {
     success: vi.fn(), info: vi.fn(), warning: vi.fn(), error: vi.fn(), closeAll: vi.fn()
   }),
+  notification: vi.fn(),
   box: { confirm: vi.fn(), alert: vi.fn(), close: vi.fn() }
 }))
 
@@ -16,16 +18,20 @@ vi.mock('element-plus', () => ({
    */
   ElTooltip: { name: 'ElTooltip', template: '<slot />' },
   ElMessage: elementPlus.message,
-  ElMessageBox: elementPlus.box
+  ElMessageBox: elementPlus.box,
+  ElNotification: elementPlus.notification
 }))
 
 import {
   acknowledge,
+  acknowledgeFailure,
   confirmChoice,
   confirmDestructive,
   dismissAllNotifications,
+  dismissCompletionNotifications,
   dismissOpenConfirmation,
   notifyBlocked,
+  notifyAvailableResult,
   notifyError,
   notifyInfo,
   notifySuccess
@@ -84,6 +90,96 @@ describe('toast severities', () => {
   it('clears every open toast when the board changes context wholesale', () => {
     dismissAllNotifications()
     expect(elementPlus.message.closeAll).toHaveBeenCalledOnce()
+  })
+
+  it('retires completion notices while preserving errors and warnings for a new form interaction', () => {
+    dismissCompletionNotifications()
+    expect(elementPlus.message.closeAll.mock.calls).toEqual([['success'], ['info']])
+  })
+})
+
+describe('available result notifications', () => {
+  it('does not repeat a generic failure heading as its summary', () => {
+    elementPlus.notification.mockReturnValue({ close: vi.fn() })
+    notifyAvailableResult({ title: 'Verification failed', message: 'Verification failed',
+      actionLabel: 'View details', discardLabel: 'Close', onAction: vi.fn(), onClose: vi.fn() })
+    const options = elementPlus.notification.mock.calls[0][0] as Record<string, any>
+    const root = document.createElement('div')
+    render(options.message as VNode, root)
+    try {
+      expect(root.querySelector('h2')?.textContent).toBe('Verification failed')
+      expect(root.querySelector('p')).toBeNull()
+    } finally { render(null, root) }
+  })
+
+  it('updates a retained failure notice and its actions when the language changes', async () => {
+    const close = vi.fn()
+    elementPlus.notification.mockReturnValue({ close })
+    const t = (key: string) => i18n.global.t(key)
+    const onAction = vi.fn().mockReturnValue(true)
+    notifyAvailableResult({ title: () => t('app.verificationFailed'), message: () => t('app.runResponseIncomplete'),
+      actionLabel: () => t('app.viewDetails'), discardLabel: () => t('app.close'), onAction, onClose: vi.fn() })
+    const options = elementPlus.notification.mock.calls[0][0] as Record<string, any>
+    const root = document.createElement('div')
+    render(options.message as VNode, root)
+    try {
+      for (const locale of ['en', 'zh-CN'] as const) {
+        i18n.global.locale.value = locale
+        await nextTick()
+        expect(root.querySelector('h2')?.textContent).toBe(t('app.verificationFailed'))
+        expect(root.querySelector('p')?.textContent).toBe(t('app.runResponseIncomplete'))
+        expect(root.querySelector('[data-testid="available-result-open"]')?.textContent).toBe(t('app.viewDetails'))
+        expect(root.querySelector('[data-testid="available-result-discard"]')?.textContent).toBe(t('app.close'))
+      }
+      root.querySelector<HTMLButtonElement>('[data-testid="available-result-open"]')!.click()
+      expect(onAction).toHaveBeenCalledOnce()
+      expect(close).toHaveBeenCalledOnce()
+      expect(elementPlus.notification).toHaveBeenCalledOnce()
+    } finally { render(null, root) }
+  })
+
+  const createNotice = () => {
+    const close = vi.fn()
+    elementPlus.notification.mockReturnValue({ close })
+    const onAction = vi.fn().mockReturnValue(false)
+    const onClose = vi.fn()
+    const dismiss = notifyAvailableResult({
+      title: 'Unsaved result', message: 'Discarding deletes it.', actionLabel: 'Open replay',
+      discardLabel: 'Discard result', onAction, onClose
+    })
+    const options = elementPlus.notification.mock.calls[0][0] as Record<string, any>
+    const root = document.createElement('div')
+    render(options.message as VNode, root)
+    return { close, onAction, onClose, dismiss, options, root }
+  }
+
+  it('survives transient toast cleanup and retains a blocked result until explicit opening', () => {
+    const notice = createNotice()
+    try {
+      expect(notice.options).toMatchObject({ duration: 0, showClose: false, position: 'bottom-right' })
+      dismissAllNotifications()
+      expect(notice.close).not.toHaveBeenCalled()
+      const open = notice.root.querySelector<HTMLButtonElement>('[data-testid="available-result-open"]')!
+      open.click()
+      expect(notice.onAction).toHaveBeenCalledOnce()
+      expect(notice.close).not.toHaveBeenCalled()
+      notice.onAction.mockReturnValue(true)
+      open.click()
+      expect(notice.close).toHaveBeenCalledOnce()
+    } finally { render(null, notice.root) }
+  })
+
+  it('provides an explicit discard control and an owning-view cleanup handle', () => {
+    const notice = createNotice()
+    try {
+      notice.root.querySelector<HTMLButtonElement>('[data-testid="available-result-discard"]')!.click()
+      expect(notice.close).toHaveBeenCalledOnce()
+      expect(notice.onAction).not.toHaveBeenCalled()
+      notice.dismiss()
+      expect(notice.close).toHaveBeenCalledTimes(2)
+      notice.options.onClose()
+      expect(notice.onClose).toHaveBeenCalledOnce()
+    } finally { render(null, notice.root) }
   })
 })
 
@@ -172,7 +268,7 @@ describe('confirmDestructive', () => {
     await expect(confirmDestructive({ title: 'Delete', message: 'Sure?' })).resolves.toBe(false)
   })
 
-  it('marks the confirm button as dangerous and keeps a cancel affordance', async () => {
+  it('marks the confirm button as dangerous without automatically focusing it', async () => {
     elementPlus.box.confirm.mockResolvedValueOnce('confirm')
     await confirmDestructive({ title: 'Delete rule', message: 'Sure?', confirmText: 'Delete' })
 
@@ -182,6 +278,7 @@ describe('confirmDestructive', () => {
     expect(message).toBe('Sure?')
     expect(title).toBe('Delete rule')
     expect(options.confirmButtonText).toBe('Delete')
+    expect(options.autofocus).toBe(false)
     expect(options.cancelButtonText).toBeTruthy()
     expect(options.confirmButtonClass).toContain('danger')
   })
@@ -315,6 +412,66 @@ describe('acknowledge', () => {
     await acknowledge({ title: 'Invalid scene', message: 'Details', tone: 'error' })
     const options = elementPlus.box.alert.mock.calls[0][2] as Record<string, unknown>
     expect(options.type).toBe('error')
+  })
+})
+
+describe('persistent actionable failures', () => {
+  it('keeps a generic apply failure title without repeating it in the body', async () => {
+    elementPlus.box.alert.mockResolvedValueOnce('confirm')
+    await acknowledgeFailure({ title: 'Failed to apply fix', message: 'Failed to apply fix',
+      suggestion: 'Review the current model.', details: ['HTTP 400'] })
+    const [content, title] = elementPlus.box.alert.mock.calls[0] as [VNode, string]
+    const root = document.createElement('div')
+    try {
+      render(content, root)
+      expect(title).toBe('Failed to apply fix')
+      expect(root.querySelector('[data-testid="failure-summary"]')).toBeNull()
+      expect(root.querySelector('[data-testid="failure-next-step"]')?.textContent).toContain('Review the current model.')
+      expect(root.querySelector('details')?.textContent).toContain('HTTP 400')
+    } finally { render(null, root) }
+  })
+
+  it('keeps a summary, next step and raw diagnostics readable until acknowledged without interpreting HTML', async () => {
+    let settle!: () => void
+    elementPlus.box.alert.mockImplementationOnce(() => new Promise<void>(resolve => { settle = resolve }))
+    const pending = acknowledgeFailure({
+      title: 'Import failed', message: 'The scene could not be read.',
+      cause: 'Unexpected token <script> at position 12',
+      suggestion: 'Correct the indicated field and import again.',
+      details: ['Unexpected token <script> at position 12'],
+      fields: { '<img src=x onerror=alert(1)>': 'Expected a rule condition' }
+    })
+    const [content, title, options] = elementPlus.box.alert.mock.calls[0] as [VNode, string, Record<string, unknown>]
+    const root = document.createElement('div')
+    try {
+      render(content, root)
+      expect(openModalDepth.value).toBe(1)
+      expect(title).toBe('Import failed')
+      expect(options).toMatchObject({ type: 'error', lockScroll: false, appendTo: 'body' })
+      expect(root.querySelector('[data-testid="failure-summary"]')?.textContent).toBe('The scene could not be read.')
+      expect(root.querySelector('[data-testid="failure-next-step"]')?.textContent).toContain('Correct the indicated field and import again.')
+      expect(root.querySelector('details')).toBeNull()
+      expect(root.querySelector('[data-testid="failure-cause"]')?.textContent).toBe('Unexpected token <script> at position 12')
+      expect(root.querySelector('[data-testid="failure-fields"]')?.textContent).toContain('<img src=x onerror=alert(1)>')
+      expect(root.querySelector('[data-testid="failure-fields"]')?.textContent).toContain('Expected a rule condition')
+      expect(root.querySelector('dt')?.closest('details')).toBeNull()
+      expect(root.querySelector('script, img')).toBeNull()
+    } finally {
+      render(null, root)
+      settle()
+      await pending
+    }
+    expect(openModalDepth.value).toBe(0)
+    expect(elementPlus.message.error).not.toHaveBeenCalled()
+  })
+
+  it('allows dismissal without retrying the failed action or leaking modal depth', async () => {
+    elementPlus.box.alert.mockRejectedValueOnce('close')
+    await expect(acknowledgeFailure({
+      title: 'Request failed', message: 'Result unavailable', suggestion: 'Check history before trying again'
+    })).resolves.toBeUndefined()
+    expect(openModalDepth.value).toBe(0)
+    expect(elementPlus.box.confirm).not.toHaveBeenCalled()
   })
 })
 

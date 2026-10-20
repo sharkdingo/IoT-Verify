@@ -47,16 +47,13 @@ const attemptedPath = computed(() => {
 
 <template>
   <div class="not-found">
-    <!-- `light` rather than `transparent`: there is no hero image behind this page for a transparent
-         header to sit over, so it needs its own ground. -->
-    <PublicHeader variant="light" />
+    <PublicHeader />
 
     <main class="not-found__body">
       <section class="not-found__card" aria-labelledby="not-found-title">
         <span class="not-found__code" aria-hidden="true">404</span>
 
         <h1 id="not-found-title" class="not-found__title">{{ t('app.notFound.title') }}</h1>
-        <p class="not-found__subtitle">{{ t('app.notFound.subtitle') }}</p>
 
         <!-- The address itself, when known: the fastest way for someone to spot their own typo. -->
         <p v-if="attemptedPath" class="not-found__path">
@@ -76,7 +73,7 @@ const attemptedPath = computed(() => {
           </RouterLink>
           <RouterLink
             to="/"
-            class="not-found__secondary"
+            class="not-found__secondary board-action-secondary"
             data-testid="not-found-home"
           >
             <span class="material-symbols-outlined text-base" aria-hidden="true">home</span>
@@ -93,7 +90,7 @@ const attemptedPath = computed(() => {
   display: flex;
   min-height: 100dvh;
   flex-direction: column;
-  background: var(--surface);
+  background: var(--iot-color-bg-canvas);
   color: var(--text);
 }
 
@@ -102,7 +99,7 @@ const attemptedPath = computed(() => {
   flex: 1;
   align-items: center;
   justify-content: center;
-  padding: 2rem 1.5rem 4rem;
+  padding: 7rem var(--iot-space-xl) var(--iot-space-4xl);
 }
 
 .not-found__card {
@@ -111,15 +108,21 @@ const attemptedPath = computed(() => {
   max-width: 32rem;
   flex-direction: column;
   align-items: center;
-  gap: 0.75rem;
+  gap: var(--iot-space-md);
+  border: 1px solid var(--border);
+  border-radius: var(--iot-radius-surface);
+  background: var(--surface);
+  padding: clamp(var(--iot-space-xl), 4vw, 2.5rem);
+  box-shadow: var(--shadow-elevated);
   text-align: center;
 }
 
 /* Large, low-contrast, and `aria-hidden`: it orients at a glance without competing with the sentence
    that actually explains the situation, and it is not read twice to a screen reader. */
 .not-found__code {
+  font-family: var(--iot-font-display);
   font-size: clamp(4rem, 14vw, 7rem);
-  font-weight: 800;
+  font-weight: 500;
   line-height: 1;
   letter-spacing: -0.04em;
   color: var(--border-strong);
@@ -128,15 +131,8 @@ const attemptedPath = computed(() => {
 .not-found__title {
   margin: 0;
   font-size: 1.5rem;
-  font-weight: 700;
-}
-
-.not-found__subtitle {
-  margin: 0;
-  max-width: 28rem;
-  font-size: 0.9375rem;
-  line-height: 1.6;
-  color: var(--text-muted);
+  font-family: var(--iot-font-display);
+  font-weight: 600;
 }
 
 .not-found__path {
@@ -145,9 +141,9 @@ const attemptedPath = computed(() => {
   flex-wrap: wrap;
   align-items: baseline;
   justify-content: center;
-  gap: 0.5rem;
-  margin: 0.25rem 0 0;
-  font-size: 0.8125rem;
+  gap: var(--iot-space-sm);
+  margin: var(--iot-space-2xs) 0 0;
+  font-size: var(--iot-font-label);
 }
 
 .not-found__path-label {
@@ -160,7 +156,7 @@ const attemptedPath = computed(() => {
   border-radius: var(--iot-radius-control);
   background: var(--surface-elevated);
   border: 1px solid var(--border);
-  padding: 0.125rem 0.5rem;
+  padding: 0.125rem var(--iot-space-sm);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
@@ -169,27 +165,8 @@ const attemptedPath = computed(() => {
   flex-wrap: wrap;
   align-items: center;
   justify-content: center;
-  gap: 0.75rem;
-  margin-top: 1rem;
+  gap: var(--iot-space-md);
+  margin-top: var(--iot-space-lg);
 }
 
-/* Secondary by weight, not by being hidden or disabled: both exits stay reachable and both keep a
-   44px target. */
-.not-found__secondary {
-  display: inline-flex;
-  min-height: 2.75rem;
-  align-items: center;
-  justify-content: center;
-  gap: 0.375rem;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--iot-radius-action);
-  padding: 0.5rem 1rem;
-  font-weight: 600;
-  color: var(--text);
-  transition: background-color 0.18s;
-}
-
-.not-found__secondary:hover {
-  background: var(--surface-elevated);
-}
 </style>

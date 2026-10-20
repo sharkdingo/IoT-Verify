@@ -296,7 +296,7 @@ The following chains are closed loops in the current backend implementation:
    template field `InternalVariables[].FalsifiableWhenCompromised`; API presence does not
    infer it.
 9. **Fix loop (Fix Pipeline)**: `FixServiceImpl` → `RuleFixer` → three strategies
-   (parameter/condition/permanent removal) chained. A global deadline is controlled by
+   (parameter/condition/rule removal) chained. A global deadline is controlled by
    `FixConfig.fixTimeoutMs` (default 300s, `@Min(1000)`); `FixContext.isExpired()` checks
    the deadline at the strategy-loop entry, the `forwardVerify()` entry, and inside each
    strategy loop; after timeout the summary appends "(fix timed out; results may be

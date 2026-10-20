@@ -113,6 +113,21 @@ const occupancySensorTemplate = {
   }
 }
 
+const careVentilationWindowTemplate = loadTemplate('Window')
+careVentilationWindowTemplate.name = 'Care Ventilation Window'
+careVentilationWindowTemplate.manifest.Name = careVentilationWindowTemplate.name
+careVentilationWindowTemplate.manifest.Description = 'An open care-apartment window lowers the normalized indoor CO2 level'
+careVentilationWindowTemplate.manifest.InternalVariables.push({
+  ...loadTemplate('Air Quality Monitor').manifest.InternalVariables.find(variable => variable.Name === 'carbonDioxide'),
+  Reads: false,
+  FalsifiableWhenCompromised: false
+})
+careVentilationWindowTemplate.manifest.ImpactedVariables = ['carbonDioxide']
+// The declared -2 ventilation rate exceeds the pool's independent [-1, 1] disturbance.
+careVentilationWindowTemplate.manifest.WorkingStates.find(state => state.Name === 'open').Dynamics.push({
+  VariableName: 'carbonDioxide', ChangeRate: '-2'
+})
+
 const scenes = [
   {
     file: 'default-fire-evacuation-scene.json',
@@ -330,9 +345,7 @@ const scenes = [
     ]
   },
 
-  // Comprehensive elderly care apartment scenario - multi-dimensional blind spot probe
-  // Targets: Template 6 (LTL), environment vs reported divergence, pure environment specs,
-  // custom template validation, multi-parameter joint solving, IN/NOT_IN relations
+  // Night-time care responses, ventilation, and an unsafe lamp-to-camera chain.
   {
     file: 'elderly-care-comprehensive-scene.json',
     // Device selection is cost-driven. A device contributes roughly
@@ -341,10 +354,11 @@ const scenes = [
     // the one costly device kept on purpose: it is the only bundled template that is multi-mode,
     // content-capable, and auto-returns to idle, which is what lets it be a repeatable chain hub.
     // Air Conditioner (28) and Thermostat (40) are deliberately absent — see the guide.
-    templateNames: ['Illuminance Sensor', 'Light', 'Motion Detector', 'Door', 'Window',
+    templateNames: ['Illuminance Sensor', 'Light', 'Motion Detector', 'Door',
       'Alarm', 'Camera', 'Air Quality Monitor', 'Air Purifier', 'Home Mode', 'Mobile Phone',
       'Clock'],
     extraTemplates: [
+      careVentilationWindowTemplate,
       // A custom name, not `HeartRateMonitor`: the domain and rate below disagree with that
       // template, and P5 rejects two declarers of one shared name whose range or
       // `NaturalChangeRate` differ. `[-1, 1]` is MEDIC's integer baseline and halves this
@@ -495,7 +509,7 @@ const scenes = [
       device('door_lock', 'Door', 'Front Door Lock', 580, 360, {
         state: 'locked', currentStateTrust: 'trusted', currentStatePrivacy: 'private'
       }),
-      device('window_1', 'Window', 'Electric Window', 580, 520, {
+      device('window_1', 'Care Ventilation Window', 'Electric Window', 580, 520, {
         state: 'closed', currentStateTrust: 'trusted', currentStatePrivacy: 'public'
       }),
       // `off`, against the template's `InitState: 'on'`, so `→ air_purifier.on` actually pulses.
@@ -520,9 +534,8 @@ const scenes = [
     // `init(a_X)` so NuSMV starts it anywhere in its domain. `location` is easy to miss: it comes
     // from `Mobile Phone`, which no rule reads.
     //
-    // Values place the home at the moment of the incident, the way the fire-evacuation scene
-    // ships `smoke = detected`. `heartRate` starts at 135 so `normal -> alert -> emergency` takes
-    // two steps; from a resting 75 at `[-1, 1]` it would need sixty.
+    // Initial readings make the night-time emergency chain visible without first waiting
+    // for the heart-rate reading to drift from a resting value.
     environmentVariables: [
       // 125, not 135: the monitor ships in `normal` and needs one step to escalate, so a value
       // already past its own alert threshold made "reports normal while reading high" true in the
@@ -620,10 +633,7 @@ const scenes = [
         content: 'photo'
       },
       // --- Chain C: ventilation. air quality -> window -> purifier.
-      // `open` precedes `close` below, and the two are made mutually exclusive by the extra
-      // air-quality condition on the closing rule. Without that the earlier rule would win the
-      // shared `WindowState` mode whenever both held, and venting would be unreachable at night —
-      // exactly the silent shadowing this scene exists to make visible.
+      // Closing requires fresh air, so night-time closing cannot interrupt needed ventilation.
       {
         name: 'When the air is stale, open the window',
         sources: [valueSource('air_quality', 'carbonDioxide', '>', '60')],
@@ -645,11 +655,7 @@ const scenes = [
         toId: 'window_1',
         toApi: 'close'
       },
-      // --- The intentional defect. Not labelled unsafe, because a household would install it:
-      // "turn the lamp off when nobody is moving" is ordinary energy saving. It shares
-      // `SwitchState` with chain B's lamp rule and sits AFTER it, so it loses the arbitration
-      // while the night rule holds — and the moment motion stops during a night-time bed exit it
-      // is the rule that wins, darkening the room the resident is walking through.
+      // Night-time bed-exit lighting has priority over motion-based energy saving.
       {
         name: 'Turn the lamp off when there is no movement',
         sources: [valueSource('motion_det', 'motion', '=', 'inactive')],
@@ -663,15 +669,12 @@ const scenes = [
     // here on purpose: a single one forces privacy modelling on for the whole run, which is the
     // largest single cost in the model after device count.
     specs: [
-      // s1 | template 3 | EXPECTED TO FAIL. The lamp must never be off while the resident is
-      // walking at night. The energy-saving rule shares `SwitchState` with the night rule and
-      // sits after it, so it wins the moment motion stops — this is the counterexample the scene
-      // exists to produce, and the trace shows which rule won the arbitration.
-      aSpec('3', [
+      // Bed exit is a trigger: the lamp must respond in the next step. Requiring an
+      // already-lit lamp in the trigger state rejects the initial scene before a rule runs.
+      implicationSpec('4', [
         condition('bed_sensor', 'variable', 'bedOccupancy', '=', 'empty', null, 'environment'),
-        condition('clock', 'variable', 'time', 'in', '22,23,0,1,2,3,4,5,6', null, 'environment'),
-        condition('smart_lamp', 'state', 'state', '=', 'off')
-      ]),
+        condition('clock', 'variable', 'time', 'in', '22,23,0,1,2,3,4,5,6', null, 'environment')
+      ], [condition('smart_lamp', 'mode', 'SwitchState', '=', 'on')]),
       // s2 | template 5 | expected to hold. Emergency vitals must eventually sound the alarm.
       implicationSpec('5',
         [condition('vitals', 'mode', 'MonitorMode', '=', 'emergency')],
@@ -689,24 +692,17 @@ const scenes = [
         [condition('care_hub', 'mode', 'State', '=', 'sendingAlertMessage')],
         [condition('door_lock', 'mode', 'LockState', '=', 'unlocked')]
       ),
-      // s5 | template 7 | expected to hold at baseline, to FAIL under attack. `airQuality` ships
-      // `untrusted`, so a compromised air monitor is what makes the window open on a lie. Without
-      // an untrusted label anywhere in the scene this template can never fail and says nothing.
+      // Opening from trusted CO2 readings is safe at baseline. A compromised monitor can
+      // falsify that reading and taint the window's control source.
       aSpec('7', [condition('window_1', 'mode', 'WindowState', '=', 'open')]),
-      // s6 | template 4 | expected to hold. Stale air must open the window in the next state.
-      // Note the threshold matches the rule exactly: an earlier version of this scene asked about
-      // `airQuality < 30` while nothing wrote `airQuality`, so it checked a command and never an
-      // effect. `carbonDioxide` has a real writer — the purifier — so this one can be falsified.
+      // Stale air opens the ventilation window in the next state.
       implicationSpec('4',
         [condition('air_quality', 'variable', 'carbonDioxide', '>', '60', null, 'environment')],
         [condition('window_1', 'mode', 'WindowState', '=', 'open')]
       ),
-      // s7 | template 5 | expected to hold. The air must eventually become fresh again, which is
-      // only true because the purifier drives `carbonDioxide` down. This pins chain C's last hop:
-      // it fails if that hop is inert (the failure mode an `api` source hits when its target
-      // already sits in the command's end state). Framed as "eventually happens" not "eventually
-      // stays" — free `a_carbonDioxide` drift can cancel the purifier's −1, so `AF(≤60)` cannot
-      // hold, but `AF EF(≤60)` can.
+      // Ventilation must actually lower CO2, including under the declared natural disturbance.
+      // The bundled purifier's CO2 rate is -1, which the +1 disturbance can cancel;
+      // the separate ventilation window contributes -2 while open.
       implicationSpec('5',
         [condition('air_quality', 'variable', 'carbonDioxide', '>', '60', null, 'environment')],
         [condition('air_quality', 'variable', 'carbonDioxide', '<=', '60', null, 'environment')]
@@ -732,20 +728,10 @@ const scenes = [
       // which asserts the door is *always* untrusted and failed in the initial state for a reason
       // unrelated to any automation.
       aSpec('3', [condition('door_lock', 'trust', 'LockState', '=', 'untrusted', 'state')]),
-      // s11 | template 3 | expected to hold, and the only privacy property in the scene. It reads
-      // a *state* label the chain actually writes: the hub sends content, so its `State` privacy
-      // must not be *downgraded* to public — `Home Mode` declares every state `Privacy: private`,
-      // but `Alarm` declares all its states `Privacy: public`, so chain A's hop 2 (alarm → hub)
-      // writes a `public` privacy label to `sendingAlertMessage` via the MEDIC join. Asking for
-      // `= private` would fail; asking for `!= public` asserts no downgrade and holds. A variable
-      // privacy label would be unfalsifiable — they are frozen (`next(p) := p`) and never written.
+      // The hub's state classification must not downgrade its care messages to public.
       aSpec('3', [condition('care_hub', 'privacy', 'State', '=', 'public', 'state')]),
-      // s12 | template 3 | expected to hold. The camera must never record while the resident is in
-      // bed during the night window that chain B serves. Reachability of `taking photo` is what
-      // makes this non-vacuous, and chain B provides it. Adding the time guard prevents a
-      // coincidence the baseline scene does not: free `a_bedOccupancy` could flip back to
-      // `occupied` in the same step the camera reaches `takingphoto`, which would make the
-      // unguarded form fail on a state the automation never intended.
+      // Intentional privacy violation: occupancy can change while the lamp-to-camera
+      // command is in flight. A guard that was true earlier is not a current privacy check.
       aSpec('3', [
         condition('camera_1', 'state', 'state', '=', 'taking photo'),
         condition('bed_sensor', 'variable', 'bedOccupancy', '=', 'occupied', null, 'environment'),

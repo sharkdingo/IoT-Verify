@@ -132,7 +132,8 @@ public class ManageBoardHistoryTool extends AbstractAiTool {
         Map<String, Object> bindingSnapshot = clearBindingSnapshot(preview);
         if (!confirmed || !UserContextHolder.isDestructiveActionConfirmed()) {
             String confirmationToken = destructiveActionGuard.issue(
-                    userId, getName(), CLEAR_TARGET_KEY, bindingSnapshot, domainImpactToken);
+                    userId, getName(), CLEAR_TARGET_KEY,
+                    "Undo/redo history", bindingSnapshot, domainImpactToken);
             Map<String, Object> response = clearPreviewView(preview);
             response.put("operation", "clear_preview");
             response.put("requiresUserConfirmation", true);
@@ -176,6 +177,7 @@ public class ManageBoardHistoryTool extends AbstractAiTool {
         if (canConfirm) {
             currentPreview.put("impactToken", destructiveActionGuard.issue(
                     userId, getName(), CLEAR_TARGET_KEY,
+                    "Undo/redo history",
                     clearBindingSnapshot(current), current.getImpactToken().trim()));
         }
         return errorJson(message, errorCode, 409, Map.of(

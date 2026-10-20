@@ -1,6 +1,5 @@
 package cn.edu.nju.Iot_Verify.service.impl;
 
-import cn.edu.nju.Iot_Verify.exception.BadRequestException;
 import cn.edu.nju.Iot_Verify.exception.ConflictException;
 import cn.edu.nju.Iot_Verify.po.UserPo;
 import cn.edu.nju.Iot_Verify.repository.UserRepository;
@@ -25,25 +24,12 @@ public class UserServiceImpl implements UserService {
     @Override
     @Transactional
     public UserPo register(String phone, String username, String password) {
-        String normalizedUsername = UsernameNormalizer.normalize(username);
-        if (!UsernameNormalizer.isValid(normalizedUsername)) {
-            throw new BadRequestException(
-                    "Username must be 3-20 Unicode characters after trimming and must not contain control or format characters.");
-        }
-        if (UsernameNormalizer.isPhoneNumber(normalizedUsername)) {
-            throw new BadRequestException("Username cannot use the phone-number format.");
-        }
+        String normalizedUsername = UsernameNormalizer.normalizeAndValidate(username);
         if (existsByPhone(phone)) {
             throw ConflictException.duplicatePhone(phone);
         }
-        if (existsByUsername(phone)) {
-            throw new ConflictException("Phone number conflicts with an existing username.");
-        }
         if (existsByUsername(normalizedUsername)) {
             throw ConflictException.duplicateUsername(normalizedUsername);
-        }
-        if (existsByPhone(normalizedUsername)) {
-            throw new ConflictException("Username conflicts with an existing phone number.");
         }
 
         UserPo user = UserPo.builder()

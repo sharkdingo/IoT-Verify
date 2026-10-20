@@ -173,6 +173,10 @@ public final class PersistedModelContextIntegrity {
                 recordType, recordId, "modelSnapshotJson", snapshot, "deviceTemplateCount");
         requireJsonBoolean(
                 recordType, recordId, "modelSnapshotJson", snapshot, "templatesFrozen");
+        JsonNode fingerprint = snapshot.get("modelFingerprint");
+        if (fingerprint != null && !fingerprint.isNull() && !fingerprint.isTextual()) {
+            throw invalid(recordType, recordId, "modelSnapshotJson", "modelFingerprint must be a string or null");
+        }
     }
 
     private static JsonNode requireJsonArray(
@@ -497,7 +501,8 @@ public final class PersistedModelContextIntegrity {
                 ? snapshot.getSpecificationCount() < 1
                 : snapshot.getSpecificationCount() != 0;
         if (snapshot.getCapturedAt() == null || !snapshot.isTemplatesFrozen()
-                || snapshot.getModelFingerprint() != null
+                || (snapshot.getModelFingerprint() != null
+                && !snapshot.getModelFingerprint().matches("[0-9a-f]{64}"))
                 || invalidCounts || invalidSpecificationCount) {
             throw invalid(recordType, recordId, "modelSnapshotJson",
                     "model snapshot fields are invalid");

@@ -39,6 +39,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -186,13 +187,40 @@ class FuzzToolsTest {
 
     @Test
     void status_returnsTaskAndProgress() throws Exception {
-        when(fuzzService.getTask(1L, 7L)).thenReturn(FuzzTaskDto.builder().id(7L).status("RUNNING").build());
-        when(fuzzService.getTaskProgress(1L, 7L)).thenReturn(42);
+        when(fuzzService.getTask(1L, 7L)).thenReturn(FuzzTaskDto.builder()
+                .id(7L).status("RUNNING").progress(42).build());
 
-        JsonNode json = objectMapper.readTree(fuzzTaskStatusTool.execute("{\"taskId\":7}"));
+        JsonNode json = objectMapper.readTree(fuzzTaskStatusTool.execute("{\"taskId\":7,\"waitMs\":0}"));
 
         assertEquals(42, json.path("progress").asInt());
         assertEquals("RUNNING", json.path("task").path("status").asText());
+        assertEquals(42, json.path("task").path("progress").asInt());
+        verify(fuzzService).getTask(1L, 7L);
+        verifyNoMoreInteractions(fuzzService);
+    }
+
+    @Test
+    void statusWaitsBrieflyUsingTheSameContractAsVerificationAndSimulation() throws Exception {
+        when(fuzzService.getTask(1L, 7L)).thenReturn(
+                FuzzTaskDto.builder().id(7L).status("RUNNING").progress(42).build(),
+                FuzzTaskDto.builder().id(7L).status("COMPLETED").progress(100).build());
+
+        JsonNode result = objectMapper.readTree(fuzzTaskStatusTool.execute(
+                "{\"taskId\":7,\"waitMs\":10000}"));
+
+        assertEquals("COMPLETED", result.path("task").path("status").asText());
+        assertEquals(100, result.path("progress").asInt());
+        verify(fuzzService, org.mockito.Mockito.times(2)).getTask(1L, 7L);
+    }
+
+    @Test
+    void statusRejectsInvalidWaitsBeforeReadingATask() throws Exception {
+        for (String wait : List.of("-1", "10001", "1.5", "\"soon\"", "null")) {
+            JsonNode result = objectMapper.readTree(fuzzTaskStatusTool.execute(
+                    "{\"taskId\":7,\"waitMs\":" + wait + "}"));
+            assertEquals("VALIDATION_ERROR", result.path("errorCode").asText(), wait);
+        }
+        verifyNoMoreInteractions(fuzzService);
     }
 
     @Test
@@ -310,7 +338,7 @@ class FuzzToolsTest {
         assertTrue(preview.path("countIncludesUnavailableEvidence").asBoolean());
         verify(fuzzService, never()).deleteRun(1L, 3L, 2L);
 
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", preview.path("impactToken").asText());
         JsonNode result = objectMapper.readTree(deleteFuzzRunTool.execute(
                 "{\"runId\":3,\"confirmed\":true,\"impactToken\":\""
                         + preview.path("impactToken").asText() + "\"}"));
@@ -324,7 +352,7 @@ class FuzzToolsTest {
     void deleteRun_confirmWithoutTokenIsRejected() throws Exception {
         when(fuzzService.getRunDeletionImpact(1L, 3L)).thenReturn(
                 RunDeletionImpactDto.builder().runId(3L).evidenceCount(0).build());
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", "missing-token");
 
         JsonNode json = objectMapper.readTree(
                 deleteFuzzRunTool.execute("{\"runId\":3,\"confirmed\":true}"));
@@ -341,7 +369,7 @@ class FuzzToolsTest {
 
         JsonNode preview = objectMapper.readTree(
                 deleteFuzzRunTool.execute("{\"runId\":3,\"confirmed\":false}"));
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", preview.path("impactToken").asText());
         JsonNode result = objectMapper.readTree(deleteFuzzRunTool.execute(
                 "{\"runId\":3,\"confirmed\":true,\"impactToken\":\""
                         + preview.path("impactToken").asText() + "\"}"));
@@ -372,7 +400,7 @@ class FuzzToolsTest {
         assertEquals("spec-1", preview.path("targetSpecIds").get(0).asText());
         verify(fuzzService, never()).deleteTask(1L, 9L);
 
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", preview.path("impactToken").asText());
         JsonNode json = objectMapper.readTree(dismissFuzzTaskTool.execute(
                 "{\"taskId\":9,\"confirmed\":true,\"impactToken\":\""
                         + preview.path("impactToken").asText() + "\"}"));

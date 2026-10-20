@@ -39,6 +39,7 @@ const ATTEMPT_STATUSES = new Set<FixStrategyAttemptStatus>([
   'SKIPPED_NO_SPEC',
   'SKIPPED_NO_PARAMETERIZABLE_VALUES',
   'SKIPPED_NO_FAULT_RULES',
+  'SKIPPED_INITIAL_STATE_VIOLATION',
   'SKIPPED_INCOMPLETE_SOURCE_MODEL',
   'SKIPPED_UNSUPPORTED'
 ])
@@ -188,7 +189,8 @@ const validateParameterAdjustment = (
   if (!TARGET_ID_PATTERN.test(text(row, 'targetId', context))) {
     throw new FixResponseContractError(context, `parameterAdjustments[${index}].targetId is invalid`)
   }
-  for (const field of ['attribute', 'relation', 'originalValue', 'newValue', 'description']) {
+  integer(row, 'rulePosition', context, 1)
+  for (const field of ['attribute', 'relation', 'originalValue', 'newValue', 'description', 'deviceLabel']) {
     text(row, field, context)
   }
   validateModelTokenSource(row, context, `parameterAdjustments[${index}]`)
@@ -213,7 +215,8 @@ const validateParameterTarget = (
   if (!TARGET_ID_PATTERN.test(text(row, 'targetId', context))) {
     throw new FixResponseContractError(context, `parameterTargets[${index}].targetId is invalid`)
   }
-  for (const field of ['attribute', 'relation', 'originalValue', 'description']) {
+  integer(row, 'rulePosition', context, 1)
+  for (const field of ['attribute', 'relation', 'originalValue', 'description', 'deviceLabel']) {
     text(row, field, context)
   }
   validateModelTokenSource(row, context, `parameterTargets[${index}]`)
@@ -386,6 +389,16 @@ export const validateFixResult = (
     (target, index) => validateParameterTarget(target, context, index))
   if (new Set(parameterTargets.map(target => target.targetId)).size !== parameterTargets.length) {
     throw new FixResponseContractError(context, 'parameterTargets contains duplicate targets')
+  }
+  const targetsById = new Map(parameterTargets.map(target => [target.targetId, target]))
+  for (const suggestion of suggestions) {
+    for (const adjustment of suggestion.parameterAdjustments) {
+      const target = targetsById.get(adjustment.targetId)
+      if (!target || (['rulePosition', 'deviceLabel', 'attribute', 'relation', 'originalValue', 'modelTokenSource'] as const)
+        .some(field => adjustment[field] !== target[field])) {
+        throw new FixResponseContractError(context, 'parameter adjustment does not match its frozen target')
+      }
+    }
   }
   const unusedPreferredRangeSelections = array(result, 'unusedPreferredRangeSelections', context)
   const seenUnusedTargets = new Set<string>()

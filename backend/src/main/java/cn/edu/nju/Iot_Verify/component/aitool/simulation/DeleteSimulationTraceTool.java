@@ -75,10 +75,12 @@ public class DeleteSimulationTraceTool extends AbstractAiTool {
 
             SimulationTraceDto trace = simulationService.getSimulation(userId, simulationId);
             Map<String, Object> previewSummary = previewSummary(simulationId, trace);
+            String displayTarget = "Simulation: " + trace.getCreatedAt() + " · " + trace.getSteps() + " steps";
             boolean confirmed = booleanArg(args, "confirmed", false);
             if (!confirmed || !UserContextHolder.isDestructiveActionConfirmed()) {
                 String impactToken = destructiveActionGuard.issue(
-                        userId, getName(), Long.toString(simulationId), previewSummary, null);
+                        userId, getName(), Long.toString(simulationId),
+                        displayTarget, previewSummary, null);
                 Map<String, Object> preview = previewResponse(previewSummary, impactToken);
                 return readOnlySuccessJson(preview, "Simulation trace deletion preview prepared; no changes were made.");
             }
@@ -88,7 +90,8 @@ public class DeleteSimulationTraceTool extends AbstractAiTool {
                     userId, getName(), Long.toString(simulationId), impactToken, previewSummary);
             if (!confirmation.approved()) {
                 String freshToken = destructiveActionGuard.issue(
-                        userId, getName(), Long.toString(simulationId), previewSummary, null);
+                        userId, getName(), Long.toString(simulationId),
+                        displayTarget, previewSummary, null);
                 return errorJson(confirmation.message(), confirmation.errorCode(), 409, Map.of(
                         "requiresUserConfirmation", true,
                         "currentPreview", previewResponse(previewSummary, freshToken)));

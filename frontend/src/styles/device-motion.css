@@ -1,0 +1,60 @@
+/* Shared by the workspace and public example; readings cross-fade without an empty phase. */
+.device-reading-slot {
+    display: grid;
+    min-width: 0;
+    max-width: 100%;
+}
+
+.device-reading-slot > span {
+    grid-area: 1 / 1;
+    min-width: 0;
+}
+
+.trace-device-icon-enter-active,
+.trace-device-icon-leave-active {
+    position: absolute;
+    transition:
+        opacity var(--iot-motion-fast),
+        transform var(--iot-motion-panel) var(--iot-ease-panel);
+}
+
+.trace-device-icon-enter-from {
+    opacity: 0;
+    transform: translateY(2px) scale(0.96);
+}
+
+.trace-device-icon-leave-to {
+    opacity: 0;
+    transform: translateY(-2px) scale(0.96);
+}
+
+.trace-device-state-enter-active,
+.trace-device-state-leave-active {
+    transition:
+        opacity var(--iot-motion-fast),
+        transform var(--iot-motion-panel) var(--iot-ease-panel);
+}
+
+.trace-device-state-enter-from {
+    opacity: 0;
+    transform: translateY(2px);
+}
+
+.trace-device-state-leave-to {
+    opacity: 0;
+    transform: translateY(-2px);
+}
+
+.trace-device-icon-leave-active,
+.trace-device-state-leave-active {
+    pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .trace-device-icon-enter-active,
+    .trace-device-icon-leave-active,
+    .trace-device-state-enter-active,
+    .trace-device-state-leave-active {
+        transition: none;
+    }
+}

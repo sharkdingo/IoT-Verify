@@ -1,6 +1,5 @@
 package cn.edu.nju.Iot_Verify.service;
 
-import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.model.RunDeletionImpactDto;
 import cn.edu.nju.Iot_Verify.dto.model.TaskCancellationResultDto;
 import cn.edu.nju.Iot_Verify.dto.model.TaskProgressStage;
@@ -12,7 +11,6 @@ import cn.edu.nju.Iot_Verify.dto.verification.VerificationTaskSummaryDto;
 import cn.edu.nju.Iot_Verify.dto.verification.VerificationRunDto;
 import cn.edu.nju.Iot_Verify.dto.verification.VerificationRunSummaryDto;
 import java.util.List;
-import java.util.Map;
 
 /**
  * 验证服务接口
@@ -28,12 +26,6 @@ public interface VerificationService {
      */
     VerificationResultDto verify(Long userId, VerificationRequestDto request);
 
-    /** Internal board-run path using manifests captured in the same persisted board snapshot. */
-    VerificationResultDto verifyWithTemplateSnapshot(
-            Long userId,
-            VerificationRequestDto request,
-            Map<String, DeviceManifest> templateManifests);
-
     /**
      * 校验请求、创建任务并提交异步验证。请求非法时不会创建任务；队列拒绝时会
      * 将已创建任务标记为失败并抛出 ServiceUnavailableException。
@@ -43,12 +35,6 @@ public interface VerificationService {
      * @return 任务ID
      */
     Long submitVerification(Long userId, VerificationRequestDto request);
-
-    /** Internal async board-run path using manifests captured with the request collections. */
-    Long submitVerificationWithTemplateSnapshot(
-            Long userId,
-            VerificationRequestDto request,
-            Map<String, DeviceManifest> templateManifests);
 
     /**
      * 获取任务状态

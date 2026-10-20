@@ -117,6 +117,45 @@ const openWorkspace = async (page: Page, auth: AuthUser) => {
 }
 
 test.describe('public theme and layout', () => {
+  test('keeps session controls reachable and focuses Cancel at narrow workspace widths', async ({ page, request }) => {
+    const auth = await createAuthenticatedUser(request)
+    await openWorkspace(page, auth)
+    for (const width of [320, 390, 414, 453, 499, 500, 639, 640, 720]) {
+      await page.setViewportSize({ width, height: 844 })
+      const menu = page.locator('details.scene-actions-menu')
+      const opener = width < 640 ? menu.locator('summary') : page.getByTestId('open-account-center')
+      await expect(opener).toBeInViewport()
+      const box = await opener.boundingBox()
+      expect(box!.x).toBeGreaterThanOrEqual(0)
+      expect(box!.x + box!.width).toBeLessThanOrEqual(width)
+      expect(box!.width).toBeGreaterThanOrEqual(44)
+      expect(box!.height).toBeGreaterThanOrEqual(44)
+      if (width < 640) {
+        await opener.click()
+        await expect(menu.getByRole('group', { name: 'Appearance and account' })).toBeVisible()
+        await expect(page.getByTestId('nav-overflow-account')).toBeInViewport()
+        await page.getByTestId('nav-overflow-account').click()
+      } else {
+        await opener.click()
+      }
+      await expect(page.getByTestId('account-page')).toBeVisible()
+      const logout = page.getByTestId('account-logout')
+      await logout.click()
+      const dialog = page.getByRole('dialog', { name: /退出登录|Log Out/ })
+      const cancel = dialog.getByRole('button', { name: /取消|Cancel/, exact: true })
+      await expect(dialog.locator('.iot-dialog__title')).toHaveCSS('font-size', '16px')
+      await expect(cancel).toHaveCSS('font-size', '14px')
+      await expect(cancel).toHaveCSS('font-weight', '600')
+      await expect.poll(() => cancel.evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44)
+      await expect(cancel).toBeFocused()
+      await cancel.press('Escape')
+      await expect(dialog).toBeHidden()
+      await expect(logout).toBeFocused()
+      await page.getByTestId('account-back').click()
+      await expect(page.getByTestId('board-root')).toBeVisible()
+    }
+  })
+
   test('register validation blocks invalid input before any network request', async ({ page }) => {
     await openPublicRoute(page, '/#/?mode=register', 'light')
 
@@ -155,19 +194,20 @@ test.describe('public theme and layout', () => {
 
     await expect(page.locator('.public-header')).toBeVisible()
     await expect(page.locator('.language-toggle')).toHaveCount(1)
-    await expect(page.locator('.theme-toggle')).toHaveCount(0)
+    await expect(page.locator('.theme-toggle')).toHaveCount(1)
     await expect(page.locator('.global-chat-wrapper')).toHaveCount(0)
     await expect(page.locator('.hero-title')).toBeVisible()
     await expect(page.locator('.auth-panel')).toBeHidden()
   })
 
-  test('landing login state opens the right floating auth card in light theme', async ({ page }) => {
+  test('landing login state follows the workspace light theme', async ({ page }) => {
     await openPublicRoute(page, '/#/?mode=login', 'light')
 
     await expectAuthHeaderActionsOnRight(page)
-    await expect(page.locator('.hero-title')).toBeVisible()
+    await expect(page.locator('#login-title')).toBeVisible()
+    await expect(page.locator('.hero-title')).toHaveCount(0)
     await expect(page.locator('.auth-panel')).toBeVisible()
-    await expectDarkSurface(page.locator('.auth-panel'))
+    await expectLightSurface(page.locator('.auth-panel'))
     await expect(page.locator('.global-chat-wrapper')).toHaveCount(0)
   })
 
@@ -188,7 +228,9 @@ test.describe('public theme and layout', () => {
     const formPanel = page.locator('.auth-panel')
     await expect(actions).toBeVisible()
     await expect(formPanel).toBeVisible()
-    await expect(page.locator('.public-header__button')).toBeHidden()
+    await expect(actions.getByRole('button')).toHaveCount(2)
+    await expect(actions.locator('.theme-toggle')).toBeVisible()
+    await expect(actions.locator('.language-toggle')).toBeVisible()
 
     const actionsBox = await actions.boundingBox()
     const formBox = await formPanel.boundingBox()
@@ -198,7 +240,10 @@ test.describe('public theme and layout', () => {
     if (!actionsBox || !formBox) return
     expect(actionsBox.x).toBeGreaterThan(190)
     expect(actionsBox.x + actionsBox.width).toBeLessThanOrEqual(376)
-    expect(formBox.y).toBeGreaterThanOrEqual(210)
+    const headerBox = await page.locator('.public-header').boundingBox()
+    expect(headerBox).not.toBeNull()
+    if (!headerBox) return
+    expect(formBox.y).toBeGreaterThan(headerBox.y + headerBox.height)
     expect(formBox.y + formBox.height).toBeLessThanOrEqual(844)
   })
 
@@ -246,8 +291,24 @@ test.describe('public theme and layout', () => {
     const labelBrightness = brightnessOf(await computedColorOf(deviceLabel, 'color'))
     expect(labelBrightness - nodeBrightness).toBeGreaterThan(100)
 
-    await deviceNode.click()
+    await deviceNode.press('Enter')
     await expectDarkSurface(page.getByTestId('device-dialog'))
+    await expect(page.getByTestId('device-dialog').locator('.iot-dialog__title')).toHaveCSS('font-size', '16px')
+    const runtimeSave = page.getByTestId('device-runtime-save')
+    await expect(runtimeSave).toHaveCSS('font-size', '14px')
+    await expect(runtimeSave).toHaveCSS('font-weight', '600')
+    await expect.poll(() => runtimeSave.evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44)
+    const sectionTitles = page.getByTestId('device-dialog').locator('.board-section-title')
+    expect(await sectionTitles.count()).toBeGreaterThan(0)
+    for (const title of await sectionTitles.all()) {
+      await expect(title).toHaveCSS('font-size', '14px')
+      await expect(title).toHaveCSS('font-weight', '600')
+    }
+    const tableHeaders = page.getByTestId('device-dialog').getByRole('columnheader')
+    expect(await tableHeaders.count()).toBeGreaterThan(0)
+    for (const header of await tableHeaders.all()) {
+      await expect(header).toHaveCSS('display', 'table-cell')
+    }
     const hoverRow = page.getByTestId('device-dialog').locator('tbody tr').nth(2)
     await hoverRow.hover()
     await expectDarkSurface(hoverRow)
@@ -280,8 +341,9 @@ test.describe('public theme and layout', () => {
     await page.locator('[data-testid="open-history-panel"]').click()
     const historyPanel = page.locator('[data-testid="trace-history-panel"]')
     await expectDarkSurface(historyPanel)
-    await expectDarkSurface(historyPanel.locator(':scope > div.p-3').nth(0))
-    await expectDarkSurface(historyPanel.locator(':scope > div.p-3').nth(1))
+    await expectDarkSurface(historyPanel.locator(':scope > .board-tool-header'))
+    await expectDarkSurface(historyPanel.locator(':scope > .history-tabs'))
+    await expectDarkSurface(historyPanel.locator(':scope > .board-panel-body'))
 
     await page.keyboard.press('Escape')
     await page.locator('.ai-assistant-btn').click({ force: true })
@@ -334,20 +396,19 @@ test.describe('public theme and layout', () => {
     await page.setViewportSize({ width: 720, height: 720 })
     await openWorkspace(page, auth)
 
-    const logoutButton = page.locator('.nav-logout-btn')
+    const accountButton = page.getByTestId('open-account-center')
     const sceneActions = page.locator('details.scene-actions-menu')
-    await expect(logoutButton).toBeVisible()
+    await expect(accountButton).toBeVisible()
     await expect(sceneActions).toBeVisible()
     await expect(page.getByTestId('scene-import')).toBeHidden()
 
-    const logoutBox = await logoutButton.boundingBox()
-    expect(logoutBox).not.toBeNull()
-    expect(logoutBox!.x).toBeGreaterThanOrEqual(0)
-    expect(logoutBox!.x + logoutBox!.width).toBeLessThanOrEqual(720)
+    const accountBox = await accountButton.boundingBox()
+    expect(accountBox).not.toBeNull()
+    expect(accountBox!.x).toBeGreaterThanOrEqual(0)
+    expect(accountBox!.x + accountBox!.width).toBeLessThanOrEqual(720)
 
-    await logoutButton.click()
-    // Addressed by test id: the entry's appearance classes come from the shared dialog layer and change with
-    // it, while this route — logout being the only way to reach account deletion — is a product contract.
+    await accountButton.click()
+    await expect(page.getByTestId('account-page')).toBeVisible()
     await page.getByTestId('open-account-delete').click()
     const accountDialog = page.locator('.account-delete-dialog')
     await expect(accountDialog).toBeVisible()

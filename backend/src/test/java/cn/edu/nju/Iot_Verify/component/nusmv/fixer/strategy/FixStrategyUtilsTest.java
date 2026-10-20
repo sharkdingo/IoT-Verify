@@ -578,6 +578,36 @@ class FixStrategyUtilsTest {
     }
 
     @Test
+    void feedbackEffectsKeepBothModePreconditionsAvailable() {
+        Map<String, DeviceSmvData> deviceMap = buildDeviceMap("relay", "downstream");
+        DeviceSmvData relay = deviceMap.get("relay");
+        relay.setStates(List.of("off", "on"));
+        relay.getModeStates().put("default", new ArrayList<>(List.of("off", "on")));
+        relay.setManifest(DeviceManifest.builder().name("Relay")
+                .apis(List.of(
+                        DeviceManifest.API.builder().name("on").startState("_").endState("on").signal(true).build(),
+                        DeviceManifest.API.builder().name("off").startState("_").endState("off").signal(true).build()))
+                .build());
+        deviceMap.get("downstream").setManifest(relay.getManifest());
+        RuleDto turnOn = commandRule("relay", "on", stateIs("relay", "=", "off"));
+        RuleDto turnOff = commandRule("relay", "off", stateIs("relay", "=", "on"));
+        RuleDto downstream = commandRule("downstream", "on", stateIs("relay", "=", "off"));
+        CommandEffects effects = CommandEffects.of(turnOn, List.of(turnOn, turnOff, downstream), deviceMap);
+
+        assertFalse(effects.establishes(stateIs("relay", "=", "on")));
+        assertFalse(effects.establishes(stateIs("relay", "=", "off")));
+        assertTrue(effects.establishes(stateIs("relay", "in", "on,off")));
+        assertTrue(effects.establishes(stateIs("downstream", "=", "on")),
+                "Possible propagation must continue beyond conflicting effects in the loop");
+        RuleDto.Condition candidate = RuleDto.Condition.builder().deviceName("relay")
+                .targetType("mode").attribute("default").relation("=").value("on").build();
+        ParameterizationConfig.ConditionValueInfo values = FixStrategyUtils.candidateConditionValueInfo(
+                candidate, turnOn, effects, deviceMap, "feedback_value");
+        assertNotNull(values, "A recurring state is a possible precondition, not a one-way command outcome");
+        assertEquals(List.of("off", "on"), values.getValues());
+    }
+
+    @Test
     void candidateConditionValueInfo_prunesStatesReachedThroughTriggeredRules() {
         Map<String, DeviceSmvData> deviceMap = buildLampCameraHubMap();
         RuleDto lightTheWay = commandRule("lamp", "on");

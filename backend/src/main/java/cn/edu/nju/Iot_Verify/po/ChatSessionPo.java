@@ -15,6 +15,8 @@ import org.hibernate.annotations.OnDeleteAction;
 @Entity
 @Table(name = "chat_session", indexes = {
         @Index(name = "idx_chat_session_user_id", columnList = "user_id")
+}, uniqueConstraints = {
+        @UniqueConstraint(name = "uk_chat_session_user_id", columnNames = {"user_id", "id"})
 })
 @EqualsAndHashCode(onlyExplicitlyIncluded = true)
 public class ChatSessionPo {

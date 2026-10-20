@@ -13,12 +13,36 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.Mockito.when;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verify;
 
 @ExtendWith(MockitoExtension.class)
 class PromptCompletionServiceTest {
+
+    @Test
+    void classification_keepsTheSmallOutputBudgetWithoutConsumingItOnReasoning() {
+        when(llmConfig.getModel()).thenReturn("gpt-6-luna");
+        when(llmProvider.chat(requestCaptor.capture(), any(LlmRequestControl.class)))
+                .thenReturn(LlmChatResponse.ofText("{\"allowed\":true}"));
+        var service = new PromptCompletionService(llmProvider, llmConfig);
+
+        assertEquals("{\"allowed\":true}", service.completeClassification("s", "u", 0.0, 160));
+        assertEquals("none", requestCaptor.getValue().reasoningEffort());
+        assertEquals(160, requestCaptor.getValue().maxTokens());
+        assertEquals(0.0, requestCaptor.getValue().temperature());
+    }
+
+    @Test
+    void classification_doesNotAddUnsupportedReasoningParametersToOtherModels() {
+        when(llmConfig.getModel()).thenReturn("custom-chat-model");
+        when(llmProvider.chat(requestCaptor.capture(), any(LlmRequestControl.class)))
+                .thenReturn(LlmChatResponse.ofText("{}"));
+
+        new PromptCompletionService(llmProvider, llmConfig).completeClassification("s", "u", 0.0, 160);
+        assertNull(requestCaptor.getValue().reasoningEffort());
+    }
 
     @Mock
     private LlmProvider llmProvider;
@@ -45,6 +69,7 @@ class PromptCompletionServiceTest {
         assertEquals("USER", sent.messages().get(1).content());
         assertEquals(0.7, sent.temperature());
         assertEquals(4000, sent.maxTokens());
+        assertNull(sent.reasoningEffort(), "Analysis retains the configured model reasoning");
         // one-shot completions must not send tools
         assertEquals(0, sent.tools().size());
     }

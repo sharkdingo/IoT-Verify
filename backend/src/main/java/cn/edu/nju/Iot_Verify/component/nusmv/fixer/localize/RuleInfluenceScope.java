@@ -45,13 +45,23 @@ public final class RuleInfluenceScope {
         }
         Set<String> devices = new HashSet<>();
         Set<String> domains = new HashSet<>();
-        // A property on a shared environment variable is seeded through its device: the closure below
-        // brings in every domain a scope device declares.
         for (SpecConditionDto condition : specConditions(spec)) {
             DeviceSmvData smv = resolve(condition == null ? null : condition.getDeviceId(), deviceSmvMap);
-            if (smv != null) devices.add(smv.getVarName());
+            if (smv == null) continue;
+            // A pool-value property depends on that value's writers, not every variable the
+            // selected sensor reports. Template 7 also observes the sensor's trust label.
+            if ("variable".equals(condition.getTargetType())
+                    && "environment".equals(condition.getVariableSource())
+                    && ((smv.getEnvVariables() != null && smv.getEnvVariables().containsKey(condition.getKey()))
+                    || (smv.getImpactedEnvironmentVariables() != null
+                    && smv.getImpactedEnvironmentVariables().containsKey(condition.getKey())))) {
+                domains.add(condition.getKey());
+                if ("7".equals(spec.getTemplateId())) devices.add(smv.getVarName());
+            } else {
+                devices.add(smv.getVarName());
+            }
         }
-        if (devices.isEmpty()) {
+        if (devices.isEmpty() && domains.isEmpty()) {
             return Optional.empty();
         }
 

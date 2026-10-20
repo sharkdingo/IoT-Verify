@@ -193,8 +193,15 @@ const MODEL_TOKEN_MESSAGE_KEYS: Readonly<Record<string, string>> = {
   false: 'app.modelTokens.false'
 }
 
+// NuSMV removes spaces from emitted state names; retain the bundled spelling's translation.
+const EMITTED_TOKEN_MESSAGE_KEYS: Readonly<Record<string, string>> = Object.fromEntries(
+  Object.entries(MODEL_TOKEN_MESSAGE_KEYS)
+    .filter(([token]) => token.includes(' '))
+    .map(([token, key]) => [token.replace(/ /g, ''), key])
+)
+
 const formatSingleToken = (token: string, translate: ModelTokenTranslator): string => {
-  const key = MODEL_TOKEN_MESSAGE_KEYS[token]
+  const key = MODEL_TOKEN_MESSAGE_KEYS[token] || EMITTED_TOKEN_MESSAGE_KEYS[token]
   if (!key) return token
   const translated = translate(key)
   return translated === key ? token : translated

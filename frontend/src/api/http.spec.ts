@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import api, { isBoardMutationRequest, shouldPublishBoardInvalidation } from './http'
 import { router } from '@/router'
 import { useAuth } from '@/stores/auth'
+import * as boardInvalidation from '@/utils/boardInvalidation'
 
 const validToken = (signature: string) => {
   const payload = btoa(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 }))
@@ -19,6 +20,8 @@ afterEach(() => {
 describe('board mutation request classification', () => {
   it('publishes invalidations only for requests that can change board semantics', () => {
     expect(isBoardMutationRequest({ method: 'post', url: '/board/nodes' })).toBe(true)
+    expect(isBoardMutationRequest({ method: 'post', url: '/board/scene' })).toBe(true)
+    expect(isBoardMutationRequest({ method: 'post', url: 'board/scene?requestId=scene-1' })).toBe(true)
     // Undo/redo change rules and specifications, so other tabs must be invalidated too.
     expect(isBoardMutationRequest({ method: 'post', url: '/board/edits/undo' })).toBe(true)
     expect(isBoardMutationRequest({ method: 'post', url: '/board/edits/redo' })).toBe(true)
@@ -33,6 +36,22 @@ describe('board mutation request classification', () => {
     expect(isBoardMutationRequest({ method: 'post', url: '/board/specs/recommend?requestId=req-1' })).toBe(false)
     expect(isBoardMutationRequest({ method: 'post', url: '/board/rules/check-duplicate' })).toBe(false)
     expect(isBoardMutationRequest({ method: 'get', url: '/board/nodes' })).toBe(false)
+    expect(isBoardMutationRequest({ method: 'get', url: '/board/scene' })).toBe(false)
+    expect(isBoardMutationRequest({ method: 'get', url: '/board/replacement-preview' })).toBe(false)
+  })
+
+  it('broadcasts a successful full-scene write for the request owner', async () => {
+    const auth = useAuth()
+    auth.login(validToken('scene-owner'), { userId: 7, phone: '13800138000', username: 'alice' })
+    const publish = vi.spyOn(boardInvalidation, 'publishBoardInvalidation').mockImplementation(() => {})
+    const adapter = async (config: any) => ({
+      data: { code: 200, message: 'ok', data: {} }, status: 200, statusText: 'OK', headers: {}, config
+    })
+
+    await api.get('/board/replacement-preview', { adapter })
+    expect(publish).not.toHaveBeenCalled()
+    await api.post('/board/scene', { scene: {} }, { adapter })
+    expect(publish).toHaveBeenCalledExactlyOnceWith(7, 'http-mutation')
   })
 
   it('does not invalidate other tabs for an undo that applied nothing', () => {
@@ -104,6 +123,29 @@ describe('board mutation request classification', () => {
     expect(auth.getToken()).toBeNull()
     await vi.waitFor(() => expect(push).toHaveBeenCalled())
     expect(push.mock.calls[0]?.[0]).toMatchObject({ query: { mode: 'login' } })
+  })
+
+  it('reports an unconfirmed password change when a background request rejects its pending credential', async () => {
+    const auth = useAuth()
+    const token = validToken('password-change')
+    auth.login(token, { userId: 7, phone: '13800138000', username: 'alice' })
+    expect(auth.beginPasswordChange(token)).toBe(true)
+    vi.spyOn(router, 'currentRoute', 'get').mockReturnValue({
+      value: { path: '/board', fullPath: '/board?run=verification:7&trace=15' }
+    } as any)
+    const push = vi.spyOn(router, 'push').mockResolvedValue(undefined)
+    try {
+      await expect(api.get('/chat/session/list', {
+        adapter: config => Promise.reject({ config, response: { status: 401, config } })
+      })).rejects.toMatchObject({ response: { status: 401 } })
+      expect(auth.isAuthenticated()).toBe(false)
+      await vi.waitFor(() => expect(push).toHaveBeenCalled())
+      expect(push.mock.calls[0]?.[0]).toEqual({
+        path: '/', query: { mode: 'login', redirect: '/board?run=verification:7&trace=15', reason: 'password-change-unknown' }
+      })
+    } finally {
+      auth.endPasswordChange(token)
+    }
   })
 
   it('preserves an explicit owner token for cleanup after the current account changes', async () => {

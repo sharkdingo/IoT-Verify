@@ -41,6 +41,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -521,6 +524,21 @@ class AcceptanceDemoScenarioNusmvTest {
         assertEquals(specs.size(), repaired.getSpecResults().size());
         assertFalse(repaired.hasAnyViolation(),
                 "The solved occupied=present guard must repair the complete model");
+
+        // Salus §5.2's guard must keep useful heating available when the room is occupied.
+        DeviceVerificationDto occupancy = devices.stream()
+                .filter(device -> "occupancy_1".equals(device.getVarName())).findFirst().orElseThrow();
+        occupancy.getVariables().get(0).setValue("present");
+        SpecificationDto occupiedHeating = immediateSpec("occupied-heating", "Heat an occupied cold room",
+                specCondition("temperature_1", "variable", "temperature", "<=", "18"),
+                specCondition("ac_1", "mode", "HvacMode", "=", "heat"));
+        SmvGenerator.GenerateResult occupiedModel = generator.generateWithEnvironment(
+                USER_ID, devices, environment, repairedRules, List.of(occupancySafety, occupiedHeating),
+                AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
+        assertCompleteModel(occupiedModel);
+        NusmvExecutor.NusmvResult occupied = executor.execute(occupiedModel.smvFile());
+        assertTrue(occupied.isSuccess(), occupied::getErrorMessage);
+        assertFalse(occupied.hasAnyViolation(), "The repaired rule must still heat the occupied cold room");
     }
 
     @Test
@@ -753,14 +771,21 @@ class AcceptanceDemoScenarioNusmvTest {
                         ruleCondition("temperature_1", "temperature", "variable", ">=", "29")),
                 rule(53L, "At or below 35, turn heating off",
                         command("ac_1", "off"),
-                        ruleCondition("temperature_1", "temperature", "variable", "<=", "35")));
+                        ruleCondition("temperature_1", "temperature", "variable", "<=", "35")),
+                rule(54L, "At 36 or above, heating is required",
+                        command("ac_1", "heat"),
+                        ruleCondition("temperature_1", "temperature", "variable", ">=", "36")));
         SpecificationDto safety = neverSpec(
                 "redundant-heating-safety",
                 "Do not heat an unoccupied room below 35 degrees",
                 specCondition("occupancy_1", "variable", "occupied", "=", "absent"),
                 specCondition("temperature_1", "variable", "temperature", "<", "35"),
                 specCondition("ac_1", "mode", "HvacMode", "=", "heat"));
-        List<SpecificationDto> specs = List.of(safety);
+        SpecificationDto requiredHeating = temporalSpec(
+                "required-heating-response", "4", "Keep heating available at 36 degrees or above",
+                List.of(specCondition("temperature_1", "variable", "temperature", ">=", "36")),
+                List.of(specCondition("ac_1", "mode", "HvacMode", "=", "heat")));
+        List<SpecificationDto> specs = List.of(safety, requiredHeating);
 
         SmvGenerator.GenerateResult baselineModel = generator.generateWithEnvironment(
                 USER_ID, devices, environment, rules, specs,
@@ -769,6 +794,8 @@ class AcceptanceDemoScenarioNusmvTest {
         NusmvExecutor.NusmvResult baseline = executor.execute(baselineModel.smvFile());
         assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
         assertEquals(1, violationCount(baseline));
+        assertTrue(verdictsBySpecId(baseline, baselineModel).get(requiredHeating.getId()).isPassed(),
+                "The required heating response must hold before attempting a repair");
         NusmvExecutor.SpecCheckResult violation = baseline.getSpecResults().stream()
                 .filter(result -> !result.isPassed())
                 .findFirst()
@@ -945,6 +972,714 @@ class AcceptanceDemoScenarioNusmvTest {
         assertTrue(fixResult.getSuggestions().isEmpty());
         strategies.forEach(strategy ->
                 assertEquals("SKIPPED_NO_FAULT_RULES", attemptStatus(fixResult, strategy)));
+    }
+
+    @Test
+    void cumulativeClimateRepairs_preserveEarlierRepairsAcrossSharedEnvironmentChanges() throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required for the cumulative shared-environment regression");
+        ObjectMapper objectMapper = new ObjectMapper();
+        ObjectNode scene = withOccupancySensor(objectMapper, "30");
+        ObjectNode occupancyManifest = (ObjectNode) scene.withArray("templates").get(2).path("manifest");
+        occupancyManifest.putArray("Modes").add("OccupancyState");
+        occupancyManifest.put("InitState", "absent");
+        occupancyManifest.set("WorkingStates", objectMapper.readTree("""
+                [{"Name":"absent","Trust":"trusted","Privacy":"public",
+                  "Dynamics":[{"VariableName":"occupied","Value":"absent"}]},
+                 {"Name":"present","Trust":"trusted","Privacy":"public",
+                  "Dynamics":[{"VariableName":"occupied","Value":"present"}]}]
+                """));
+        List<DeviceVerificationDto> prototypes = readDevices(scene);
+        prototypes.get(2).setState("absent");
+        prototypes.get(2).setCurrentStateTrust("trusted");
+        prototypes.get(2).setCurrentStatePrivacy("public");
+        List<DeviceVerificationDto> devices = new ArrayList<>();
+        List<RuleDto> rules = new ArrayList<>();
+        List<SpecificationDto> specs = new ArrayList<>();
+        Map<String, String> suffixes = Map.of("Temperature Sensor", "temperature",
+                "Air Conditioner", "ac", "Occupancy Sensor", "occupancy");
+        for (int zoneIndex = 0; zoneIndex < 3; zoneIndex++) {
+            String zone = List.of("zone_a", "zone_b", "zone_c").get(zoneIndex);
+            for (DeviceVerificationDto prototype : prototypes) {
+                DeviceVerificationDto device = objectMapper.convertValue(prototype, DeviceVerificationDto.class);
+                device.setVarName(zone + "_" + suffixes.get(device.getTemplateName()));
+                device.setDeviceLabel(zone + " " + device.getTemplateName());
+                devices.add(device);
+            }
+            String sensor = zone + "_temperature";
+            String actuator = zone + "_ac";
+            for (String threshold : List.of("28", "29")) {
+                rules.add(rule((long) rules.size() + 1, zone + " early heating " + threshold,
+                        command(actuator, "heat"), ruleCondition(sensor, "temperature", "variable", ">=", threshold)));
+            }
+            rules.add(rule((long) rules.size() + 1, zone + " shutoff at or below 35",
+                    command(actuator, "off"), ruleCondition(sensor, "temperature", "variable", "<=", "35")));
+            rules.add(rule((long) rules.size() + 1, zone + " required heating at least 36",
+                    command(actuator, "heat"), ruleCondition(sensor, "temperature", "variable", ">=", "36")));
+            specs.add(neverSpec("scene_spec_" + (zoneIndex * 2 + 1), zone + " no low-temperature heating",
+                    specCondition(zone + "_occupancy", "variable", "occupied", "=", "absent"),
+                    specCondition(sensor, "variable", "temperature", "<", "35"),
+                    specCondition(actuator, "mode", "HvacMode", "=", "heat")));
+            specs.add(immediateSpec("scene_spec_" + (zoneIndex * 2 + 2), zone + " required high-temperature heating",
+                    specCondition(sensor, "variable", "temperature", ">=", "36"),
+                    specCondition(actuator, "mode", "HvacMode", "=", "heat")));
+        }
+        SmvGenerator generator = buildGenerator(objectMapper, scene);
+        NusmvExecutor executor = buildExecutor(nusmvPath);
+        List<BoardEnvironmentVariableDto> environment = readEnvironment(scene);
+        RuleFixer fixer = allStrategyFixer(generator, executor, 60_000);
+        Set<String> protectedSpecs = new HashSet<>();
+        List<String> strategies = List.of("parameter", "condition", "remove");
+        for (int round = 0; round < strategies.size(); round++) {
+            String targetId = specs.get(round * 2).getId();
+            SmvGenerator.GenerateResult model = generator.generateWithEnvironment(
+                    USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
+                    SmvGenerator.GeneratePurpose.VERIFICATION);
+            assertCompleteModel(model);
+            NusmvExecutor.NusmvResult baseline = executor.execute(model.smvFile());
+            assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
+            Map<String, NusmvExecutor.SpecCheckResult> before = verdictsBySpecId(baseline, model);
+            assertEquals(3 - round, violationCount(baseline));
+            before.forEach((id, verdict) -> { if (verdict.isPassed()) protectedSpecs.add(id); });
+            List<TraceStateDto> states = new SmvTraceParser().parseCounterexampleStates(
+                    before.get(targetId).getCounterexample(), model.deviceSmvMap(), rules);
+            FixResultDto fixes = fixer.fix(320L + round, targetId, states, rules, devices, environment,
+                    specs, model.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), false,
+                    List.of(strategies.get(round)), 20, Map.of());
+            assertVerifiedAttempt(fixes, strategies.get(round));
+            assertEveryListedAlternativeHolds(fixes.getSuggestions(), targetId, rules, devices,
+                    environment, specs, model.deviceSmvMap(), generator, executor);
+            FixSuggestionDto chosen = fixes.getSuggestions().get(0);
+            if (round == 0) {
+                assertEquals(List.of("34", "35"), chosen.getParameterAdjustments().stream()
+                        .map(ParameterAdjustment::getNewValue).sorted().toList(),
+                        "Keep the original first repair that exposed the later shared-environment failure");
+            }
+            Map<String, String> refs = model.deviceSmvMap().keySet().stream()
+                    .collect(java.util.stream.Collectors.toMap(ref -> ref, ref -> ref));
+            rules = FixStrategyApplier.apply(chosen.getStrategy(), chosen, rules, model.deviceSmvMap(), refs);
+            SmvGenerator.GenerateResult repairedModel = generator.generateWithEnvironment(
+                    USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
+                    SmvGenerator.GeneratePurpose.VERIFICATION);
+            assertCompleteModel(repairedModel);
+            NusmvExecutor.NusmvResult repaired = executor.execute(repairedModel.smvFile());
+            assertTrue(repaired.isSuccess(), repaired::getErrorMessage);
+            Map<String, NusmvExecutor.SpecCheckResult> after = verdictsBySpecId(repaired, repairedModel);
+            assertTrue(after.get(targetId).isPassed());
+            for (String id : protectedSpecs) assertTrue(after.get(id).isPassed(), id);
+            assertEquals(2 - round, violationCount(repaired));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 2})
+    void salusHouse_repairsAllSixPoliciesWithoutRegressingEarlierRepairs(int extraLightsPerOriginal) throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required for the Salus house reconstruction");
+        ObjectMapper objectMapper = new ObjectMapper();
+        JsonNode scene = objectMapper.readTree(Files.readString(
+                Path.of("..", "docs", "examples", "salus-house-repair-scene.json")));
+        assertEquals(41, scene.path("devices").size());
+        assertEquals(29, scene.path("rules").size());
+        assertEquals(6, scene.path("specs").size());
+        expandHouseLighting((ObjectNode) scene, extraLightsPerOriginal);
+        assertEquals(41 + 10 * extraLightsPerOriginal, scene.path("devices").size());
+        assertEquals(29 + 10 * extraLightsPerOriginal, scene.path("rules").size());
+        SmvGenerator generator = buildGenerator(objectMapper, scene);
+        NusmvExecutor executor = buildExecutor(nusmvPath);
+        List<DeviceVerificationDto> devices = readDevices(scene);
+        List<BoardEnvironmentVariableDto> environment = readEnvironment(scene);
+        List<RuleDto> rules = readRules(scene);
+        List<SpecificationDto> specs = new ArrayList<>(readSpecs(scene, devices, "salus_house"));
+        specs.add(immediateSpec("gas-alarm-response", "Gas warning still sounds",
+                specCondition("kitchen_gas", "variable", "kitchenGas", ">=", "2"),
+                specCondition("kitchen_alarm", "mode", "SwitchState", "=", "on")));
+        specs.add(immediateSpec("entrance-alarm-response", "Relay the kitchen alarm",
+                specCondition("kitchen_alarm", "mode", "SwitchState", "=", "on"),
+                specCondition("entrance_alarm", "mode", "SwitchState", "=", "on")));
+        specs.add(immediateSpec("hall-alarm-response", "Relay the entrance alarm",
+                specCondition("entrance_alarm", "mode", "SwitchState", "=", "on"),
+                specCondition("hall_alarm", "mode", "SwitchState", "=", "on")));
+        specs.add(immediateSpec("away-camera-response", "Keep away monitoring available",
+                specCondition("entrance_home", "variable", "occupied", "=", "absent"),
+                specCondition("entrance_camera", "mode", "SwitchState", "=", "on")));
+        int policyCount = scene.path("specs").size();
+        RuleFixer fixer = allStrategyFixer(generator, executor, 60_000);
+        Set<String> protectedSpecs = new HashSet<>();
+        List<String> strategies = List.of("parameter", "condition", "condition", "remove", "remove", "parameter");
+        for (int round = 0; round < policyCount; round++) {
+            SmvGenerator.GenerateResult model = generator.generateWithEnvironment(
+                    USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
+                    SmvGenerator.GeneratePurpose.VERIFICATION);
+            assertCompleteModel(model);
+            NusmvExecutor.NusmvResult baseline = executor.execute(model.smvFile());
+            assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
+            Map<String, NusmvExecutor.SpecCheckResult> before = verdictsBySpecId(baseline, model);
+            if (round == 0) {
+                assertEquals(6, violationCount(baseline));
+                assertEquals(4, baseline.getSpecResults().stream().filter(result -> result.isPassed()).count());
+            }
+            before.forEach((id, verdict) -> { if (verdict.isPassed()) protectedSpecs.add(id); });
+            String target = specs.get(round).getId();
+            if (before.get(target).isPassed()) continue;
+            List<TraceStateDto> states = new SmvTraceParser().parseCounterexampleStates(
+                    before.get(target).getCounterexample(), model.deviceSmvMap(), rules);
+            assertTrue(states.size() >= 2);
+            long started = System.nanoTime();
+            FixResultDto fixes = fixer.fix(400L + round, target, states, rules, devices, environment,
+                    specs, model.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), false,
+                    List.of(strategies.get(round)), 20, Map.of());
+            System.out.println("SALUS_HOUSE devices=" + devices.size() + " round=" + round + " strategy=" + strategies.get(round)
+                    + " elapsedMs=" + ((System.nanoTime() - started) / 1_000_000)
+                    + " attempts=" + fixes.getStrategyAttempts());
+            assertVerifiedAttempt(fixes, strategies.get(round));
+            assertEveryListedAlternativeHolds(fixes.getSuggestions(), target, rules, devices,
+                    environment, specs, model.deviceSmvMap(), generator, executor);
+            FixSuggestionDto chosen = fixes.getSuggestions().get(0);
+            Map<String, String> refs = model.deviceSmvMap().keySet().stream()
+                    .collect(java.util.stream.Collectors.toMap(ref -> ref, ref -> ref));
+            rules = FixStrategyApplier.apply(chosen.getStrategy(), chosen, rules, model.deviceSmvMap(), refs);
+            SmvGenerator.GenerateResult repairedModel = generator.generateWithEnvironment(
+                    USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
+                    SmvGenerator.GeneratePurpose.VERIFICATION);
+            assertCompleteModel(repairedModel);
+            NusmvExecutor.NusmvResult repaired = executor.execute(repairedModel.smvFile());
+            assertTrue(repaired.isSuccess(), repaired::getErrorMessage);
+            Map<String, NusmvExecutor.SpecCheckResult> after = verdictsBySpecId(repaired, repairedModel);
+            assertTrue(after.get(target).isPassed());
+            for (String id : protectedSpecs) assertTrue(after.get(id).isPassed(), id);
+            if (round == policyCount - 1) assertEquals(0, violationCount(repaired));
+        }
+        SmvGenerator.GenerateResult finalModel = generator.generateWithEnvironment(
+                USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
+                SmvGenerator.GeneratePurpose.VERIFICATION);
+        assertCompleteModel(finalModel);
+        NusmvExecutor.NusmvResult finalCheck = executor.execute(finalModel.smvFile());
+        assertTrue(finalCheck.isSuccess(), finalCheck::getErrorMessage);
+        assertEquals(0, violationCount(finalCheck));
+
+        // Exercise the other occupancy/sleep branch: suppressing every light forever would
+        // pass the six safety policies while destroying the automation the user needs.
+        for (DeviceVerificationDto device : devices) {
+            String name = device.getVarName();
+            String value = "bedroom_sleep".equals(name) ? "awake"
+                    : name.endsWith("_home") ? "present"
+                    : "entrance_rfid".equals(name) ? "known" : null;
+            if (value != null) {
+                device.setState(value);
+                device.getVariables().forEach(variable -> variable.setValue(value));
+            }
+        }
+        SpecificationDto lighting = immediateSpec("occupied-awake-lighting", "Keep useful lighting available",
+                specCondition("entrance_home", "variable", "occupied", "=", "present"),
+                specCondition("bedroom_light_1", "mode", "SwitchState", "=", "on"));
+        lighting.setThenConditions(devices.stream().filter(device -> device.getVarName().contains("_light"))
+                .map(device -> {
+                    SpecConditionDto condition = specCondition(device.getVarName(), "mode", "SwitchState", "=", "on");
+                    condition.setSide("then");
+                    return condition;
+                }).toList());
+        specs.add(lighting);
+        environment.stream().filter(variable -> "kitchenGas".equals(variable.getName()))
+                .forEach(variable -> variable.setValue("2"));
+        SmvGenerator.GenerateResult occupiedModel = generator.generateWithEnvironment(
+                USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
+                SmvGenerator.GeneratePurpose.VERIFICATION);
+        assertCompleteModel(occupiedModel);
+        NusmvExecutor.NusmvResult occupiedCheck = executor.execute(occupiedModel.smvFile());
+        assertTrue(occupiedCheck.isSuccess(), occupiedCheck::getErrorMessage);
+        Map<String, NusmvExecutor.SpecCheckResult> occupiedVerdicts = verdictsBySpecId(occupiedCheck, occupiedModel);
+        assertTrue(occupiedVerdicts.get(lighting.getId()).isPassed(),
+                "Safety repairs must retain lighting when occupants are awake");
+        assertEquals(1, violationCount(occupiedCheck));
+        String gasTarget = specs.get(5).getId();
+        assertFalse(occupiedVerdicts.get(gasTarget).isPassed());
+        // At the limit with a running supply and stopped extractor, the very first physical
+        // step exceeds the limit before any command takes effect. Rule edits cannot erase it.
+        List<TraceStateDto> startupStates = new SmvTraceParser().parseCounterexampleStates(
+                occupiedVerdicts.get(gasTarget).getCounterexample(), occupiedModel.deviceSmvMap(), rules);
+        FixResultDto startupFixes = fixer.fix(450L, gasTarget, startupStates, rules, devices, environment,
+                specs, occupiedModel.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), false,
+                List.of("parameter", "condition", "remove"), 20, Map.of());
+        assertFalse(startupFixes.isFixable(), "An unavoidable initial transient must not be reported as repaired");
+        assertTrue(startupFixes.getSuggestions().isEmpty());
+        assertEquals(3, startupFixes.getStrategyAttempts().size());
+        startupFixes.getStrategyAttempts().forEach(attempt -> assertTrue(
+                Set.of("NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE", "ALL_CANDIDATES_REJECTED").contains(attempt.getStatus()),
+                () -> "An initial-state limitation needs a completed search outcome: " + attempt));
+
+        // Check the same occupied branch with extraction already active: gas stays at the
+        // warning level, so the alarm response is exercised rather than passing vacuously.
+        devices.stream().filter(device -> "kitchen_fan".equals(device.getVarName()))
+                .forEach(device -> device.setState("on"));
+        SmvGenerator.GenerateResult activeModel = generator.generateWithEnvironment(
+                USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
+                SmvGenerator.GeneratePurpose.VERIFICATION);
+        assertCompleteModel(activeModel);
+        NusmvExecutor.NusmvResult activeCheck = executor.execute(activeModel.smvFile());
+        assertTrue(activeCheck.isSuccess(), activeCheck::getErrorMessage);
+        assertEquals(0, violationCount(activeCheck));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 2})
+    void dynamicHome_repairsChangingInputsAndConflictsWithoutBreakingResponses(int copies) throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required for dynamic repair scenarios");
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode scene = mapper.readTree(Files.readString(
+                Path.of("..", "docs", "examples", "dynamic-home-repair-scene.json")));
+        expandHouseLighting((ObjectNode) scene, copies);
+        assertEquals(23 + 8 * copies, scene.path("devices").size());
+        assertEquals(33 + 16 * copies, scene.path("rules").size());
+        assertEquals(17, scene.path("specs").size());
+        SmvGenerator generator = buildGenerator(mapper, scene);
+        NusmvExecutor executor = buildExecutor(nusmvPath);
+        List<DeviceVerificationDto> devices = readDevices(scene);
+        List<BoardEnvironmentVariableDto> environment = readEnvironment(scene);
+        List<RuleDto> rules = readRules(scene);
+        List<SpecificationDto> specs = readSpecs(scene, devices, "dynamic_home");
+        RuleFixer fixer = allStrategyFixer(generator, executor, 60_000);
+        List<String> strategies = List.of("parameter", "condition", "condition", "condition", "parameter");
+        Set<String> protectedSpecs = new HashSet<>();
+        Map<String, Set<String>> environmentValues = new java.util.HashMap<>();
+        Map<String, Set<String>> deviceStates = new java.util.HashMap<>();
+        for (int round = 0; round < strategies.size(); round++) {
+            SmvGenerator.GenerateResult model = generator.generateWithEnvironment(
+                    USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
+                    SmvGenerator.GeneratePurpose.VERIFICATION);
+            assertCompleteModel(model);
+            NusmvExecutor.NusmvResult baseline = executor.execute(model.smvFile());
+            assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
+            Map<String, NusmvExecutor.SpecCheckResult> before = verdictsBySpecId(baseline, model);
+            if (round == 0) assertEquals(5, violationCount(baseline));
+            before.forEach((id, verdict) -> { if (verdict.isPassed()) protectedSpecs.add(id); });
+            String target = specs.get(round).getId();
+            assertFalse(before.get(target).isPassed(), "Each successive problem must still need its own repair");
+            List<TraceStateDto> states = new SmvTraceParser().parseCounterexampleStates(
+                    before.get(target).getCounterexample(), model.deviceSmvMap(), rules);
+            assertTrue(states.size() >= 2);
+            states.forEach(state -> {
+                state.getEnvVariables().forEach(variable -> environmentValues
+                        .computeIfAbsent(variable.getName(), name -> new HashSet<>()).add(variable.getValue()));
+                state.getDevices().forEach(device -> deviceStates
+                        .computeIfAbsent(device.getDeviceId(), name -> new HashSet<>()).add(device.getState()));
+            });
+            if (round == 1) assertOpposingRuleSelection(states, rules, "room_light_1", "on", "off",
+                    state -> "absent".equals(traceEnvironmentValue(state, "home"))
+                            && "detected".equals(traceEnvironmentValue(state, "motion")));
+            if (round == 2) assertOpposingRuleSelection(states, rules, "front_door", "locked", "unlocked",
+                    state -> "absent".equals(traceEnvironmentValue(state, "home"))
+                            && hasDeviceState(List.of(state), "exit_alarm", "on"));
+            if (round == 3) assertOpposingRuleSelection(states, rules, "window", "open", "closed",
+                    state -> "wet".equals(traceEnvironmentValue(state, "weather"))
+                            && Integer.parseInt(traceEnvironmentValue(state, "temperature")) >= 27);
+            long started = System.nanoTime();
+            FixResultDto fixes = fixer.fix(500L + round, target, states, rules, devices, environment,
+                    specs, model.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), false,
+                    List.of(strategies.get(round)), 20, Map.of());
+            System.out.println("DYNAMIC_HOME devices=" + devices.size() + " round=" + round
+                    + " elapsedMs=" + ((System.nanoTime() - started) / 1_000_000)
+                    + " attempts=" + fixes.getStrategyAttempts());
+            assertVerifiedAttempt(fixes, strategies.get(round));
+            assertEveryListedAlternativeHolds(fixes.getSuggestions(), target, rules, devices,
+                    environment, specs, model.deviceSmvMap(), generator, executor);
+            FixSuggestionDto chosen = fixes.getSuggestions().get(0);
+            Map<String, String> refs = model.deviceSmvMap().keySet().stream()
+                    .collect(java.util.stream.Collectors.toMap(ref -> ref, ref -> ref));
+            rules = FixStrategyApplier.apply(chosen.getStrategy(), chosen, rules, model.deviceSmvMap(), refs);
+            assertEquals(33 + 16 * copies, rules.size(), "Responses must be repaired without deleting automations");
+            SmvGenerator.GenerateResult repairedModel = generator.generateWithEnvironment(
+                    USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
+                    SmvGenerator.GeneratePurpose.VERIFICATION);
+            assertCompleteModel(repairedModel);
+            NusmvExecutor.NusmvResult repaired = executor.execute(repairedModel.smvFile());
+            assertTrue(repaired.isSuccess(), repaired::getErrorMessage);
+            Map<String, NusmvExecutor.SpecCheckResult> after = verdictsBySpecId(repaired, repairedModel);
+            assertTrue(after.get(target).isPassed());
+            for (String id : protectedSpecs) assertTrue(after.get(id).isPassed(), id);
+            assertEquals(4 - round, violationCount(repaired));
+        }
+        assertTrue(environmentValues.get("temperature").size() > 1);
+        assertTrue(environmentValues.get("gas").size() > 1);
+        assertTrue(environmentValues.get("smoke").size() > 1);
+        assertTrue(deviceStates.get("exit_alarm").size() > 1, "The multi-hop alarm must actually change state");
+    }
+
+    @Test
+    void relayCycle_conditionRepairKeepsBothRelaysReachable() throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required for feedback-loop repair");
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode scene = mapper.readTree(Files.readString(
+                Path.of("..", "docs", "examples", "relay-cycle-repair-scene.json")));
+        SmvGenerator generator = buildGenerator(mapper, scene);
+        NusmvExecutor executor = buildExecutor(nusmvPath);
+        List<DeviceVerificationDto> devices = readDevices(scene);
+        List<BoardEnvironmentVariableDto> environment = readEnvironment(scene);
+        List<RuleDto> rules = readRules(scene);
+        List<SpecificationDto> specs = readSpecs(scene, devices, "relay_cycle");
+        SmvGenerator.GenerateResult model = generator.generateWithEnvironment(
+                USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
+                SmvGenerator.GeneratePurpose.VERIFICATION);
+        assertCompleteModel(model);
+        NusmvExecutor.NusmvResult baseline = executor.execute(model.smvFile());
+        assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
+        assertEquals(1, violationCount(baseline));
+        assertEquals(4, baseline.getSpecResults().size());
+        List<TraceStateDto> states = new SmvTraceParser().parseCounterexampleStates(
+                verdictsBySpecId(baseline, model).get(specs.get(0).getId()).getCounterexample(),
+                model.deviceSmvMap(), rules);
+        assertTrue(hasDeviceState(states, "heating_relay", "on"));
+        assertTrue(hasDeviceState(states, "cooling_relay", "on"));
+        FixResultDto fixes = allStrategyFixer(generator, executor, 60_000).fix(
+                576L, specs.get(0).getId(), states, rules, devices, environment, specs,
+                model.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), false, List.of("condition"), 20, Map.of());
+        assertVerifiedAttempt(fixes, "condition");
+        assertTrue(fixes.getSuggestions().stream().allMatch(suggestion ->
+                suggestion.getRemovedRuleDescriptions().isEmpty() && suggestion.getPreexistingViolations().isEmpty()));
+        assertEveryListedAlternativeHolds(fixes.getSuggestions(), specs.get(0).getId(), rules, devices,
+                environment, specs, model.deviceSmvMap(), generator, executor);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,false", "true,false", "true,true"})
+    void cameraChains_listAffordableRepairsWithoutBreakingExistingResponses(boolean forked, boolean fullScene) throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required for complete repair enumeration");
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode scene = (ObjectNode) mapper.readTree(Files.readString(
+                Path.of("..", "docs", "examples", forked
+                        ? "forked-chain-repair-scene.json" : "entry-camera-chain-scene.json")));
+        assertEquals(forked ? 21 : 8, scene.path("devices").size());
+        assertEquals(forked ? 19 : 7, scene.path("rules").size());
+        if (forked && !fullScene) {
+            // Check complete enumeration on the independent two-path scene. The full variant
+            // separately verifies repairs with every shipped background device and requirement.
+            while (scene.withArray("devices").size() > 7) scene.withArray("devices").remove(7);
+            while (scene.withArray("rules").size() > 7) scene.withArray("rules").remove(7);
+            while (scene.withArray("specs").size() > 2) scene.withArray("specs").remove(2);
+            while (scene.withArray("environmentVariables").size() > 1) scene.withArray("environmentVariables").remove(1);
+            while (scene.withArray("templates").size() > 3) scene.withArray("templates").remove(3);
+        }
+        SmvGenerator generator = buildGenerator(mapper, scene);
+        NusmvExecutor executor = buildExecutor(nusmvPath);
+        List<DeviceVerificationDto> devices = readDevices(scene);
+        List<BoardEnvironmentVariableDto> environment = readEnvironment(scene);
+        List<RuleDto> rules = readRules(scene);
+        List<SpecificationDto> specs = readSpecs(scene, devices, "entry_camera");
+        SmvGenerator.GenerateResult model = generator.generateWithEnvironment(
+                USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
+                SmvGenerator.GeneratePurpose.VERIFICATION);
+        assertCompleteModel(model);
+        NusmvExecutor.NusmvResult baseline = executor.execute(model.smvFile());
+        assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
+        assertEquals(forked && fullScene ? 3 : 1, violationCount(baseline));
+        assertTrue(verdictsBySpecId(baseline, model).get(specs.get(1).getId()).isPassed());
+        List<TraceStateDto> states = new SmvTraceParser().parseCounterexampleStates(
+                verdictsBySpecId(baseline, model).get(specs.get(0).getId()).getCounterexample(),
+                model.deviceSmvMap(), rules);
+        assertTrue(hasDeviceState(states, "camera_power", "on"), "The chain must actually reach the camera");
+        FixResultDto fixes = allStrategyFixer(generator, executor, 60_000).fix(
+                575L, specs.get(0).getId(), states, rules, devices, environment, specs,
+                model.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), false, List.of("remove"), 2, Map.of());
+        assertVerifiedAttempt(fixes, "remove");
+        Set<Set<Integer>> expected = new HashSet<>();
+        for (int a = 1; a <= (forked ? 3 : 6); a++) {
+            if (forked) {
+                for (int b = 4; b <= 6; b++) expected.add(Set.of(a, b));
+            } else {
+                expected.add(Set.of(a));
+            }
+        }
+        Set<Set<Integer>> actual = fixes.getSuggestions().stream()
+                .map(suggestion -> Set.copyOf(suggestion.getRemovedRuleIndices()))
+                .collect(java.util.stream.Collectors.toSet());
+        assertEquals(actual.size(), fixes.getSuggestions().size(), "Every choice must be distinct");
+        assertTrue(expected.containsAll(actual), "Every choice cuts both paths and preserves entry lighting");
+        if (!fullScene || Boolean.TRUE.equals(fixes.getStrategyAttempts().get(0).getAlternativesComplete())) {
+            assertEquals(Boolean.TRUE, fixes.getStrategyAttempts().get(0).getAlternativesComplete());
+            assertEquals(expected, actual, "A complete search must list every minimal repair");
+        }
+        assertEveryListedAlternativeHolds(fixes.getSuggestions(), specs.get(0).getId(), rules, devices,
+                environment, specs, model.deviceSmvMap(), generator, executor);
+    }
+
+    @Test
+    void conflictingEmergencyRequirements_cannotBeRepairedByBreakingThePassingRequirement() throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required for contradictory policy checks");
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode scene = mapper.readTree(Files.readString(
+                Path.of("..", "docs", "examples", "emergency-policy-conflict-scene.json")));
+        SmvGenerator generator = buildGenerator(mapper, scene);
+        NusmvExecutor executor = buildExecutor(nusmvPath);
+        List<DeviceVerificationDto> devices = readDevices(scene);
+        List<BoardEnvironmentVariableDto> environment = readEnvironment(scene);
+        List<RuleDto> rules = readRules(scene);
+        List<SpecificationDto> specs = readSpecs(scene, devices, "emergency_conflict");
+        SmvGenerator.GenerateResult model = generator.generateWithEnvironment(
+                USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
+                SmvGenerator.GeneratePurpose.VERIFICATION);
+        assertCompleteModel(model);
+        NusmvExecutor.NusmvResult baseline = executor.execute(model.smvFile());
+        assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
+        assertEquals(1, violationCount(baseline));
+        String target = specs.get(0).getId();
+        List<TraceStateDto> states = new SmvTraceParser().parseCounterexampleStates(
+                verdictsBySpecId(baseline, model).get(target).getCounterexample(), model.deviceSmvMap(), rules);
+        assertOpposingRuleSelection(states, rules, "front_door", "locked", "unlocked",
+                state -> "absent".equals(traceEnvironmentValue(state, "home"))
+                        && hasDeviceState(List.of(state), "kitchen_alarm", "on"));
+        FixResultDto fixes = allStrategyFixer(generator, executor, 60_000).fix(
+                550L, target, states, rules, devices, environment, specs, model.deviceSmvMap(),
+                USER_ID, AttackScenarioDto.none(), false, List.of("parameter", "condition", "remove"), 20, Map.of());
+        System.out.println("EMERGENCY_CONFLICT attempts=" + fixes.getStrategyAttempts());
+        assertFalse(fixes.isFixable());
+        assertTrue(fixes.getSuggestions().isEmpty());
+        assertEquals("ALL_CANDIDATES_REJECTED", attemptStatus(fixes, "remove"));
+        assertTrue(fixes.getStrategyAttempts().stream().noneMatch(attempt ->
+                Set.of("VERIFIED", "FAILED_MODEL_GENERATION", "FAILED_SOLVER_EXECUTION", "TIMED_OUT", "SKIPPED_TIMEOUT")
+                        .contains(attempt.getStatus())));
+
+        // A user decision, not an automatic repair: give fire evacuation precedence over away locking.
+        SpecConditionDto noAlarm = specCondition("kitchen_alarm", "mode", "SwitchState", "=", "off");
+        noAlarm.setSide("if");
+        List<SpecConditionDto> securityConditions = new ArrayList<>(specs.get(1).getIfConditions());
+        securityConditions.add(noAlarm);
+        specs.get(1).setIfConditions(securityConditions);
+        RuleDto securityRule = rules.stream().filter(rule -> "Away door lock".equals(rule.getRuleString()))
+                .findFirst().orElseThrow();
+        List<RuleDto.Condition> sources = new ArrayList<>(securityRule.getConditions());
+        sources.add(ruleCondition("kitchen_alarm", "SwitchState", "mode", "=", "off"));
+        securityRule.setConditions(sources);
+        SmvGenerator.GenerateResult revisedModel = generator.generateWithEnvironment(
+                USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
+                SmvGenerator.GeneratePurpose.VERIFICATION);
+        assertCompleteModel(revisedModel);
+        NusmvExecutor.NusmvResult revised = executor.execute(revisedModel.smvFile());
+        assertTrue(revised.isSuccess(), revised::getErrorMessage);
+        assertEquals(0, violationCount(revised));
+    }
+
+    private String traceEnvironmentValue(TraceStateDto state, String name) {
+        return state.getEnvVariables().stream().filter(variable -> name.equals(variable.getName()))
+                .map(variable -> variable.getValue()).findFirst().orElseThrow();
+    }
+
+    /** Matching commands may oppose each other, but only the selected branch is execution evidence. */
+    private void assertOpposingRuleSelection(List<TraceStateDto> states, List<RuleDto> rules,
+                                            String target, String winner, String blocked,
+                                            Predicate<TraceStateDto> overlap) {
+        int winnerIndex = -1;
+        int blockedIndex = -1;
+        for (int i = 0; i < rules.size(); i++) {
+            RuleDto.Command command = rules.get(i).getCommand();
+            if (!target.equals(command.getDeviceName())) continue;
+            if (winner.equals(command.getAction())) winnerIndex = i;
+            if (blocked.equals(command.getAction())) blockedIndex = i;
+        }
+        assertTrue(winnerIndex >= 0 && blockedIndex > winnerIndex);
+        for (int i = 0; i < states.size() - 1; i++) {
+            if (!overlap.test(states.get(i))) continue;
+            Set<Integer> recorded = states.get(i + 1).getTriggeredRules().stream()
+                    .map(rule -> rule.getRuleIndex()).collect(java.util.stream.Collectors.toSet());
+            if (recorded.contains(winnerIndex) && !recorded.contains(blockedIndex)
+                    && hasDeviceState(List.of(states.get(i + 1)), target, winner)) return;
+        }
+        throw new AssertionError("The counterexample must expose opposing matches and the actual first-match winner");
+    }
+
+    private void expandHouseLighting(ObjectNode scene, int copies) {
+        JsonNode originalDevices = scene.path("devices").deepCopy();
+        JsonNode originalRules = scene.path("rules").deepCopy();
+        for (JsonNode device : originalDevices) {
+            String originalId = device.path("id").asText();
+            if (!originalId.contains("_light")) continue;
+            List<JsonNode> deviceRules = java.util.stream.StreamSupport.stream(originalRules.spliterator(), false)
+                    .filter(rule -> originalId.equals(rule.path("toId").asText())).toList();
+            assertFalse(deviceRules.isEmpty());
+            for (int copy = 1; copy <= copies; copy++) {
+                String id = originalId + "_extra_" + copy;
+                ObjectNode extraDevice = device.deepCopy();
+                extraDevice.put("id", id).put("label", device.path("label").asText() + " " + (copy + 1));
+                ((ObjectNode) extraDevice.path("position")).put("y", device.path("position").path("y").asInt() + copy * 150);
+                scene.withArray("devices").add(extraDevice);
+                for (JsonNode originalRule : deviceRules) {
+                    ObjectNode extraRule = originalRule.deepCopy();
+                    extraRule.put("name", originalRule.path("name").asText() + " " + (copy + 1)).put("toId", id);
+                    scene.withArray("rules").add(extraRule);
+                }
+                for (JsonNode spec : scene.path("specs")) {
+                    for (JsonNode condition : spec.path("thenConditions").deepCopy()) {
+                        if (originalId.equals(condition.path("deviceId").asText())) {
+                            ObjectNode extraCondition = condition.deepCopy();
+                            extraCondition.put("deviceId", id);
+                            ((ObjectNode) spec).withArray("thenConditions").add(extraCondition);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    void elderlyCareScene_preservesNightLightingAndVentilationWhenRepairingPrivacy() throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required for the care-apartment regression");
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode scene = mapper.readTree(Files.readString(
+                Path.of("..", "docs", "examples", "elderly-care-comprehensive-scene.json")));
+        SmvGenerator generator = buildGenerator(mapper, scene);
+        NusmvExecutor executor = buildExecutor(nusmvPath);
+        List<DeviceVerificationDto> devices = readDevices(scene);
+        List<BoardEnvironmentVariableDto> environment = readEnvironment(scene);
+        List<RuleDto> rules = readRules(scene);
+        List<SpecificationDto> specs = readSpecs(scene, devices, "care");
+        SmvGenerator.GenerateResult model = generator.generateWithEnvironment(
+                USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), true,
+                SmvGenerator.GeneratePurpose.VERIFICATION);
+        assertCompleteModel(model);
+        NusmvExecutor.NusmvResult baseline = executor.execute(model.smvFile());
+        assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
+        assertEquals(12, baseline.getSpecResults().size());
+        assertEquals(1, violationCount(baseline));
+        Map<String, NusmvExecutor.SpecCheckResult> verdicts = verdictsBySpecId(baseline, model);
+        assertTrue(verdicts.get(specs.get(0).getId()).isPassed(), "Night-time bed exit must light the way in the next step");
+        assertTrue(verdicts.get(specs.get(6).getId()).isPassed(), "The declared window effect must lower CO2");
+        String target = specs.get(11).getId();
+        assertFalse(verdicts.get(target).isPassed(), "The lamp-to-camera privacy defect must remain visible");
+        List<TraceStateDto> states = new SmvTraceParser().parseCounterexampleStates(
+                verdicts.get(target).getCounterexample(), model.deviceSmvMap(), rules);
+        FixResultDto fixes = allStrategyFixer(generator, executor, 60_000).fix(
+                316L, target, states, rules, devices, environment, specs, model.deviceSmvMap(),
+                USER_ID, AttackScenarioDto.none(), true, List.of("remove"), 20, Map.of());
+        assertVerifiedAttempt(fixes, "remove");
+        assertTrue(fixes.getSuggestions().stream().allMatch(suggestion ->
+                        suggestion.getRemovedRuleIndices().equals(List.of(6))),
+                "Do not remove the required night light to stop the downstream camera");
+        assertEveryListedAlternativeHolds(fixes.getSuggestions(), target, rules, devices,
+                environment, specs, model.deviceSmvMap(), generator, executor);
+        assertTrue(fixes.getSuggestions().stream().allMatch(suggestion -> suggestion.getPreexistingViolations().isEmpty()));
+    }
+
+    @Test
+    void elderlyCare_initialSafetyAndAbsentCO2EffectsExplainWhyRulesCannotRepairThem() throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required for unchangeable care requirements");
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode scene = (ObjectNode) mapper.readTree(Files.readString(
+                Path.of("..", "docs", "examples", "elderly-care-comprehensive-scene.json")));
+        // Contact sensing alone has no physical ventilation effect. This is an intentionally
+        // incomplete scene model, not incomplete solver evidence or a reason to claim safety.
+        for (JsonNode template : scene.path("templates")) {
+            if ("Care Ventilation Window".equals(template.path("name").asText())) {
+                ((ObjectNode) template).put("name", "Window");
+                ((ObjectNode) template).set("manifest", mapper.readTree(Files.readString(
+                        Path.of("src", "main", "resources", "deviceTemplate", "Window.json"))));
+            }
+            if ("Air Purifier".equals(template.path("name").asText())) {
+                ((ObjectNode) template).put("name", "Particle-only Purifier");
+                ObjectNode manifest = (ObjectNode) template.path("manifest");
+                manifest.put("Name", "Particle-only Purifier");
+                manifest.withArray("InternalVariables").remove(1);
+                manifest.withArray("ImpactedVariables").remove(1);
+                ((ObjectNode) manifest.path("WorkingStates").get(0)).withArray("Dynamics").remove(1);
+            }
+        }
+        for (JsonNode device : scene.path("devices")) {
+            if ("window_1".equals(device.path("id").asText())) ((ObjectNode) device).put("templateName", "Window");
+            if ("air_purifier".equals(device.path("id").asText())) ((ObjectNode) device).put("templateName", "Particle-only Purifier");
+        }
+        SmvGenerator generator = buildGenerator(mapper, scene);
+        NusmvExecutor executor = buildExecutor(nusmvPath);
+        List<DeviceVerificationDto> devices = readDevices(scene);
+        List<BoardEnvironmentVariableDto> environment = readEnvironment(scene);
+        List<RuleDto> rules = readRules(scene);
+        List<SpecificationDto> specs = new ArrayList<>(readSpecs(scene, devices, "care_blocked"));
+        SpecificationDto nightSafety = neverSpec(specs.get(0).getId(), "Already lit at night-time bed exit",
+                specCondition("bed_sensor", "variable", "bedOccupancy", "=", "empty"),
+                specCondition("clock", "variable", "time", "in", "22,23,0,1,2,3,4,5,6"),
+                specCondition("smart_lamp", "mode", "SwitchState", "=", "off"));
+        specs.set(0, nightSafety);
+        SmvGenerator.GenerateResult model = generator.generateWithEnvironment(
+                USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), true,
+                SmvGenerator.GeneratePurpose.VERIFICATION);
+        assertCompleteModel(model);
+        NusmvExecutor.NusmvResult baseline = executor.execute(model.smvFile());
+        assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
+        assertEquals(3, violationCount(baseline));
+        Map<String, NusmvExecutor.SpecCheckResult> verdicts = verdictsBySpecId(baseline, model);
+        RuleFixer fixer = allStrategyFixer(generator, executor, 60_000);
+        for (int index : List.of(0, 6)) {
+            String target = specs.get(index).getId();
+            List<TraceStateDto> states = new SmvTraceParser().parseCounterexampleStates(
+                    verdicts.get(target).getCounterexample(), model.deviceSmvMap(), rules);
+            if (index == 0) assertEquals(1, states.size());
+            FixResultDto fixes = fixer.fix(317L + index, target, states, rules, devices, environment,
+                    specs, model.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), true, null, 20, Map.of());
+            assertFalse(fixes.isFixable());
+            assertTrue(fixes.isSourceModelComplete());
+            assertEquals(3, fixes.getStrategyAttempts().size());
+            String status = index == 0 ? "SKIPPED_INITIAL_STATE_VIOLATION" : "SKIPPED_NO_FAULT_RULES";
+            assertTrue(fixes.getStrategyAttempts().stream().allMatch(attempt -> status.equals(attempt.getStatus())),
+                    () -> "No edit can change this requirement: " + fixes.getStrategyAttempts());
+            assertTrue(fixes.getFaultRules().isEmpty());
+        }
+    }
+
+    @Test
+    void salusVentilationThreshold_repairsAnIdleRuleBeforeTheEnvironmentCrossesTheLimit() throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required for the Salus section 5.1 regression");
+        ObjectMapper objectMapper = new ObjectMapper();
+        JsonNode scene = objectMapper.readTree(Files.readString(
+                Path.of("..", "docs", "examples", "salus-ventilation-repair-scene.json")));
+        SmvGenerator generator = buildGenerator(objectMapper, scene);
+        NusmvExecutor executor = buildExecutor(nusmvPath);
+        List<DeviceVerificationDto> devices = readDevices(scene);
+        List<BoardEnvironmentVariableDto> environment = readEnvironment(scene);
+        List<RuleDto> rules = readRules(scene);
+        List<SpecificationDto> specs = readSpecs(scene, devices, "salus_ventilation");
+        SmvGenerator.GenerateResult model = generator.generateWithEnvironment(
+                USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
+                SmvGenerator.GeneratePurpose.VERIFICATION);
+        assertCompleteModel(model);
+        NusmvExecutor.NusmvResult baseline = executor.execute(model.smvFile());
+        assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
+        Map<String, NusmvExecutor.SpecCheckResult> verdicts = verdictsBySpecId(baseline, model);
+        assertFalse(verdicts.get(specs.get(0).getId()).isPassed());
+        assertFalse(verdicts.get(specs.get(1).getId()).isPassed(),
+                "The permitted zero-rise path leaves the original fan off at 999 ppm forever");
+        List<TraceStateDto> states = new SmvTraceParser().parseCounterexampleStates(
+                verdicts.get(specs.get(0).getId()).getCounterexample(), model.deviceSmvMap(), rules);
+        assertTrue(states.size() >= 2);
+        assertTrue(new FaultLocalizer().localize(states, rules, model.deviceSmvMap()).isEmpty(),
+                "CO2 crosses the limit before the original ventilation rule ever fires");
+
+        FixResultDto result = allStrategyFixer(generator, executor, 30_000).fix(
+                315L, specs.get(0).getId(), states, rules, devices, environment, specs, model.deviceSmvMap(),
+                USER_ID, AttackScenarioDto.none(), false, List.of("parameter"), 20, Map.of());
+
+        assertVerifiedAttempt(result, "parameter");
+        listedRepair(result, "parameter", "the ventilation threshold moved earlier, without deleting the fan rule",
+                suggestion -> suggestion.getParameterAdjustments().stream().anyMatch(adjustment ->
+                        adjustment.getRuleIndex() == 0 && "1000".equals(adjustment.getOriginalValue())
+                                && Integer.parseInt(adjustment.getNewValue()) < 1000));
+        assertTrue(result.getSuggestions().stream().allMatch(suggestion ->
+                        suggestion.getPreexistingViolations().isEmpty()),
+                "Every listed threshold must also make the fan run, including when CO2 stops rising");
+        assertEveryListedAlternativeHolds(result.getSuggestions(), specs.get(0).getId(), rules, devices,
+                environment, specs, model.deviceSmvMap(), generator, executor);
     }
 
     @Test
@@ -1446,6 +2181,19 @@ class AcceptanceDemoScenarioNusmvTest {
             Map<String, cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvData> deviceSmvMap,
             SmvGenerator generator,
             NusmvExecutor executor) throws Exception {
+        boolean enablePrivacy = specs.stream()
+                .flatMap(spec -> java.util.stream.Stream.of(spec.getAConditions(), spec.getIfConditions(), spec.getThenConditions()))
+                .flatMap(List::stream).anyMatch(condition -> "privacy".equals(condition.getTargetType()));
+        SmvGenerator.GenerateResult originalModel = generator.generateWithEnvironment(
+                USER_ID, devices, environment, originalRules, specs,
+                AttackScenarioDto.none(), enablePrivacy, SmvGenerator.GeneratePurpose.VERIFICATION);
+        assertCompleteModel(originalModel);
+        NusmvExecutor.NusmvResult original = executor.execute(originalModel.smvFile());
+        assertTrue(original.isSuccess(), original::getErrorMessage);
+        assertEquals(specs.size(), original.getSpecResults().size());
+        Set<String> protectedSpecs = verdictsBySpecId(original, originalModel).entrySet().stream()
+                .filter(entry -> entry.getValue().isPassed()).map(Map.Entry::getKey)
+                .collect(java.util.stream.Collectors.toSet());
         // The test board's device ids are the SMV names the fixer reports, so an added condition maps to itself.
         Map<String, String> persistenceDeviceRefs = deviceSmvMap.keySet().stream()
                 .collect(java.util.stream.Collectors.toMap(ref -> ref, ref -> ref));
@@ -1454,7 +2202,7 @@ class AcceptanceDemoScenarioNusmvTest {
                     suggestion.getStrategy(), suggestion, originalRules, deviceSmvMap, persistenceDeviceRefs);
             SmvGenerator.GenerateResult repairedModel = generator.generateWithEnvironment(
                     USER_ID, devices, environment, repairedRules, specs,
-                    AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
+                    AttackScenarioDto.none(), enablePrivacy, SmvGenerator.GeneratePurpose.VERIFICATION);
             assertCompleteModel(repairedModel);
             NusmvExecutor.NusmvResult repaired = executor.execute(repairedModel.smvFile());
             assertTrue(repaired.isSuccess(), repaired::getErrorMessage);
@@ -1469,6 +2217,10 @@ class AcceptanceDemoScenarioNusmvTest {
             }
             assertFalse(violated.contains(targetSpecId),
                     () -> suggestion.getStrategy() + " alternative must satisfy the target: " + suggestion);
+            for (String protectedSpec : protectedSpecs) {
+                assertFalse(violated.contains(protectedSpec),
+                        () -> suggestion.getStrategy() + " alternative must preserve " + protectedSpec);
+            }
             assertEquals(reported, violated,
                     () -> suggestion.getStrategy() + " alternative must report exactly what it leaves violated: "
                             + suggestion);

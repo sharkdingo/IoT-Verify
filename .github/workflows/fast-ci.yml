@@ -4,9 +4,9 @@ name: Fast CI
 # still being a real gate: compile, typecheck, unit tests, and a browser-driven smoke barrier that
 # proves the stack actually boots and serves a verification end to end.
 #
-# What it deliberately does not do is run all 93 E2E tests. Measurement on this repo: the full suite
-# is 478s of a 588s job, and two specs are 59% of that. Paying it on a component tweak buys almost
-# nothing; Full CI still pays it wherever risk warrants (see .github/ci-risk-router.mjs).
+# What it deliberately does not do is run the complete E2E suite. An earlier measurement on this repo:
+# the full suite took 478s of a 588s job, and two specs were 59% of that. Paying it on a component
+# tweak buys almost nothing; Full CI still pays it wherever risk warrants (see .github/ci-risk-router.mjs).
 
 on:
   push:
@@ -172,6 +172,19 @@ jobs:
     if: needs.route.outputs.backend == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    services:
+      mysql:
+        image: mysql:8.0@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b
+        env:
+          MYSQL_DATABASE: iot_verify_undo_it
+          MYSQL_USER: iot_verify
+          MYSQL_PASSWORD: iot_verify_ci
+          MYSQL_ROOT_PASSWORD: root_ci
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot_ci --silent"
+          --health-interval=10s --health-timeout=5s --health-retries=12
     defaults:
       run:
         working-directory: backend
@@ -194,7 +207,10 @@ jobs:
       # `package` rather than `test`: same test run, and it also produces the jar the smoke job needs,
       # so the E2E tier no longer recompiles the whole tree from scratch.
       - name: Test and package
-        run: mvn -B package
+        env:
+          DB_USERNAME: iot_verify
+          DB_PASSWORD: iot_verify_ci
+        run: mvn -B package -Diot.verify.mysql.required=true
 
       - name: Upload backend jar
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

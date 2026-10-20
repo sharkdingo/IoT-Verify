@@ -14,6 +14,7 @@ import cn.edu.nju.Iot_Verify.exception.FixApplyPreflightUnavailableException;
 import cn.edu.nju.Iot_Verify.exception.ResourceNotFoundException;
 import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
 import cn.edu.nju.Iot_Verify.security.UserContextHolder;
+import cn.edu.nju.Iot_Verify.service.AiFixSuggestionService;
 import cn.edu.nju.Iot_Verify.service.FixService;
 import cn.edu.nju.Iot_Verify.service.FixSuggestionTokenService;
 import cn.edu.nju.Iot_Verify.util.FunctionParameterSchema;
@@ -36,23 +37,25 @@ import java.util.Set;
 public class ApplyFixTool extends AbstractAiTool {
 
     private static final Set<String> STRATEGIES = Set.of("parameter", "condition", "remove");
-    private static final Set<String> MODEL_TOKEN_SOURCES = Set.of("BUNDLED", "CUSTOM", "UNKNOWN");
 
     private final FixService fixService;
     private final FixSuggestionTokenService suggestionTokenService;
     private final AiDestructiveActionGuard destructiveActionGuard;
     private final ChatExecutionConfig chatExecutionConfig;
+    private final AiFixSuggestionService suggestionService;
 
     public ApplyFixTool(FixService fixService,
                         FixSuggestionTokenService suggestionTokenService,
                         ObjectMapper objectMapper,
                         AiDestructiveActionGuard destructiveActionGuard,
-                        ChatExecutionConfig chatExecutionConfig) {
+                        ChatExecutionConfig chatExecutionConfig,
+                        AiFixSuggestionService suggestionService) {
         super(objectMapper);
         this.fixService = fixService;
         this.suggestionTokenService = suggestionTokenService;
         this.destructiveActionGuard = destructiveActionGuard;
         this.chatExecutionConfig = chatExecutionConfig;
+        this.suggestionService = suggestionService;
     }
 
     @Override
@@ -68,12 +71,13 @@ public class ApplyFixTool extends AbstractAiTool {
                 "description", "Formal verification trace ID returned with the signed fix suggestion."));
         properties.put("confirmed", Map.of(
                 "type", "boolean",
-                "description", "Use false with suggestion to preview. Use true only in a later turn after explicit user confirmation."));
-        properties.put("suggestion", suggestionSchema());
-        properties.put("preferredRangeSelections", preferredRangeSelectionsSchema());
+                "description", "Use false with suggestionId to preview. Use true only in a later turn after explicit user confirmation."));
+        properties.put("suggestionId", Map.of(
+                "type", "string",
+                "description", "Required with confirmed=false. Select the suggestionId returned by fix_violation in this conversation. The server retains the exact signed proposal and its preferred ranges. On confirmation this selector may be resent only if it matches the preview."));
         properties.put("impactToken", Map.of(
                 "type", "string",
-                "description", "Required only with confirmed=true. Copy the opaque impactToken from the latest apply_fix preview. On that call suggestion and preferredRangeSelections may be resent unchanged; they are ignored because the server uses its own stored proposal."));
+                "description", "Required only with confirmed=true. Use the impactToken from the current server-authoritative confirmation context; the server applies its stored proposal."));
 
         return LlmToolSpec.of(
                 getName(),
@@ -120,13 +124,27 @@ public class ApplyFixTool extends AbstractAiTool {
 
     private String preview(Long userId, long traceId, JsonNode args) throws Exception {
         requireOnlyFields(args, "arguments",
-                Set.of("traceId", "confirmed", "suggestion", "preferredRangeSelections"));
-        JsonNode suggestionNode = args.get("suggestion");
-        validateSuggestion(suggestionNode);
+                Set.of("traceId", "confirmed", "suggestionId"));
+        String suggestionId = requiredTextField(args, "suggestionId", "arguments");
+        String[] reference = suggestionId.split(":", -1);
+        if (reference.length != 2 || !suggestionId.matches("[1-9][0-9]{0,18}:[1-9][0-9]{0,9}")) {
+            throw validation("arguments.suggestionId must be a repair option returned in this conversation.");
+        }
+        long messageId;
+        int suggestionIndex;
+        try {
+            messageId = Long.parseLong(reference[0]);
+            suggestionIndex = Integer.parseInt(reference[1]) - 1;
+        } catch (NumberFormatException e) {
+            throw validation("arguments.suggestionId is outside the supported range.");
+        }
+        AiFixSuggestionService.ResolvedSuggestion selected = suggestionService.resolve(
+                userId, UserContextHolder.getChatSessionId(), traceId, messageId, suggestionIndex);
+        JsonNode suggestionNode = selected.suggestion();
         FixSuggestionDto suggestion = objectMapper.treeToValue(suggestionNode, FixSuggestionDto.class);
         String strategy = suggestion.getStrategy();
-        String suggestionToken = requiredTextField(suggestionNode, "suggestionToken", "arguments.suggestion");
-        ParsedPreferredRanges preferredRanges = parsePreferredRanges(args.get("preferredRangeSelections"));
+        String suggestionToken = requiredTextField(suggestionNode, "suggestionToken", "stored suggestion");
+        ParsedPreferredRanges preferredRanges = parsePreferredRanges(selected.preferredRangeSelections());
 
         // The signed token is the trust boundary: only the fixer issues tokens, and it lists only
         // suggestions that forward verification accepted.
@@ -134,9 +152,11 @@ public class ApplyFixTool extends AbstractAiTool {
                 userId, traceId, strategy, suggestion, suggestionToken, preferredRanges.byTargetId());
 
         ApplyCommand command = new ApplyCommand(
-                traceId, strategy, suggestion, suggestionToken, preferredRanges.selections());
+                traceId, suggestionId, strategy, suggestion, suggestionToken, preferredRanges.selections());
         String impactToken = destructiveActionGuard.issueStoredAction(
-                userId, getName(), Long.toString(traceId), command);
+                userId, getName(), Long.toString(traceId),
+                "remove".equals(strategy) ? String.join(", ", suggestion.getRemovedRuleDescriptions())
+                        : suggestion.getDescription(), command);
 
         ObjectNode visibleSuggestion = suggestionNode.deepCopy();
         visibleSuggestion.remove("suggestionToken");
@@ -144,6 +164,7 @@ public class ApplyFixTool extends AbstractAiTool {
         response.put("operation", "preview");
         response.put("requiresUserConfirmation", true);
         response.put("traceId", traceId);
+        response.put("suggestionId", suggestionId);
         response.put("strategy", strategy);
         response.put("suggestion", visibleSuggestion);
         response.put("preferredRangeSelections", preferredRanges.selections());
@@ -171,12 +192,8 @@ public class ApplyFixTool extends AbstractAiTool {
     }
 
     private String applyConfirmed(Long userId, long traceId, JsonNode args) throws Exception {
-        // `suggestion` and `preferredRangeSelections` are accepted but ignored: the model reaches this
-        // call by resending the object it previewed with, and rejecting them cost a guaranteed wasted
-        // round on a VALIDATION_ERROR. They are not read — the proposal comes from the server-stored
-        // action below, which is what makes a confirmation unforgeable.
         requireOnlyFields(args, "arguments",
-                Set.of("traceId", "confirmed", "impactToken", "suggestion", "preferredRangeSelections"));
+                Set.of("traceId", "confirmed", "impactToken", "suggestionId"));
         String impactToken = requiredTextField(args, "impactToken", "arguments");
         AiDestructiveActionGuard.ConsumeResult confirmation = destructiveActionGuard.consumeStoredAction(
                 userId, getName(), Long.toString(traceId), impactToken);
@@ -186,11 +203,17 @@ public class ApplyFixTool extends AbstractAiTool {
         }
 
         ApplyCommand command = objectMapper.treeToValue(confirmation.actionPayload(), ApplyCommand.class);
-        if (command.traceId() != traceId || !STRATEGIES.contains(command.strategy())
+        if (command.traceId() != traceId || command.suggestionId() == null || !STRATEGIES.contains(command.strategy())
                 || command.suggestion() == null || command.suggestionToken() == null) {
             return errorJson(
                     "The stored formal-fix proposal is unavailable. No changes were made; run fix_violation and request a fresh apply preview.",
                     "CONFIRMATION_MISSING", 409, Map.of("requiresUserConfirmation", true));
+        }
+
+        if (args.has("suggestionId") && !command.suggestionId().equals(
+                requiredTextField(args, "suggestionId", "arguments"))) {
+            return errorJson("The selected repair option changed after its preview. Request a new preview before confirming it.",
+                    "CONFIRMATION_MISMATCH", 409, Map.of("requiresUserConfirmation", true));
         }
 
         Map<String, PreferredRange> preferredRanges = preferredRangesByTarget(command.preferredRangeSelections());
@@ -302,90 +325,6 @@ public class ApplyFixTool extends AbstractAiTool {
         return readOnlySuccessJson(body, "Formal-fix preview exceeded the safe result size limit.");
     }
 
-    private void validateSuggestion(JsonNode suggestion) throws ArgValidationException {
-        requireOnlyFields(suggestion, "arguments.suggestion", Set.of(
-                "suggestionToken", "strategy", "description", "parameterAdjustments",
-                "conditionAdjustments", "removedRuleDescriptions", "preexistingViolations"));
-        requiredTextField(suggestion, "suggestionToken", "arguments.suggestion");
-        String strategy = requiredTextField(suggestion, "strategy", "arguments.suggestion");
-        if (!STRATEGIES.contains(strategy)) {
-            throw validation("arguments.suggestion.strategy must be parameter, condition, or remove.");
-        }
-        requiredTextField(suggestion, "description", "arguments.suggestion");
-
-        JsonNode parameters = requiredArray(suggestion, "parameterAdjustments", "arguments.suggestion");
-        JsonNode conditions = requiredArray(suggestion, "conditionAdjustments", "arguments.suggestion");
-        JsonNode removals = requiredArray(suggestion, "removedRuleDescriptions", "arguments.suggestion");
-        for (int index = 0; index < parameters.size(); index++) {
-            validateParameterAdjustment(parameters.get(index), index);
-        }
-        for (int index = 0; index < conditions.size(); index++) {
-            validateConditionAdjustment(conditions.get(index), index);
-        }
-        for (int index = 0; index < removals.size(); index++) {
-            if (!removals.get(index).isTextual() || removals.get(index).textValue().isBlank()) {
-                throw validation("arguments.suggestion.removedRuleDescriptions[" + index
-                        + "] must be a non-empty string.");
-            }
-        }
-        JsonNode preexisting = requiredArray(suggestion, "preexistingViolations", "arguments.suggestion");
-        for (int index = 0; index < preexisting.size(); index++) {
-            String path = "arguments.suggestion.preexistingViolations[" + index + "]";
-            requireOnlyFields(preexisting.get(index), path, Set.of("specId", "templateId", "formulaPreview"));
-            for (String field : List.of("specId", "templateId", "formulaPreview")) {
-                requiredTextField(preexisting.get(index), field, path);
-            }
-        }
-
-        boolean shapeMatches = switch (strategy) {
-            case "parameter" -> !parameters.isEmpty() && conditions.isEmpty() && removals.isEmpty();
-            case "condition" -> parameters.isEmpty() && !conditions.isEmpty() && removals.isEmpty();
-            case "remove" -> parameters.isEmpty() && conditions.isEmpty() && !removals.isEmpty();
-            default -> false;
-        };
-        if (!shapeMatches) {
-            throw validation("arguments.suggestion change lists do not match its strategy.");
-        }
-    }
-
-    private void validateParameterAdjustment(JsonNode adjustment, int index) throws ArgValidationException {
-        String path = "arguments.suggestion.parameterAdjustments[" + index + "]";
-        requireOnlyFields(adjustment, path, Set.of(
-                "targetId", "attribute", "relation", "originalValue", "newValue",
-                "lowerBound", "upperBound", "description", "modelTokenSource"));
-        String targetId = requiredTextField(adjustment, "targetId", path);
-        if (!PreferredRangeSelection.isValidTargetId(targetId)) {
-            throw validation(path + ".targetId is not a valid parameter-adjustment selector.");
-        }
-        for (String field : List.of("attribute", "relation", "originalValue", "newValue", "description")) {
-            requiredTextField(adjustment, field, path);
-        }
-        requiredInt(adjustment, "lowerBound", path);
-        requiredInt(adjustment, "upperBound", path);
-        requireModelTokenSource(adjustment, path);
-    }
-
-    private void validateConditionAdjustment(JsonNode adjustment, int index) throws ArgValidationException {
-        String path = "arguments.suggestion.conditionAdjustments[" + index + "]";
-        requireOnlyFields(adjustment, path, Set.of(
-                "action", "attribute", "targetType", "description", "ruleDescription",
-                "deviceLabel", "relation", "value", "modelTokenSource"));
-        String action = requiredTextField(adjustment, "action", path);
-        if (!Set.of("add", "remove", "keep").contains(action)) {
-            throw validation(path + ".action must be add, remove, or keep.");
-        }
-        String targetType = requiredTextField(adjustment, "targetType", path);
-        if (!Set.of("api", "variable", "mode", "state").contains(targetType)) {
-            throw validation(path + ".targetType must be api, variable, mode, or state.");
-        }
-        for (String field : List.of("attribute", "description", "ruleDescription", "deviceLabel")) {
-            requiredTextField(adjustment, field, path);
-        }
-        nullableText(adjustment, "relation", path);
-        nullableText(adjustment, "value", path);
-        requireModelTokenSource(adjustment, path);
-    }
-
     private ParsedPreferredRanges parsePreferredRanges(JsonNode node) throws ArgValidationException {
         if (node == null) return new ParsedPreferredRanges(List.of(), null);
         if (!node.isArray()) {
@@ -423,14 +362,6 @@ public class ApplyFixTool extends AbstractAiTool {
         return ranges;
     }
 
-    private JsonNode requiredArray(JsonNode object, String field, String path) throws ArgValidationException {
-        JsonNode value = object == null ? null : object.get(field);
-        if (value == null || !value.isArray()) {
-            throw validation(path + "." + field + " is required and must be an array.");
-        }
-        return value;
-    }
-
     private int requiredInt(JsonNode object, String field, String path) throws ArgValidationException {
         JsonNode value = object == null ? null : object.get(field);
         if (value == null || !value.isIntegralNumber() || !value.canConvertToInt()) {
@@ -439,100 +370,8 @@ public class ApplyFixTool extends AbstractAiTool {
         return value.intValue();
     }
 
-    private void nullableText(JsonNode object, String field, String path) throws ArgValidationException {
-        JsonNode value = object == null ? null : object.get(field);
-        if (value == null || (!value.isNull() && !value.isTextual())) {
-            throw validation(path + "." + field + " is required and must be a string or null.");
-        }
-    }
-
-    private void requireModelTokenSource(JsonNode object, String path) throws ArgValidationException {
-        String source = requiredTextField(object, "modelTokenSource", path);
-        if (!MODEL_TOKEN_SOURCES.contains(source)) {
-            throw validation(path + ".modelTokenSource must be BUNDLED, CUSTOM, or UNKNOWN.");
-        }
-    }
-
     private ArgValidationException validation(String message) {
         return new ArgValidationException(errorJson(message, "VALIDATION_ERROR", 400));
-    }
-
-    private Map<String, Object> suggestionSchema() {
-        Map<String, Object> properties = new LinkedHashMap<>();
-        properties.put("suggestionToken", Map.of("type", "string"));
-        properties.put("strategy", Map.of("type", "string", "enum", List.of("parameter", "condition", "remove")));
-        properties.put("description", Map.of("type", "string"));
-        properties.put("parameterAdjustments", Map.of("type", "array", "items", parameterAdjustmentSchema()));
-        properties.put("conditionAdjustments", Map.of("type", "array", "items", conditionAdjustmentSchema()));
-        properties.put("removedRuleDescriptions", Map.of("type", "array", "items", Map.of("type", "string")));
-        properties.put("preexistingViolations", Map.of(
-                "type", "array",
-                "description", "Specifications the original rules already violated and this suggestion leaves "
-                        + "violated; copy unchanged.",
-                "items", preexistingViolationSchema()));
-        return objectSchema(properties, List.copyOf(properties.keySet()),
-                "Required with confirmed=false. Copy one complete suggestion object exactly from "
-                        + "fix_violation. On the confirmed=true call it may be resent unchanged and is "
-                        + "ignored: the server applies its own stored proposal.");
-    }
-
-    private Map<String, Object> preexistingViolationSchema() {
-        Map<String, Object> properties = new LinkedHashMap<>();
-        properties.put("specId", Map.of("type", "string"));
-        properties.put("templateId", Map.of("type", "string"));
-        properties.put("formulaPreview", Map.of("type", "string"));
-        return objectSchema(properties, List.copyOf(properties.keySet()), null);
-    }
-
-    private Map<String, Object> parameterAdjustmentSchema() {
-        Map<String, Object> properties = new LinkedHashMap<>();
-        properties.put("targetId", Map.of("type", "string"));
-        properties.put("attribute", Map.of("type", "string"));
-        properties.put("relation", Map.of("type", "string"));
-        properties.put("originalValue", Map.of("type", "string"));
-        properties.put("newValue", Map.of("type", "string"));
-        properties.put("lowerBound", Map.of("type", "integer"));
-        properties.put("upperBound", Map.of("type", "integer"));
-        properties.put("description", Map.of("type", "string"));
-        properties.put("modelTokenSource", Map.of("type", "string", "enum", List.of("BUNDLED", "CUSTOM", "UNKNOWN")));
-        return objectSchema(properties, List.copyOf(properties.keySet()), null);
-    }
-
-    private Map<String, Object> conditionAdjustmentSchema() {
-        Map<String, Object> properties = new LinkedHashMap<>();
-        properties.put("action", Map.of("type", "string", "enum", List.of("add", "remove", "keep")));
-        properties.put("attribute", Map.of("type", "string"));
-        properties.put("targetType", Map.of("type", "string", "enum", List.of("api", "variable", "mode", "state")));
-        properties.put("description", Map.of("type", "string"));
-        properties.put("ruleDescription", Map.of("type", "string"));
-        properties.put("deviceLabel", Map.of("type", "string"));
-        properties.put("relation", Map.of("type", List.of("string", "null")));
-        properties.put("value", Map.of("type", List.of("string", "null")));
-        properties.put("modelTokenSource", Map.of("type", "string", "enum", List.of("BUNDLED", "CUSTOM", "UNKNOWN")));
-        return objectSchema(properties, List.copyOf(properties.keySet()), null);
-    }
-
-    private Map<String, Object> preferredRangeSelectionsSchema() {
-        Map<String, Object> properties = new LinkedHashMap<>();
-        properties.put("targetId", Map.of("type", "string"));
-        properties.put("lower", Map.of("type", "integer"));
-        properties.put("upper", Map.of("type", "integer"));
-        return Map.of(
-                "type", "array",
-                "description", "Copy the exact preferred range selections used when fix_violation generated this suggestion; omit when none were used.",
-                "items", objectSchema(properties, List.copyOf(properties.keySet()), null));
-    }
-
-    private Map<String, Object> objectSchema(Map<String, Object> properties,
-                                             List<String> required,
-                                             String description) {
-        Map<String, Object> schema = new LinkedHashMap<>();
-        schema.put("type", "object");
-        if (description != null) schema.put("description", description);
-        schema.put("properties", properties);
-        schema.put("required", required);
-        schema.put("additionalProperties", false);
-        return schema;
     }
 
     private record ParsedPreferredRanges(List<PreferredRangeSelection> selections,
@@ -540,6 +379,7 @@ public class ApplyFixTool extends AbstractAiTool {
     }
 
     private record ApplyCommand(long traceId,
+                                String suggestionId,
                                 String strategy,
                                 FixSuggestionDto suggestion,
                                 String suggestionToken,

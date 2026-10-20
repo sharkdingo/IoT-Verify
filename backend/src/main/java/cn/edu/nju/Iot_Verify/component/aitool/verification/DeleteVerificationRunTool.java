@@ -73,10 +73,13 @@ public class DeleteVerificationRunTool extends AbstractAiTool {
 
             RunDeletionImpactDto impact = verificationService.getRunDeletionImpact(userId, runId);
             Map<String, Object> previewSummary = previewSummary(impact);
+            String displayTarget = "Verification run: " + impact.getCompletedAt() + " · "
+                    + impact.getEvidenceCount() + " stored counterexamples";
             boolean confirmed = booleanArg(args, "confirmed", false);
             if (!confirmed || !UserContextHolder.isDestructiveActionConfirmed()) {
                 String impactToken = destructiveActionGuard.issue(
-                        userId, getName(), Long.toString(runId), previewSummary, null);
+                        userId, getName(), Long.toString(runId),
+                        displayTarget, previewSummary, null);
                 return readOnlySuccessJson(previewResponse(previewSummary, impactToken),
                         "Verification run deletion preview prepared; no changes were made.");
             }
@@ -86,7 +89,8 @@ public class DeleteVerificationRunTool extends AbstractAiTool {
                     userId, getName(), Long.toString(runId), impactToken, previewSummary);
             if (!confirmation.approved()) {
                 String freshToken = destructiveActionGuard.issue(
-                        userId, getName(), Long.toString(runId), previewSummary, null);
+                        userId, getName(), Long.toString(runId),
+                        displayTarget, previewSummary, null);
                 return errorJson(confirmation.message(), confirmation.errorCode(), 409, Map.of(
                         "requiresUserConfirmation", true,
                         "currentPreview", previewResponse(previewSummary, freshToken)));

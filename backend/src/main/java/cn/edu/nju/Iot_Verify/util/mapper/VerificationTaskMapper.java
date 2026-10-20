@@ -9,6 +9,7 @@ import cn.edu.nju.Iot_Verify.dto.verification.VerificationOutcome;
 import cn.edu.nju.Iot_Verify.dto.model.ModelGenerationIssueDto;
 import cn.edu.nju.Iot_Verify.exception.PersistedDataIntegrityException;
 import cn.edu.nju.Iot_Verify.po.VerificationTaskPo;
+import cn.edu.nju.Iot_Verify.po.VerificationResultView;
 import cn.edu.nju.Iot_Verify.repository.projection.VerificationTaskSummaryProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.VerificationRunSummaryProjection;
 import cn.edu.nju.Iot_Verify.util.JsonUtils;
@@ -26,7 +27,7 @@ public class VerificationTaskMapper {
     /**
      * VerificationTaskPo -> VerificationTaskDto
      */
-    public VerificationTaskDto toDto(VerificationTaskPo po) {
+    public VerificationTaskDto toDto(VerificationResultView po) {
         if (po == null) {
             return null;
         }
@@ -64,7 +65,7 @@ public class VerificationTaskMapper {
                 .nusmvOutput(po.getNusmvOutput())
                 // Presence only, as on the run DTO: a completed async task is the run, and its response
                 // is what the polling client reads to decide whether to offer the model download.
-                .hasSmvModel(po.getSmvModelContent() != null && !po.getSmvModelContent().isBlank())
+                .hasSmvModel(Boolean.TRUE.equals(po.getHasSmvModel()))
                 .errorMessage(po.getErrorMessage())
                 .progress(po.getProgress())
                 .progressStage(po.getProgressStage())
@@ -113,7 +114,7 @@ public class VerificationTaskMapper {
                 .toList();
     }
 
-    public VerificationTaskSummaryDto toSummaryDto(VerificationTaskPo po) {
+    public VerificationTaskSummaryDto toSummaryDto(VerificationResultView po) {
         if (po == null) {
             return null;
         }
@@ -186,7 +187,7 @@ public class VerificationTaskMapper {
                 .build();
     }
 
-    public VerificationRunDto toRunDto(VerificationTaskPo po, int counterexampleCount) {
+    public VerificationRunDto toRunDto(VerificationResultView po, int counterexampleCount) {
         if (po == null) {
             return null;
         }
@@ -226,11 +227,11 @@ public class VerificationTaskMapper {
                 .nusmvOutput(po.getNusmvOutput())
                 // Presence only. The model itself is tens of thousands of characters, so it is fetched
                 // through its own endpoint rather than inflating every run-detail response.
-                .hasSmvModel(po.getSmvModelContent() != null && !po.getSmvModelContent().isBlank())
+                .hasSmvModel(Boolean.TRUE.equals(po.getHasSmvModel()))
                 .build();
     }
 
-    private VerificationOutcome taskOutcome(VerificationTaskPo po, String recordType) {
+    private VerificationOutcome taskOutcome(VerificationResultView po, String recordType) {
         if (po.getStatus() == null) {
             throw new PersistedDataIntegrityException(
                     recordType, po.getId(), "status", "task status is missing");
@@ -250,7 +251,7 @@ public class VerificationTaskMapper {
         return po.getOutcome();
     }
 
-    private Boolean taskModelComplete(VerificationTaskPo po, VerificationOutcome outcome) {
+    private Boolean taskModelComplete(VerificationResultView po, VerificationOutcome outcome) {
         if (outcome == null) {
             return null;
         }
@@ -269,18 +270,18 @@ public class VerificationTaskMapper {
                 .toList();
     }
 
-    private List<SpecResultDto> readSpecResults(VerificationTaskPo po) {
+    private List<SpecResultDto> readSpecResults(VerificationResultView po) {
         return JsonUtils.readPersisted("verification task", po.getId(), "specResultsJson",
                 () -> JsonUtils.fromJsonList(po.getSpecResultsJson(), SpecResultDto.class));
     }
 
-    private List<ModelGenerationIssueDto> readGenerationIssues(VerificationTaskPo po) {
+    private List<ModelGenerationIssueDto> readGenerationIssues(VerificationResultView po) {
         return JsonUtils.readPersisted("verification task", po.getId(), "generationIssuesJson",
                 () -> JsonUtils.fromJsonList(po.getGenerationIssuesJson(), ModelGenerationIssueDto.class));
     }
 
     private PersistedModelContextIntegrity.ValidatedContext modelContext(
-            VerificationTaskPo po, String recordType) {
+            VerificationResultView po, String recordType) {
         return PersistedModelContextIntegrity.readVerification(
                 recordType, po.getId(), po.getIsAttack(), po.getAttackBudget(), po.getEnablePrivacy(),
                 po.getModeledDeviceAttackPointCount(), po.getModeledFalsifiableReadingDeviceCount(),
@@ -315,7 +316,7 @@ public class VerificationTaskMapper {
         return outcome;
     }
 
-    private void validateLifecycle(VerificationTaskPo po, String recordType) {
+    private void validateLifecycle(VerificationResultView po, String recordType) {
         if (po.getId() == null || po.getId() < 1) {
             fail(recordType, po.getId(), "id", "task id is missing or invalid");
         }
@@ -378,7 +379,7 @@ public class VerificationTaskMapper {
         }
     }
 
-    private void validateTimeOrder(VerificationTaskPo po, String recordType) {
+    private void validateTimeOrder(VerificationResultView po, String recordType) {
         if (po.getStartedAt() != null && po.getStartedAt().isBefore(po.getCreatedAt())) {
             fail(recordType, po.getId(), "startedAt", "task start time precedes creation time");
         }

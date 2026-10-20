@@ -6,6 +6,7 @@ import cn.edu.nju.Iot_Verify.dto.model.TaskProgressStage;
 import cn.edu.nju.Iot_Verify.repository.projection.CompletedRunDeletionProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.FuzzTaskSummaryProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.FuzzTaskProgressProjection;
+import cn.edu.nju.Iot_Verify.repository.projection.FuzzSpecificationPresentationProjection;
 import jakarta.persistence.LockModeType;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -26,6 +27,11 @@ public interface FuzzTaskRepository extends JpaRepository<FuzzTaskPo, Long>, Dat
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("SELECT t FROM FuzzTaskPo t WHERE t.id = :taskId")
     Optional<FuzzTaskPo> findByIdForUpdate(@Param("taskId") Long taskId);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT t FROM FuzzTaskPo t WHERE t.id = :taskId AND t.userId = :userId")
+    Optional<FuzzTaskPo> findByIdAndUserIdForUpdate(
+            @Param("taskId") Long taskId, @Param("userId") Long userId);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("SELECT t FROM FuzzTaskPo t WHERE t.id = :runId "
@@ -55,6 +61,20 @@ public interface FuzzTaskRepository extends JpaRepository<FuzzTaskPo, Long>, Dat
     Optional<FuzzTaskPo> findByIdAndUserId(Long id, Long userId);
 
     Optional<FuzzTaskSummaryProjection> findSummaryByIdAndUserId(Long id, Long userId);
+
+    // Materialize one validated JSON value per owned row; LIMIT prevents derived-table merging
+    // from expanding every field extraction back into a separate parse of the LONGTEXT envelope.
+    @Query(value = "SELECT id AS id, "
+            + "CASE WHEN JSON_EXTRACT(frozenInput, '$.schemaVersion') = 1 THEN "
+            + "CAST(JSON_EXTRACT(frozenInput, '$.snapshot.specifications') AS CHAR) END AS specificationsJson, "
+            + "CASE WHEN JSON_EXTRACT(frozenInput, '$.schemaVersion') = 1 THEN "
+            + "CAST(JSON_EXTRACT(frozenInput, '$.modelTokenSourcesByDeviceId') AS CHAR) END AS modelTokenSourcesJson "
+            + "FROM (SELECT id, CASE WHEN JSON_VALID(model_input_snapshot_json) THEN "
+            + "CAST(model_input_snapshot_json AS JSON) END AS frozenInput "
+            + "FROM fuzz_task WHERE user_id = :userId AND id IN :runIds "
+            + "LIMIT 18446744073709551615) frozen", nativeQuery = true)
+    List<FuzzSpecificationPresentationProjection> findSpecificationPresentationByUserIdAndIdIn(
+            @Param("userId") Long userId, @Param("runIds") List<Long> runIds);
 
     Optional<FuzzTaskPo> findByIdAndUserIdAndStatus(
             Long id, Long userId, FuzzTaskPo.TaskStatus status);

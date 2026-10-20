@@ -634,6 +634,45 @@ class SmvTraceParserTest {
         assertEquals(2, states.get(1).getStateIndex());
     }
 
+    @Test
+    void parseCounterexample_keepsEncounterOrderAndDoesNotReuseDevicesAcrossDeltaStates() {
+        Map<String, DeviceSmvData> deviceMap = new LinkedHashMap<>();
+        for (String id : List.of("first", "second")) {
+            DeviceSmvData device = new DeviceSmvData();
+            device.setVarName(id);
+            device.setTemplateName("Sensor");
+            device.setModelTokenSource(ModelTokenSource.BUNDLED);
+            device.getVariables().add(internalVariable("value"));
+            deviceMap.put(id, device);
+        }
+        String output = """
+                State 4.1:
+                  second.value = 1
+                  first.value = 2
+                  second.value = 3
+                  decimal = 1.5
+                -> State: 4.2 <-
+                  first.value = 4
+                  second.value = 5
+                State: 4.3
+                """;
+
+        List<TraceStateDto> states = parser.parseCounterexampleStates(output, deviceMap);
+
+        assertEquals(3, states.size());
+        for (TraceStateDto state : states) {
+            assertEquals(List.of("second", "first"),
+                    state.getDevices().stream().map(TraceDeviceDto::getDeviceId).toList());
+            assertEquals(1, state.getDevices().get(0).getVariables().size());
+            assertEquals("1.5", findGlobalValue(state, "decimal"));
+        }
+        assertEquals("3", findVariable(states.get(0).getDevices().get(0), "value").getValue());
+        assertEquals("5", findVariable(states.get(1).getDevices().get(0), "value").getValue());
+        assertEquals("4", findVariable(states.get(1).getDevices().get(1), "value").getValue());
+        assertNotSame(states.get(0).getDevices().get(0), states.get(1).getDevices().get(0));
+        assertNotSame(states.get(1).getDevices().get(0), states.get(2).getDevices().get(0));
+    }
+
     private TraceVariableDto findVariable(TraceDeviceDto dev, String name) {
         if (dev.getVariables() == null) {
             return null;

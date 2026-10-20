@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { readThemeTokens } from './themeTokens'
 
 /**
  * Interactive controls are 44px targets, declared as a floor rather than left to padding.
@@ -18,7 +19,7 @@ import { describe, expect, it } from 'vitest'
  * is the clearest example, because all eight buttons agreed on 40px and nothing in the code said 40.
  *
  * These are the surfaces a user crosses before every task — undo, the workflow entry points, the panel that lists
- * their devices — so a near-miss here costs more than the 4px suggests. `--iot-tap-min` names the value once so a
+ * their devices — so a near-miss here costs more than the 4px suggests. `--iot-target-min` names the value once so a
  * call site states the constraint instead of restating a number.
  */
 
@@ -28,10 +29,14 @@ const css = (file: string) => readFileSync(join(STYLE_DIR, file), 'utf8')
 
 /** The declaration block of a selector, up to its closing brace. */
 const ruleBody = (file: string, selector: string): string => {
-  const source = css(file)
-  const at = source.indexOf(`${selector} {`)
-  expect(at, `${selector} should exist in ${file}`).toBeGreaterThan(-1)
-  return source.slice(at, at + source.slice(at).indexOf('}'))
+  const source = css(file).replace(/\/\*[\s\S]*?\*\//g, '')
+  const requested = selector.split(',').map(value => value.trim())
+  const rule = [...source.matchAll(/([^{}]+)\{([^{}]*)\}/g)].find(match => {
+    const declared = match[1].split(',').map(value => value.trim())
+    return requested.every(value => declared.includes(value))
+  })
+  expect(rule, `${selector} should exist in ${file}`).toBeDefined()
+  return rule![2]
 }
 
 /** 2.75rem at a 16px root. */
@@ -39,8 +44,11 @@ const MINIMUM_REM = 2.75
 
 /** Every `min-height`/`height`/`min-width`/`width` in a block, as pixels. */
 const declaredSizes = (block: string) => {
+  const target = /--iot-target-min:\s*([\d.]+(?:rem|px));/.exec(css('base.css'))
+  expect(target, 'the shared target must have a measurable size').not.toBeNull()
+  const resolved = block.split('var(--iot-target-min)').join(target![1])
   const sizes: Array<{ raw: string, px: number }> = []
-  for (const match of block.matchAll(/(?:min-)?(?:width|height):\s*([\d.]+)(rem|px)\b/g)) {
+  for (const match of resolved.matchAll(/(?:min-)?(?:width|height):\s*([\d.]+)(rem|px)\b/g)) {
     sizes.push({ raw: match[0], px: match[2] === 'rem' ? Number(match[1]) * 16 : Number(match[1]) })
   }
   return sizes
@@ -51,26 +59,22 @@ describe('interactive target size floor', () => {
     // All eight measured 124x40 — the entry points to simulation, verification, exploration, run history and the
     // four recommendation panels, i.e. every primary workflow on the board.
     const block = ruleBody('board.css', '.iot-board .board-tool-button')
-    expect(block).toMatch(new RegExp(`min-height:\\s*${MINIMUM_REM}rem`))
+    expect(block).toMatch(/min-height:\s*var\(--iot-target-min\)/)
+    expect(readThemeTokens('light')['--iot-target-min']).toBe(`${MINIMUM_REM}rem`)
     expect(block).not.toMatch(/min-height:\s*2\.5rem/)
   })
 
-  it('sizes the canvas map tools at the minimum', () => {
-    // Zoom in, zoom out and fit-to-screen measured 32px — among the most repeatedly pressed controls, and the
-    // ones a user reaches for while already struggling to see something.
-    //
-    // The assertion is on `min-width`/`min-height`, not on every declared size: this block legitimately sets a
-    // smaller `width`/`height` for the icon box, which `min-*` overrides, so the floor is what decides the
-    // rendered target (measured 44x44 in a browser). Requiring *every* size to clear 44px only passed while
-    // the floor lived in a second block 66 lines away — two owners for one control, invisible precisely
-    // because `min-*` happened to win. A `max-*` here would defeat the floor, so it is ruled out.
-    const block = ruleBody('board.css', '.iot-board .canvas-map__tool')
-    for (const axis of ['width', 'height']) {
-      const declared = new RegExp(`min-${axis}:\\s*([\\d.]+)rem`).exec(block)
-      expect(declared, `.canvas-map__tool should declare min-${axis}`).not.toBeNull()
-      expect(Number(declared![1]) * 16).toBeGreaterThanOrEqual(MINIMUM_REM * 16)
-      expect(block, `a max-${axis} would defeat the floor`).not.toMatch(new RegExp(`max-${axis}:`))
-    }
+  it('keeps canvas map tools on the shared full target with a quiet face', () => {
+    const board = readFileSync(join(STYLE_DIR, '../views/Board.vue'), 'utf8')
+    const buttons = [...board.matchAll(/<button\b[^>]*class="([^"]*\bcanvas-map__tool\b[^"]*)"/g)]
+    expect(buttons).toHaveLength(3)
+    for (const button of buttons) expect(button[1].split(/\s+/)).toContain('board-panel-icon-action')
+    // The painted face is smaller; the shared button itself still owns the entire hit target.
+    const block = ruleBody('board.css', '.iot-board .board-panel-icon-action')
+    const sizes = declaredSizes(block)
+    expect(sizes).toHaveLength(2)
+    for (const size of sizes) expect(size.px).toBeGreaterThanOrEqual(MINIMUM_REM * 16)
+    expect(block).not.toMatch(/max-(width|height):/)
   })
 
   it('sizes the nav strip controls at the minimum in the base rule', () => {
@@ -78,10 +82,12 @@ describe('interactive target size floor', () => {
     // desktop was 4px short, because the rule lived in `max-width: 1023.98px` instead of the base declaration.
     for (const selector of [
       '.board-nav-bar .board-edit-history-btn',
-      '.board-nav-bar .nav-logout-btn'
+      '.board-nav-bar .nav-account-btn'
     ]) {
       const block = ruleBody('board.css', selector)
-      for (const size of declaredSizes(block)) {
+      const sizes = declaredSizes(block)
+      expect(sizes.length, `${selector} must declare its target size`).toBeGreaterThan(0)
+      for (const size of sizes) {
         expect(size.px, `${selector}: ${size.raw}`).toBeGreaterThanOrEqual(MINIMUM_REM * 16)
       }
     }
@@ -136,12 +142,20 @@ describe('interactive target size floor', () => {
   it('sizes the inspector tabs and add-device control at the minimum', () => {
     const inspector = readFileSync(join(__dirname, '../../components/SystemInspector.vue'), 'utf8')
 
-    // The tab strip measured 33px; a tab is a primary navigation target.
-    expect(inspector).toMatch(/min-w-0 min-h-11 rounded-lg px-2 py-2/)
+    // Shared styling must still guarantee a full target for every tab.
+    expect(inspector).toMatch(/class="board-section-tab(?:\s[^\"]*)?"/)
+    const tab = ruleBody('board.css', '.iot-board .board-section-tab')
+    expect(tab).toContain('min-height: var(--iot-target-min)')
+    const target = declaredSizes(tab)
+    expect(target.length).toBeGreaterThan(0)
+    expect(target.every(size => size.px >= MINIMUM_REM * 16)).toBe(true)
     // `inspector-add-device` measured 26x36 and is the primary way to add a device to the board.
     const addAt = inspector.indexOf('data-testid="inspector-add-device"')
     expect(addAt).toBeGreaterThan(-1)
     const addButton = inspector.slice(addAt, addAt + 400)
-    expect(addButton).toMatch(/h-11 w-11/)
+    expect(addButton).toContain('board-panel-icon-action')
+    const action = ruleBody('board.css', '.iot-board .board-panel-icon-action')
+    expect(action).toContain('width: var(--iot-target-min)')
+    expect(action).toContain('height: var(--iot-target-min)')
   })
 })

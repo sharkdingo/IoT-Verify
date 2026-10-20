@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { readThemeTokens, themeColor, contrast } from './themeTokens'
 
 /**
  * A role's ink half must not be used as a fill under light text.
@@ -22,24 +23,7 @@ import { describe, expect, it } from 'vitest'
 const SRC = join(__dirname, '../..')
 const SKIP = new Set(['__tests__', 'assets', 'testing'])
 
-/** Dark-theme ink values, read from base.css — these are what make the pattern fail. */
-const INK_DARK: Record<string, string> = {
-  danger: '#fca5a5', warning: '#fcd34d', success: '#6ee7b7', info: '#67e8f9', accent: '#60a5fa',
-}
-
-const channels = (hex: string) => {
-  const raw = hex.replace('#', '')
-  const parts = raw.length === 3 ? raw.split('').map(c => c + c) : (raw.match(/../g) ?? [])
-  return parts.map(p => parseInt(p, 16) / 255)
-}
-const luminance = (hex: string) => {
-  const [r, g, b] = channels(hex).map(c => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4))
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b
-}
-const contrast = (a: string, b: string) => {
-  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x)
-  return (hi + 0.05) / (lo + 0.05)
-}
+const darkTokens = readThemeTokens('dark')
 
 const sources = () => {
   const files: Array<{ name: string, text: string }> = []
@@ -74,14 +58,14 @@ describe('ink/fill separation', () => {
         const background = /(?:^|[;\s])(?:background|background-color)\s*:\s*([^;]+)/.exec(body)
         const foreground = /(?:^|[;\s])color\s*:\s*([^;]+)/.exec(body)
         if (!background || !foreground) continue
-        if (!/^\s*(#fff(fff)?|white)\s*$/i.test(foreground[1])) continue
+        if (!/^\s*(#fff(fff)?|white|var\(--text-on-fill\))\s*$/i.test(foreground[1])) continue
 
         // A bare role, not its `-fill`/`-surface`/`-border` sibling.
         const ink = /var\(--(danger|warning|success|info|accent)\)/.exec(background[1])
         if (!ink) continue
 
         const line = clean.slice(0, rule.index).split('\n').length
-        const measured = contrast(INK_DARK[ink[1]], '#ffffff')
+        const measured = contrast(themeColor(darkTokens, `--${ink[1]}`), '#ffffff')
         offenders.push(
           `${name}:${line}  ${selector.slice(0, 44)} — white on var(--${ink[1]}) is `
           + `${measured.toFixed(2)}:1 in dark theme; use var(--${ink[1]}-fill)`,

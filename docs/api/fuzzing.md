@@ -5,7 +5,7 @@ module. The endpoint index lives in [rest-endpoints.md](rest-endpoints.md); glob
 authentication, `Result<T>`, and error conventions live in
 [overview.md](overview.md).
 
-Verified against code on 2026-07-31. Source: `controller/FuzzController.java`,
+Verified against code on 2026-10-19. Source: `controller/FuzzController.java`,
 `service/impl/FuzzServiceImpl.java`, and `dto/fuzz/`.
 
 ---
@@ -39,11 +39,9 @@ confirmed redistribution license.
 
 This read-only endpoint returns the current authenticated user's canonical bounded-search
 model fingerprint as a 64-character lowercase SHA-256 string in `Result<String>.data`.
-It captures the same normalized devices and runtime values, effective environment,
-ordered rules, structured specifications, and referenced template manifests used by a
-real exploration submission. Canvas coordinates, panel layout, labels, descriptions,
-icons, formula previews, and rule display strings are excluded because they do not
-change exploration behavior.
+Its identity equals the verification/exploration value in the shared
+[current model fingerprint contract](board.md#current-model-fingerprints). That contract owns
+the included semantic inputs and excluded presentation fields.
 
 Completed runs store this fingerprint in `modelSnapshot.modelFingerprint`. The frontend
 uses exact fingerprint equality to decide whether a historical run still matches the
@@ -125,12 +123,9 @@ the paper seed instead of silently randomizing the rest of the candidate.
 A client must present this response as a legal-domain preview, then use persisted
 finding input events to explain the concrete choices after a candidate is found.
 
-The fingerprint covers ordered executable devices and runtime values, environment variables,
-ordered rules, structured specifications, and referenced template manifests. Device order is
-preserved because simultaneous shared-environment writes use first-match priority. Visual canvas
-layout and presentation caches such as device labels, formula previews, descriptions, icons,
-and rule display strings are excluded, so renaming an item does not invalidate a semantically
-unchanged preview.
+The paper-domain identity adds the requested `pathLength` to the shared
+[canonical model input](board.md#current-model-fingerprints). It is distinct from the stored
+run's Board identity, which does not include search configuration.
 The submit endpoint recomputes this value from a fresh server snapshot before writing a
 task; a mismatch fails validation and requires the client to refresh the preview.
 
@@ -310,6 +305,7 @@ fast task cannot finish before its persisted creation timestamp.
   and progress.
 - `POST /api/fuzz/tasks/{id}/cancel`: returns `TaskCancellationResultDto`; terminal
   writes use atomic status predicates, so cancellation cannot later become completion.
+  Status reads follow the shared [cancellation transaction ordering](../architecture/verification-flow.md#sync-async-and-simulation).
   Locally queued work is removed immediately when this instance owns it. The response
   reports no remaining execution only after that pre-start removal is definitive;
   otherwise it conservatively reports that execution may still be stopping while a local
@@ -379,6 +375,8 @@ page when the current page length equals its requested size. Meanwhile,
 | `modelSnapshot` | object | Captured counts/time with `templatesFrozen=true` and the canonical `modelFingerprint` used for current-Board drift checks |
 | `playbackScene` | object | `FuzzRunDto` detail only: canonical frozen `{ nodes, rules }` used to render its findings without consulting the live Board. It is omitted from list summaries. |
 | `eligibility` | object | Eligible IDs plus frozen `eligibleSpecLabels`, itemized ineligible specifications, requested count, and eligible count |
+| `eligibleSpecifications` | `Record<string, SpecificationDto>` | Frozen structured conditions keyed by exactly the eligible specification IDs; used to distinguish targets sharing one template |
+| `modelTokenSourcesByDeviceId` | `Record<string, ModelTokenSource>` | Frozen device token provenance for condition display, with exact captured-device membership. Uses the [trace token-provenance contract](verification.md#3-trace-structure); built-in tokens may be localized, custom or unknown tokens keep their spelling |
 | `limitations` | `string[]` | Stable limitation codes that apply to this run |
 | `createdAt` / `completedAt` | datetime | Lifecycle timestamps |
 | `findingCount` | integer | Number of persisted candidate violations |
@@ -401,9 +399,22 @@ an unavailable detail object. When a complete-result read identifies an individu
 validated siblings for direct replay. Deleting a run through `DELETE /api/fuzz/runs/{id}`
 deletes its findings in the same transaction.
 
-Run-list decoding uses a lightweight finding projection that excludes the frozen
-`violatedSpec`, trace-state, and input-event LONGTEXT. It returns `violatedSpecId`, the
-frozen `specificationLabel`, and `stateCount`, and validates run
+Run metadata uses immutable constructor projections that exclude frozen inputs and diagnostic
+logs. Run-list decoding uses a lightweight finding projection that excludes per-finding
+specification, trace-state, and input-event LONGTEXT. The run, presentation, and finding projections
+are captured in one read-only transaction. JSON validation and DTO assembly follow that capture,
+after a standalone read has returned its database connection; an enclosing transaction retains
+its ownership and original rollback propagation for decoding exceptions that escape the service.
+Run detail likewise captures its owned run and complete ordered findings together, then validates
+and assembles the captured evidence after releasing a standalone connection.
+A separate bounded projection extracts
+only the specification array and token-source map from the owning run's version-`1`
+frozen-input envelope. MySQL validates and materializes each selected envelope as JSON once
+before extracting both fields, rather than repeatedly parsing its LONGTEXT representation.
+Malformed or unsupported envelopes still produce unavailable presentation metadata. The mapper
+validates specification shapes/counts, eligible membership,
+and condition device references, and populates each finding's `violatedSpec` from that array.
+It also returns `violatedSpecId`, the frozen `specificationLabel`, and `stateCount`, and validates run
 metadata, finding ownership/counts, seed, timestamps, and bounded state-count/violation-step
 metadata, including `stateCount <= pathLength`. A finding summary intentionally has no
 `dataAvailable` field: the list projection has not loaded enough evidence to make that
@@ -500,10 +511,10 @@ was requested — see the workload section above.
 | `inputEvents` | `FuzzInputEventDto[]` | Ordered replay evidence as `{ step, kind, targetId, property, value, source }`. `kind` is `DEVICE_STATE`, `DEVICE_VARIABLE`, `ENVIRONMENT_VALUE`, or `ENVIRONMENT_RATE`; `source` is `MODEL_CHOICE`, `RANDOM_INITIAL_STATE`, or `SEED_EVENT`. Paper-compatible one-based `Position` is exposed as zero-based `step` |
 | `createdAt` | datetime | Persistence time |
 
-Run-list summaries replace `violatedSpec`, `states`, and `inputEvents` with the bounded
-`specificationLabel` and `stateCount` fields. They do not expose `dataAvailable`, because
-summary metadata alone cannot establish trace replayability. The optional `violatedSpec`
-field is omitted from JSON in list summaries; it is present in full `FuzzFindingDto` detail.
+Run-list finding summaries retain `violatedSpec` from the owning run's frozen presentation
+projection and replace `states` and `inputEvents` with bounded `specificationLabel` and
+`stateCount` fields. They do not expose `dataAvailable`, because summary metadata alone
+cannot establish trace replayability.
 For every summary, `firstViolationStep` likewise equals `stateCount - 1`.
 Findings use separate persistence from formal `trace` rows and cannot be sent to fix
 endpoints.

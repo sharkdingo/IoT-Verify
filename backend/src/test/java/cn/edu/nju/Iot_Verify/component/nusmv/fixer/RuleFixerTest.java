@@ -14,7 +14,10 @@ import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
+import cn.edu.nju.Iot_Verify.dto.trace.TraceStateDto;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -269,7 +272,7 @@ class RuleFixerTest {
         FixStrategy removeStrategy = mockStrategy("remove", false);
         when(removeStrategy.tryFix(any())).thenAnswer(invocation -> {
             FixContext context = invocation.getArgument(0);
-            context.initializeStrategySearch("remove", 2);
+            context.initializeStrategySearch("remove", 2, List.of(1024L));
             context.addStrategyAttempts("remove", 2);
             context.recordStrategyNoResult("remove", "SEARCH_BUDGET_EXHAUSTED",
                     "Unchecked combinations remain.");
@@ -462,6 +465,76 @@ class RuleFixerTest {
         assertEquals(List.of(1), related.getFaultRules().stream().map(FaultRuleDto::getRuleIndex).toList());
         // Fault rule first, then the dormant rule that can also change the lamp; the fan rule stays out.
         assertEquals(List.of(List.of(1, 2)), scopes);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void fix_idleRulesCanPreventTheViolationEvenWhenNoRelevantRuleFired(boolean unrelatedRuleFired) {
+        FixStrategy strategy = mockStrategy("parameter", true);
+        RuleFixer fixer = new RuleFixer(faultLocalizer, List.of(strategy), fixConfig());
+        List<RuleDto> rules = List.of(
+                RuleDto.builder().command(RuleDto.Command.builder().deviceName("fan").action("on").build()).build(),
+                RuleDto.builder().command(RuleDto.Command.builder().deviceName("lamp").action("off").build()).build());
+        when(faultLocalizer.localize(any(), any(), any())).thenReturn(unrelatedRuleFired
+                ? List.of(FaultRuleDto.builder().ruleIndex(0).build()) : List.of());
+        List<List<Integer>> scopes = new java.util.ArrayList<>();
+        when(strategy.tryFix(any())).thenAnswer(inv -> {
+            FixContext context = inv.getArgument(0);
+            scopes.add(context.getRepairRuleIndices());
+            assertTrue(context.getFaultRules().isEmpty(), "An idle rule must not be presented as a fired fault");
+            return FixStrategy.StrategyOutcome.none();
+        });
+
+        FixResultDto result = fixer.fix(1L, "spec_0", List.of(new TraceStateDto(), new TraceStateDto()),
+                rules, List.of(), List.of(lampSpec()), Map.of("fan", device("fan"), "lamp", device("lamp")),
+                1L, AttackScenarioDto.none(), false, List.of("parameter"), 20, null);
+
+        assertEquals(List.of(List.of(1)), scopes, "Search the idle relevant rule, not the unrelated fired one");
+        assertEquals("INCONCLUSIVE", result.getStrategyAttempts().get(0).getStatus());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"1", "3", "7"})
+    void fix_safetyViolationAtInitialStateExplainsWhyRuleEditsCannotRepairIt(String templateId) {
+        FixStrategy strategy = mockStrategy("parameter", true);
+        RuleFixer fixer = new RuleFixer(faultLocalizer, List.of(strategy), fixConfig());
+        when(faultLocalizer.localize(any(), any(), any())).thenReturn(List.of());
+        SpecificationDto spec = lampSpec();
+        spec.setTemplateId(templateId);
+        RuleDto rule = RuleDto.builder()
+                .command(RuleDto.Command.builder().deviceName("lamp").action("on").build()).build();
+
+        FixResultDto result = fixer.fix(1L, "spec_0", List.of(new TraceStateDto()),
+                List.of(rule), List.of(), List.of(spec), Map.of("lamp", device("lamp")),
+                1L, AttackScenarioDto.none(), false, null, 20, null);
+
+        assertFalse(result.isFixable());
+        assertTrue(result.isSourceModelComplete());
+        assertEquals(List.of("parameter", "condition", "remove"), result.getStrategyAttempts().stream()
+                .map(FixStrategyAttemptDto::getStrategy).toList());
+        assertTrue(result.getStrategyAttempts().stream()
+                .allMatch(attempt -> "SKIPPED_INITIAL_STATE_VIOLATION".equals(attempt.getStatus())));
+        assertTrue(result.getSummary().contains("before any automation command can run"));
+        verify(strategy, never()).tryFix(any());
+    }
+
+    @Test
+    void fix_oneStateLivenessCycleStillSearchesDormantRules() {
+        FixStrategy strategy = mockStrategy("condition", true);
+        RuleFixer fixer = new RuleFixer(faultLocalizer, List.of(strategy), fixConfig());
+        when(faultLocalizer.localize(any(), any(), any())).thenReturn(List.of());
+        SpecificationDto spec = lampSpec();
+        spec.setTemplateId("2");
+        TraceStateDto state = TraceStateDto.builder().loopStart(true).build();
+        RuleDto rule = RuleDto.builder()
+                .command(RuleDto.Command.builder().deviceName("lamp").action("on").build()).build();
+
+        FixResultDto result = fixer.fix(1L, "spec_0", List.of(state), List.of(rule), List.of(), List.of(spec),
+                Map.of("lamp", device("lamp")), 1L, AttackScenarioDto.none(), false,
+                List.of("condition"), 20, null);
+
+        verify(strategy).tryFix(argThat(context -> context.getRepairRuleIndices().equals(List.of(0))));
+        assertEquals("INCONCLUSIVE", result.getStrategyAttempts().get(0).getStatus());
     }
 
     private static SpecificationDto lampSpec() {

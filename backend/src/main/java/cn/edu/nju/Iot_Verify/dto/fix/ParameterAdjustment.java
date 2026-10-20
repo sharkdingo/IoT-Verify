@@ -20,6 +20,9 @@ public class ParameterAdjustment {
      * REST/AI clients should submit this id instead of ruleIndex/conditionIndex.
      */
     private String targetId;
+    /** One-based rule order in the frozen trace snapshot, for display only. */
+    private int rulePosition;
+    private String deviceLabel;
     /** Internal trace-snapshot locator used only while applying the server-recomputed fix. */
     @JsonIgnore
     private int ruleIndex;

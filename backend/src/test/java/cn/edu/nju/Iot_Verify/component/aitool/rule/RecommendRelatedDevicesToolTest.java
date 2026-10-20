@@ -1,9 +1,13 @@
 package cn.edu.nju.Iot_Verify.component.aitool.rule;
 
+import cn.edu.nju.Iot_Verify.service.recommendation.DeviceInfoHelper;
+import cn.edu.nju.Iot_Verify.service.recommendation.DeviceRecommendationService;
+import cn.edu.nju.Iot_Verify.service.recommendation.RecommendationResultParser;
 import cn.edu.nju.Iot_Verify.component.ai.PromptCompletionService;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
 import cn.edu.nju.Iot_Verify.security.UserContextHolder;
 import cn.edu.nju.Iot_Verify.service.BoardStorageService;
+import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
 import cn.edu.nju.Iot_Verify.testutil.LogCapture;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -19,13 +23,16 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.lenient;
 
 @ExtendWith(MockitoExtension.class)
 class RecommendRelatedDevicesToolTest {
@@ -37,12 +44,17 @@ class RecommendRelatedDevicesToolTest {
     @Mock
     private BoardStorageService boardStorageService;
 
+    private BoardSemanticSnapshotDto snapshot;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
     private RecommendRelatedDevicesTool tool;
 
     @BeforeEach
     void setUp() {
-        tool = new RecommendRelatedDevicesTool(promptCompletionService, objectMapper, deviceInfoHelper, boardStorageService);
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of());
+        lenient().when(boardStorageService.getSemanticSnapshot(1L)).thenAnswer(invocation -> snapshot);
+        tool = new RecommendRelatedDevicesTool(new DeviceRecommendationService(deviceInfoHelper, boardStorageService,
+                promptCompletionService, objectMapper, new RecommendationResultParser(objectMapper)), objectMapper);
         UserContextHolder.setUserId(1L);
     }
 
@@ -52,24 +64,46 @@ class RecommendRelatedDevicesToolTest {
     }
 
     @Test
-    void executeBoardRecommendations_rejectsUnknownRequestFieldBeforeReadingBoardOrCallingAi() throws Exception {
+    void promptAndValidationUseOneCapturedTemplateSetEvenIfBoardChangesDuringCompletion() throws Exception {
+        snapshot = new BoardSemanticSnapshotDto(
+                List.of(), List.of(), List.of(), List.of(), List.of(template("Camera")));
+        tool = new RecommendRelatedDevicesTool(new DeviceRecommendationService(new DeviceInfoHelper(), boardStorageService,
+                promptCompletionService, objectMapper, new RecommendationResultParser(objectMapper)), objectMapper);
+        when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
+                .thenAnswer(invocation -> {
+                    assertTrue(invocation.<String>getArgument(1).contains("Camera"));
+                    snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of());
+                    return """
+                            {"recommendations":[{"templateName":"Camera","suggestedLabel":"Door camera"}]}
+                            """;
+                });
+
+        JsonNode result = objectMapper.readTree(tool.execute("{}"));
+
+        assertEquals(1, result.path("validatedCount").asInt(), result.toString());
+        verify(boardStorageService).getSemanticSnapshot(1L);
+        verifyNoMoreInteractions(boardStorageService);
+    }
+
+    @Test
+    void execute_rejectsUnknownRequestFieldBeforeReadingBoardOrCallingAi() throws Exception {
         JsonNode json = objectMapper.readTree(
-                tool.executeBoardRecommendations("{\"userRequrement\":\"night safety\"}"));
+                tool.execute("{\"userRequrement\":\"night safety\"}"));
 
         assertEquals("VALIDATION_ERROR", json.path("errorCode").asText());
         assertEquals("$ contains unsupported field(s): userRequrement.", json.path("error").asText());
-        verify(boardStorageService, never()).getDeviceTemplates(1L);
+        verify(boardStorageService, never()).getSemanticSnapshot(1L);
         verify(promptCompletionService, never()).complete(anyString(), anyString(), anyDouble(), anyInt());
     }
 
     @Test
-    void executeBoardRecommendations_withUnparseableAiResponse_returnsUpstreamError() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of());
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(template("Camera")));
+    void execute_withUnparseableAiResponse_returnsUpstreamError() throws Exception {
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(snapshot.nodes(), snapshot.environmentVariables(), snapshot.rules(), snapshot.specifications(), List.of(template("Camera")));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("not-json");
 
-        JsonNode json = objectMapper.readTree(tool.executeBoardRecommendations("{}"));
+        JsonNode json = objectMapper.readTree(tool.execute("{}"));
 
         assertEquals("AI_RESPONSE_INVALID", json.path("errorCode").asText());
         assertEquals(502, json.path("status").asInt());
@@ -77,10 +111,10 @@ class RecommendRelatedDevicesToolTest {
     }
 
     @Test
-    void executeBoardRecommendations_doesNotLogRejectedModelCandidateContent() throws Exception {
+    void execute_doesNotLogRejectedModelCandidateContent() throws Exception {
         String sensitive = "private-template-value-never-log";
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of());
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(template("Camera")));
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(snapshot.nodes(), snapshot.environmentVariables(), snapshot.rules(), snapshot.specifications(), List.of(template("Camera")));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -93,8 +127,8 @@ class RecommendRelatedDevicesToolTest {
                         }
                         """);
 
-        try (LogCapture logs = LogCapture.forClass(RecommendRelatedDevicesTool.class)) {
-            JsonNode json = objectMapper.readTree(tool.executeBoardRecommendations("{}"));
+        try (LogCapture logs = LogCapture.forClass(DeviceRecommendationService.class)) {
+            JsonNode json = objectMapper.readTree(tool.execute("{}"));
 
             assertEquals(1, json.path("filteredCount").asInt());
             assertFalse(logs.messages().stream().anyMatch(message -> message.contains(sensitive)));
@@ -102,13 +136,13 @@ class RecommendRelatedDevicesToolTest {
     }
 
     @Test
-    void executeBoardRecommendations_whenAiReturnsNoCandidates_reportsNoFiltering() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of());
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(template("Camera")));
+    void execute_whenAiReturnsNoCandidates_reportsNoFiltering() throws Exception {
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(snapshot.nodes(), snapshot.environmentVariables(), snapshot.rules(), snapshot.specifications(), List.of(template("Camera")));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("{\"recommendations\":[]}");
 
-        JsonNode json = objectMapper.readTree(tool.executeBoardRecommendations("{}"));
+        JsonNode json = objectMapper.readTree(tool.execute("{}"));
 
         assertEquals(0, json.path("rawCandidateCount").asInt());
         assertEquals(0, json.path("filteredCount").asInt());
@@ -116,9 +150,9 @@ class RecommendRelatedDevicesToolTest {
     }
 
     @Test
-    void executeBoardRecommendations_honorsMaxRecommendations() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of());
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(
+    void execute_honorsMaxRecommendations() throws Exception {
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(snapshot.nodes(), snapshot.environmentVariables(), snapshot.rules(), snapshot.specifications(), List.of(
                 template("Camera"), template("Alarm"), template("Plug")));
         when(promptCompletionService.completeRecommendation(
                 anyString(),
@@ -135,7 +169,7 @@ class RecommendRelatedDevicesToolTest {
                         }
                         """);
 
-        String result = tool.executeBoardRecommendations("""
+        String result = tool.execute("""
                 {
                   "maxRecommendations": 2
                 }
@@ -154,8 +188,8 @@ class RecommendRelatedDevicesToolTest {
     }
 
     @Test
-    void executeBoardRecommendations_withChineseLanguage_returnsLocalizedBackendMessage() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of(
+    void execute_withChineseLanguage_returnsLocalizedBackendMessage() throws Exception {
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of(
                 new DeviceInfoHelper.DeviceInfo(
                         "door-1",
                         "Door",
@@ -172,7 +206,7 @@ class RecommendRelatedDevicesToolTest {
                         List.of("closed", "open"),
                         List.of())
         ));
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(template("Camera")));
+        snapshot = new BoardSemanticSnapshotDto(snapshot.nodes(), snapshot.environmentVariables(), snapshot.rules(), snapshot.specifications(), List.of(template("Camera")));
         when(promptCompletionService.completeRecommendation(
                 anyString(),
                 contains("输出语言: 简体中文"),
@@ -186,7 +220,7 @@ class RecommendRelatedDevicesToolTest {
                         }
                         """);
 
-        String result = tool.executeBoardRecommendations("""
+        String result = tool.execute("""
                 {
                   "language": "zh-CN",
                   "maxRecommendations": 3
@@ -202,9 +236,9 @@ class RecommendRelatedDevicesToolTest {
     }
 
     @Test
-    void executeBoardRecommendations_canonicalizesTemplateNameFromAvailableTemplate() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of());
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(template("Window Shade")));
+    void execute_canonicalizesTemplateNameFromAvailableTemplate() throws Exception {
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(snapshot.nodes(), snapshot.environmentVariables(), snapshot.rules(), snapshot.specifications(), List.of(template("Window Shade")));
         when(promptCompletionService.completeRecommendation(
                 anyString(),
                 anyString(),
@@ -218,7 +252,7 @@ class RecommendRelatedDevicesToolTest {
                         }
                         """);
 
-        String result = tool.executeBoardRecommendations("{\"maxRecommendations\":3}");
+        String result = tool.execute("{\"maxRecommendations\":3}");
 
         JsonNode json = objectMapper.readTree(result);
 
@@ -228,9 +262,9 @@ class RecommendRelatedDevicesToolTest {
     }
 
     @Test
-    void executeBoardRecommendations_returnsFilteredItemsForUnknownTemplates() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of());
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(template("Camera")));
+    void execute_returnsFilteredItemsForUnknownTemplates() throws Exception {
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(snapshot.nodes(), snapshot.environmentVariables(), snapshot.rules(), snapshot.specifications(), List.of(template("Camera")));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -241,7 +275,7 @@ class RecommendRelatedDevicesToolTest {
                         }
                         """);
 
-        String result = tool.executeBoardRecommendations("{\"maxRecommendations\":3}");
+        String result = tool.execute("{\"maxRecommendations\":3}");
         JsonNode json = objectMapper.readTree(result);
 
         assertEquals(1, json.path("count").asInt());
@@ -253,9 +287,9 @@ class RecommendRelatedDevicesToolTest {
     }
 
     @Test
-    void executeBoardRecommendations_filtersCandidatesWithDroppedInitialRuntime() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of());
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(runtimeTemplate("Sensor")));
+    void execute_filtersCandidatesWithDroppedInitialRuntime() throws Exception {
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(snapshot.nodes(), snapshot.environmentVariables(), snapshot.rules(), snapshot.specifications(), List.of(runtimeTemplate("Sensor")));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -275,7 +309,7 @@ class RecommendRelatedDevicesToolTest {
                         }
                         """);
 
-        String result = tool.executeBoardRecommendations("{\"maxRecommendations\":5}");
+        String result = tool.execute("{\"maxRecommendations\":5}");
         JsonNode json = objectMapper.readTree(result);
 
         assertEquals(1, json.path("count").asInt());
@@ -292,9 +326,9 @@ class RecommendRelatedDevicesToolTest {
     }
 
     @Test
-    void executeBoardRecommendations_filtersDisplayNameDuplicatesAcrossDifferentTemplates() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of());
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(
+    void execute_filtersDisplayNameDuplicatesAcrossDifferentTemplates() throws Exception {
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(snapshot.nodes(), snapshot.environmentVariables(), snapshot.rules(), snapshot.specifications(), List.of(
                 template("Camera"), template("Alarm")));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
@@ -306,7 +340,7 @@ class RecommendRelatedDevicesToolTest {
                         }
                         """);
 
-        JsonNode json = objectMapper.readTree(tool.executeBoardRecommendations("{\"maxRecommendations\":5}"));
+        JsonNode json = objectMapper.readTree(tool.execute("{\"maxRecommendations\":5}"));
 
         assertEquals(1, json.path("count").asInt());
         assertEquals("Entry Monitor", json.path("recommendations").get(0).path("suggestedLabel").asText());
@@ -314,9 +348,9 @@ class RecommendRelatedDevicesToolTest {
     }
 
     @Test
-    void executeBoardRecommendations_materializesValuesButLeavesTemplateLabelsAsFallback() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of());
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(runtimeTemplate("Sensor")));
+    void execute_materializesValuesButLeavesTemplateLabelsAsFallback() throws Exception {
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(snapshot.nodes(), snapshot.environmentVariables(), snapshot.rules(), snapshot.specifications(), List.of(runtimeTemplate("Sensor")));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -329,7 +363,7 @@ class RecommendRelatedDevicesToolTest {
                         }
                         """);
 
-        JsonNode json = objectMapper.readTree(tool.executeBoardRecommendations("{\"maxRecommendations\":5}"));
+        JsonNode json = objectMapper.readTree(tool.execute("{\"maxRecommendations\":5}"));
         JsonNode recommendation = json.path("recommendations").get(0);
 
         assertEquals(1, json.path("count").asInt());
@@ -363,9 +397,9 @@ class RecommendRelatedDevicesToolTest {
      * whose runtime cannot be applied is reported as filtered, not repaired into a different suggestion.
      */
     @Test
-    void executeBoardRecommendations_dropsCandidateWithNonIntegerValueForAnIntegerDomain() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of());
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(numericTemplate("Thermometer")));
+    void execute_dropsCandidateWithNonIntegerValueForAnIntegerDomain() throws Exception {
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(snapshot.nodes(), snapshot.environmentVariables(), snapshot.rules(), snapshot.specifications(), List.of(numericTemplate("Thermometer")));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -379,7 +413,7 @@ class RecommendRelatedDevicesToolTest {
                         }
                         """);
 
-        JsonNode json = objectMapper.readTree(tool.executeBoardRecommendations("{\"maxRecommendations\":5}"));
+        JsonNode json = objectMapper.readTree(tool.execute("{\"maxRecommendations\":5}"));
 
         assertEquals(0, json.path("count").asInt());
         assertEquals(1, json.path("filteredCount").asInt());
@@ -388,9 +422,9 @@ class RecommendRelatedDevicesToolTest {
 
     /** An in-domain integer is kept verbatim — the guard above must not reject legal values. */
     @Test
-    void executeBoardRecommendations_keepsAnInDomainIntegerValue() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of());
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(numericTemplate("Thermometer")));
+    void execute_keepsAnInDomainIntegerValue() throws Exception {
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(snapshot.nodes(), snapshot.environmentVariables(), snapshot.rules(), snapshot.specifications(), List.of(numericTemplate("Thermometer")));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -404,16 +438,16 @@ class RecommendRelatedDevicesToolTest {
                         }
                         """);
 
-        JsonNode json = objectMapper.readTree(tool.executeBoardRecommendations("{\"maxRecommendations\":5}"));
+        JsonNode json = objectMapper.readTree(tool.execute("{\"maxRecommendations\":5}"));
 
         assertEquals("22", json.path("recommendations").get(0)
                 .path("initialVariables").get(0).path("value").asText());
     }
 
     @Test
-    void executeBoardRecommendations_rejectsExplicitBlankRuntimeInsteadOfDefaultingIt() throws Exception {
-        when(deviceInfoHelper.getDevicesWithTemplateInfo(1L)).thenReturn(List.of());
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(runtimeTemplate("Sensor")));
+    void execute_rejectsExplicitBlankRuntimeInsteadOfDefaultingIt() throws Exception {
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of());
+        snapshot = new BoardSemanticSnapshotDto(snapshot.nodes(), snapshot.environmentVariables(), snapshot.rules(), snapshot.specifications(), List.of(runtimeTemplate("Sensor")));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -425,7 +459,7 @@ class RecommendRelatedDevicesToolTest {
                         }
                         """);
 
-        JsonNode json = objectMapper.readTree(tool.executeBoardRecommendations("{}"));
+        JsonNode json = objectMapper.readTree(tool.execute("{}"));
 
         assertEquals(0, json.path("count").asInt());
         assertEquals(1, json.path("filteredCount").asInt());
@@ -434,15 +468,15 @@ class RecommendRelatedDevicesToolTest {
     }
 
     @Test
-    void executeBoardRecommendations_rejectsOverlongRequirementInsteadOfTruncatingIt() throws Exception {
+    void execute_rejectsOverlongRequirementInsteadOfTruncatingIt() throws Exception {
         String args = "{\"userRequirement\":\"" + "x".repeat(2001) + "\"}";
 
-        JsonNode json = objectMapper.readTree(tool.executeBoardRecommendations(args));
+        JsonNode json = objectMapper.readTree(tool.execute(args));
 
         assertEquals("VALIDATION_ERROR", json.path("errorCode").asText());
         assertEquals("userRequirement must be at most 2000 characters.", json.path("error").asText());
-        verify(deviceInfoHelper, never()).getDevicesWithTemplateInfo(1L);
-        verify(boardStorageService, never()).getDeviceTemplates(1L);
+        verify(deviceInfoHelper, never()).getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class));
+        verify(boardStorageService, never()).getSemanticSnapshot(1L);
         verify(promptCompletionService, never()).complete(anyString(), anyString(), anyDouble(), anyInt());
     }
 

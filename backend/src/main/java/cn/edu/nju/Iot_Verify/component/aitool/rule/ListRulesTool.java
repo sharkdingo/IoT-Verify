@@ -4,6 +4,7 @@ import cn.edu.nju.Iot_Verify.component.ai.model.LlmToolSpec;
 import cn.edu.nju.Iot_Verify.component.aitool.AbstractAiTool;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
+import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
 import cn.edu.nju.Iot_Verify.exception.BaseException;
 import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
 import cn.edu.nju.Iot_Verify.service.BoardStorageService;
@@ -60,8 +61,9 @@ public class ListRulesTool extends AbstractAiTool {
             requireOnlyFields(args, "arguments", Set.of("keyword"));
             String keyword = optionalTextArg(args, "keyword", "", 100);
 
-            List<RuleDto> rules = safeList(boardStorageService.getRules(userId));
-            List<DeviceNodeDto> nodes = safeList(boardStorageService.getNodes(userId));
+            BoardSemanticSnapshotDto snapshot = boardStorageService.getSemanticSnapshot(userId);
+            List<RuleDto> rules = snapshot.rules();
+            List<DeviceNodeDto> nodes = snapshot.nodes();
             if (!keyword.isEmpty()) {
                 rules = rules.stream()
                         .filter(rule -> RuleToolPresenter.containsKeyword(rule, nodes, keyword))

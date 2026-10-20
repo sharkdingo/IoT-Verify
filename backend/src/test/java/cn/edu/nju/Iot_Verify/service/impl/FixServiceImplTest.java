@@ -24,12 +24,16 @@ import cn.edu.nju.Iot_Verify.dto.model.TemplateSnapshotBundleDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import cn.edu.nju.Iot_Verify.dto.trace.TraceDto;
+import cn.edu.nju.Iot_Verify.dto.verification.VerificationRequestDto;
 import cn.edu.nju.Iot_Verify.exception.BadRequestException;
 import cn.edu.nju.Iot_Verify.exception.PersistedDataIntegrityException;
 import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
 import cn.edu.nju.Iot_Verify.exception.SmvGenerationException;
 import cn.edu.nju.Iot_Verify.po.TracePo;
 import cn.edu.nju.Iot_Verify.repository.TraceRepository;
+import cn.edu.nju.Iot_Verify.repository.VerificationTaskRepository;
+import cn.edu.nju.Iot_Verify.repository.projection.VerificationTraceContextProjection;
+import cn.edu.nju.Iot_Verify.po.VerificationTaskPo;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
@@ -45,6 +49,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.stubbing.Answer;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
@@ -59,6 +64,8 @@ import static org.mockito.Mockito.*;
 class FixServiceImplTest {
 
     @Mock private TraceRepository traceRepository;
+    @Mock private VerificationTaskRepository verificationTaskRepository;
+    @Mock private VerificationTraceContextProjection runContext;
     @Mock private TraceMapper traceMapper;
     @Mock private SmvGenerator smvGenerator;
     @Mock private RuleFixer ruleFixer;
@@ -68,6 +75,8 @@ class FixServiceImplTest {
     @Mock private FormalOperationAdmission formalOperationAdmission;
 
     private FixServiceImpl fixService;
+    private String persistedRequestJson;
+    private String persistedTemplateSnapshotsJson;
     private List<DeviceVerificationDto> currentDevices;
     private List<SpecificationDto> currentSpecs;
     private List<DeviceNodeDto> currentNodes;
@@ -76,6 +85,8 @@ class FixServiceImplTest {
 
     @BeforeEach
     void setUp() {
+        persistedRequestJson = null;
+        persistedTemplateSnapshotsJson = null;
         FixConfig fixConfig = new FixConfig();
         fixConfig.setMaxAttempts(20);
         lenient().when(formalOperationAdmission.execute(anyLong(), any()))
@@ -83,7 +94,7 @@ class FixServiceImplTest {
         lenient().when(fixSuggestionTokenService.verify(
                         anyLong(), anyLong(), anyString(), any(), anyString(), any()))
                 .thenAnswer(invocation -> invocation.getArgument(3));
-        fixService = new FixServiceImpl(traceRepository, traceMapper, smvGenerator, ruleFixer, fixConfig,
+        fixService = new FixServiceImpl(traceRepository, verificationTaskRepository, traceMapper, smvGenerator, ruleFixer, fixConfig,
                 boardStorageService, boardDataConverter, fixSuggestionTokenService, formalOperationAdmission);
         DeviceManifest manifest = DeviceManifest.builder().name("t1").build();
         currentDevices = List.of();
@@ -101,12 +112,36 @@ class FixServiceImplTest {
                 .thenAnswer(invocation -> currentModelSnapshot());
     }
 
+    private void stubPersistedTraceContext(TracePo po, TraceDto trace) {
+        stubRunContext(po);
+        when(traceMapper.readContext(po, runContext)).thenAnswer(invocation -> {
+            VerificationRequestDto request = JsonUtils.readPersistedJsonRequired(
+                    "verification run", 9L, "requestJson", persistedRequestJson,
+                    () -> JsonUtils.fromJson(persistedRequestJson, VerificationRequestDto.class));
+            return new TraceMapper.PersistedContext(trace, request, persistedTemplateSnapshotsJson);
+        });
+    }
+
+    private void setRunRequest(String json) {
+        persistedRequestJson = json;
+    }
+
+    private void setRunTemplates(String json) {
+        persistedTemplateSnapshotsJson = json;
+    }
+
+    private void stubRunContext(TracePo po) {
+        po.setVerificationTaskId(9L);
+        when(verificationTaskRepository.findTraceContextsByUserIdAndIdInAndStatus(
+                1L, List.of(9L), VerificationTaskPo.TaskStatus.COMPLETED)).thenReturn(List.of(runContext));
+    }
+
     private void attachTemplateSnapshot(TracePo po, String... deviceIds) {
         Map<String, ModelTokenSource> tokenSources = new java.util.LinkedHashMap<>();
         for (String deviceId : deviceIds) {
             tokenSources.put(deviceId, ModelTokenSource.BUNDLED);
         }
-        po.setTemplateSnapshotsJson(JsonUtils.toJson(TemplateSnapshotBundleDto.captured(
+        setRunTemplates(JsonUtils.toJson(TemplateSnapshotBundleDto.captured(
                 Map.of("t1", DeviceManifest.builder().name("t1").build()), tokenSources)));
     }
 
@@ -166,21 +201,54 @@ class FixServiceImplTest {
     }
 
     private void setupTraceContext() {
+        setupTraceContext(invocation -> FixResultDto.builder().fixable(false).build());
+    }
+
+    private void setupTraceContext(Answer<FixResultDto> fixAnswer) {
         TracePo po = new TracePo();
         po.setId(1L);
         po.setUserId(1L);
         attachTemplateSnapshot(po, "d1");
-        po.setRequestJson("{\"devices\":[{\"varName\":\"d1\",\"templateName\":\"t1\"}],"
+        setRunRequest("{\"devices\":[{\"varName\":\"d1\",\"templateName\":\"t1\"}],"
                 + "\"rules\":[],\"specs\":[],\"attackScenario\":{\"mode\":\"NONE\"},\"enablePrivacy\":false}");
         when(traceRepository.findByIdAndUserId(1L, 1L)).thenReturn(Optional.of(po));
 
         TraceDto traceDto = new TraceDto();
         traceDto.setViolatedSpecId("s0");
         traceDto.setModelComplete(true);
-        when(traceMapper.toDto(po)).thenReturn(traceDto);
+        stubPersistedTraceContext(po, traceDto);
         when(ruleFixer.fix(anyLong(), any(), any(), anyList(), anyList(), anyList(), anyList(),
-                anyMap(), anyLong(), any(AttackScenarioDto.class), anyBoolean(), any(), anyInt(), any()))
-                .thenReturn(FixResultDto.builder().fixable(false).build());
+                anyMap(), anyLong(), any(AttackScenarioDto.class), anyBoolean(), any(), anyInt(), any(), any(Runnable.class)))
+                .thenAnswer(fixAnswer);
+    }
+
+    @Test
+    void localizeFaultReusesDecodedRequestWithoutReadingRawJsonAgain() {
+        TracePo po = spy(new TracePo());
+        po.setId(1L);
+        po.setUserId(1L);
+        attachTemplateSnapshot(po, "d1");
+        VerificationRequestDto request = JsonUtils.fromJson(
+                "{\"devices\":[{\"varName\":\"d1\",\"templateName\":\"t1\"}],"
+                        + "\"rules\":[],\"specs\":[],\"attackScenario\":{\"mode\":\"NONE\"}}",
+                VerificationRequestDto.class);
+        setRunRequest(JsonUtils.toJson(request));
+        TraceDto trace = new TraceDto();
+        trace.setViolatedSpecId("s0");
+        trace.setStates(List.of());
+        trace.setModelComplete(true);
+        when(traceRepository.findByIdAndUserId(1L, 1L)).thenReturn(Optional.of(po));
+        stubRunContext(po);
+        when(traceMapper.readContext(po, runContext)).thenReturn(new TraceMapper.PersistedContext(trace, request, persistedTemplateSnapshotsJson));
+        when(ruleFixer.localizeFaults(anyList(), anyList(), any(), anyList(), anyMap()))
+                .thenReturn(List.of());
+
+        assertTrue(fixService.localizeFault(1L, 1L).getFaultRules().isEmpty());
+
+        verify(runContext, never()).getRequestJson();
+        verify(smvGenerator, atLeastOnce()).buildDeviceSmvMapFromTemplateSnapshots(
+                same(request.getDevices()), anyMap());
+        assertEquals(ModelTokenSource.BUNDLED, request.getDevices().get(0).getModelTokenSource());
     }
 
     @Test
@@ -222,10 +290,10 @@ class FixServiceImplTest {
         TracePo po = new TracePo();
         po.setId(1L);
         po.setUserId(1L);
-        po.setRequestJson("{\"devices\":[{\"varName\":\"sensor\",\"templateName\":\"t1\"}],"
+        setRunRequest("{\"devices\":[{\"varName\":\"sensor\",\"templateName\":\"t1\"}],"
                 + "\"rules\":[],\"specs\":[],\"enablePrivacy\":false}");
         when(traceRepository.findByIdAndUserId(1L, 1L)).thenReturn(Optional.of(po));
-        when(traceMapper.toDto(po)).thenReturn(new TraceDto());
+        stubPersistedTraceContext(po, new TraceDto());
 
         PersistedDataIntegrityException error = assertThrows(PersistedDataIntegrityException.class,
                 () -> fixService.localizeFault(1L, 1L));
@@ -240,21 +308,21 @@ class FixServiceImplTest {
         po.setId(1L);
         po.setUserId(1L);
         DeviceManifest manifest = DeviceManifest.builder().name("t1").build();
-        po.setTemplateSnapshotsJson(malformedSnapshot
+        setRunTemplates(malformedSnapshot
                 ? JsonUtils.toJson(Map.of("t1", manifest))
                 : tokenSources.containsValue(ModelTokenSource.UNKNOWN)
                 ? "{\"schemaVersion\":1,\"manifests\":{\"t1\":{\"Name\":\"t1\"}},"
                         + "\"modelTokenSourcesByDeviceId\":{\"sensor\":\"UNKNOWN\"}}"
                 : JsonUtils.toJson(TemplateSnapshotBundleDto.captured(
                         Map.of("t1", manifest), tokenSources)));
-        po.setRequestJson("{\"devices\":[{\"varName\":\"sensor\",\"templateName\":\"t1\"}],"
+        setRunRequest("{\"devices\":[{\"varName\":\"sensor\",\"templateName\":\"t1\"}],"
                 + "\"rules\":[],\"specs\":[],\"attackScenario\":{\"mode\":\"NONE\"},\"enablePrivacy\":false}");
         when(traceRepository.findByIdAndUserId(1L, 1L)).thenReturn(Optional.of(po));
 
         TraceDto trace = new TraceDto();
         trace.setViolatedSpecId("s0");
         trace.setModelComplete(true);
-        when(traceMapper.toDto(po)).thenReturn(trace);
+        stubPersistedTraceContext(po, trace);
         lenient().doAnswer(invocation -> {
                     List<DeviceVerificationDto> devices = invocation.getArgument(0);
                     DeviceVerificationDto input = devices.get(0);
@@ -281,6 +349,23 @@ class FixServiceImplTest {
     // ---- P0: strategies passthrough ----
 
     @Test
+    void fix_reportsComparisonOnlyAfterTheFixerVerifiesAnOption() {
+        java.util.List<cn.edu.nju.Iot_Verify.dto.model.InteractiveOperationStage> stages = new java.util.ArrayList<>();
+        setupTraceContext(invocation -> {
+                    assertFalse(stages.contains(cn.edu.nju.Iot_Verify.dto.model.InteractiveOperationStage.COMPARING_VERIFIED_OPTIONS));
+                    invocation.getArgument(14, Runnable.class).run();
+                    return FixResultDto.builder().fixable(false).build();
+                });
+        fixService.fix(1L, 1L, List.of("condition"), null, stages::add);
+        assertEquals(List.of(
+                cn.edu.nju.Iot_Verify.dto.model.InteractiveOperationStage.PREPARING_CONTEXT,
+                cn.edu.nju.Iot_Verify.dto.model.InteractiveOperationStage.PREPARING_MODEL,
+                cn.edu.nju.Iot_Verify.dto.model.InteractiveOperationStage.SEARCHING_AND_VERIFYING,
+                cn.edu.nju.Iot_Verify.dto.model.InteractiveOperationStage.COMPARING_VERIFIED_OPTIONS,
+                cn.edu.nju.Iot_Verify.dto.model.InteractiveOperationStage.FINALIZING), stages);
+    }
+
+    @Test
     void fix_nullStrategies_passesNullToRuleFixer() {
         setupTraceContext();
         fixService.fix(1L, 1L, null, null);
@@ -288,7 +373,7 @@ class FixServiceImplTest {
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<String>> captor = ArgumentCaptor.forClass(List.class);
         verify(ruleFixer).fix(anyLong(), any(), any(), anyList(), anyList(), anyList(), anyList(),
-                anyMap(), anyLong(), any(AttackScenarioDto.class), anyBoolean(), captor.capture(), anyInt(), any());
+                anyMap(), anyLong(), any(AttackScenarioDto.class), anyBoolean(), captor.capture(), anyInt(), any(), any(Runnable.class));
         assertNull(captor.getValue());
         verify(formalOperationAdmission).execute(eq(1L), any());
     }
@@ -301,7 +386,7 @@ class FixServiceImplTest {
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<String>> captor = ArgumentCaptor.forClass(List.class);
         verify(ruleFixer).fix(anyLong(), any(), any(), anyList(), anyList(), anyList(), anyList(),
-                anyMap(), anyLong(), any(AttackScenarioDto.class), anyBoolean(), captor.capture(), anyInt(), any());
+                anyMap(), anyLong(), any(AttackScenarioDto.class), anyBoolean(), captor.capture(), anyInt(), any(), any(Runnable.class));
         assertEquals(List.of("remove"), captor.getValue());
     }
 
@@ -337,7 +422,7 @@ class FixServiceImplTest {
         po.setId(1L);
         po.setUserId(1L);
         attachTemplateSnapshot(po, "d1");
-        po.setRequestJson("{\"devices\":[{\"varName\":\"d1\",\"templateName\":\"t1\"}],"
+        setRunRequest("{\"devices\":[{\"varName\":\"d1\",\"templateName\":\"t1\"}],"
                 + "\"rules\":[],\"specs\":[],\"attackScenario\":{\"mode\":\"NONE\"},\"enablePrivacy\":false}");
         when(traceRepository.findByIdAndUserId(1L, 1L)).thenReturn(Optional.of(po));
 
@@ -350,7 +435,7 @@ class FixServiceImplTest {
         traceDto.setViolatedSpecId("s0");
         traceDto.setStates(List.of());
         traceDto.setGenerationIssues(List.of(issue));
-        when(traceMapper.toDto(po)).thenReturn(traceDto);
+        stubPersistedTraceContext(po, traceDto);
         when(ruleFixer.localizeFaults(anyList(), anyList(), any(), any(), anyMap())).thenReturn(List.of());
 
         FaultLocalizationResultDto localization = fixService.localizeFault(1L, 1L);
@@ -364,7 +449,7 @@ class FixServiceImplTest {
         assertTrue(result.getStrategyAttempts().stream()
                 .allMatch(attempt -> "SKIPPED_INCOMPLETE_SOURCE_MODEL".equals(attempt.getStatus())));
         verify(ruleFixer, never()).fix(anyLong(), any(), any(), anyList(), anyList(), anyList(), anyList(),
-                anyMap(), anyLong(), any(AttackScenarioDto.class), anyBoolean(), any(), anyInt(), any());
+                anyMap(), anyLong(), any(AttackScenarioDto.class), anyBoolean(), any(), anyInt(), any(), any(Runnable.class));
 
         clearInvocations(smvGenerator);
         assertThrows(BadRequestException.class,
@@ -385,7 +470,7 @@ class FixServiceImplTest {
         po.setId(1L);
         po.setUserId(1L);
         attachTemplateSnapshot(po, "d1");
-        po.setRequestJson("{\"devices\":[{\"varName\":\"d1\",\"templateName\":\"t1\"}],"
+        setRunRequest("{\"devices\":[{\"varName\":\"d1\",\"templateName\":\"t1\"}],"
                 + "\"rules\":[],\"specs\":[],\"attackScenario\":{\"mode\":\"NONE\"},\"enablePrivacy\":false}");
         when(traceRepository.findByIdAndUserId(1L, 1L)).thenReturn(Optional.of(po));
 
@@ -393,7 +478,7 @@ class FixServiceImplTest {
         traceDto.setViolatedSpecId("s0");
         traceDto.setStates(List.of());
         traceDto.setModelComplete(false);
-        when(traceMapper.toDto(po)).thenReturn(traceDto);
+        stubPersistedTraceContext(po, traceDto);
         when(ruleFixer.localizeFaults(anyList(), anyList(), any(), any(), anyMap())).thenReturn(List.of());
 
         String targetId = "param_abcdefghijklmnopqrstuvwx";
@@ -414,16 +499,16 @@ class FixServiceImplTest {
         po.setId(1L);
         po.setUserId(1L);
         attachTemplateSnapshot(po, "d1");
-        po.setRequestJson("{\"devices\":[{\"varName\":\"d1\",\"templateName\":\"t1\"}],"
+        setRunRequest("{\"devices\":[{\"varName\":\"d1\",\"templateName\":\"t1\"}],"
                 + "\"environmentVariables\":[{\"name\":\"temperature\",\"value\":\"28\",\"trust\":\"trusted\",\"privacy\":\"public\"}],"
                 + "\"rules\":[],\"specs\":[],\"attackScenario\":{\"mode\":\"NONE\"},\"enablePrivacy\":false}");
         when(traceRepository.findByIdAndUserId(1L, 1L)).thenReturn(Optional.of(po));
         TraceDto traceDto = new TraceDto();
         traceDto.setViolatedSpecId("s0");
         traceDto.setModelComplete(true);
-        when(traceMapper.toDto(po)).thenReturn(traceDto);
+        stubPersistedTraceContext(po, traceDto);
         when(ruleFixer.fix(anyLong(), any(), any(), anyList(), anyList(), anyList(), anyList(),
-                anyMap(), anyLong(), any(AttackScenarioDto.class), anyBoolean(), any(), anyInt(), any()))
+                anyMap(), anyLong(), any(AttackScenarioDto.class), anyBoolean(), any(), anyInt(), any(), any(Runnable.class)))
                 .thenReturn(FixResultDto.builder().fixable(false).build());
 
         fixService.fix(1L, 1L, null, null);
@@ -431,7 +516,7 @@ class FixServiceImplTest {
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<BoardEnvironmentVariableDto>> envCaptor = ArgumentCaptor.forClass(List.class);
         verify(ruleFixer).fix(anyLong(), any(), any(), anyList(), anyList(), envCaptor.capture(), anyList(),
-                anyMap(), anyLong(), any(AttackScenarioDto.class), anyBoolean(), any(), anyInt(), any());
+                anyMap(), anyLong(), any(AttackScenarioDto.class), anyBoolean(), any(), anyInt(), any(), any(Runnable.class));
         assertEquals(1, envCaptor.getValue().size());
         assertEquals("temperature", envCaptor.getValue().get(0).getName());
         assertEquals("28", envCaptor.getValue().get(0).getValue());
@@ -484,7 +569,7 @@ class FixServiceImplTest {
         po.setId(1L);
         po.setUserId(1L);
         attachTemplateSnapshot(po, "d1");
-        po.setRequestJson("{\"devices\":[{\"varName\":\"d1\",\"templateName\":\"t1\"}],"
+        setRunRequest("{\"devices\":[{\"varName\":\"d1\",\"templateName\":\"t1\"}],"
                 + "\"rules\":[],\"specs\":[],\"attackScenario\":{\"mode\":\"NONE\"},\"enablePrivacy\":false}");
         when(traceRepository.findByIdAndUserId(1L, 1L)).thenReturn(Optional.of(po));
 
@@ -492,9 +577,9 @@ class FixServiceImplTest {
         traceDto.setViolatedSpecId("s0");
         traceDto.setCreatedAt(createdAt);
         traceDto.setModelComplete(true);
-        when(traceMapper.toDto(po)).thenReturn(traceDto);
+        stubPersistedTraceContext(po, traceDto);
         when(ruleFixer.fix(anyLong(), any(), any(), anyList(), anyList(), anyList(), anyList(),
-                anyMap(), anyLong(), any(AttackScenarioDto.class), anyBoolean(), any(), anyInt(), any()))
+                anyMap(), anyLong(), any(AttackScenarioDto.class), anyBoolean(), any(), anyInt(), any(), any(Runnable.class)))
                 .thenReturn(fixResult);
     }
 
@@ -616,7 +701,7 @@ class FixServiceImplTest {
         po.setId(1L);
         po.setUserId(1L);
         attachTemplateSnapshot(po, "sensor");
-        po.setRequestJson("{\"devices\":[{\"varName\":\"sensor\",\"templateName\":\"t1\"}],"
+        setRunRequest("{\"devices\":[{\"varName\":\"sensor\",\"templateName\":\"t1\"}],"
                 + "\"rules\":[{\"conditions\":[{\"deviceName\":\"sensor\",\"attribute\":\"temperature\","
                 + "\"relation\":\">\",\"value\":\"30\"}],\"command\":{\"deviceName\":\"sensor\",\"action\":\"on\"},"
                 + "\"ruleString\":\"r0\"}],\"specs\":[],\"attackScenario\":{\"mode\":\"NONE\"},\"enablePrivacy\":false}");
@@ -626,7 +711,7 @@ class FixServiceImplTest {
         traceDto.setViolatedSpecId("s0");
         traceDto.setCreatedAt(createdAt);
         traceDto.setModelComplete(true);
-        when(traceMapper.toDto(po)).thenReturn(traceDto);
+        stubPersistedTraceContext(po, traceDto);
 
         // By default the current board matches the snapshot (no spec/device drift). Tests that exercise
         // drift override these stubs.
@@ -773,7 +858,7 @@ class FixServiceImplTest {
     }
 
     @Test
-    void applyFix_remove_permanentlyRemovesFlaggedRule() {
+    void applyFix_remove_removesFlaggedRule() {
         setupApplyContextSingleRule();
         FixSuggestionDto remove = FixSuggestionDto.builder()
                 .strategy("remove")
@@ -785,6 +870,8 @@ class FixServiceImplTest {
 
         assertTrue(result.isApplied());
         assertTrue(result.getRules().isEmpty());
+        assertEquals("Removed 1 automation rule(s) using the signed verification evidence after drift checks.",
+                result.getMessage());
     }
 
     // ---- spec/device-only drift guard (the recompute replays the stored context, so it cannot see
@@ -888,7 +975,7 @@ class FixServiceImplTest {
         po.setId(1L);
         po.setUserId(1L);
         attachTemplateSnapshot(po, "_1lamp");
-        po.setRequestJson("{\"devices\":[{\"varName\":\"_1lamp\",\"templateName\":\"t1\"}],"
+        setRunRequest("{\"devices\":[{\"varName\":\"_1lamp\",\"templateName\":\"t1\"}],"
                 + "\"rules\":[{\"conditions\":[{\"deviceName\":\"_1lamp\",\"attribute\":\"state\","
                 + "\"targetType\":\"state\",\"relation\":\"=\",\"value\":\"on\"}],\"command\":{\"deviceName\":\"_1lamp\",\"action\":\"off\"},"
                 + "\"ruleString\":\"r0\"}],\"specs\":[],\"attackScenario\":{\"mode\":\"NONE\"},\"enablePrivacy\":false}");
@@ -896,7 +983,7 @@ class FixServiceImplTest {
         TraceDto traceDto = new TraceDto();
         traceDto.setViolatedSpecId("s0");
         traceDto.setModelComplete(true);
-        when(traceMapper.toDto(po)).thenReturn(traceDto);
+        stubPersistedTraceContext(po, traceDto);
         // No spec/device drift: current board mirrors the snapshot device (raw node id 1Lamp).
         DeviceVerificationDto dev = new DeviceVerificationDto();
         dev.setVarName("1Lamp");
@@ -927,7 +1014,7 @@ class FixServiceImplTest {
         po.setId(1L);
         po.setUserId(1L);
         attachTemplateSnapshot(po, "_1lamp");
-        po.setRequestJson("{\"devices\":[{\"varName\":\"_1lamp\",\"templateName\":\"t1\"}],"
+        setRunRequest("{\"devices\":[{\"varName\":\"_1lamp\",\"templateName\":\"t1\"}],"
                 + "\"rules\":[{\"conditions\":[{\"deviceName\":\"_1lamp\",\"attribute\":\"state\","
                 + "\"targetType\":\"state\",\"relation\":\"=\",\"value\":\"on\"}],\"command\":{\"deviceName\":\"_1lamp\",\"action\":\"off\"},"
                 + "\"ruleString\":\"r0\"}],\"specs\":[],\"attackScenario\":{\"mode\":\"NONE\"},\"enablePrivacy\":false}");
@@ -935,7 +1022,7 @@ class FixServiceImplTest {
         TraceDto traceDto = new TraceDto();
         traceDto.setViolatedSpecId("s0");
         traceDto.setModelComplete(true);
-        when(traceMapper.toDto(po)).thenReturn(traceDto);
+        stubPersistedTraceContext(po, traceDto);
 
         DeviceVerificationDto dev = new DeviceVerificationDto();
         // Model-boundary devices carry the NuSMV-safe varName; the persisted canvas node below

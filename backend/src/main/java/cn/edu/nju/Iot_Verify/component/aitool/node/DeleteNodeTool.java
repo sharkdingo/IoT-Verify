@@ -76,7 +76,7 @@ public class DeleteNodeTool extends AbstractAiTool {
                 return e.getErrorResponse();
             }
             requireOnlyFields(args, "arguments", Set.of("id", "confirmed", "impactToken"));
-            String id = requiredTextField(args, "id", "arguments");
+            String id = requiredDeviceIdField(args, "id", "arguments");
 
             boolean confirmed = booleanArg(args, "confirmed", false);
             DeviceDeletionResultDto preview = boardStorageService.previewNodeDeletion(userId, id);
@@ -91,7 +91,8 @@ public class DeleteNodeTool extends AbstractAiTool {
                     "domainImpactToken", currentImpactToken);
             if (!confirmed || !UserContextHolder.isDestructiveActionConfirmed()) {
                 String confirmationToken = destructiveActionGuard.issue(
-                        userId, getName(), id, bindingSnapshot, currentImpactToken);
+                        userId, getName(), id,
+                        preview.getDeletedDevice().getLabel(), bindingSnapshot, currentImpactToken);
                 Map<String, Object> response = previewResponse(previewSummary, confirmationToken);
                 return readOnlySuccessJson(response, "Device deletion preview unavailable.");
             }
@@ -105,7 +106,8 @@ public class DeleteNodeTool extends AbstractAiTool {
                     userId, getName(), id, suppliedImpactToken, bindingSnapshot);
             if (!confirmation.approved()) {
                 String freshToken = destructiveActionGuard.issue(
-                        userId, getName(), id, bindingSnapshot, currentImpactToken);
+                        userId, getName(), id,
+                        preview.getDeletedDevice().getLabel(), bindingSnapshot, currentImpactToken);
                 return errorJson(confirmation.message(), confirmation.errorCode(), 409, Map.of(
                         "requiresUserConfirmation", true,
                         "currentPreview", previewResponse(previewSummary, freshToken)));

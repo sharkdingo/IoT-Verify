@@ -1,6 +1,5 @@
 package cn.edu.nju.Iot_Verify.service;
 
-import cn.edu.nju.Iot_Verify.dto.chat.ChatMessageResponseDto;
 import cn.edu.nju.Iot_Verify.dto.chat.ChatHistoryPageDto;
 import cn.edu.nju.Iot_Verify.dto.chat.ChatConfirmationCommandDto;
 import cn.edu.nju.Iot_Verify.dto.chat.ChatPendingConfirmationDto;
@@ -13,7 +12,6 @@ import java.util.List;
 public interface ChatService {
     List<ChatSessionResponseDto> getUserSessions(Long userId);
     ChatSessionResponseDto createSession(Long userId);
-    List<ChatMessageResponseDto> getHistory(Long userId, String sessionId);
     ChatHistoryPageDto getHistoryPage(Long userId, String sessionId, Long beforeId, int limit);
     void markTerminalSeen(Long userId, String sessionId, Long terminalMessageId);
     void deleteSession(Long userId, String sessionId);

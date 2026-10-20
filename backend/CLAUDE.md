@@ -44,11 +44,12 @@ is worse than stale. Judge a JVM's staleness by your modified `.java` mtimes, ne
 ## Conventions (hard rules)
 
 Base package `cn.edu.nju.Iot_Verify` (entry point `IotVerifyApplication`); the package layout and
-the 53 AI tools are mapped in
+the registered AI tools are mapped in
 [../docs/architecture/overview.md](../docs/architecture/overview.md).
 
-- Controllers return `Result<T>`; use `Result.success()` for void. SSE endpoints return
-  `SseEmitter` directly (not wrapped). The `@CurrentUser` param is always `Long userId`.
+- JSON controllers return `Result<T>`; use `Result.success()` for void. SSE and SMV
+  downloads use their own response representations; see [API conventions](../docs/api/overview.md).
+  The `@CurrentUser` param is always `Long userId`.
 - **Never expose PO entities** — always map to DTOs.
 - Read methods are `@Transactional(readOnly = true)`.
 - Exceptions map via `GlobalExceptionHandler` (masks internal messages). Throw the
@@ -184,8 +185,9 @@ the 53 AI tools are mapped in
   line boundary, and gets a much larger budget. Its identifier redaction requires a digit in the
   tail — without that it rewrote ordinary English ("rule-based", "device-level") as
   `[internal reference]`, corrupting the very explanation it protected. The planning prompt asks the
-  model to *do* the reasoning — decompose, cite observed board state, name a rejected alternative on
-  a judgement call, verify its own outcome — not to narrate the calls it is about to make. A round
+  model to give a short public explanation promptly and put the complete analysis after the necessary
+  evidence: cite observed board state, address material alternatives, and verify its own outcome.
+  Repeated pre-tool plans delay the first useful update without adding evidence. A round
   that returns no reasoning is reported as returning none; never substitute wording that implies
   reasoning happened.
 - **AI rule/spec tools are node-id authoritative.** Recommendation prompts and parsed

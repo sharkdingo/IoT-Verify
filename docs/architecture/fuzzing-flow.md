@@ -4,7 +4,7 @@ Architecture and semantic boundary for the HAFuzz-inspired bounded search module
 API fields and endpoints are owned by [../api/fuzzing.md](../api/fuzzing.md); formal
 model semantics remain owned by [nusmv-model.md](nusmv-model.md).
 
-Verified against code on 2026-09-30. Source: `component/fuzz/`,
+Verified against code on 2026-10-08. Source: `component/fuzz/`,
 `service/impl/FuzzServiceImpl.java`, `po/FuzzTaskPo.java`, and
 `po/FuzzFindingPo.java`.
 
@@ -82,7 +82,9 @@ Canvas coordinates and dimensions do not invalidate a semantic preview.
    become itemized ineligibility; they are never treated as satisfied. The persisted
    `explorationMode` then selects one of two bounded search strategies.
 5. `BOARD_SNAPSHOT` uses one `SplittableRandom` seeded by `effectiveSeed` to create a
-   decision-genome population from the authored Board initial state. A genome
+   decision-genome population from the authored Board initial state. Missing local
+   runtime overrides use the same [initial-value authority as the formal model](nusmv-model.md);
+   present invalid overrides remain model errors. A genome
    deterministically selects bounded environment/device-variable choices. Only decoded
    decisions with more than one semantic successor are mutation targets; every twentieth
    offspring is a deterministic random restart.

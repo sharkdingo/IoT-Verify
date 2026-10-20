@@ -22,19 +22,11 @@ import {
   validateFuzzPaperDomainPreview,
   validateFuzzWorkloadPreview
 } from '@/utils/fuzzingResponse'
-import { validateTaskCancellationResult, validateTaskProgress } from '@/utils/runResponse'
+import { validateTaskCancellationResult } from '@/utils/runResponse'
 
 const unpack = <T>(response: any): T => response.data.data
 
 export default {
-  getCurrentModelFingerprint: async (): Promise<string> => {
-    const fingerprint = unpack<unknown>(await api.get('/fuzz/model-fingerprint'))
-    if (!isValidFuzzPaperDomainFingerprint(fingerprint)) {
-      throw new TypeError('The current Board model fingerprint is invalid')
-    }
-    return fingerprint
-  },
-
   previewPaperDomain: async (pathLength: number): Promise<FuzzPaperDomainPreview> =>
     validateFuzzPaperDomainPreview(
       unpack<unknown>(await api.post('/fuzz/paper-domain/preview', { pathLength })),
@@ -81,12 +73,6 @@ export default {
 
   getTask: async (taskId: number): Promise<FuzzingTask> =>
     validateFuzzingTask(unpack<unknown>(await api.get(`/fuzz/tasks/${taskId}`))),
-
-  getTaskProgress: async (taskId: number): Promise<number> =>
-    validateTaskProgress(
-      unpack<unknown>(await api.get(`/fuzz/tasks/${taskId}/progress`)),
-      'Fuzz task progress'
-    ),
 
   cancelTask: async (taskId: number): Promise<TaskCancellationResult> =>
     validateTaskCancellationResult(

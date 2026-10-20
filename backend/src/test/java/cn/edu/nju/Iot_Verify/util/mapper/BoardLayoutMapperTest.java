@@ -113,11 +113,19 @@ class BoardLayoutMapperTest {
     }
 
     @Test
-    void toEntity_clampsCanvasZoomBounds() {
+    void toEntity_preservesOverviewZoomAndNormalizesInvalidZoom() {
         BoardLayoutDto layout = new BoardLayoutDto();
 
         layout.setCanvasZoom(0.01);
-        assertEquals(0.4, mapper.toEntity(layout, 9L, 7L).getCanvasZoom());
+        BoardLayoutPo overview = mapper.toEntity(layout, 9L, 7L);
+        assertEquals(0.01, overview.getCanvasZoom());
+        assertEquals(0.01, mapper.toDto(overview).getCanvasZoom());
+
+        layout.setCanvasZoom(0.0);
+        assertEquals(1.0, mapper.toEntity(layout, 9L, 7L).getCanvasZoom());
+
+        layout.setCanvasZoom(-0.1);
+        assertEquals(1.0, mapper.toEntity(layout, 9L, 7L).getCanvasZoom());
 
         layout.setCanvasZoom(9.0);
         assertEquals(2.0, mapper.toEntity(layout, 9L, 7L).getCanvasZoom());
@@ -135,6 +143,25 @@ class BoardLayoutMapperTest {
 
         assertEquals(-1_000_000.0, po.getCanvasPanX());
         assertEquals(0.0, po.getCanvasPanY());
+    }
+
+    @Test
+    void environmentSection_roundTripsOnlyInInspector() {
+        BoardLayoutDto layout = new BoardLayoutDto();
+        BoardLayoutDto.Panels panels = new BoardLayoutDto.Panels();
+        BoardLayoutDto.PanelLayout inspector = new BoardLayoutDto.PanelLayout();
+        inspector.setActiveSection("environment");
+        panels.setInspector(inspector);
+        BoardLayoutDto.PanelLayout control = new BoardLayoutDto.PanelLayout();
+        control.setActiveSection("environment");
+        panels.setControl(control);
+        layout.setPanels(panels);
+
+        BoardLayoutPo po = mapper.toEntity(layout, 9L, 7L);
+
+        assertEquals("environment", po.getInspectorPanelActiveSection());
+        assertEquals("environment", mapper.toDto(po).getPanels().getInspector().getActiveSection());
+        assertEquals("templates", po.getControlPanelActiveSection());
     }
 
     @Test

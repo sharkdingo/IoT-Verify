@@ -10,6 +10,7 @@ import cn.edu.nju.Iot_Verify.dto.device.DeviceLayoutDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceRuntimeConfigDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceRuntimeUpdateDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceUpdateResultDto;
+import cn.edu.nju.Iot_Verify.dto.device.DeviceJournalSnapshot;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
 import cn.edu.nju.Iot_Verify.dto.device.VariableStateDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
@@ -51,6 +52,8 @@ import cn.edu.nju.Iot_Verify.util.mapper.SpecificationMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.ArgumentCaptor;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -77,6 +80,8 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.same;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -146,11 +151,9 @@ class BoardStorageServiceImplBatchTest {
                 confirmedBatch(service, new BoardBatchDto(List.of(node), List.of(rule), List.of(spec))));
 
         assertTrue(result != null);
-        // All three replaced within the single transaction. Rules are asserted through the mapper
-        // rather than a deleteByUserId: saveRulesInternal is identity-preserving, so it reconciles
-        // against the existing list instead of clearing it.
-        verify(nodeRepo).deleteByUserId(1L);
-        verify(specRepo).deleteByUserId(1L);
+        // All three collections reconcile identities within the single transaction.
+        verify(nodeRepo).saveAll(any());
+        verify(specRepo).saveAll(any());
         verify(ruleMapper).toEntity(rule, 1L);
         verify(transactionTemplate, times(2)).execute(any());
         // Scene replacement rewrites every collection, so no recorded per-record inverse still
@@ -166,8 +169,8 @@ class BoardStorageServiceImplBatchTest {
 
         assertTrue(error.getErrors().containsKey("nodes"));
         assertTrue(error.getErrors().containsKey("specs"));
-        verify(nodeRepo, never()).deleteByUserId(anyLong());
-        verify(specRepo, never()).deleteByUserId(anyLong());
+        verify(nodeRepo, never()).deleteAll(any());
+        verify(specRepo, never()).deleteAll(any());
     }
 
     @Test
@@ -179,7 +182,7 @@ class BoardStorageServiceImplBatchTest {
                 ValidationException.class, () -> service.saveBoardBatch(1L, oversized));
 
         assertTrue(error.getErrors().containsKey("nodes"));
-        verify(nodeRepo, never()).deleteByUserId(anyLong());
+        verify(nodeRepo, never()).deleteAll(any());
     }
 
     @Test
@@ -192,7 +195,7 @@ class BoardStorageServiceImplBatchTest {
                 () -> service.addNodes(1L, List.of(new DeviceNodeDto()), List.of()));
 
         assertTrue(error.getMessage().contains("at most 100 devices"));
-        verify(nodeRepo, never()).deleteByUserId(anyLong());
+        verify(nodeRepo, never()).deleteAll(any());
     }
 
     @Test
@@ -210,8 +213,58 @@ class BoardStorageServiceImplBatchTest {
                 () -> service.renameNode(1L, "device-1", "My new name", "Original name"));
 
         assertTrue(error.getMessage().contains("changed after the rename dialog was opened"));
-        verify(nodeRepo, never()).deleteByUserId(anyLong());
+        verify(nodeRepo, never()).deleteAll(any());
         verify(nodeRepo, never()).save(any());
+    }
+
+    @Test
+    void renameNode_decodesSpecificationsOnceAndKeepsDistinctJournalDisplayCaches() {
+        SpecificationMapper realSpecificationMapper = spy(new SpecificationMapper());
+        var realService = new BoardStorageServiceImpl(
+                nodeRepo, null, specRepo, ruleRepo, null, deviceTemplateRepo, null,
+                transactionTemplate, null, realSpecificationMapper, ruleMapper, new DeviceNodeMapper(),
+                null, new DeviceTemplateMapper(), null, userRepository, editJournal);
+        DeviceNodePo node = DeviceNodePo.builder().id("switch_1").userId(1L).templateName("Switch")
+                .label("Original name").posX(0.0).posY(0.0).width(176).height(128).state("off").build();
+        var manifest = DeviceTemplateDto.DeviceManifest.builder().name("Switch").modes(List.of("Power"))
+                .initState("off").workingStates(List.of(workingState("off"), workingState("on")))
+                .apis(List.of()).build();
+        var template = DeviceTemplatePo.builder().userId(1L).name("Switch")
+                .manifestJson(JsonUtils.toJson(manifest)).build();
+        SpecConditionDto condition = new SpecConditionDto();
+        condition.setDeviceId("switch_1");
+        condition.setDeviceLabel("Original name");
+        condition.setTargetType("state");
+        condition.setKey("state");
+        condition.setRelation("=");
+        condition.setValue("on");
+        SpecificationDto original = new SpecificationDto();
+        original.setId("spec-1");
+        original.setTemplateId("1");
+        original.setAConditions(List.of(condition));
+        original.setDevices(List.of(new SpecificationDto.DeviceRefDto("switch_1", "Original name", List.of())));
+        SpecificationPo originalPo = new SpecificationMapper().toEntity(original, 1L);
+        when(nodeRepo.findByUserId(1L)).thenReturn(List.of(node));
+        when(nodeRepo.findById(new DeviceNodeId("switch_1", 1L))).thenReturn(Optional.of(node));
+        when(nodeRepo.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(template));
+        when(specRepo.findByUserId(1L)).thenReturn(List.of(originalPo));
+
+        var result = realService.renameNode(1L, "switch_1", "New name", "Original name");
+
+        assertEquals(1, result.getUpdatedSpecificationCount());
+        assertEquals("New name", result.getCurrentSpecifications().get(0).getAConditions().get(0).getDeviceLabel());
+        assertTrue(result.getCurrentSpecifications().get(0).getFormula().contains("New name"));
+        verify(realSpecificationMapper).toDto(same(originalPo));
+        verify(specRepo, times(2)).findByUserId(1L);
+        var before = ArgumentCaptor.forClass(DeviceJournalSnapshot.class);
+        var after = ArgumentCaptor.forClass(DeviceJournalSnapshot.class);
+        verify(editJournal).record(eq(1L), eq(BoardEditEntityType.DEVICE), eq(BoardEditOperation.UPDATE),
+                eq("switch_1"), before.capture(), after.capture());
+        assertEquals("Original name", before.getValue().getSpecs().get(0).getSpec()
+                .getAConditions().get(0).getDeviceLabel());
+        assertEquals("New name", after.getValue().getSpecs().get(0).getSpec()
+                .getAConditions().get(0).getDeviceLabel());
     }
 
     @Test
@@ -236,7 +289,7 @@ class BoardStorageServiceImplBatchTest {
                 .command(command)
                 .ruleString("Motion starts alarm")
                 .build();
-        when(ruleRepo.findByUserId(1L)).thenReturn(List.of(stored), List.of());
+        when(ruleRepo.findByUserIdOrderByExecutionOrderAscIdAsc(1L)).thenReturn(List.of(stored), List.of());
         when(ruleMapper.toDto(stored)).thenReturn(current);
 
         service.removeRuleIfUnchanged(1L, 9L, expected);
@@ -268,7 +321,7 @@ class BoardStorageServiceImplBatchTest {
         assertThrows(ConflictException.class,
                 () -> service.removeSpecIfUnchanged(1L, "spec-9", expected));
 
-        verify(specRepo, never()).deleteByUserId(anyLong());
+        verify(specRepo, never()).deleteAll(any());
     }
 
     @Test
@@ -302,10 +355,10 @@ class BoardStorageServiceImplBatchTest {
 
         assertEquals("claimed NAME", error.getRequestedLabel());
         assertEquals("claimed NAME_1", error.getSuggestedLabel());
-        verify(nodeRepo, never()).deleteByUserId(anyLong());
+        verify(nodeRepo, never()).deleteAll(any());
         verify(nodeRepo, never()).save(any());
         verify(nodeRepo, never()).saveAll(any());
-        verify(specRepo, never()).deleteByUserId(anyLong());
+        verify(specRepo, never()).deleteAll(any());
         verify(specRepo, never()).saveAll(any());
     }
 
@@ -332,7 +385,7 @@ class BoardStorageServiceImplBatchTest {
                 BadRequestException.class, () -> service.addSpec(1L, new SpecificationDto()));
 
         assertTrue(error.getMessage().contains("at most 100 specifications"));
-        verify(specRepo, never()).deleteByUserId(anyLong());
+        verify(specRepo, never()).deleteAll(any());
     }
 
     @Test
@@ -356,10 +409,10 @@ class BoardStorageServiceImplBatchTest {
 
         assertEquals(2, error.getCurrentPreview().getDeviceCount());
         assertTrue(!preview.getImpactToken().equals(error.getCurrentPreview().getImpactToken()));
-        verify(nodeRepo, never()).deleteByUserId(anyLong());
-        verify(environmentRepo, never()).deleteByUserId(anyLong());
+        verify(nodeRepo, never()).deleteAll(any());
+        verify(environmentRepo, never()).deleteAll(any());
         verify(ruleRepo, never()).saveAll(any());
-        verify(specRepo, never()).deleteByUserId(anyLong());
+        verify(specRepo, never()).deleteAll(any());
     }
 
     @Test
@@ -379,7 +432,7 @@ class BoardStorageServiceImplBatchTest {
         assertEquals(2, error.getCurrentPreview().getEditHistoryEntryCount());
         assertTrue(!preview.getImpactToken().equals(error.getCurrentPreview().getImpactToken()));
         verify(editJournal, never()).clear(anyLong());
-        verify(nodeRepo, never()).deleteByUserId(anyLong());
+        verify(nodeRepo, never()).deleteAll(any());
     }
 
     @Test
@@ -704,7 +757,7 @@ class BoardStorageServiceImplBatchTest {
         assertEquals("26", savedEnvironment.getValue());
         assertEquals("untrusted", savedEnvironment.getTrust());
         assertEquals("private", savedEnvironment.getPrivacy());
-        verify(environmentRepo, atLeastOnce()).deleteByUserId(1L);
+        verify(environmentRepo, never()).deleteAll(any());
         verify(environmentRepo, atLeastOnce()).saveAll(argThat(saved -> {
             for (BoardEnvironmentVariablePo po : saved) {
                 if ("temperature".equals(po.getName())
@@ -760,7 +813,7 @@ class BoardStorageServiceImplBatchTest {
         assertTrue(message.contains("natural-change-rate mismatch"), message);
         assertTrue(message.contains("Hallway sensor"), message);
         assertTrue(message.contains("Patio sensor"), message);
-        verify(nodeRepo, never()).deleteByUserId(1L);
+        verify(nodeRepo, never()).deleteAll(any());
     }
 
     @Test
@@ -913,7 +966,7 @@ class BoardStorageServiceImplBatchTest {
         assertTrue(reason.contains("Living-room sensor"), reason);
         assertTrue(reason.contains("shared environment value 'temperature'"), reason);
         assertTrue(reason.contains("display name may stay unchanged"), reason);
-        verify(nodeRepo, never()).deleteByUserId(1L);
+        verify(nodeRepo, never()).deleteAll(any());
     }
 
     @Test
@@ -950,7 +1003,7 @@ class BoardStorageServiceImplBatchTest {
 
         String reason = error.getErrors().get("nodes[0].id");
         assertTrue(reason.contains("rule playback tracking"), reason);
-        verify(nodeRepo, never()).deleteByUserId(1L);
+        verify(nodeRepo, never()).deleteAll(any());
     }
 
     private static DeviceNodeDto boardNode(String id, String templateName, String label) {
@@ -1030,7 +1083,7 @@ class BoardStorageServiceImplBatchTest {
 
         assertTrue(error.getErrors().values().stream()
                 .anyMatch(message -> message.contains("missing required environment variables")));
-        verify(nodeRepo, never()).deleteByUserId(1L);
+        verify(nodeRepo, never()).deleteAll(any());
 
         batch.setEnvironmentVariables(List.of(
                 new BoardEnvironmentVariableDto("temperature", null, "trusted", "public")));
@@ -1039,7 +1092,7 @@ class BoardStorageServiceImplBatchTest {
                 () -> serviceWithEnvironment.saveBoardBatch(1L, batch));
         assertTrue(missingValue.getErrors().get("environmentVariables[0].value")
                 .contains("explicit and non-blank"));
-        verify(nodeRepo, never()).deleteByUserId(1L);
+        verify(nodeRepo, never()).deleteAll(any());
     }
 
     @Test
@@ -1256,7 +1309,7 @@ class BoardStorageServiceImplBatchTest {
 
         assertEquals("humidity", conflict.getVariableName());
         assertEquals("40", conflict.getCurrentVariable().getValue());
-        verify(environmentRepo, never()).deleteByUserId(anyLong());
+        verify(environmentRepo, never()).deleteAll(any());
         verify(environmentRepo, never()).saveAll(any());
     }
 
@@ -1305,7 +1358,7 @@ class BoardStorageServiceImplBatchTest {
 
         assertEquals("removedVariable", conflict.getVariableName());
         assertNull(conflict.getCurrentVariable());
-        verify(environmentRepo, never()).deleteByUserId(anyLong());
+        verify(environmentRepo, never()).deleteAll(any());
         verify(environmentRepo, never()).saveAll(any());
     }
 
@@ -1329,7 +1382,7 @@ class BoardStorageServiceImplBatchTest {
 
         assertEquals("Expected environment variable value is required",
                 error.getErrors().get("environmentUpdates[0].expected.value"));
-        verify(environmentRepo, never()).deleteByUserId(anyLong());
+        verify(environmentRepo, never()).deleteAll(any());
         verify(environmentRepo, never()).saveAll(any());
     }
 
@@ -1407,7 +1460,7 @@ class BoardStorageServiceImplBatchTest {
 
         assertEquals(DeviceLayoutDto.MAX_WIDTH, saved.get(0).getWidth());
         assertEquals(DeviceLayoutDto.MIN_HEIGHT, saved.get(0).getHeight());
-        verify(nodeRepo).deleteByUserId(1L);
+        verify(nodeRepo).saveAll(any());
     }
 
     /**
@@ -1524,16 +1577,17 @@ class BoardStorageServiceImplBatchTest {
                         confirmedBatch(service, new BoardBatchDto(List.of(node), List.of(), List.of()))));
 
         assertEquals("Width must be within 80..2000", error.getErrors().get("nodes[0].width"));
-        verify(nodeRepo, never()).deleteByUserId(1L);
+        verify(nodeRepo, never()).deleteAll(any());
     }
 
     @Test
     void updateNodeRuntime_changesOnlyDeviceLocalRuntimeFields() {
         DeviceNodeMapper realMapper = new DeviceNodeMapper();
+        DeviceTemplateMapper templateMapper = spy(new DeviceTemplateMapper());
         BoardStorageServiceImpl serviceWithRealMapper = new BoardStorageServiceImpl(
                 nodeRepo, null, specRepo, ruleRepo, null, deviceTemplateRepo, null,
                 transactionTemplate, null, specificationMapper, ruleMapper, realMapper,
-                null, new DeviceTemplateMapper(), null, userRepository, editJournal);
+                null, templateMapper, null, userRepository, editJournal);
         DeviceNodePo stored = DeviceNodePo.builder()
                 .id("switch_1")
                 .userId(1L)
@@ -1589,6 +1643,8 @@ class BoardStorageServiceImplBatchTest {
         assertEquals(20.0, result.getCurrentDevice().getPosition().getY());
         assertEquals(176, result.getCurrentDevice().getWidth());
         assertEquals(128, result.getCurrentDevice().getHeight());
+        verify(deviceTemplateRepo).findByUserId(1L);
+        verify(templateMapper).toDto(template);
 
         // A later write is visible after the user-row lock; the old baseline must no longer apply.
         assertThrows(DeviceRuntimeConflictException.class, () ->
@@ -1910,7 +1966,7 @@ class BoardStorageServiceImplBatchTest {
                 () -> serviceWithTemplates.addSpec(1L, spec));
 
         assertTrue(error.getErrors().values().stream().anyMatch(message -> message.contains("has no EndState")));
-        verify(specRepo, never()).deleteByUserId(1L);
+        verify(specRepo, never()).deleteAll(any());
     }
 
     @Test
@@ -1947,9 +2003,9 @@ class BoardStorageServiceImplBatchTest {
 
         assertThrows(ConflictException.class, () -> serviceWithTemplates.saveBoardBatch(
                 1L, confirmedBatch(serviceWithTemplates, batch)));
-        verify(nodeRepo, never()).deleteByUserId(1L);
+        verify(nodeRepo, never()).deleteAll(any());
         verify(ruleRepo, never()).saveAll(any());
-        verify(specRepo, never()).deleteByUserId(1L);
+        verify(specRepo, never()).deleteAll(any());
     }
 
     @Test
@@ -1982,9 +2038,9 @@ class BoardStorageServiceImplBatchTest {
         assertTrue(error.getMessage().contains("must exactly match manifest.Name"));
         assertTrue(error.getMessage().contains("cannot rename"));
         verifyNoInteractions(deviceTemplateRepo);
-        verify(nodeRepo, never()).deleteByUserId(1L);
+        verify(nodeRepo, never()).deleteAll(any());
         verify(ruleRepo, never()).saveAll(any());
-        verify(specRepo, never()).deleteByUserId(1L);
+        verify(specRepo, never()).deleteAll(any());
     }
 
     @Test
@@ -1997,8 +2053,67 @@ class BoardStorageServiceImplBatchTest {
                 () -> service.saveBoardBatch(1L, batch));
 
         assertTrue(error.getErrors().containsKey("environmentVariables"));
-        verify(nodeRepo, never()).deleteByUserId(1L);
-        verify(specRepo, never()).deleteByUserId(1L);
+        verify(nodeRepo, never()).deleteAll(any());
+        verify(specRepo, never()).deleteAll(any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"enum", "numeric"})
+    void saveBoardBatch_usesSubmittedEnvironmentWhenTheReplacementChangesADomain(String domainType) {
+        var serviceWithEnvironment = new BoardStorageServiceImpl(
+                nodeRepo, environmentRepo, specRepo, ruleRepo, null, deviceTemplateRepo, null,
+                transactionTemplate, null, new SpecificationMapper(), new RuleMapper(), new DeviceNodeMapper(),
+                null, new DeviceTemplateMapper(), null, userRepository, editJournal);
+        boolean discrete = "enum".equals(domainType);
+        String variableName = discrete ? "motion" : "temperature";
+        String previousValue = discrete ? "active" : "90";
+        String nextValue = discrete ? "clear" : "20";
+        var declaration = DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
+                .name(variableName).isInside(false).reads(true).trust("trusted").privacy("public");
+        if (discrete) {
+            declaration.values(List.of("detected", "clear"));
+        } else {
+            declaration.lowerBound(0).upperBound(30).naturalChangeRate("0");
+        }
+        var manifest = DeviceTemplateDto.DeviceManifest.builder()
+                .name("Replacement sensor").modes(List.of()).initState("")
+                .internalVariables(List.of(declaration.build())).build();
+        var template = DeviceTemplatePo.builder().userId(1L).name(manifest.getName())
+                .manifestJson(JsonUtils.toJson(manifest)).build();
+        var previousDeclaration = DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
+                .name(variableName).isInside(false).reads(true).trust("untrusted").privacy("private");
+        if (discrete) {
+            previousDeclaration.values(List.of("active", "inactive"));
+        } else {
+            previousDeclaration.lowerBound(0).upperBound(100).naturalChangeRate("0");
+        }
+        var previousManifest = DeviceTemplateDto.DeviceManifest.builder().name("Previous sensor")
+                .modes(List.of()).initState("").internalVariables(List.of(previousDeclaration.build())).build();
+        var previousTemplate = DeviceTemplatePo.builder().userId(1L).name(previousManifest.getName())
+                .manifestJson(JsonUtils.toJson(previousManifest)).build();
+        var previous = BoardEnvironmentVariablePo.builder().userId(1L).name(variableName)
+                .value(previousValue).trust("untrusted").privacy("private").build();
+        when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(previousTemplate, template));
+        when(nodeRepo.findByUserId(1L)).thenReturn(List.of(new DeviceNodeMapper().toEntity(
+                boardNode("previous_sensor", previousManifest.getName(), "Previous sensor"), 1L)));
+        when(environmentRepo.findByUserIdOrderByNameAsc(1L)).thenReturn(List.of(previous));
+        when(nodeRepo.saveAll(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        var expected = new BoardEnvironmentVariableDto(variableName, nextValue, "trusted", "public");
+        var batch = new BoardBatchDto(
+                List.of(boardNode("sensor", manifest.getName(), "Replacement sensor")),
+                List.of(expected), List.of(), List.of());
+        batch.setTemplateSnapshots(List.of(new DeviceTemplateMapper().toDto(template)));
+
+        var result = serviceWithEnvironment.saveBoardBatch(1L, confirmedBatch(serviceWithEnvironment, batch));
+
+        assertEquals(List.of(expected), result.getEnvironmentVariables());
+        verify(environmentRepo).saveAll(argThat(values -> {
+            var rows = new ArrayList<BoardEnvironmentVariablePo>();
+            values.forEach(rows::add);
+            return rows.size() == 1 && nextValue.equals(rows.get(0).getValue())
+                    && "trusted".equals(rows.get(0).getTrust()) && "public".equals(rows.get(0).getPrivacy());
+        }));
+        verify(editJournal).clear(1L);
     }
 
     @Test
@@ -2032,9 +2147,9 @@ class BoardStorageServiceImplBatchTest {
                         1L, confirmedBatch(serviceWithTemplates, batch)));
 
         assertTrue(error.getMessage().contains("self-contained"));
-        verify(nodeRepo, never()).deleteByUserId(1L);
+        verify(nodeRepo, never()).deleteAll(any());
         verify(ruleRepo, never()).saveAll(any());
-        verify(specRepo, never()).deleteByUserId(1L);
+        verify(specRepo, never()).deleteAll(any());
     }
 
     @Test
@@ -2063,9 +2178,9 @@ class BoardStorageServiceImplBatchTest {
                         1L, confirmedBatch(serviceWithTemplates, batch)));
 
         assertTrue(error.getMessage().contains("unreferenced template snapshot"));
-        verify(nodeRepo, never()).deleteByUserId(1L);
+        verify(nodeRepo, never()).deleteAll(any());
         verify(ruleRepo, never()).saveAll(any());
-        verify(specRepo, never()).deleteByUserId(1L);
+        verify(specRepo, never()).deleteAll(any());
     }
 
     @Test
@@ -2133,6 +2248,32 @@ class BoardStorageServiceImplBatchTest {
         verify(ruleRepo, never()).save(any());
 
         assertDoesNotThrow(() -> service.addRule(1L, ruleWithConditions(RequestLimits.MAX_RULE_CONDITIONS)));
+    }
+
+    @Test
+    void updateRulesAgainstSnapshot_rejectsOversizedConditionsBeforeAnyWrite() {
+        ValidationException error = assertThrows(ValidationException.class,
+                () -> service.updateRulesAgainstSnapshot(1L,
+                        snapshot -> List.of(ruleWithConditions(RequestLimits.MAX_RULE_CONDITIONS + 1))));
+
+        assertTrue(error.getErrors().containsKey("conditions"));
+        verify(ruleRepo, never()).save(any());
+        verify(ruleRepo, never()).deleteAll(any());
+        verifyNoInteractions(editJournal);
+    }
+
+    @Test
+    void updateRulesAgainstSnapshot_rejectsOversizedPreviewBeforeAnyWrite() {
+        RuleDto rule = ruleWithConditions(1);
+        rule.setRuleString("x".repeat(RequestLimits.MAX_DESCRIPTION_LENGTH + 1));
+
+        ValidationException error = assertThrows(ValidationException.class,
+                () -> service.updateRulesAgainstSnapshot(1L, snapshot -> List.of(rule)));
+
+        assertTrue(error.getErrors().containsKey("ruleString"));
+        verify(ruleRepo, never()).save(any());
+        verify(ruleRepo, never()).deleteAll(any());
+        verifyNoInteractions(editJournal);
     }
 
     /**
@@ -2251,12 +2392,9 @@ class BoardStorageServiceImplBatchTest {
                 .conditions(List.of()).command(RuleDto.Command.builder().action("on").build()).build();
 
         when(ruleRepo.findByUserIdOrderByExecutionOrderAscIdAsc(1L))
-                .thenReturn(List.of(firstPo, secondPo), List.of(secondPo, firstPo));
+                .thenReturn(List.of(firstPo, secondPo));
         when(ruleMapper.toDto(firstPo)).thenReturn(first);
         when(ruleMapper.toDto(secondPo)).thenReturn(second);
-        when(ruleRepo.findByUserId(1L)).thenReturn(List.of(firstPo, secondPo));
-        when(nodeRepo.findByUserId(1L)).thenReturn(List.of());
-        when(ruleMapper.toEntity(any(), anyLong())).thenAnswer(invocation -> new RulePo());
 
         // Reorder is reversible, so it returns the same mutation envelope as the other
         // reversible edits rather than a bare list.
@@ -2270,6 +2408,43 @@ class BoardStorageServiceImplBatchTest {
                 .map(RulePo::getExecutionOrder).toList());
         assertEquals(List.of(2L, 1L), captor.getAllValues().stream()
                 .map(RulePo::getId).toList());
+        verify(ruleRepo).findByUserIdOrderByExecutionOrderAscIdAsc(1L);
+        verify(ruleMapper, never()).toEntity(any(), anyLong());
+        verifyNoInteractions(nodeRepo, specRepo, deviceTemplateRepo);
+    }
+
+    @Test
+    void reorderRules_preservesExistingPayloadsAndSkipsUnchangedPositions() {
+        var createdAt = java.time.LocalDateTime.of(2026, 10, 8, 8, 0);
+        RulePo first = RulePo.builder().id(1L).userId(1L).executionOrder(0)
+                .conditionsJson("[]").commandJson("{\"action\":\"on\"}")
+                .ruleString("first saved preview").createdAt(createdAt).build();
+        RulePo middle = RulePo.builder().id(2L).userId(1L).executionOrder(1)
+                .conditionsJson("[]").commandJson("{\"action\":\"off\"}")
+                .ruleString("middle saved preview").createdAt(createdAt).build();
+        RulePo last = RulePo.builder().id(3L).userId(1L).executionOrder(2)
+                .conditionsJson("[]").commandJson("{\"action\":\"toggle\"}")
+                .ruleString("last saved preview").createdAt(createdAt).build();
+        when(ruleRepo.findByUserIdOrderByExecutionOrderAscIdAsc(1L)).thenReturn(List.of(first, middle, last));
+        when(ruleMapper.toDto(any())).thenAnswer(inv -> {
+            RulePo row = inv.getArgument(0);
+            return RuleDto.builder().id(row.getId()).ruleString(row.getRuleString()).build();
+        });
+
+        var result = service.reorderRules(1L, List.of(1L, 2L, 3L), List.of(3L, 2L, 1L));
+
+        assertEquals(List.of(3L, 2L, 1L), result.getCurrentItems().stream().map(RuleDto::getId).toList());
+        verify(ruleRepo).save(same(first));
+        verify(ruleRepo).save(same(last));
+        verify(ruleRepo, never()).save(same(middle));
+        assertEquals("[]", first.getConditionsJson());
+        assertEquals("{\"action\":\"on\"}", first.getCommandJson());
+        assertEquals("first saved preview", first.getRuleString());
+        assertEquals(createdAt, first.getCreatedAt());
+        assertEquals(2, first.getExecutionOrder());
+        assertEquals(0, last.getExecutionOrder());
+        verify(ruleMapper, never()).toEntity(any(), anyLong());
+        verifyNoInteractions(nodeRepo, specRepo, deviceTemplateRepo);
     }
 
     @Test
@@ -2452,7 +2627,7 @@ class BoardStorageServiceImplBatchTest {
 
         assertTrue(error.getMessage().contains("identical specifications"));
         assertTrue(error.getMessage().contains("Living Sensor.temperature >= 30"));
-        verify(specRepo, never()).deleteByUserId(anyLong());
+        verify(specRepo, never()).deleteAll(any());
         verify(specRepo, never()).saveAll(any());
     }
 
@@ -2494,10 +2669,10 @@ class BoardStorageServiceImplBatchTest {
         assertThrows(ConflictException.class,
                 () -> service.deleteNodeCascade(1L, "sensor1", "stale-token"));
 
-        verify(nodeRepo, never()).deleteByUserId(anyLong());
+        verify(nodeRepo, never()).deleteAll(any());
         verify(ruleRepo, never()).deleteById(anyLong());
         verify(ruleRepo, never()).save(any());
-        verify(specRepo, never()).deleteByUserId(anyLong());
+        verify(specRepo, never()).deleteAll(any());
         verify(specRepo, never()).saveAll(any());
     }
 
@@ -2519,8 +2694,8 @@ class BoardStorageServiceImplBatchTest {
         assertEquals("deleted", result.getOperation());
         assertEquals("sensor1", result.getDeletedDevice().getId());
         assertEquals(preview.getImpactToken(), result.getImpactToken());
-        verify(nodeRepo).deleteByUserId(1L);
-        verify(specRepo).deleteByUserId(1L);
+        verify(nodeRepo).deleteAll(List.of(nodePo));
+        verify(specRepo, never()).deleteAll(any());
         // The complete cascade is one compound journal entry; individual rule/spec entries remain
         // behind it and cannot be reached until the device deletion itself has been undone.
         verify(editJournal).record(eq(1L), eq(BoardEditEntityType.DEVICE),
@@ -2570,7 +2745,7 @@ class BoardStorageServiceImplBatchTest {
         when(nodeRepo.saveAll(any())).thenReturn(List.of(savedNode));
         when(deviceNodeMapper.toDto(savedNode)).thenReturn(draft);
         when(environmentRepo.findByUserIdOrderByNameAsc(1L))
-                .thenReturn(List.of(), List.of(), List.of(savedEnvironment));
+                .thenReturn(List.of(), List.of(), List.of(), List.of(savedEnvironment));
         when(environmentRepo.saveAll(any())).thenReturn(List.of(savedEnvironment));
 
         var result = serviceWithEnvironment.createNode(1L, current -> {
@@ -2641,7 +2816,7 @@ class BoardStorageServiceImplBatchTest {
 
         assertThrows(ConflictException.class, () -> serviceWithEnvironment.deleteNodeCascade(
                 1L, "sensor1", "stale-token"));
-        verify(nodeRepo, never()).deleteByUserId(anyLong());
+        verify(nodeRepo, never()).deleteAll(any());
     }
 
     @Test

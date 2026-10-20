@@ -1,0 +1,189 @@
+{
+  "schema": "iot-verify.board-scene",
+  "version": 5,
+  "templates": [
+    {
+      "name": "Salus Ventilation Fan",
+      "manifest": {
+        "Name": "Salus Ventilation Fan",
+        "Description": "Ventilation actuator for the Salus section 5.1 threshold example",
+        "InternalVariables": [
+          {
+            "Name": "CO2",
+            "Description": "Shared kitchen CO2 level",
+            "IsInside": false,
+            "Reads": false,
+            "FalsifiableWhenCompromised": false,
+            "Trust": "untrusted",
+            "Privacy": "public",
+            "LowerBound": 0,
+            "UpperBound": 2500,
+            "NaturalChangeRate": "1"
+          }
+        ],
+        "ImpactedVariables": [
+          "CO2"
+        ],
+        "Modes": [
+          "SwitchState"
+        ],
+        "InitState": "off",
+        "WorkingStates": [
+          {
+            "Name": "on",
+            "Dynamics": [
+              {
+                "VariableName": "CO2",
+                "ChangeRate": "-1"
+              }
+            ],
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public"
+          },
+          {
+            "Name": "off",
+            "Dynamics": [],
+            "Description": "",
+            "Trust": "trusted",
+            "Privacy": "public"
+          }
+        ],
+        "Transitions": [],
+        "APIs": [
+          {
+            "Name": "on",
+            "StartState": "",
+            "EndState": "on",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          },
+          {
+            "Name": "off",
+            "StartState": "",
+            "EndState": "off",
+            "Trigger": null,
+            "Signal": true,
+            "Description": ""
+          }
+        ]
+      }
+    },
+    {
+      "name": "Salus CO2 Sensor",
+      "manifest": {
+        "Name": "Salus CO2 Sensor",
+        "Description": "",
+        "InternalVariables": [
+          {
+            "Name": "CO2",
+            "Description": "Shared kitchen CO2 level",
+            "IsInside": false,
+            "Reads": true,
+            "FalsifiableWhenCompromised": true,
+            "Trust": "untrusted",
+            "Privacy": "public",
+            "LowerBound": 0,
+            "UpperBound": 2500,
+            "NaturalChangeRate": "1"
+          }
+        ],
+        "Modes": [],
+        "InitState": "",
+        "WorkingStates": [],
+        "Transitions": [],
+        "APIs": []
+      }
+    }
+  ],
+  "environmentVariables": [
+    {
+      "name": "CO2",
+      "value": "999",
+      "trust": "untrusted",
+      "privacy": "public"
+    }
+  ],
+  "devices": [
+    {
+      "id": "fan_1",
+      "templateName": "Salus Ventilation Fan",
+      "label": "Kitchen Ventilation Fan",
+      "state": "off",
+      "currentStateTrust": "trusted",
+      "currentStatePrivacy": "public",
+      "variables": [],
+      "privacies": [],
+      "position": {"x": 470, "y": 220},
+      "width": 176,
+      "height": 128
+    },
+    {
+      "id": "co2_1",
+      "templateName": "Salus CO2 Sensor",
+      "label": "Kitchen CO2 Sensor",
+      "variables": [],
+      "privacies": [],
+      "position": {"x": 210, "y": 220},
+      "width": 176,
+      "height": 128
+    }
+  ],
+  "rules": [
+    {
+      "name": "Above 1000 ppm, turn ventilation on",
+      "sources": [
+        {
+          "fromId": "co2_1",
+          "fromApi": "CO2",
+          "itemType": "variable",
+          "relation": ">",
+          "value": "1000"
+        }
+      ],
+      "toId": "fan_1",
+      "toApi": "on"
+    }
+  ],
+  "specs": [
+    {
+      "templateId": "3",
+      "aConditions": [
+        {
+          "deviceId": "co2_1",
+          "targetType": "variable",
+          "key": "CO2",
+          "variableSource": "environment",
+          "relation": ">",
+          "value": "1000"
+        }
+      ],
+      "ifConditions": [],
+      "thenConditions": []
+    },
+    {
+      "templateId": "5",
+      "aConditions": [],
+      "ifConditions": [
+        {
+          "deviceId": "co2_1",
+          "targetType": "variable",
+          "key": "CO2",
+          "variableSource": "environment",
+          "relation": ">=",
+          "value": "999"
+        }
+      ],
+      "thenConditions": [
+        {
+          "deviceId": "fan_1",
+          "targetType": "mode",
+          "key": "SwitchState",
+          "relation": "=",
+          "value": "on"
+        }
+      ]
+    }
+  ]
+}

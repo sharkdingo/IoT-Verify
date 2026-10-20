@@ -14,6 +14,7 @@ import org.springframework.data.redis.core.script.RedisScript;
 
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -74,6 +75,31 @@ class DistributedInteractiveExecutionStoreTest {
                 eq("iot-verify:interactive:recommendation:7:cancel-all"),
                 anyString(),
                 eq(Duration.ofMinutes(10)));
+    }
+
+    @Test
+    void interruptedWorkerPublishesItsTerminalStatusAndKeepsItsInterrupt() {
+        when(redisTemplate.execute(any(RedisScript.class), anyList(), any(), any(), any(), any()))
+                .thenReturn(1L);
+        AtomicBoolean finished = new AtomicBoolean();
+        when(redisTemplate.execute(any(RedisScript.class), anyList(), any(), any(), any(), any(), any()))
+                .thenAnswer(invocation -> {
+                    if (Thread.currentThread().isInterrupted()) {
+                        throw new RedisConnectionFailureException("Redis command interrupted");
+                    }
+                    finished.set(true);
+                    return 1L;
+                });
+        var lease = store.acquire("fix", 7L, "request-123", false);
+
+        Thread.currentThread().interrupt();
+        try {
+            store.finish(lease, InteractiveOperationStage.CANCELLING);
+            assertTrue(Thread.currentThread().isInterrupted(), "Cleanup must preserve the cancellation signal");
+            assertTrue(finished.get(), "Terminal publication must not fail on the worker's own cancellation flag");
+        } finally {
+            Thread.interrupted();
+        }
     }
 
     @Test

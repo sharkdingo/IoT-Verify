@@ -1,5 +1,7 @@
 // src/api/board.ts - Board API（自动解包Result<T>）
 import api from './http';
+import type { BoardModelFingerprints } from '@/types/modelSemantics';
+import { isModelFingerprint } from '@/utils/modelComparison';
 import { PRIVACY_VALUE_SET, TRUST_VALUE_SET } from '@/utils/deviceRuntime';
 import { saveBlobResponseAsFile } from '@/utils/attachmentDownload';
 
@@ -25,6 +27,7 @@ import type { BoardLayoutDto } from '../types/canvas'
 import type {
     DuplicateRuleReasonCode,
     RuleForm,
+    RuleDto,
     RuleSimilarityReasonCode,
     RuleSourceItemType
 } from '../types/rule'
@@ -78,7 +81,6 @@ import {
 import {
     validateTaskCancellationResult,
     validateInteractiveOperationStatus,
-    validateTaskProgress,
     validateVerificationTask,
     validateVerificationTaskSummaryList,
     validateVerificationRun,
@@ -156,6 +158,7 @@ export interface ScenarioRecommendationRequest extends ScenarioObjectiveTargets 
     maxSpecs: number
     language?: string
     userRequirement?: string
+    templateNames?: string[]
 }
 
 export interface ScenarioObjectiveIssue {
@@ -220,25 +223,6 @@ const requireValueBasedRuleSource = (source: any, sourceType: RuleSourceItemType
     }
 }
 
-// 后端 RuleDto 接口（用于 API 通信）
-interface BackendRuleDto {
-    id: number | null
-    conditions: Array<{
-        deviceName: string
-        attribute: string
-        targetType: RuleSourceItemType
-        relation?: string
-        value?: string
-    }>
-    command: {
-        deviceName: string
-        action: string
-        contentDevice: string | null
-        content: string | null
-    }
-    ruleString: string | null
-}
-
 export interface BoardSemanticSnapshot {
     nodes: DeviceNode[]
     environmentVariables: ModelEnvironmentVariable[]
@@ -256,7 +240,7 @@ export interface BoardSceneReplacementResult {
     createdTemplates: DeviceTemplate[]
 }
 
-const fromBackendRuleDto = (rule: BackendRuleDto): RuleForm => ({
+const fromRuleDto = (rule: RuleDto): RuleForm => ({
     // Keep the persisted id as a numeric string for targeted delete and batch scene export/import.
     // Client-created rules use a temporary `rule_<timestamp>` id and are sent with id=null.
     id: rule.id != null ? String(rule.id) : '',
@@ -280,9 +264,9 @@ const fromBackendRuleDto = (rule: BackendRuleDto): RuleForm => ({
     content: rule.command?.content || undefined
 })
 
-// RuleForm -> BackendRuleDto. Shared by targeted create, checks, and explicit scene batch replacement.
+// RuleForm -> RuleDto. Shared by targeted create, checks, and explicit scene batch replacement.
 // Client-created rules use a `rule_<timestamp>` id -> send null; persisted rules retain their numeric id.
-const toBackendRuleDto = (rule: RuleForm): BackendRuleDto => {
+const toRuleDto = (rule: RuleForm): RuleDto => {
     let id: number | null = null;
     if (rule.id && rule.id.startsWith('rule_')) {
         id = null;
@@ -1459,7 +1443,7 @@ const validateDeviceDeletionResult = (
         currentSpecifications,
         environmentVariables,
         environmentChanges
-    } as DeviceDeletionResult & { removedRules: BackendRuleDto[]; currentRules: BackendRuleDto[] }
+    } as DeviceDeletionResult & { removedRules: RuleDto[]; currentRules: RuleDto[] }
 }
 
 const validateCollectionMutationResult = <T>(
@@ -1554,7 +1538,7 @@ const parseBoardUndoResult = (
         'environmentVariables'
     )
 
-    const rules = requireResponseArray<BackendRuleDto>(raw, context, 'rules')
+    const rules = requireResponseArray<RuleDto>(raw, context, 'rules')
         .map((rule, index) => validateBackendRuleResult(rule, `${context}.rules[${index}]`))
     requireUniqueIdentities(rules, rule => Number(rule.id), context, 'rules')
 
@@ -1654,7 +1638,7 @@ const parseBoardUndoResult = (
         reasonCode: raw.reasonCode,
         nodes,
         environmentVariables,
-        rules: rules.map(fromBackendRuleDto),
+        rules: rules.map(fromRuleDto),
         specs,
         canUndo: raw.canUndo,
         canRedo: raw.canRedo
@@ -1674,7 +1658,7 @@ const validateBoardBatchResult = (value: unknown) => {
     if (new Set(environmentVariables.map(variable => variable.name)).size !== environmentVariables.length) {
         throw new BoardResponseContractError(context, 'environmentVariables contains duplicate names')
     }
-    const rules = requireResponseArray<BackendRuleDto>(result, context, 'rules')
+    const rules = requireResponseArray<RuleDto>(result, context, 'rules')
         .map((rule, index) => validateBackendRuleResult(rule, `${context}.rules[${index}]`))
     requireUniqueIdentities(rules, rule => Number(rule.id), context, 'rules')
     const ruleIds = rules.map(rule => rule.id)
@@ -1705,7 +1689,7 @@ const validateBoardBatchResult = (value: unknown) => {
     } as {
         nodes: DeviceNode[]
         environmentVariables: ModelEnvironmentVariable[]
-        rules: BackendRuleDto[]
+        rules: RuleDto[]
         specs: Specification[]
         createdTemplates: DeviceTemplate[]
     }
@@ -1963,7 +1947,7 @@ const validateBoardNodeResult = (value: unknown, context: string): DeviceNode =>
     return node as unknown as DeviceNode
 }
 
-const validateBackendRuleResult = (value: unknown, context: string): BackendRuleDto => {
+const validateBackendRuleResult = (value: unknown, context: string): RuleDto => {
     const rule = requireResponseRecord(value, context)
     if (!Number.isSafeInteger(rule.id) || rule.id <= 0) {
         throw new BoardResponseContractError(context, 'id must be a positive integer')
@@ -2007,7 +1991,7 @@ const validateBackendRuleResult = (value: unknown, context: string): BackendRule
     if (rule.ruleString !== null && rule.ruleString !== undefined && typeof rule.ruleString !== 'string') {
         throw new BoardResponseContractError(context, 'ruleString must be text or null')
     }
-    return rule as unknown as BackendRuleDto
+    return rule as unknown as RuleDto
 }
 
 const validateBoardSpecificationResult = (value: unknown, context: string): Specification => {
@@ -2218,7 +2202,7 @@ const visibleSuggestionKey = (suggestion: FixSuggestion): string => {
 const validateFixApplyResult = (
     value: unknown,
     submitted: FixSuggestion
-): Omit<FixApplyResult, 'rules'> & { rules: BackendRuleDto[] } => {
+): Omit<FixApplyResult, 'rules'> & { rules: RuleDto[] } => {
     const context = 'Automatic fix apply'
     const expectedStrategy = submitted.strategy
     const result = requireResponseRecord(value, context)
@@ -2237,7 +2221,7 @@ const validateFixApplyResult = (
     if (visibleSuggestionKey(applied) !== visibleSuggestionKey(submitted)) {
         throw new BoardResponseContractError(context, 'appliedSuggestion is not the suggestion that was submitted')
     }
-    const rules = requireResponseArray<BackendRuleDto>(result, context, 'rules')
+    const rules = requireResponseArray<RuleDto>(result, context, 'rules')
         .map((rule, index) => validateBackendRuleResult(rule, `${context}.rules[${index}]`))
     requireUniqueIdentities(rules, rule => Number(rule.id), context, 'rules')
     if (!Number.isSafeInteger(result.previousRuleCount) || result.previousRuleCount < 0
@@ -2258,7 +2242,7 @@ const validateFixApplyResult = (
             'an applied automatic fix must be undoable and must clear redo history'
         )
     }
-    return { ...result, rules } as Omit<FixApplyResult, 'rules'> & { rules: BackendRuleDto[] }
+    return { ...result, rules } as Omit<FixApplyResult, 'rules'> & { rules: RuleDto[] }
 }
 
 export default {
@@ -2271,7 +2255,7 @@ export default {
         )
         const rawNodes = requireResponseArray<DeviceNode>(snapshot.nodes, `${context}.nodes`)
             .map((node, index) => validateBoardNodeResult(node, `${context}.nodes[${index}]`))
-        const rawRules = requireResponseArray<BackendRuleDto>(snapshot.rules, `${context}.rules`)
+        const rawRules = requireResponseArray<RuleDto>(snapshot.rules, `${context}.rules`)
             .map((rule, index) => validateBackendRuleResult(rule, `${context}.rules[${index}]`))
         const rawSpecifications = requireResponseArray<Specification>(
             snapshot.specifications,
@@ -2301,10 +2285,19 @@ export default {
         return {
             nodes: rawNodes,
             environmentVariables,
-            rules: rawRules.map(fromBackendRuleDto),
+            rules: rawRules.map(fromRuleDto),
             specifications: rawSpecifications,
             deviceTemplates
         }
+    },
+    getModelFingerprints: async (): Promise<BoardModelFingerprints> => {
+        const value = requireResponseRecord(
+            unpack<unknown>(await api.get('/board/model-fingerprints')), 'Board model comparison'
+        )
+        if (!isModelFingerprint(value.verification) || !isModelFingerprint(value.simulation)) {
+            throw new BoardResponseContractError('Board model comparison', 'both model fingerprints are required')
+        }
+        return { verification: value.verification, simulation: value.simulation }
     },
     getNodes: async (): Promise<DeviceNode[]> => {
         const nodes = requireResponseArray<DeviceNode>(
@@ -2332,8 +2325,9 @@ export default {
     updateNodeLayout: async (nodeId: string, layout: DeviceLayout): Promise<DeviceUpdateResult> => {
         return validateDeviceUpdateResult(
             unpack<unknown>(await api.put(
-                `/board/nodes/${encodeURIComponent(nodeId)}/layout`,
-                layout
+                '/board/nodes/layout',
+                layout,
+                { params: { nodeId } }
             )),
             'layout',
             nodeId,
@@ -2343,8 +2337,9 @@ export default {
     updateNodeRuntime: async (nodeId: string, runtime: DeviceRuntimeUpdate): Promise<DeviceUpdateResult> => {
         return validateDeviceUpdateResult(
             unpack<unknown>(await api.put(
-                `/board/nodes/${encodeURIComponent(nodeId)}/runtime`,
-                runtime
+                '/board/nodes/runtime',
+                runtime,
+                { params: { nodeId } }
             )),
             'runtime',
             nodeId,
@@ -2357,27 +2352,27 @@ export default {
         expectedLabel: string
     ): Promise<DeviceMutationResult> => {
         const result = unpack<unknown>(
-            await api.patch(`/board/nodes/${encodeURIComponent(nodeId)}/label`, {
+            await api.patch('/board/nodes/label', {
                 label,
                 expectedLabel
-            })
+            }, { params: { nodeId } })
         );
         return validateDeviceRenameResult(result, nodeId, label, expectedLabel)
     },
     previewNodeDeletion: async (nodeId: string): Promise<DeviceDeletionResult> => {
         const result = validateDeviceDeletionResult(
-            unpack<unknown>(await api.get(`/board/nodes/${encodeURIComponent(nodeId)}/deletion-preview`)),
+            unpack<unknown>(await api.get('/board/nodes/deletion-preview', { params: { nodeId } })),
             'preview',
             nodeId,
             'Device deletion preview'
         ) as Omit<DeviceDeletionResult, 'removedRules' | 'currentRules'> & {
-            removedRules: BackendRuleDto[];
-            currentRules: BackendRuleDto[];
+            removedRules: RuleDto[];
+            currentRules: RuleDto[];
         };
         return {
             ...result,
-            removedRules: result.removedRules.map(fromBackendRuleDto),
-            currentRules: result.currentRules.map(fromBackendRuleDto)
+            removedRules: result.removedRules.map(fromRuleDto),
+            currentRules: result.currentRules.map(fromRuleDto)
         };
     },
     deleteNode: async (
@@ -2385,21 +2380,21 @@ export default {
         impactToken: string
     ): Promise<CommittedDeviceDeletionResult> => {
         const result = validateDeviceDeletionResult(
-            unpack<unknown>(await api.post(`/board/nodes/${encodeURIComponent(nodeId)}/delete`, {
+            unpack<unknown>(await api.post('/board/nodes/delete', {
                 impactToken
-            })),
+            }, { params: { nodeId } })),
             'deleted',
             nodeId,
             'Device deletion',
             impactToken
         ) as Omit<DeviceDeletionResult, 'removedRules' | 'currentRules'> & {
-            removedRules: BackendRuleDto[];
-            currentRules: BackendRuleDto[];
+            removedRules: RuleDto[];
+            currentRules: RuleDto[];
         };
         return {
             ...result,
-            removedRules: result.removedRules.map(fromBackendRuleDto),
-            currentRules: result.currentRules.map(fromBackendRuleDto)
+            removedRules: result.removedRules.map(fromRuleDto),
+            currentRules: result.currentRules.map(fromRuleDto)
         } as CommittedDeviceDeletionResult;
     },
 
@@ -2460,20 +2455,20 @@ export default {
 
     // ==== 规则（sources -> target） ====
     getRules: async (): Promise<RuleForm[]> => {
-        const data = requireResponseArray<BackendRuleDto>(
+        const data = requireResponseArray<RuleDto>(
             unpack<unknown>(await api.get('/board/rules')),
             'Rule list'
         );
         const rules = data.map((rule, index) =>
             validateBackendRuleResult(rule, `Rule list[${index}]`))
         requireUniqueIdentities(rules, rule => Number(rule.id), 'Rule list', 'rules')
-        return rules.map(fromBackendRuleDto)
+        return rules.map(fromRuleDto)
     },
     addRule: async (rule: RuleForm): Promise<CollectionMutationResult<RuleForm>> => {
         assertRuleHasTrigger(rule)
 
-        const result = validateCollectionMutationResult<BackendRuleDto>(
-            unpack<unknown>(await api.post('/board/rules', toBackendRuleDto(rule))),
+        const result = validateCollectionMutationResult<RuleDto>(
+            unpack<unknown>(await api.post('/board/rules', toRuleDto(rule))),
             'created',
             'Rule creation',
             validateBackendRuleResult,
@@ -2481,8 +2476,8 @@ export default {
         );
         return {
             ...result,
-            affectedItem: fromBackendRuleDto(result.affectedItem),
-            currentItems: result.currentItems.map(fromBackendRuleDto)
+            affectedItem: fromRuleDto(result.affectedItem),
+            currentItems: result.currentItems.map(fromRuleDto)
         };
     },
     /**
@@ -2515,7 +2510,7 @@ export default {
         if (envelope.affectedItem !== null) {
             throw new BoardResponseContractError('Rule reorder', 'affectedItem must be null')
         }
-        const result = requireResponseArray<BackendRuleDto>(envelope, 'Rule reorder', 'currentItems')
+        const result = requireResponseArray<RuleDto>(envelope, 'Rule reorder', 'currentItems')
             .map((rule, index) => validateBackendRuleResult(rule, `Rule reorder[${index}]`))
         if (result.length !== persistedIds.length
             || result.some((rule, index) => rule.id !== persistedIds[index])) {
@@ -2532,7 +2527,7 @@ export default {
             )
         }
         return {
-            rules: result.map(fromBackendRuleDto),
+            rules: result.map(fromRuleDto),
             canUndo: envelope.canUndo,
             canRedo: envelope.canRedo
         }
@@ -2543,8 +2538,8 @@ export default {
         if (!Number.isSafeInteger(numericId) || numericId <= 0) {
             throw new Error('Persisted rule id is required for deletion');
         }
-        const expected = toBackendRuleDto(rule)
-        const result = validateCollectionMutationResult<BackendRuleDto>(
+        const expected = toRuleDto(rule)
+        const result = validateCollectionMutationResult<RuleDto>(
             unpack<unknown>(await api.delete(`/board/rules/${numericId}`, { data: expected })),
             'deleted',
             'Rule deletion',
@@ -2554,8 +2549,8 @@ export default {
         );
         return {
             ...result,
-            affectedItem: fromBackendRuleDto(result.affectedItem),
-            currentItems: result.currentItems.map(fromBackendRuleDto)
+            affectedItem: fromRuleDto(result.affectedItem),
+            currentItems: result.currentItems.map(fromRuleDto)
         };
     },
 
@@ -2624,7 +2619,7 @@ export default {
         );
         return {
             ...saved,
-            rules: saved.rules.map(fromBackendRuleDto)
+            rules: saved.rules.map(fromRuleDto)
         };
     },
 
@@ -2651,7 +2646,7 @@ export default {
         );
         return {
             ...saved,
-            rules: saved.rules.map(fromBackendRuleDto)
+            rules: saved.rules.map(fromRuleDto)
         };
     },
 
@@ -2661,7 +2656,7 @@ export default {
     checkDuplicateRule: async (rule: RuleForm, signal?: AbortSignal): Promise<DuplicateRuleCheckResult> => {
         assertRuleHasTrigger(rule)
 
-        const dto = toBackendRuleDto(rule);
+        const dto = toRuleDto(rule);
 
         const response = await api.post<any>('/board/rules/check-duplicate', dto, { signal });
         return validateDuplicateRuleCheckResult(unpack<unknown>(response));
@@ -2673,7 +2668,7 @@ export default {
     checkRuleSimilarity: async (rule: RuleForm, signal?: AbortSignal): Promise<RuleSimilarityResult> => {
         assertRuleHasTrigger(rule)
 
-        const dto = toBackendRuleDto(rule);
+        const dto = toRuleDto(rule);
 
         const response = await api.post<any>('/board/rules/check-similarity', dto, { signal });
         return validateRuleSimilarityResult(unpack<unknown>(response));
@@ -2683,8 +2678,10 @@ export default {
     getLayout: async (): Promise<BoardLayoutDto> => {
         return unpack<BoardLayoutDto>(await api.get('/board/layout'));
     },
-    saveLayout: async (dto: BoardLayoutDto): Promise<BoardLayoutDto> => {
-        return unpack<BoardLayoutDto>(await api.post('/board/layout', dto));
+    saveLayout: async (dto: BoardLayoutDto, authToken: string): Promise<BoardLayoutDto> => {
+        return unpack<BoardLayoutDto>(await api.post('/board/layout', dto, {
+            headers: { Authorization: `Bearer ${authToken}` }
+        }));
     },
 
     // ==== 设备模板 ====
@@ -2781,12 +2778,6 @@ export default {
     },
     deleteVerificationRun: async (runId: number): Promise<void> => {
         return unpack<void>(await api.delete(`/verify/runs/${runId}`));
-    },
-    getTaskProgress: async (taskId: number): Promise<number> => {
-        return validateTaskProgress(
-            unpack<unknown>(await api.get(`/verify/tasks/${taskId}/progress`)),
-            'Verification task progress'
-        );
     },
     cancelTask: async (taskId: number): Promise<TaskCancellationResult> => {
         return validateTaskCancellationResult(
@@ -2996,12 +2987,17 @@ export default {
         );
     },
 
-    cancelFixRequest: async (requestId: string, authToken: string): Promise<boolean> => {
+    cancelFixRequest: async (
+        requestId: string,
+        authToken: string,
+        options?: { keepalive: boolean }
+    ): Promise<boolean> => {
         return unpack<boolean>(await api.delete(
             `/verify/fix-requests/${encodeURIComponent(requestId)}`,
             {
                 ...INTERACTIVE_CONTROL_REQUEST,
-                headers: { Authorization: `Bearer ${authToken}` }
+                headers: { Authorization: `Bearer ${authToken}` },
+                ...(options?.keepalive ? { adapter: 'fetch', fetchOptions: { keepalive: true } } : {})
             }
         ));
     },
@@ -3039,7 +3035,7 @@ export default {
         )
         return {
             ...result,
-            rules: result.rules.map(fromBackendRuleDto)
+            rules: result.rules.map(fromRuleDto)
         };
     }
 }

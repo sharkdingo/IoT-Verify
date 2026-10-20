@@ -1,32 +1,32 @@
 package cn.edu.nju.Iot_Verify.component.aitool.rule;
 
+import cn.edu.nju.Iot_Verify.service.recommendation.DeviceInfoHelper;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
-import cn.edu.nju.Iot_Verify.service.BoardStorageService;
+import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 class DeviceInfoHelperTest {
 
     @Test
     void getDevicesWithTemplateInfo_matchesTemplateAliasesAndDoesNotReserveVariablePrefix() {
-        BoardStorageService storage = mock(BoardStorageService.class);
-        when(storage.getNodes(1L)).thenReturn(List.of(
+        List<DeviceNodeDto> nodes = List.of(
                 node("shade_1", "Bedroom Shade", "Window Shade", "closed"),
                 node("shade_1_position", "position", "variable_position", "0")
-        ));
-        when(storage.getDeviceTemplates(1L)).thenReturn(List.of(
+        );
+        List<DeviceTemplateDto> templates = List.of(
                 template("Window Shade Display", "Window Shade"),
                 template("variable_position", "variable_position")
-        ));
+        );
 
-        DeviceInfoHelper helper = new DeviceInfoHelper(storage);
-        List<DeviceInfoHelper.DeviceInfo> devices = helper.getDevicesWithTemplateInfo(1L);
+        BoardSemanticSnapshotDto snapshot = new BoardSemanticSnapshotDto(
+                nodes, List.of(), List.of(), List.of(), templates);
+        DeviceInfoHelper helper = new DeviceInfoHelper();
+        List<DeviceInfoHelper.DeviceInfo> devices = helper.getDevicesWithTemplateInfo(snapshot);
 
         assertEquals(2, devices.size());
         DeviceInfoHelper.DeviceInfo shade = devices.get(0);

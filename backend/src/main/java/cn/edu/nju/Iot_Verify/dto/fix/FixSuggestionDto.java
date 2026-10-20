@@ -29,7 +29,7 @@ public class FixSuggestionDto {
     /** Internal positions of rules to remove (for the "remove" strategy). */
     @JsonIgnore
     private List<Integer> removedRuleIndices;
-    /** Human-readable rules that would be permanently removed from the active board. */
+    /** Human-readable rules that would be removed from the active board. */
     @Builder.Default
     private List<String> removedRuleDescriptions = List.of();
     /**

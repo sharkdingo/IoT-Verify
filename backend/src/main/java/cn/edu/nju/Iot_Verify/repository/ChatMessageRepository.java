@@ -12,6 +12,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Collection;
 import java.util.List;
+import java.util.Optional;
 
 public interface ChatMessageRepository extends JpaRepository<ChatMessagePo, Long> {
     // Full session history for frontend timeline.
@@ -19,6 +20,17 @@ public interface ChatMessageRepository extends JpaRepository<ChatMessagePo, Long
     List<ChatMessagePo> findBySessionIdOrderByIdDesc(String sessionId, Pageable pageable);
     List<ChatMessagePo> findBySessionIdAndIdLessThanOrderByIdDesc(
             String sessionId, Long id, Pageable pageable);
+    Optional<ChatMessagePo> findByIdAndSessionIdAndRole(Long id, String sessionId, String role);
+    @Query("""
+            select message from ChatMessagePo message
+             where message.sessionId = :sessionId and message.role = 'tool'
+               and (:beforeId is null or message.id < :beforeId)
+             order by message.id desc
+            """)
+    List<ChatMessagePo> findToolActivityPage(@Param("sessionId") String sessionId,
+                                            @Param("beforeId") Long beforeId, Pageable pageable);
+    Optional<ChatMessagePo> findFirstBySessionIdAndIdLessThanAndRoleOrderByIdDesc(
+            String sessionId, Long id, String role);
 
     // Recent message window for AI context. The database id is the cross-instance order.
     List<ChatMessagePo> findTop80BySessionIdOrderByIdDesc(String sessionId);

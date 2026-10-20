@@ -10,11 +10,9 @@ const i18n = createI18n({
   messages: {
     en: {
       app: {
-        recommendationProgressTool_rule: 'rule recommendation tool',
         recommendationProgressTitle: 'AI recommendation in progress',
         recommendationProgressElapsed: '{seconds}s elapsed',
         recommendationProgressContext: '{templates}/{devices}/{rules}/{specs}',
-        recommendationProgressTool: 'Calling: {tool}',
         recommendationProgressQueued: 'Waiting for server capacity',
         recommendationProgressSubmitting: 'Submitting the request',
         recommendationProgressAnalyzing: 'Waiting for the model service; private reasoning is not observable.',
@@ -28,7 +26,6 @@ const i18n = createI18n({
 
 const mountStatus = (stage: 'QUEUED' | 'REQUESTING_MODEL' | 'VALIDATING_RESULT', elapsedSeconds: number) => mount(RecommendationProgressStatus, {
   props: {
-    kind: 'rule',
     elapsedSeconds,
     stage,
     templateCount: 45,

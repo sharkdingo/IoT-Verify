@@ -1153,18 +1153,18 @@ async function runUiChecks(seed) {
     }
     const menu = document.querySelector('details.scene-actions-menu')
     return {
-      logout: rect('.nav-logout-btn'),
+      account: rect('[data-testid="open-account-center"]'),
       sceneMenuVisible: Boolean(menu && menu.getClientRects().length),
       visibleFullSceneActions: [...document.querySelectorAll('.scene-action-btn')]
         .filter(element => element.getClientRects().length > 0).length
     }
   })
-  soft(midWidthNavigation.logout
-    && midWidthNavigation.logout.left >= 0
-    && midWidthNavigation.logout.right <= 720,
-  `720px navigation logout is outside the viewport: ${JSON.stringify(midWidthNavigation.logout)}`)
-  soft(midWidthNavigation.logout?.width >= 44 && midWidthNavigation.logout?.height >= 44,
-    `720px navigation logout is below the 44px target: ${JSON.stringify(midWidthNavigation.logout)}`)
+  soft(midWidthNavigation.account
+    && midWidthNavigation.account.left >= 0
+    && midWidthNavigation.account.right <= 720,
+  `720px navigation account is outside the viewport: ${JSON.stringify(midWidthNavigation.account)}`)
+  soft(midWidthNavigation.account?.width >= 44 && midWidthNavigation.account?.height >= 44,
+    `720px navigation account is below the 44px target: ${JSON.stringify(midWidthNavigation.account)}`)
   soft(midWidthNavigation.sceneMenuVisible, '720px navigation did not expose the compact scene-actions menu')
   soft(midWidthNavigation.visibleFullSceneActions === 0,
     `720px navigation still renders ${midWidthNavigation.visibleFullSceneActions} full scene actions`)
@@ -1300,7 +1300,8 @@ async function runUiChecks(seed) {
   soft(await contextMenuNode.evaluate(element => document.activeElement === element),
     'closing Rename from the device context menu did not restore node focus')
 
-  await page.route('**/api/board/nodes/node_door_entry/deletion-preview', route => route.fulfill({
+  await page.route(url => url.pathname === '/api/board/nodes/deletion-preview'
+    && url.searchParams.get('nodeId') === 'node_door_entry', route => route.fulfill({
     status: 503,
     contentType: 'application/json',
     body: JSON.stringify({ code: 503, message: 'Injected preview failure', data: null })

@@ -1,6 +1,7 @@
 package cn.edu.nju.Iot_Verify.security;
 
 import cn.edu.nju.Iot_Verify.repository.UserRepository;
+import cn.edu.nju.Iot_Verify.po.UserPo;
 import cn.edu.nju.Iot_Verify.service.TokenBlacklistService;
 import cn.edu.nju.Iot_Verify.util.JwtUtil;
 import jakarta.servlet.DispatcherType;
@@ -15,9 +16,11 @@ import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.web.servlet.HandlerExceptionResolver;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -39,11 +42,14 @@ class JwtAuthenticationFilterAsyncDispatchTest {
     @Mock
     private UserRepository userRepository;
 
+    @Mock
+    private HandlerExceptionResolver exceptionResolver;
+
     private JwtAuthenticationFilter filter;
 
     @BeforeEach
     void setUp() {
-        filter = new JwtAuthenticationFilter(jwtUtil, tokenBlacklistService, userRepository);
+        filter = new JwtAuthenticationFilter(jwtUtil, tokenBlacklistService, userRepository, exceptionResolver);
         SecurityContextHolder.clearContext();
     }
 
@@ -68,10 +74,9 @@ class JwtAuthenticationFilterAsyncDispatchTest {
         AtomicBoolean chainCalled = new AtomicBoolean(false);
         FilterChain chain = (req, res) -> chainCalled.set(true);
 
-        when(jwtUtil.validateToken(token)).thenReturn(true);
+        when(jwtUtil.parseIdentity(token)).thenReturn(new JwtUtil.TokenIdentity(42L, 0L));
         when(tokenBlacklistService.isBlacklisted(token)).thenReturn(false);
-        when(jwtUtil.getUserIdFromToken(token)).thenReturn(42L);
-        when(userRepository.existsById(42L)).thenReturn(true);
+        when(userRepository.findById(42L)).thenReturn(Optional.of(UserPo.builder().id(42L).build()));
 
         filter.doFilter(request, response, chain);
 
@@ -79,9 +84,9 @@ class JwtAuthenticationFilterAsyncDispatchTest {
         assertTrue(chainCalled.get());
         assertNotNull(authentication);
         assertEquals(42L, authentication.getPrincipal());
-        verify(jwtUtil).validateToken(token);
+        verify(jwtUtil).parseIdentity(token);
         verify(tokenBlacklistService).isBlacklisted(token);
-        verify(jwtUtil).getUserIdFromToken(token);
+        verify(userRepository).findById(42L);
     }
 
     @Test
@@ -97,10 +102,9 @@ class JwtAuthenticationFilterAsyncDispatchTest {
             userIdDuringChain1.set(UserContextHolder.getUserId());
         };
 
-        when(jwtUtil.validateToken(token)).thenReturn(true);
+        when(jwtUtil.parseIdentity(token)).thenReturn(new JwtUtil.TokenIdentity(42L, 0L));
         when(tokenBlacklistService.isBlacklisted(token)).thenReturn(false);
-        when(jwtUtil.getUserIdFromToken(token)).thenReturn(42L);
-        when(userRepository.existsById(42L)).thenReturn(true);
+        when(userRepository.findById(42L)).thenReturn(Optional.of(UserPo.builder().id(42L).build()));
 
         filter.doFilter(request1, response1, chain1);
 

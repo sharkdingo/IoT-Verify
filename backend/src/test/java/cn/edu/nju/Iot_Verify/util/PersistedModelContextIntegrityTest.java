@@ -33,6 +33,22 @@ class PersistedModelContextIntegrityTest {
     }
 
     @Test
+    void restoresValidComparisonEvidenceAndRejectsMalformedFingerprints() {
+        var captured = VERIFICATION_SNAPSHOT.toBuilder().modelFingerprint("a".repeat(64)).build();
+        assertEquals("a".repeat(64), readVerification(JsonUtils.toJson(NO_ATTACK_SEMANTICS),
+                JsonUtils.toJson(captured)).modelSnapshot().getModelFingerprint());
+        for (String malformed : List.of("", "a".repeat(63), "A".repeat(64), "g".repeat(64))) {
+            captured.setModelFingerprint(malformed);
+            assertThrows(PersistedDataIntegrityException.class, () -> readVerification(
+                    JsonUtils.toJson(NO_ATTACK_SEMANTICS), JsonUtils.toJson(captured)));
+        }
+        ObjectNode malformed = (ObjectNode) new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules().valueToTree(VERIFICATION_SNAPSHOT);
+        malformed.put("modelFingerprint", new java.math.BigInteger("1".repeat(64)));
+        assertThrows(PersistedDataIntegrityException.class, () -> readVerification(
+                JsonUtils.toJson(NO_ATTACK_SEMANTICS), malformed.toString()));
+    }
+
+    @Test
     void restoresPerValueProvenanceSoAStoredTraceStaysExplainable() {
         // Provenance is the only record of why a value was allowed to move. If it did not survive
         // persistence, explaining a stored trace would fall back to the current Board -- which may

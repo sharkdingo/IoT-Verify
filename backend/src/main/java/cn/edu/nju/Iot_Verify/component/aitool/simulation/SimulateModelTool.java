@@ -3,11 +3,7 @@ package cn.edu.nju.Iot_Verify.component.aitool.simulation;
 import cn.edu.nju.Iot_Verify.component.ai.model.LlmToolSpec;
 import cn.edu.nju.Iot_Verify.component.aitool.AbstractAiTool;
 import cn.edu.nju.Iot_Verify.component.aitool.ModelTraceToolPresenter;
-import cn.edu.nju.Iot_Verify.util.mapper.BoardDataConverter;
-import cn.edu.nju.Iot_Verify.util.mapper.BoardDataConverter.ModelInputSnapshot;
-import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
 import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
-import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.dto.simulation.SimulationRequestDto;
 import cn.edu.nju.Iot_Verify.dto.simulation.SimulationResultDto;
 import cn.edu.nju.Iot_Verify.dto.trace.TraceStateDto;
@@ -33,14 +29,11 @@ import java.util.Set;
 @Component
 public class SimulateModelTool extends AbstractAiTool {
 
-    private final BoardDataConverter boardDataConverter;
     private final SimulationService simulationService;
 
-    public SimulateModelTool(BoardDataConverter boardDataConverter,
-                             SimulationService simulationService,
+    public SimulateModelTool(SimulationService simulationService,
                              ObjectMapper objectMapper) {
         super(objectMapper);
-        this.boardDataConverter = boardDataConverter;
         this.simulationService = simulationService;
     }
 
@@ -92,28 +85,12 @@ public class SimulateModelTool extends AbstractAiTool {
             AttackScenarioDto attackScenario = attackScenarioArg(args, false);
             boolean enablePrivacy = booleanArg(args, "enablePrivacy", false);
 
-            ModelInputSnapshot board = boardDataConverter.getModelInputSnapshot(userId);
-            List<DeviceVerificationDto> devices = board.devices();
-            List<RuleDto> rules = board.rules();
-
-            if (devices.isEmpty()) {
-                return errorJson("No devices found on the board. Please add devices first.",
-                        "VALIDATION_ERROR", 400);
-            }
-
-            log.info("Executing simulate_model: {} devices, {} rules, {} steps, attackMode={}, attackPoints={}, privacy={}",
-                    devices.size(), rules.size(), steps, attackScenario.getMode(),
-                    attackScenario.effectiveBudget(), enablePrivacy);
-
-            // The service reads the scene from the same board this tool just inspected, so the
-            // request carries only run parameters.
             SimulationRequestDto request = new SimulationRequestDto();
             request.setSteps(steps);
             request.setAttackScenario(attackScenario);
             request.setEnablePrivacy(enablePrivacy);
 
-            SimulationResultDto result = simulationService.simulateWithTemplateSnapshot(
-                    userId, request, board.templateManifests());
+            SimulationResultDto result = simulationService.simulate(userId, request);
             if (result == null || result.getStates() == null || result.getStates().isEmpty()) {
                 throw SimulationExecutionException.fromResult(result);
             }

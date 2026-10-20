@@ -1,8 +1,5 @@
 package cn.edu.nju.Iot_Verify.component.aitool.verification;
 
-import cn.edu.nju.Iot_Verify.util.mapper.BoardDataConverter;
-import cn.edu.nju.Iot_Verify.util.mapper.BoardDataConverter.ModelInputSnapshot;
-import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
 import cn.edu.nju.Iot_Verify.dto.model.ModelRunSnapshotDto;
 import cn.edu.nju.Iot_Verify.dto.model.RunPersistenceDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
@@ -22,12 +19,12 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
-import java.util.Map;
 import java.time.LocalDateTime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
@@ -38,8 +35,6 @@ import static org.mockito.Mockito.when;
 @ExtendWith(MockitoExtension.class)
 class VerificationSyncToolTest {
 
-    @Mock
-    private BoardDataConverter boardDataConverter;
     @Mock
     private VerificationService verificationService;
 
@@ -61,13 +56,6 @@ class VerificationSyncToolTest {
         ObjectMapper failingMapper = spy(new ObjectMapper());
         doThrow(new RuntimeException("boom")).when(failingMapper).writeValueAsString(any());
 
-        DeviceVerificationDto device = new DeviceVerificationDto();
-        device.setVarName("dev_1");
-        device.setTemplateName("Light");
-        SpecificationDto spec = new SpecificationDto();
-        spec.setId("s1");
-        when(boardDataConverter.getModelInputSnapshot(1L)).thenReturn(snapshot(device, spec));
-
         VerificationResultDto result = VerificationResultDto.builder()
                 .outcome(VerificationOutcome.SATISFIED)
                 .modelComplete(true)
@@ -80,10 +68,10 @@ class VerificationSyncToolTest {
                 .checkLogs(List.of("ok"))
                 .historyPersistence(RunPersistenceDto.saved(10L))
                 .build();
-        when(verificationService.verifyWithTemplateSnapshot(anyLong(), any(), any()))
+        when(verificationService.verify(anyLong(), any()))
                 .thenReturn(result);
 
-        VerifyModelTool tool = new VerifyModelTool(boardDataConverter, verificationService, failingMapper);
+        VerifyModelTool tool = new VerifyModelTool(verificationService, failingMapper);
         String response = tool.execute("{}");
         JsonNode json = objectMapper.readTree(response);
 
@@ -92,19 +80,15 @@ class VerificationSyncToolTest {
         assertEquals(true, json.path("mutationMayHaveCommitted").asBoolean());
         assertTrue(json.path("message").asText().contains("Do not infer"));
         assertTrue(json.path("warning").asText().contains("serialization failed"));
-        verify(verificationService).verifyWithTemplateSnapshot(anyLong(), any(), any());
+        verify(verificationService).verify(anyLong(), any());
     }
 
     @Test
     void verifyModel_violationReportsFrozenScopeAndReadableTraceContext() throws Exception {
-        DeviceVerificationDto device = new DeviceVerificationDto();
-        device.setVarName("dev_1");
-        device.setTemplateName("Light");
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
         spec.setTemplateLabel("Kitchen light must stay off");
         spec.setFormula("AG(kitchen_light.off)");
-        when(boardDataConverter.getModelInputSnapshot(1L)).thenReturn(snapshot(device, spec));
 
         TraceDto trace = TraceDto.builder()
                 .id(7L)
@@ -129,15 +113,21 @@ class VerificationSyncToolTest {
                 .historyPersistence(RunPersistenceDto.outcomeUnknown(
                         "RUN_HISTORY_SAVE_OUTCOME_UNKNOWN"))
                 .modelSnapshot(ModelRunSnapshotDto.captured(
-                        LocalDateTime.of(2026, 7, 12, 10, 0), 1, 0, 1, 0, 1))
+                        LocalDateTime.of(2026, 7, 12, 10, 0), 1, 0, 3, 0, 1))
                 .build();
-        when(verificationService.verifyWithTemplateSnapshot(anyLong(), any(), any()))
+        when(verificationService.verify(anyLong(), any()))
                 .thenReturn(result);
 
-        VerifyModelTool tool = new VerifyModelTool(boardDataConverter, verificationService, objectMapper);
+        VerifyModelTool tool = new VerifyModelTool(verificationService, objectMapper);
         String response = tool.execute("{}");
         JsonNode json = objectMapper.readTree(response);
 
+        assertEquals(3, json.path("requestedSpecCount").asInt());
+        assertEquals(1, json.path("emittedSpecCount").asInt());
+        verify(verificationService).verify(anyLong(), argThat(request ->
+                request.getDevices() == null && request.getSpecs() == null && request.getPlaybackNodes() == null
+                        && request.getRules().isEmpty() && request.getEnvironmentVariables().isEmpty()
+                        && request.getAttackScenario() != null));
         assertEquals(1, json.path("violationCount").asInt());
         assertEquals(1, json.path("traceCount").asInt());
         assertTrue(json.path("specResults").get(0).path("specId").isMissingNode());
@@ -161,7 +151,7 @@ class VerificationSyncToolTest {
 
     @Test
     void verifyModel_invalidJsonArgs_shouldReturnValidationError() throws Exception {
-        VerifyModelTool tool = new VerifyModelTool(boardDataConverter, verificationService, objectMapper);
+        VerifyModelTool tool = new VerifyModelTool(verificationService, objectMapper);
 
         String response = tool.execute("{");
         JsonNode json = objectMapper.readTree(response);
@@ -169,12 +159,12 @@ class VerificationSyncToolTest {
         assertEquals("VALIDATION_ERROR", json.path("errorCode").asText());
         assertEquals(400, json.path("status").asInt());
         assertEquals("Invalid JSON arguments.", json.path("error").asText());
-        verify(verificationService, never()).verifyWithTemplateSnapshot(anyLong(), any(), any());
+        verify(verificationService, never()).verify(anyLong(), any());
     }
 
     @Test
     void verifyModel_invalidIntensity_shouldReturnValidationErrorBeforeLoadingBoard() throws Exception {
-        VerifyModelTool tool = new VerifyModelTool(boardDataConverter, verificationService, objectMapper);
+        VerifyModelTool tool = new VerifyModelTool(verificationService, objectMapper);
 
         String response = tool.execute("{\"attackBudget\":51}");
         JsonNode json = objectMapper.readTree(response);
@@ -182,13 +172,12 @@ class VerificationSyncToolTest {
         assertEquals("VALIDATION_ERROR", json.path("errorCode").asText());
         assertEquals(400, json.path("status").asInt());
         assertEquals("attackBudget must be between 0 and 50.", json.path("error").asText());
-        verify(boardDataConverter, never()).getModelInputSnapshot(anyLong());
-        verify(verificationService, never()).verifyWithTemplateSnapshot(anyLong(), any(), any());
+        verify(verificationService, never()).verify(anyLong(), any());
     }
 
     @Test
     void verifyModel_attackEnabledWithZeroBudget_shouldReturnValidationErrorBeforeLoadingBoard() throws Exception {
-        VerifyModelTool tool = new VerifyModelTool(boardDataConverter, verificationService, objectMapper);
+        VerifyModelTool tool = new VerifyModelTool(verificationService, objectMapper);
 
         String response = tool.execute("{\"attackMode\":\"exhaustive\",\"attackBudget\":0}");
         JsonNode json = objectMapper.readTree(response);
@@ -196,13 +185,12 @@ class VerificationSyncToolTest {
         assertEquals("VALIDATION_ERROR", json.path("errorCode").asText());
         assertEquals(400, json.path("status").asInt());
         assertEquals("attackBudget must be between 1 and 50.", json.path("error").asText());
-        verify(boardDataConverter, never()).getModelInputSnapshot(anyLong());
-        verify(verificationService, never()).verifyWithTemplateSnapshot(anyLong(), any(), any());
+        verify(verificationService, never()).verify(anyLong(), any());
     }
 
     @Test
     void verifyModel_disabledAttackRejectsPositiveBudgetAndUnknownFieldsBeforeLoadingBoard() throws Exception {
-        VerifyModelTool tool = new VerifyModelTool(boardDataConverter, verificationService, objectMapper);
+        VerifyModelTool tool = new VerifyModelTool(verificationService, objectMapper);
 
         JsonNode positiveDisabledBudget = objectMapper.readTree(
                 tool.execute("{\"attackMode\":\"none\",\"attackBudget\":3}"));
@@ -213,13 +201,12 @@ class VerificationSyncToolTest {
         assertTrue(positiveDisabledBudget.path("error").asText().contains("attackMode is none"));
         assertEquals("VALIDATION_ERROR", unknownField.path("errorCode").asText());
         assertTrue(unknownField.path("error").asText().contains("isAttack"));
-        verify(boardDataConverter, never()).getModelInputSnapshot(anyLong());
-        verify(verificationService, never()).verifyWithTemplateSnapshot(anyLong(), any(), any());
+        verify(verificationService, never()).verify(anyLong(), any());
     }
 
     @Test
     void verifyModel_hugePositiveIntensity_shouldReturnValidationErrorBeforeLoadingBoard() throws Exception {
-        VerifyModelTool tool = new VerifyModelTool(boardDataConverter, verificationService, objectMapper);
+        VerifyModelTool tool = new VerifyModelTool(verificationService, objectMapper);
 
         String response = tool.execute("{\"attackBudget\":4294967299}");
         JsonNode json = objectMapper.readTree(response);
@@ -227,13 +214,12 @@ class VerificationSyncToolTest {
         assertEquals("VALIDATION_ERROR", json.path("errorCode").asText());
         assertEquals(400, json.path("status").asInt());
         assertEquals("attackBudget must be between 0 and 50.", json.path("error").asText());
-        verify(boardDataConverter, never()).getModelInputSnapshot(anyLong());
-        verify(verificationService, never()).verifyWithTemplateSnapshot(anyLong(), any(), any());
+        verify(verificationService, never()).verify(anyLong(), any());
     }
 
     @Test
     void verifyModel_hugeNegativeIntensity_shouldReturnValidationErrorBeforeLoadingBoard() throws Exception {
-        VerifyModelTool tool = new VerifyModelTool(boardDataConverter, verificationService, objectMapper);
+        VerifyModelTool tool = new VerifyModelTool(verificationService, objectMapper);
 
         String response = tool.execute("{\"attackBudget\":-4294967299}");
         JsonNode json = objectMapper.readTree(response);
@@ -241,13 +227,12 @@ class VerificationSyncToolTest {
         assertEquals("VALIDATION_ERROR", json.path("errorCode").asText());
         assertEquals(400, json.path("status").asInt());
         assertEquals("attackBudget must be between 0 and 50.", json.path("error").asText());
-        verify(boardDataConverter, never()).getModelInputSnapshot(anyLong());
-        verify(verificationService, never()).verifyWithTemplateSnapshot(anyLong(), any(), any());
+        verify(verificationService, never()).verify(anyLong(), any());
     }
 
     @Test
     void verifyModel_stringIntensity_shouldReturnValidationErrorBeforeLoadingBoard() throws Exception {
-        VerifyModelTool tool = new VerifyModelTool(boardDataConverter, verificationService, objectMapper);
+        VerifyModelTool tool = new VerifyModelTool(verificationService, objectMapper);
 
         String response = tool.execute("{\"attackBudget\":\"3\"}");
         JsonNode json = objectMapper.readTree(response);
@@ -255,12 +240,7 @@ class VerificationSyncToolTest {
         assertEquals("VALIDATION_ERROR", json.path("errorCode").asText());
         assertEquals(400, json.path("status").asInt());
         assertEquals("attackBudget must be an integer between 0 and 50.", json.path("error").asText());
-        verify(boardDataConverter, never()).getModelInputSnapshot(anyLong());
-        verify(verificationService, never()).verifyWithTemplateSnapshot(anyLong(), any(), any());
+        verify(verificationService, never()).verify(anyLong(), any());
     }
 
-    private ModelInputSnapshot snapshot(DeviceVerificationDto device, SpecificationDto spec) {
-        return new ModelInputSnapshot(
-                List.of(), List.of(device), List.of(), List.of(), List.of(spec), Map.of());
-    }
 }

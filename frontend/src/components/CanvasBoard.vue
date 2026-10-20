@@ -5,15 +5,17 @@ import { useI18n } from 'vue-i18n'
 import type { DeviceNode } from '../types/node'
 import type { DeviceTemplate } from '../types/device'
 import type { DeviceEdge } from '../types/edge'
+import type { RuleDto, RuleForm } from '@/types/rule'
+import { presentRule } from '@/utils/modelPresentation'
 import type { CanvasPan } from '../types/canvas'
 import type { ModelTokenSource } from '../types/modelToken'
 
 import { updateEdgesForNode } from '../utils/canvas/geometry'
+import { createGeneratedDeviceIcon, indexDeviceTemplates } from '../utils/device'
 
 import { getLinkPoints, getSelfLoopPath } from '../utils/rule'
 
 import {
-  findTraceVariableAtOrBefore,
   buildTraceDevicePlaybackIndex,
   buildTraceEdgePlaybackStates,
   normalizeTraceComparable,
@@ -52,14 +54,13 @@ import {
   NODE_WIDTH_RANGE
 } from '../utils/canvas/nodeResize'
 import {
+  NODE_ACCENT_COUNT,
   getNodeAccentColor,
   getNodeBorderColor,
   getNodeColorIndex,
   getNodeSurfaceColor
 } from '../utils/canvas/nodePalette'
-import { estimateCanvasTextWidth, truncateCanvasTextToWidth } from '../utils/canvas/canvasText'
 import HintTooltip from '@/components/common/HintTooltip.vue'
-import { normalizeModelRelation } from '@/utils/modelRequest'
 
 // Particle animation utilities
 const getParticleOpacity = (index: number): string => {
@@ -95,20 +96,13 @@ const syncReducedMotionPreference = () => {
 const shouldRenderEdgeFlow = (edge: DeviceEdge) =>
   edgePlaybackStateCache.value.get(edge)?.shouldAnimate ?? false
 
-const fallbackDeviceSvg = `<svg width="72" height="72" viewBox="0 0 72 72" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <rect x="14" y="12" width="44" height="48" rx="10" fill="var(--border)" stroke="var(--text-muted)" stroke-width="3"/>
-  <circle cx="36" cy="32" r="10" fill="#FFFFFF" stroke="var(--text-muted)" stroke-width="3"/>
-  <path d="M26 50h20" stroke="var(--text-muted)" stroke-width="4" stroke-linecap="round"/>
-</svg>`
-
-const svgDataUri = (svg: string): string =>
-  `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(svg)))}`
+const fallbackDeviceIcon = createGeneratedDeviceIcon('Device')
 
 // Handle image loading errors by showing a stable inline SVG fallback.
 const handleImageError = (event: Event) => {
   const img = event.target as HTMLImageElement
   img.onerror = null
-  img.src = svgDataUri(fallbackDeviceSvg)
+  img.src = fallbackDeviceIcon
 }
 
 const traceDevicePlaybackIndex = computed(() => buildTraceDevicePlaybackIndex(
@@ -161,11 +155,11 @@ const getStateDisplayClass = (node: DeviceNode): string =>
 // 获取节点当前状态对应的图标
 const getCurrentNodeIcon = (node: DeviceNode): string => {
   if (isTraceActive.value && !getLatestTraceDeviceForNode(node.id)) {
-    return props.getNodeIcon(node) || svgDataUri(fallbackDeviceSvg)
+    return props.getNodeIcon(node) || fallbackDeviceIcon
   }
   const currentState = getNodeState(node) || 'Working'
 
-  return props.getNodeIcon(node, currentState) || svgDataUri(fallbackDeviceSvg)
+  return props.getNodeIcon(node, currentState) || fallbackDeviceIcon
 }
 
 const getNodeVisualStateKey = (node: DeviceNode): string =>
@@ -185,6 +179,8 @@ const props = defineProps<{
   nodes: DeviceNode[]
   /** 所有边（Board.vue 的 edges.value） */
   edges: DeviceEdge[]
+  rules?: Array<RuleForm | RuleDto>
+  getVisibleFrame?: () => { left: number; top: number; width: number; height: number } | null
   /** Templates provide inherited security-label defaults for the live board. */
   deviceTemplates?: DeviceTemplate[]
   /** 画布平移（Board.vue 的 canvasPan.value） */
@@ -258,9 +254,8 @@ const canvasGridStyle = computed(() => {
   const offsetX = ((props.pan.x % gridSize) + gridSize) % gridSize
   const offsetY = ((props.pan.y % gridSize) + gridSize) % gridSize
   return {
-    '--canvas-grid-size': `${gridSize}px`,
-    '--canvas-grid-offset-x': `${offsetX}px`,
-    '--canvas-grid-offset-y': `${offsetY}px`
+    backgroundSize: `${gridSize}px ${gridSize}px`,
+    backgroundPosition: `${offsetX}px ${offsetY}px`
   }
 })
 
@@ -272,6 +267,8 @@ const nodeMap = computed(() => {
   }
   return map
 })
+
+const templatesByName = computed(() => indexDeviceTemplates(props.deviceTemplates || []))
 
 // 预计算所有边的调整后坐标，避免模板中重复计算
 const edgesWithAdjustedPoints = computed(() => {
@@ -302,6 +299,7 @@ const edgesWithAdjustedPoints = computed(() => {
     const sourceNode = nodeMap.value.get(edge.from)
     const colorIndex = sourceNode ? getNodeColorIndex(sourceNode.id) : 0
     const isInternal = isInternalVariableEdge(edge)
+    const sourceColor = sourceNode ? getNodeAccentColor(sourceNode.id) : 'var(--iot-node-accent-0)'
 
     return {
       edge,
@@ -312,46 +310,28 @@ const edgesWithAdjustedPoints = computed(() => {
       labelPoint,
       index, // Pre-computed index to avoid O(E) indexOf() in template
       // 预计算样式
-      particleColor: isInternal ? 'var(--text-muted)' :
-        ['url(#grad-blue)', 'url(#grad-green)', 'url(#grad-purple)', 'url(#grad-orange)',
-         'url(#grad-red)', 'url(#grad-teal)', 'url(#grad-pink)', 'url(#grad-yellow)'][colorIndex],
-      arrowMarker: isInternal ? '' :
-        ['url(#arrow-blue)', 'url(#arrow-green)', 'url(#arrow-purple)', 'url(#arrow-orange)',
-         'url(#arrow-red)', 'url(#arrow-teal)', 'url(#arrow-pink)', 'url(#arrow-yellow)'][colorIndex],
-      particleFillColor: sourceNode ? getNodeAccentColor(sourceNode.id) : 'var(--iot-node-accent-0)'
+      baseColor: isInternal ? 'var(--text-muted)' : sourceColor,
+      particleColor: isInternal ? 'var(--text-muted)' : `url(#node-gradient-${colorIndex})`,
+      arrowMarker: isInternal ? '' : `url(#node-arrow-${colorIndex})`,
+      particleFillColor: sourceColor
     }
   })
 })
 
 const getLatestTraceVariableValueForNode = (nodeId: string, variableName: string): string | null => {
-  if (!props.highlightedTrace?.states) return null
-  const currentIndex = props.highlightedTrace.selectedStateIndex || 0
-  const variable = findTraceVariableAtOrBefore(props.highlightedTrace, nodeId, variableName, currentIndex)
+  const variable = getLatestTraceVariableForNode(nodeId, variableName)
   return variable ? normalizeTraceComparable(variable.value) : null
 }
 
 const getLatestTraceVariableForNode = (nodeId: string, variableName: string) => {
-  if (!props.highlightedTrace?.states) return null
-  return findTraceVariableAtOrBefore(
-    props.highlightedTrace,
-    nodeId,
-    variableName,
-    props.highlightedTrace.selectedStateIndex || 0
-  ) as PlaybackTraceVariable | null
+  return traceDevicePlaybackIndex.value.getCurrentVariable(nodeId, variableName)
 }
 
 const getPreviousTraceVariableForNode = (
   nodeId: string,
   variableName: string
 ): PlaybackTraceVariable | null => {
-  if (!props.highlightedTrace?.states || props.highlightedTrace.selectedStateIndex === undefined) return null
-  if (props.highlightedTrace.selectedStateIndex <= 0) return null
-  return findTraceVariableAtOrBefore(
-    props.highlightedTrace,
-    nodeId,
-    variableName,
-    props.highlightedTrace.selectedStateIndex - 1
-  ) as PlaybackTraceVariable | null
+  return traceDevicePlaybackIndex.value.getPreviousVariable(nodeId, variableName)
 }
 
 const getLatestTraceDeviceForNode = (nodeId: string): PlaybackTraceDevice | null =>
@@ -496,7 +476,24 @@ let activeDragPointerId: number | null = null
 let activeDragTarget: HTMLElement | null = null
 let activeDragNodeId: string | null = null
 let activeDragStartPoint: { x: number; y: number } | null = null
+let activeDragLastPoint: { x: number; y: number } | null = null
 let activeDragMoved = false
+let pendingDragSample: { event: PointerEvent; zoom: number } | null = null
+let dragPreviewFrame: number | null = null
+
+const clearDragPreview = () => {
+  if (dragPreviewFrame !== null) cancelAnimationFrame(dragPreviewFrame)
+  dragPreviewFrame = null
+  pendingDragSample = null
+}
+
+const flushDragPreview = () => {
+  const sample = pendingDragSample
+  clearDragPreview()
+  if (sample && sample.event.pointerId === activeDragPointerId) {
+    updateNodeDrag(sample.event, nodeDragState, sample.zoom)
+  }
+}
 
 const removeDragListeners = () => {
   window.removeEventListener('pointermove', onNodePointerMove)
@@ -505,6 +502,7 @@ const removeDragListeners = () => {
 }
 
 const releaseDragPointer = () => {
+  clearDragPreview()
   const target = activeDragTarget
   const pointerId = activeDragPointerId
   const nodeId = activeDragNodeId
@@ -512,6 +510,7 @@ const releaseDragPointer = () => {
   activeDragTarget = null
   activeDragNodeId = null
   activeDragStartPoint = null
+  activeDragLastPoint = null
   activeDragMoved = false
   target?.removeEventListener('lostpointercapture', onNodeLostPointerCapture)
   if (target && pointerId !== null) {
@@ -552,6 +551,7 @@ const onNodePointerDown = (e: PointerEvent, node: DeviceNode) => {
   activeDragTarget = e.currentTarget as HTMLElement
   activeDragNodeId = node.id
   activeDragStartPoint = { x: e.clientX, y: e.clientY }
+  activeDragLastPoint = { x: e.clientX, y: e.clientY }
   activeDragMoved = false
   emit('node-layout-interaction-start', node.id)
   activeDragTarget.focus({ preventScroll: true })
@@ -568,6 +568,10 @@ const onNodePointerDown = (e: PointerEvent, node: DeviceNode) => {
 
 const onNodePointerMove = (e: PointerEvent) => {
   if (e.pointerId !== activeDragPointerId) return
+  if (activeDragLastPoint) {
+    activeDragLastPoint.x = e.clientX
+    activeDragLastPoint.y = e.clientY
+  }
   if (!activeDragMoved && activeDragStartPoint) {
     const distance = Math.hypot(
       e.clientX - activeDragStartPoint.x,
@@ -576,11 +580,25 @@ const onNodePointerMove = (e: PointerEvent) => {
     if (distance < NODE_DRAG_THRESHOLD_PX) return
     activeDragMoved = true
   }
-  updateNodeDrag(e, nodeDragState, props.zoom)
+  pendingDragSample = { event: e, zoom: props.zoom }
+  if (dragPreviewFrame === null) {
+    dragPreviewFrame = requestAnimationFrame(() => {
+      dragPreviewFrame = null
+      flushDragPreview()
+    })
+  }
 }
 
 const onNodePointerUp = (e: PointerEvent) => {
   if (e.pointerId !== activeDragPointerId) return
+  // Release can carry a newer position without a move. A stationary release must retain the
+  // last sample's zoom, including a queued sample captured before the viewport changed.
+  if (activeDragLastPoint
+      && (e.clientX !== activeDragLastPoint.x || e.clientY !== activeDragLastPoint.y)) {
+    onNodePointerMove(e)
+  }
+  // A release can arrive before the next paint; commit the latest pointer sample once.
+  flushDragPreview()
   const movedEnough = activeDragMoved
   const moved = endNodeDrag(nodeDragState)
   if (moved) {
@@ -608,6 +626,7 @@ const resizeState = createNodeResizeState()
 let activeResizePointerId: number | null = null
 let activeResizeTarget: HTMLElement | null = null
 let activeResizeNodeId: string | null = null
+let activeResizeLastPoint: { x: number; y: number } | null = null
 
 const removeResizeListeners = () => {
   window.removeEventListener('pointermove', onPointerMoveResize)
@@ -622,6 +641,7 @@ const releaseResizePointer = () => {
   activeResizePointerId = null
   activeResizeTarget = null
   activeResizeNodeId = null
+  activeResizeLastPoint = null
   target?.removeEventListener('lostpointercapture', onResizeLostPointerCapture)
   if (target && pointerId !== null) {
     try {
@@ -654,6 +674,7 @@ const onPointerDownResize = (
   activeResizePointerId = e.pointerId
   activeResizeTarget = e.currentTarget as HTMLElement
   activeResizeNodeId = node.id
+  activeResizeLastPoint = { x: e.clientX, y: e.clientY }
   emit('node-layout-interaction-start', node.id)
   try {
     activeResizeTarget.setPointerCapture?.(e.pointerId)
@@ -668,6 +689,10 @@ const onPointerDownResize = (
 
 const onPointerMoveResize = (e: PointerEvent) => {
   if (e.pointerId !== activeResizePointerId) return
+  if (activeResizeLastPoint) {
+    activeResizeLastPoint.x = e.clientX
+    activeResizeLastPoint.y = e.clientY
+  }
   const changed = updateNodeResize(e, resizeState, props.zoom)
   if (!changed || !resizeState.node) return
 
@@ -676,6 +701,10 @@ const onPointerMoveResize = (e: PointerEvent) => {
 
 const onPointerUpResize = (e: PointerEvent) => {
   if (e.pointerId !== activeResizePointerId) return
+  if (activeResizeLastPoint
+      && (e.clientX !== activeResizeLastPoint.x || e.clientY !== activeResizeLastPoint.y)) {
+    onPointerMoveResize(e)
+  }
   const resized = endNodeResize(resizeState)
   if (resized) {
     emit('node-moved-or-resized', resized.id)
@@ -752,57 +781,10 @@ const getAdjustedLinkPoints = (fromNode: DeviceNode | undefined, toNode: DeviceN
     }
   }
 
-  const { fromPoint, toPoint } = getLinkPoints(fromNode, toNode)
-
-  // If bidirectional, add offset to avoid overlap
-  if (hasBidirectionalEdges(edge.from, edge.to)) {
-    // Determine offset based on lexicographic order of node IDs
-    // This ensures: A->B always gets same offset, B->A gets opposite
-    const nodes = [edge.from, edge.to].sort()
-    const isFirstDirection = (edge.from === nodes[0] && edge.to === nodes[1])
-    const offset = isFirstDirection ? 25 : -25 // First lexicographic direction up, second down
-
-    // Add perpendicular offset to the line (simple up/down offset)
-    return {
-      fromPoint: {
-        x: fromPoint.x,
-        y: fromPoint.y + offset
-      },
-      toPoint: {
-        x: toPoint.x,
-        y: toPoint.y + offset
-      }
-    }
-  }
-
-  return { fromPoint, toPoint }
+  return getLinkPoints(fromNode, toNode, hasBidirectionalEdges(edge.from, edge.to) ? 25 : 0)
 }
 
 type NodeVisualTier = 'compact' | 'condensed' | 'expanded'
-
-/**
- * An edge label's relation, keyed on the canonical form and using the same glyphs as the inspector.
- *
- * The map was keyed on `EQ`/`GTE`/`LTE`, which nothing persists — `RuleBuilderDialog` authors symbol form and the
- * backend canonicalises to symbols — so every key was dead and only the fallthrough ran. Meanwhile `in` rendered
- * as a translated word here and as `∈` in the inspector, for the same condition on the same rule. One operator
- * should not have two readings on two surfaces a user compares side by side.
- */
-const getRelationSymbol = (relation?: string) => {
-  if (!relation) return ''
-  const canonical = normalizeModelRelation(relation) ?? relation
-  const glyphs: Record<string, string> = {
-    '=': '=',
-    '!=': '≠',
-    '>': '>',
-    '>=': '≥',
-    '<': '<',
-    '<=': '≤',
-    'in': '∈',
-    'not in': '∉'
-  }
-  return glyphs[canonical] || canonical
-}
 
 const hasValue = (value: unknown) =>
   value !== null && value !== undefined && String(value).trim() !== ''
@@ -815,8 +797,19 @@ const getNodeVisualTier = (node: DeviceNode): NodeVisualTier => {
   return 'expanded'
 }
 
-const getNodeVisualTierClass = (node: DeviceNode) =>
-  `device-node--${getNodeVisualTier(node)}`
+const getNodeVisualTierClass = (node: DeviceNode) => {
+  const screenWidth = node.width * props.zoom
+  const screenHeight = node.height * props.zoom
+  return [
+    `device-node--${getNodeVisualTier(node)}`,
+    {
+      'device-node--horizontal': screenWidth >= 112 && screenWidth >= screenHeight * 1.5,
+      'device-node--short': screenHeight < 48,
+      'device-node--minimal': screenHeight < 32,
+      'device-node--micro': screenWidth < 28 || screenHeight < 18
+    }
+  ]
+}
 
 const getCompactNodeLabel = (node: DeviceNode) => {
   const label = String(node.label || '').trim().replace(/\s+/g, ' ')
@@ -829,7 +822,6 @@ const getCompactNodeLabel = (node: DeviceNode) => {
 const POINTER_RESIZE_TARGET_SIZE_PX = 44
 // Keep a small pointer-free center around compact nodes. A full 44px corner hit
 // target is useful only when each screen dimension leaves a safe gap around it.
-const POINTER_RESIZE_MIN_NODE_SIZE_PX = POINTER_RESIZE_TARGET_SIZE_PX + 8
 const POINTER_RESIZE_ALL_HANDLES_SIZE_PX = POINTER_RESIZE_TARGET_SIZE_PX * 2
 /**
  * How many variable badges a node prints.
@@ -852,13 +844,14 @@ const POINTER_RESIZE_MAX_INWARD_FRACTION = 0.35
 /**
  * Per-node handle geometry, in model units (the canvas transform scales them to screen).
  *
- * The touch target stays 44 screen pixels at every zoom — that is a WCAG floor, not a preference. What adapts
+ * The pointer target stays 44 screen pixels at every zoom. What adapts
  * is *where* those 44px sit relative to the corner: normally half in / half out, but on a node too small to
  * spare 22px the handle slides outward so it keeps its size without smothering the node. At zoom 1 on an 80×60
- * node the cap does not bind (35% of 60 = 21px vs a 22px natural reach, so the shift is 1px); at zoom 0.3 the
- * same node is 24×18 on screen and the handle sits 6px in / 38px out.
+ * node the cap shifts it outward by 1px (35% of 60 = 21px vs a 22px natural reach); at zoom 0.3 the
+ * same node is 24×18 on screen and the handle sits 6.3px in / 37.7px out.
  *
- * Declared per node rather than once on the canvas because the cap depends on the node's own dimensions.
+ * Computed per node because the cap depends on its dimensions. Direct dimensions and negative
+ * margins keep the same corner anchors without propagating geometry variables into pseudo-elements.
  */
 const getNodeResizeHandleGeometry = (node: DeviceNode) => {
   const zoom = Math.max(props.zoom, 0.01)
@@ -867,41 +860,18 @@ const getNodeResizeHandleGeometry = (node: DeviceNode) => {
     POINTER_RESIZE_TARGET_SIZE_PX / 2,
     nodeScreenMin * POINTER_RESIZE_MAX_INWARD_FRACTION
   )
-  return {
-    '--resize-hit-size': `${POINTER_RESIZE_TARGET_SIZE_PX / zoom}px`,
-    // Negative because each handle is positioned by its outer edge: the more negative, the farther out it sits.
-    '--resize-hit-offset': `${-(POINTER_RESIZE_TARGET_SIZE_PX - inwardPx) / zoom}px`
-  }
+  const size = `${POINTER_RESIZE_TARGET_SIZE_PX / zoom}px`
+  return `width:${size};height:${size};margin:${-(POINTER_RESIZE_TARGET_SIZE_PX - inwardPx) / zoom}px`
 }
 
 /**
  * Get the visual rendering position of a node.
  * During drag, returns the temporary position; otherwise returns the committed position.
- * This prevents triggering Vue reactivity on every pointermove event.
+ * The preview leaves the parent's committed scene unchanged until release.
  */
 const getNodeRenderPosition = (node: DeviceNode) => {
   return getNodeDragPosition(node, nodeDragState)
 }
-
-/**
- * Whether the bottom-right handle renders — the one grip that makes a node growable by pointer.
- *
- * This used to require 52 screen pixels in *both* axes, which silently locked the product's smallest node.
- * `NODE_HEIGHT_RANGE.min` is 60, so a minimum-sized node fell below the threshold at any zoom under 52/60 =
- * 0.867: at zoom 0.85 it measured 68×51 and lost every handle, one pixel short. The only remaining way to
- * grow it was Ctrl+arrow, which nothing on screen advertises — so the node was, to the user, permanently
- * stuck at its smallest size.
- *
- * A node at its minimum **in both dimensions** is exactly when a grip matters most, so those get an
- * unconditional guarantee. Nodes with one dimension at minimum but the other larger (e.g. 80×120) still use
- * the screen-space test, because a tall skinny node has room at any reasonable zoom. The collision that the
- * 52px threshold was really protecting against is now handled by `getNodeResizeHandleGeometry` capping the
- * handle's inward reach.
- */
-const canPointerResizeNode = (node: DeviceNode) =>
-  (node.width <= NODE_WIDTH_RANGE.min && node.height <= NODE_HEIGHT_RANGE.min)
-  || (node.width * props.zoom >= POINTER_RESIZE_MIN_NODE_SIZE_PX
-    && node.height * props.zoom >= POINTER_RESIZE_MIN_NODE_SIZE_PX)
 
 /**
  * Whether all four corners get a handle.
@@ -1104,10 +1074,7 @@ const computeNodeSecurityBadges = (node: DeviceNode): SecurityBadge[] => {
   }
 
   const templateName = String(node.templateName || '').trim().toLowerCase()
-  const template = props.deviceTemplates?.find(candidate => templateName && (
-    String(candidate.name || '').trim().toLowerCase() === templateName
-    || String(candidate.manifest?.Name || '').trim().toLowerCase() === templateName
-  ))
+  const template = templatesByName.value.get(templateName)
   const effectiveState = props.getNodeEffectiveState(node)
   const stateDefinition = template?.manifest?.WorkingStates?.find(state => state.Name === effectiveState)
   const trustOverrides = new Map(
@@ -1311,49 +1278,181 @@ const getNodeStateTitle = (node: DeviceNode) => {
   return current
 }
 
-const getFullEdgeLabel = (edge: DeviceEdge) => {
-  const sourceName = edge.fromLabel || edge.from
-  const targetName = edge.toLabel || edge.to
-  const sourceNode = nodeMap.value.get(edge.from)
-  const targetNode = nodeMap.value.get(edge.to)
-  const relation = getRelationSymbol(edge.relation)
-  const sourceSignal = edge.fromApi
-    ? (sourceNode ? formatNodeModelToken(sourceNode, edge.fromApi) : edge.fromApi)
-    : edge.itemType || t('app.condition')
-  const sourceValue = sourceNode ? formatNodeModelToken(sourceNode, edge.value) : edge.value
-  const condition = relation && hasValue(edge.value)
-    ? `${sourceName}.${sourceSignal} ${relation} ${sourceValue}`
-    : `${sourceName}.${sourceSignal}`
-  const targetAction = edge.toApi && targetNode
-    ? formatNodeModelToken(targetNode, edge.toApi)
-    : edge.toApi
-  const action = targetAction ? `${targetName}.${targetAction}` : targetName
-  return `${condition} -> ${action}`
-}
-
-const getEdgeLabelText = (edge: DeviceEdge) =>
-  truncateCanvasTextToWidth(getFullEdgeLabel(edge), 222)
-
-const getEdgeLabelWidth = (edge: DeviceEdge) => {
-  const textWidth = estimateCanvasTextWidth(getEdgeLabelText(edge))
-  return Math.min(240, Math.max(76, textWidth + 18))
-}
-
+const canvasElement = ref<HTMLElement | null>(null)
+const edgePopover = ref<HTMLElement | null>(null)
 const hoveredEdgeId = ref<string | null>(null)
 const focusedEdgeId = ref<string | null>(null)
+const dismissedEdgeId = ref<string | null>(null)
+const edgePointer = ref<{ x: number; y: number } | null>(null)
+const EDGE_HOVER_DELAY_MS = 400
+let pendingEdgeId: string | null = null
+let edgeEnterTimer: ReturnType<typeof setTimeout> | undefined
+let edgeLeaveTimer: ReturnType<typeof setTimeout> | undefined
+let edgeSizeObserver: ResizeObserver | undefined
+const edgeViewport = reactive({ width: 0, height: 0, topInset: 0, popoverHeight: 0 })
 
-const shouldShowEdgeLabel = (edge: DeviceEdge) =>
-  !isInternalVariableEdge(edge) &&
-  (hoveredEdgeId.value === edge.id || focusedEdgeId.value === edge.id)
+const edgePresentations = computed(() => {
+  const context = {
+    t,
+    resolveDevice: (id: string) => nodeMap.value.get(id),
+    formatToken: (id: string, value: unknown) => {
+      if (isTraceActive.value) {
+        return formatPlaybackModelToken(getLatestTraceDeviceForNode(id)?.modelTokenSource, value)
+      }
+      const node = nodeMap.value.get(id)
+      return node ? formatNodeModelToken(node, value) : String(value ?? '')
+    }
+  }
+  const rules = props.rules || []
+  const byId = new Map(rules.map((rule, index) => [String(rule.id ?? ''), index]))
+  const presentations = rules.map(rule => presentRule(rule, context))
+  return new Map(props.edges.map(edge => {
+    const index = edge.ruleIndex ?? (edge.ruleId ? byId.get(edge.ruleId) : undefined)
+    const presentation = index !== undefined && presentations[index]
+      ? presentations[index]
+      : presentRule({ sources: [{ fromId: edge.from, fromApi: edge.fromApi || '',
+        itemType: edge.itemType || 'api', relation: edge.relation, value: edge.value }],
+        toId: edge.to, toApi: edge.toApi || '' }, context)
+    return [edge.id, presentation]
+  }))
+})
 
-const setHoveredEdge = (edgeId: string | null) => {
-  hoveredEdgeId.value = edgeId
+const getFullEdgeLabel = (edge: DeviceEdge) => {
+  const presentation = edgePresentations.value.get(edge.id)!
+  return presentation.contentSource
+    ? presentation.description + '. ' + t('app.contentLabelSource') + ': ' + presentation.contentSource
+    : presentation.description
 }
+
+const activeEdgeDetail = computed(() => {
+  const id = hoveredEdgeId.value || focusedEdgeId.value
+  if (!id || dismissedEdgeId.value === id) return null
+  const item = edgesWithAdjustedPoints.value.find(item => item.edge.id === id)
+  if (!item || isInternalVariableEdge(item.edge)) return null
+  return { ...item, presentation: edgePresentations.value.get(id)! }
+})
+
+const syncEdgePopoverSize = () => {
+  const canvas = canvasElement.value
+  if (!canvas) return
+  edgeViewport.width = canvas.clientWidth || window.innerWidth
+  edgeViewport.height = canvas.clientHeight || window.innerHeight
+  edgeViewport.topInset = Number.parseFloat(getComputedStyle(canvas).paddingTop) || 0
+  edgeViewport.popoverHeight = edgePopover.value?.offsetHeight || 0
+}
+
+const edgePopoverStyle = computed(() => {
+  const point = activeEdgeDetail.value?.labelPoint
+  if (!point) return {}
+  const frame = props.getVisibleFrame
+    ? props.getVisibleFrame()
+    : { left: 0, top: edgeViewport.topInset, width: edgeViewport.width, height: edgeViewport.height - edgeViewport.topInset }
+  if (!frame) return { display: 'none' }
+  const margin = 12
+  const gap = 16
+  const width = Math.min(320, Math.max(0, frame.width - margin * 2))
+  const maxHeight = Math.min(360, Math.max(0, frame.height - margin * 2))
+  const height = Math.min(edgeViewport.popoverHeight, maxHeight)
+  const pointer = hoveredEdgeId.value === activeEdgeDetail.value?.edge.id ? edgePointer.value : null
+  const x = pointer?.x ?? point.x * props.zoom + props.pan.x
+  const y = pointer?.y ?? point.y * props.zoom + props.pan.y
+  const right = x + gap
+  const left = right + width <= frame.left + frame.width - margin ? right : x - gap - width
+  return {
+    left: Math.min(Math.max(frame.left + margin, left), Math.max(frame.left + margin, frame.left + frame.width - width - margin)) + 'px',
+    top: Math.min(Math.max(frame.top + margin, y - margin), Math.max(frame.top + margin, frame.top + frame.height - height - margin)) + 'px',
+    width: width + 'px',
+    maxHeight: maxHeight + 'px'
+  }
+})
+
+const clearEdgeLeaveTimer = () => {
+  clearTimeout(edgeLeaveTimer)
+  edgeLeaveTimer = undefined
+}
+const clearEdgeEnterTimer = () => {
+  clearTimeout(edgeEnterTimer)
+  edgeEnterTimer = undefined
+  pendingEdgeId = null
+}
+const recordEdgePointer = (event: PointerEvent) => {
+  const rect = canvasElement.value?.getBoundingClientRect()
+  edgePointer.value = { x: event.clientX - (rect?.left || 0), y: event.clientY - (rect?.top || 0) }
+}
+const trackPendingEdgePointer = (event: PointerEvent) => {
+  if (pendingEdgeId) recordEdgePointer(event)
+}
+const setHoveredEdge = (edgeId: string | null, event?: PointerEvent) => {
+  clearEdgeLeaveTimer()
+  if (edgeId) {
+    if (hoveredEdgeId.value === edgeId || pendingEdgeId === edgeId) return
+    clearEdgeEnterTimer()
+    hoveredEdgeId.value = null
+    if (event) recordEdgePointer(event)
+    pendingEdgeId = edgeId
+    edgeEnterTimer = setTimeout(() => {
+      clearEdgeEnterTimer()
+      dismissedEdgeId.value = null
+      hoveredEdgeId.value = edgeId
+    }, EDGE_HOVER_DELAY_MS)
+  } else {
+    clearEdgeEnterTimer()
+    // Leave a short bridge from the line to the readable, selectable card.
+    edgeLeaveTimer = setTimeout(() => {
+      hoveredEdgeId.value = null
+    }, 120)
+  }
+}
+const focusEdgeDetail = (edgeId: string) => {
+  clearEdgeEnterTimer()
+  clearEdgeLeaveTimer()
+  hoveredEdgeId.value = null
+  focusedEdgeId.value = edgeId
+  dismissedEdgeId.value = null
+}
+const dismissEdgeDetail = (event?: KeyboardEvent) => {
+  clearEdgeEnterTimer()
+  if (!activeEdgeDetail.value) return
+  event?.preventDefault()
+  event?.stopPropagation()
+  dismissedEdgeId.value = activeEdgeDetail.value?.edge.id || null
+  clearEdgeLeaveTimer()
+  hoveredEdgeId.value = null
+}
+watch(() => props.edges.map(edge => edge.id), ids => {
+  if (pendingEdgeId && !ids.includes(pendingEdgeId)) clearEdgeEnterTimer()
+  if (hoveredEdgeId.value && !ids.includes(hoveredEdgeId.value)) hoveredEdgeId.value = null
+  if (focusedEdgeId.value && !ids.includes(focusedEdgeId.value)) focusedEdgeId.value = null
+})
+watch(edgePopover, (element, previous) => {
+  if (previous) edgeSizeObserver?.unobserve(previous)
+  if (element) edgeSizeObserver?.observe(element)
+  syncEdgePopoverSize()
+}, { flush: 'post' })
+onMounted(() => {
+  syncEdgePopoverSize()
+  if (typeof ResizeObserver !== 'undefined') {
+    edgeSizeObserver = new ResizeObserver(syncEdgePopoverSize)
+    if (canvasElement.value) edgeSizeObserver.observe(canvasElement.value)
+  }
+  window.addEventListener('resize', syncEdgePopoverSize)
+})
+onBeforeUnmount(() => {
+  clearEdgeEnterTimer()
+  clearEdgeLeaveTimer()
+  edgeSizeObserver?.disconnect()
+  window.removeEventListener('resize', syncEdgePopoverSize)
+})
+
+// A held pointer owns the preview until release or cancellation; another command must not
+// persist that preview, change its origin, or remove its node while the gesture is active.
+const isNodeCommandBlocked = () => props.interactionLocked
+  || activeDragPointerId !== null || activeResizePointerId !== null
 
 const onNodeContextInternal = (node: DeviceNode, e: MouseEvent) => {
   e.preventDefault()
   e.stopPropagation()
-  if (props.interactionLocked) return
+  if (isNodeCommandBlocked()) return
   emit('node-context', node, { x: e.clientX, y: e.clientY })
 }
 
@@ -1370,6 +1469,59 @@ const getNodeTitle = (node: DeviceNode) => {
   if (security.length > 0) details.push(security.join(', '))
   return details.join(' - ')
 }
+
+// Geometry and focus change independently of model wording. Track formatter dependencies here
+// so navigation can reuse content while runtime values, templates and locale remain reactive.
+const nodeContentCache = computed(() => new Map(props.nodes.map(node => {
+  const runtime = getNodeRuntimeBadges(node)
+  return [node.id, {
+    ariaLabel: getNodeAriaLabel(node),
+    title: getNodeTitle(node),
+    icon: getCurrentNodeIcon(node),
+    stateKey: getNodeVisualStateKey(node),
+    stateClass: getStateDisplayClass(node),
+    stateTitle: getNodeStateTitle(node),
+    stateText: getNodeDisplayState(node),
+    runtime,
+    hiddenVariableNames: getHiddenVariableNames(node),
+    hiddenVariableLabel: runtime.hiddenVariableCount > 0
+      ? t('app.traceVisualization.moreVariables', { count: runtime.hiddenVariableCount }) : '',
+    security: getNodeSecurityBadges(node)
+  }]
+})))
+
+// Position stays outside presentation so held dragging and panning reuse unchanged subtrees.
+const nodePresentations = computed(() => new Map(props.nodes.map(node => {
+  const attacked = isDeviceAttacked(node.id)
+  const inTrace = isNodeInTrace(node)
+  return [node.id, {
+    ...nodeContentCache.value.get(node.id)!,
+    classes: [getNodeVisualTierClass(node), {
+      'trace-active': inTrace,
+      'trace-not-represented': isTraceActive.value && !isNodeRepresentedInTrace(node),
+      'trace-changed': isNodeTraceChanged(node),
+      'trace-change-pulse': shouldAnimateTraceChange(node),
+      'device-attacked': attacked,
+      'device-at-violation': isNodeAtViolation(node),
+      'node-focused': props.focusedNodeId === node.id,
+      'cursor-default': props.interactionLocked
+    }],
+    // Vue compares CSS text before writing it; object styles rewrite every property even when
+    // unchanged. Navigation must not rewrite node geometry and colours on each zoom frame.
+    style: `width:${node.width}px;height:${node.height}px;`
+      + `--node-accent-color:${getNodeAccentColor(node.id)};`
+      + `background-color:${getNodeSurfaceColor(node.id)};`
+      + `border-color:${attacked ? 'var(--danger)' : getNodeBorderColor(node.id)};`
+      + (inTrace ? `--trace-glow-color:${attacked ? 'var(--danger)' : getNodeBorderColor(node.id)};` : ''),
+    // Only card content consumes these values; keep zoom inheritance out of the resize handles.
+    contentStyle: `--node-ui-scale:${Math.min(props.zoom, 1)};`
+      + `--node-name-lines:${node.height * props.zoom >= 60 ? 3 : 2}`,
+    resizeStyle: getNodeResizeHandleGeometry(node),
+    label: getNodeVisualTier(node) === 'compact' ? getCompactNodeLabel(node) : node.label
+  }]
+})))
+
+const getNodePresentation = (node: DeviceNode) => nodePresentations.value.get(node.id)!
 
 const moveNodeByKeyboard = (node: DeviceNode, dx: number, dy: number) => {
   node.position.x += dx
@@ -1389,23 +1541,24 @@ const resizeNodeByKeyboard = (node: DeviceNode, dw: number, dh: number) => {
 }
 
 const onNodeKeydown = (event: KeyboardEvent, node: DeviceNode) => {
+  const interactionBlocked = isNodeCommandBlocked()
   if (event.key === 'Enter' || event.key === ' ') {
     event.preventDefault()
-    if (props.interactionLocked) return
+    if (interactionBlocked) return
     emit('node-open', node)
     return
   }
 
   if (event.key === 'Delete' || event.key === 'Backspace') {
     event.preventDefault()
-    if (props.interactionLocked) return
+    if (interactionBlocked) return
     emit('node-delete', node.id)
     return
   }
 
   if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
     event.preventDefault()
-    if (props.interactionLocked) return
+    if (interactionBlocked) return
     const element = event.currentTarget as HTMLElement | null
     const rect = element?.getBoundingClientRect()
     emit('node-context', node, {
@@ -1425,7 +1578,7 @@ const onNodeKeydown = (event: KeyboardEvent, node: DeviceNode) => {
   const delta = movement[event.key]
   if (!delta || event.repeat) return
   event.preventDefault()
-  if (props.interactionLocked) return
+  if (interactionBlocked) return
   if (event.ctrlKey || event.metaKey) {
     resizeNodeByKeyboard(node, delta.dx, delta.dy)
   } else {
@@ -1456,6 +1609,7 @@ onMounted(() => {
 
 <template>
   <div
+      ref="canvasElement"
       class="canvas"
       data-testid="canvas-board"
       :style="canvasGridStyle"
@@ -1465,21 +1619,13 @@ onMounted(() => {
       @mouseenter="() => emit('canvas-enter')"
       @mouseleave="() => emit('canvas-leave')"
       @wheel="(e: WheelEvent) => emit('canvas-wheel', e)"
+      @keydown.esc="dismissEdgeDetail"
   >
     <p id="canvas-node-keyboard-instructions" class="sr-only">
       {{ t('app.canvasNodeKeyboardInstructions') }}
     </p>
-    <div
-        class="canvas-inner"
-        :style="{
-        transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
-        transformOrigin: '0 0',
-        '--canvas-zoom': zoom,
-        '--resize-visual-size': `${11.2 / Math.max(zoom, 0.01)}px`
-      }"
-    >
-      <!-- 连线层 -->
-      <svg class="edge-layer">
+      <!-- Translate the SVG viewport for panning; keep scaling inside for non-scaling strokes. -->
+      <svg class="edge-layer" :style="{ transform: `translate(${pan.x}px, ${pan.y}px)` }">
 
         <defs>
           <!-- Glow filter for particle effect -->
@@ -1491,271 +1637,194 @@ onMounted(() => {
             </feMerge>
           </filter>
 
-          <!-- Gradient definitions -->
-          <linearGradient id="grad-blue" x1="0%" x2="100%" y1="0%" y2="0%">
-            <stop offset="0%" style="stop-color:var(--iot-node-accent-0);stop-opacity:0.2"></stop>
-            <stop offset="50%" style="stop-color:var(--iot-node-accent-0);stop-opacity:1"></stop>
-            <stop offset="100%" style="stop-color:var(--iot-node-accent-0);stop-opacity:0.2"></stop>
+          <linearGradient
+            v-for="tone in NODE_ACCENT_COUNT" :id="`node-gradient-${tone - 1}`" :key="`gradient-${tone}`"
+            x1="0%" x2="100%" y1="0%" y2="0%"
+          >
+            <stop offset="0%" :style="{ stopColor: `var(--iot-node-accent-${tone - 1})`, stopOpacity: 0.2 }" />
+            <stop offset="50%" :style="{ stopColor: `var(--iot-node-accent-${tone - 1})`, stopOpacity: 1 }" />
+            <stop offset="100%" :style="{ stopColor: `var(--iot-node-accent-${tone - 1})`, stopOpacity: 0.2 }" />
           </linearGradient>
-
-          <linearGradient id="grad-purple" x1="0%" x2="100%" y1="0%" y2="0%">
-            <stop offset="0%" style="stop-color:var(--iot-node-accent-2);stop-opacity:0.2"></stop>
-            <stop offset="50%" style="stop-color:var(--iot-node-accent-2);stop-opacity:1"></stop>
-            <stop offset="100%" style="stop-color:var(--iot-node-accent-2);stop-opacity:0.2"></stop>
-          </linearGradient>
-
-          <linearGradient id="grad-green" x1="0%" x2="100%" y1="0%" y2="0%">
-            <stop offset="0%" style="stop-color:var(--iot-node-accent-1);stop-opacity:0.2"></stop>
-            <stop offset="50%" style="stop-color:var(--iot-node-accent-1);stop-opacity:1"></stop>
-            <stop offset="100%" style="stop-color:var(--iot-node-accent-1);stop-opacity:0.2"></stop>
-          </linearGradient>
-
-          <linearGradient id="grad-orange" x1="0%" x2="100%" y1="0%" y2="0%">
-            <stop offset="0%" style="stop-color:var(--iot-node-accent-3);stop-opacity:0.2"></stop>
-            <stop offset="50%" style="stop-color:var(--iot-node-accent-3);stop-opacity:1"></stop>
-            <stop offset="100%" style="stop-color:var(--iot-node-accent-3);stop-opacity:0.2"></stop>
-          </linearGradient>
-
-          <linearGradient id="grad-red" x1="0%" x2="100%" y1="0%" y2="0%">
-            <stop offset="0%" style="stop-color:var(--iot-node-accent-4);stop-opacity:0.2"></stop>
-            <stop offset="50%" style="stop-color:var(--iot-node-accent-4);stop-opacity:1"></stop>
-            <stop offset="100%" style="stop-color:var(--iot-node-accent-4);stop-opacity:0.2"></stop>
-          </linearGradient>
-
-          <linearGradient id="grad-teal" x1="0%" x2="100%" y1="0%" y2="0%">
-            <stop offset="0%" style="stop-color:var(--iot-node-accent-5);stop-opacity:0.2"></stop>
-            <stop offset="50%" style="stop-color:var(--iot-node-accent-5);stop-opacity:1"></stop>
-            <stop offset="100%" style="stop-color:var(--iot-node-accent-5);stop-opacity:0.2"></stop>
-          </linearGradient>
-
-          <linearGradient id="grad-pink" x1="0%" x2="100%" y1="0%" y2="0%">
-            <stop offset="0%" style="stop-color:var(--iot-node-accent-6);stop-opacity:0.2"></stop>
-            <stop offset="50%" style="stop-color:var(--iot-node-accent-6);stop-opacity:1"></stop>
-            <stop offset="100%" style="stop-color:var(--iot-node-accent-6);stop-opacity:0.2"></stop>
-          </linearGradient>
-
-          <linearGradient id="grad-yellow" x1="0%" x2="100%" y1="0%" y2="0%">
-            <stop offset="0%" style="stop-color:var(--iot-node-accent-7);stop-opacity:0.2"></stop>
-            <stop offset="50%" style="stop-color:var(--iot-node-accent-7);stop-opacity:1"></stop>
-            <stop offset="100%" style="stop-color:var(--iot-node-accent-7);stop-opacity:0.2"></stop>
-          </linearGradient>
-
-          <!-- Arrow markers for different colors -->
-          <marker id="arrow-blue" markerWidth="10" markerHeight="10" refX="10" refY="3" orient="auto">
-            <path d="M0,0 L0,6 L9,3 z" fill="var(--iot-node-accent-0)"></path>
-          </marker>
-          <marker id="arrow-green" markerWidth="10" markerHeight="10" refX="10" refY="3" orient="auto">
-            <path d="M0,0 L0,6 L9,3 z" fill="var(--iot-node-accent-1)"></path>
-          </marker>
-          <marker id="arrow-purple" markerWidth="10" markerHeight="10" refX="10" refY="3" orient="auto">
-            <path d="M0,0 L0,6 L9,3 z" fill="var(--iot-node-accent-2)"></path>
-          </marker>
-          <marker id="arrow-orange" markerWidth="10" markerHeight="10" refX="10" refY="3" orient="auto">
-            <path d="M0,0 L0,6 L9,3 z" fill="var(--iot-node-accent-3)"></path>
-          </marker>
-          <marker id="arrow-red" markerWidth="10" markerHeight="10" refX="10" refY="3" orient="auto">
-            <path d="M0,0 L0,6 L9,3 z" fill="var(--iot-node-accent-4)"></path>
-          </marker>
-          <marker id="arrow-teal" markerWidth="10" markerHeight="10" refX="10" refY="3" orient="auto">
-            <path d="M0,0 L0,6 L9,3 z" fill="var(--iot-node-accent-5)"></path>
-          </marker>
-          <marker id="arrow-pink" markerWidth="10" markerHeight="10" refX="10" refY="3" orient="auto">
-            <path d="M0,0 L0,6 L9,3 z" fill="var(--iot-node-accent-6)"></path>
-          </marker>
-          <marker id="arrow-yellow" markerWidth="10" markerHeight="10" refX="10" refY="3" orient="auto">
-            <path d="M0,0 L0,6 L9,3 z" fill="var(--iot-node-accent-7)"></path>
+          <marker
+            v-for="tone in NODE_ACCENT_COUNT" :id="`node-arrow-${tone - 1}`" :key="`arrow-${tone}`"
+            viewBox="0 0 10 10" markerUnits="userSpaceOnUse"
+            :markerWidth="8 / props.zoom" :markerHeight="8 / props.zoom" refX="9" refY="5" orient="auto"
+          >
+            <path d="M1,1 L9,5 L1,9 z" :fill="`var(--iot-node-accent-${tone - 1})`" />
           </marker>
         </defs>
 
-        <g
-            v-for="edgeItem in edgesWithAdjustedPoints"
-            :key="edgeItem.edge.id"
-            @pointerenter="setHoveredEdge(edgeItem.edge.id)"
-            @pointerleave="setHoveredEdge(null)"
-        >
-          <!-- Base lines removed - only showing particle effects -->
-          <path
-              v-if="edgeItem.edge.from === edgeItem.edge.to"
-              class="edge-base-line"
-              :class="getEdgePlaybackClass(edgeItem.edge)"
-              :d="edgeItem.selfLoopPath"
-              fill="none"
-              :stroke="edgeItem.particleColor"
-              :stroke-dasharray="isInternalVariableEdge(edgeItem.edge) ? '6,6' : ''"
-              :marker-end="edgeItem.arrowMarker"
-          />
-          <line
-              v-else
-              class="edge-base-line"
-              :class="getEdgePlaybackClass(edgeItem.edge)"
-              :x1="edgeItem.adjustedPoints.fromPoint.x"
-              :y1="edgeItem.adjustedPoints.fromPoint.y"
-              :x2="edgeItem.adjustedPoints.toPoint.x"
-              :y2="edgeItem.adjustedPoints.toPoint.y"
-              fill="none"
-              :stroke="edgeItem.particleColor"
-              :stroke-dasharray="isInternalVariableEdge(edgeItem.edge) ? '6,6' : ''"
-              :marker-end="edgeItem.arrowMarker"
-          />
-
-          <path
-              v-if="edgeItem.edge.from === edgeItem.edge.to"
-              class="edge-hitarea"
-              :data-rule-id="edgeItem.edge.ruleId || undefined"
-              :d="edgeItem.selfLoopPath"
-              role="img"
-              tabindex="0"
-              :aria-label="getFullEdgeLabel(edgeItem.edge)"
-              @pointerenter="setHoveredEdge(edgeItem.edge.id)"
-              @pointerleave="setHoveredEdge(null)"
-              @focus="focusedEdgeId = edgeItem.edge.id"
-              @blur="focusedEdgeId = null"
-          />
-          <line
-              v-else
-              class="edge-hitarea"
-              :data-rule-id="edgeItem.edge.ruleId || undefined"
-              role="img"
-              tabindex="0"
-              :aria-label="getFullEdgeLabel(edgeItem.edge)"
-              :x1="edgeItem.adjustedPoints.fromPoint.x"
-              :y1="edgeItem.adjustedPoints.fromPoint.y"
-              :x2="edgeItem.adjustedPoints.toPoint.x"
-              :y2="edgeItem.adjustedPoints.toPoint.y"
-              @pointerenter="setHoveredEdge(edgeItem.edge.id)"
-              @pointerleave="setHoveredEdge(null)"
-              @focus="focusedEdgeId = edgeItem.edge.id"
-              @blur="focusedEdgeId = null"
-          />
-
-          <!-- During model playback, motion represents a backend-reported delivered automation. -->
-          <!-- Key includes selectedStateIndex to remount and restart animation on each state transition -->
-          <path
-              v-if="edgeItem.edge.from === edgeItem.edge.to && shouldRenderEdgeFlow(edgeItem.edge)"
-              :key="`edge-flow-loop-${edgeItem.edge.id}-${props.highlightedTrace?.selectedStateIndex ?? -1}`"
-              class="edge-line particle-line"
-              :data-playback-state="props.highlightedTrace?.selectedStateIndex"
-              :class="[getParticleOpacity(edgeItem.index), getEdgePlaybackClass(edgeItem.edge)]"
-              :d="edgeItem.selfLoopPath"
-              fill="none"
-              filter="url(#glow)"
-              :stroke="edgeItem.particleColor"
-              stroke-width="2"
-              :stroke-dasharray="isInternalVariableEdge(edgeItem.edge) ? '5,5' : ''"
-              :marker-end="edgeItem.arrowMarker"
-          />
-          <line
-              v-else-if="shouldRenderEdgeFlow(edgeItem.edge)"
-              :key="`edge-flow-line-${edgeItem.edge.id}-${props.highlightedTrace?.selectedStateIndex ?? -1}`"
-              class="edge-line particle-line"
-              :data-playback-state="props.highlightedTrace?.selectedStateIndex"
-              :class="[getParticleOpacity(edgeItem.index), getEdgePlaybackClass(edgeItem.edge)]"
-              :x1="edgeItem.adjustedPoints.fromPoint.x"
-              :y1="edgeItem.adjustedPoints.fromPoint.y"
-              :x2="edgeItem.adjustedPoints.toPoint.x"
-              :y2="edgeItem.adjustedPoints.toPoint.y"
-              fill="none"
-              filter="url(#glow)"
-              :stroke="edgeItem.particleColor"
-              stroke-width="2"
-              :stroke-dasharray="isInternalVariableEdge(edgeItem.edge) ? '5,5' : ''"
-              :marker-end="edgeItem.arrowMarker"
-          />
-
-          <!-- A compromised or idle automation remains visible as a static edge. -->
-          <!-- Key includes selectedStateIndex to remount and restart animation on each state transition -->
-          <circle
-              v-if="edgeItem.edge.from !== edgeItem.edge.to && shouldRenderEdgeFlow(edgeItem.edge)"
-              :key="`edge-flow-particle-${edgeItem.edge.id}-${props.highlightedTrace?.selectedStateIndex ?? -1}`"
-              class="trace-flow-particle"
-              :data-playback-state="props.highlightedTrace?.selectedStateIndex"
-              :fill="edgeItem.particleFillColor"
-              filter="url(#glow)"
-              :r="getParticleSize(edgeItem.index)"
-          >
-            <animateMotion
-                :dur="TRACE_FLOW_DURATION"
-                :path="`M ${edgeItem.adjustedPoints.fromPoint.x} ${edgeItem.adjustedPoints.fromPoint.y} L ${edgeItem.adjustedPoints.toPoint.x} ${edgeItem.adjustedPoints.toPoint.y}`"
-                repeatCount="1"
-                fill="freeze"
-            />
-            <animate
-                attributeName="opacity"
-                values="0;1;1;0"
-                keyTimes="0;0.12;0.8;1"
-                :dur="TRACE_FLOW_DURATION"
-                repeatCount="1"
-                fill="freeze"
-            />
-          </circle>
+        <g data-testid="canvas-edge-world" :transform="`scale(${zoom})`">
           <g
-              v-if="shouldShowEdgeLabel(edgeItem.edge)"
-              class="edge-label"
-              :transform="`translate(${edgeItem.labelPoint.x} ${edgeItem.labelPoint.y})`"
+              v-for="edgeItem in edgesWithAdjustedPoints"
+              :key="edgeItem.edge.id"
+              @pointerenter="setHoveredEdge(edgeItem.edge.id, $event)"
+              @pointerleave="setHoveredEdge(null)"
+              @pointermove="trackPendingEdgePointer"
           >
-            <title>{{ getFullEdgeLabel(edgeItem.edge) }}</title>
-            <rect
-                class="edge-label__bg"
-                :x="-getEdgeLabelWidth(edgeItem.edge) / 2"
-                y="-10"
-                :width="getEdgeLabelWidth(edgeItem.edge)"
-                height="20"
-                rx="10"
+            <!-- Static connections stay visible; only delivered commands carry motion. -->
+            <path
+                v-if="edgeItem.edge.from === edgeItem.edge.to"
+                class="edge-base-line"
+                :class="getEdgePlaybackClass(edgeItem.edge)"
+                :d="edgeItem.selfLoopPath"
+                fill="none"
+                :stroke="edgeItem.baseColor"
+                :stroke-dasharray="isInternalVariableEdge(edgeItem.edge) ? '6,6' : ''"
+                :marker-end="edgeItem.arrowMarker"
             />
-            <text class="edge-label__text" text-anchor="middle" dominant-baseline="middle">
-              {{ getEdgeLabelText(edgeItem.edge) }}
-            </text>
+            <line
+                v-else
+                class="edge-base-line"
+                :class="getEdgePlaybackClass(edgeItem.edge)"
+                :x1="edgeItem.adjustedPoints.fromPoint.x"
+                :y1="edgeItem.adjustedPoints.fromPoint.y"
+                :x2="edgeItem.adjustedPoints.toPoint.x"
+                :y2="edgeItem.adjustedPoints.toPoint.y"
+                fill="none"
+                :stroke="edgeItem.baseColor"
+                :stroke-dasharray="isInternalVariableEdge(edgeItem.edge) ? '6,6' : ''"
+                :marker-end="edgeItem.arrowMarker"
+            />
+
+            <path
+                v-if="edgeItem.edge.from === edgeItem.edge.to"
+                class="edge-hitarea"
+                :data-rule-id="edgeItem.edge.ruleId || undefined"
+                :d="edgeItem.selfLoopPath"
+                role="img"
+                tabindex="0"
+                :aria-label="getFullEdgeLabel(edgeItem.edge)"
+                :aria-describedby="activeEdgeDetail?.edge.id === edgeItem.edge.id ? 'canvas-edge-details' : undefined"
+                @pointerenter="setHoveredEdge(edgeItem.edge.id, $event)"
+                @pointerleave="setHoveredEdge(null)"
+                @focus="focusEdgeDetail(edgeItem.edge.id)"
+                @blur="focusedEdgeId = null"
+            />
+            <line
+                v-else
+                class="edge-hitarea"
+                :data-rule-id="edgeItem.edge.ruleId || undefined"
+                role="img"
+                tabindex="0"
+                :aria-label="getFullEdgeLabel(edgeItem.edge)"
+                :aria-describedby="activeEdgeDetail?.edge.id === edgeItem.edge.id ? 'canvas-edge-details' : undefined"
+                :x1="edgeItem.adjustedPoints.fromPoint.x"
+                :y1="edgeItem.adjustedPoints.fromPoint.y"
+                :x2="edgeItem.adjustedPoints.toPoint.x"
+                :y2="edgeItem.adjustedPoints.toPoint.y"
+                @pointerenter="setHoveredEdge(edgeItem.edge.id, $event)"
+                @pointerleave="setHoveredEdge(null)"
+                @focus="focusEdgeDetail(edgeItem.edge.id)"
+                @blur="focusedEdgeId = null"
+            />
+
+            <!-- During model playback, motion represents a backend-reported delivered automation. -->
+            <!-- Key includes selectedStateIndex to remount and restart animation on each state transition -->
+            <path
+                v-if="edgeItem.edge.from === edgeItem.edge.to && shouldRenderEdgeFlow(edgeItem.edge)"
+                :key="`edge-flow-loop-${edgeItem.edge.id}-${props.highlightedTrace?.selectedStateIndex ?? -1}`"
+                class="edge-line particle-line"
+                :data-playback-state="props.highlightedTrace?.selectedStateIndex"
+                :class="[getParticleOpacity(edgeItem.index), getEdgePlaybackClass(edgeItem.edge)]"
+                :d="edgeItem.selfLoopPath"
+                fill="none"
+                filter="url(#glow)"
+                :stroke="edgeItem.particleColor"
+                stroke-width="2"
+                :stroke-dasharray="isInternalVariableEdge(edgeItem.edge) ? '5,5' : ''"
+                :marker-end="edgeItem.arrowMarker"
+            />
+            <line
+                v-else-if="shouldRenderEdgeFlow(edgeItem.edge)"
+                :key="`edge-flow-line-${edgeItem.edge.id}-${props.highlightedTrace?.selectedStateIndex ?? -1}`"
+                class="edge-line particle-line"
+                :data-playback-state="props.highlightedTrace?.selectedStateIndex"
+                :class="[getParticleOpacity(edgeItem.index), getEdgePlaybackClass(edgeItem.edge)]"
+                :x1="edgeItem.adjustedPoints.fromPoint.x"
+                :y1="edgeItem.adjustedPoints.fromPoint.y"
+                :x2="edgeItem.adjustedPoints.toPoint.x"
+                :y2="edgeItem.adjustedPoints.toPoint.y"
+                fill="none"
+                filter="url(#glow)"
+                :stroke="edgeItem.particleColor"
+                stroke-width="2"
+                :stroke-dasharray="isInternalVariableEdge(edgeItem.edge) ? '5,5' : ''"
+                :marker-end="edgeItem.arrowMarker"
+            />
+
+            <!-- One particle per delivered connection, replayed for the selected transition. -->
+            <circle
+                v-if="edgeItem.edge.from !== edgeItem.edge.to && shouldRenderEdgeFlow(edgeItem.edge)"
+                :key="`edge-flow-particle-${edgeItem.edge.id}-${props.highlightedTrace?.selectedStateIndex ?? -1}`"
+                class="trace-flow-particle"
+                :data-playback-state="props.highlightedTrace?.selectedStateIndex"
+                :fill="edgeItem.particleFillColor"
+                filter="url(#glow)"
+                :r="getParticleSize(edgeItem.index) / props.zoom"
+            >
+              <animateMotion
+                  :dur="TRACE_FLOW_DURATION"
+                  :path="`M ${edgeItem.adjustedPoints.fromPoint.x} ${edgeItem.adjustedPoints.fromPoint.y} L ${edgeItem.adjustedPoints.toPoint.x} ${edgeItem.adjustedPoints.toPoint.y}`"
+                  repeatCount="1"
+                  fill="freeze"
+              />
+              <animate
+                  attributeName="opacity"
+                  values="0;1;1;0"
+                  keyTimes="0;0.12;0.8;1"
+                  :dur="TRACE_FLOW_DURATION"
+                  repeatCount="1"
+                  fill="freeze"
+              />
+            </circle>
           </g>
-          <!-- For self-loops, we could add a different animation -->
         </g>
       </svg>
 
+    <div
+        class="canvas-inner"
+        :style="{
+        transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+        transformOrigin: '0 0'
+      }"
+    >
       <!-- 设备节点 -->
       <div
           v-for="node in nodes"
           :key="node.id"
+          v-memo="[getNodePresentation(node), getNodeRenderPosition(node).x, getNodeRenderPosition(node).y]"
           :data-node-id="node.id"
           class="device-node"
           tabindex="0"
           role="button"
           :aria-disabled="interactionLocked ? 'true' : undefined"
-          :aria-label="getNodeAriaLabel(node)"
+          :aria-label="getNodePresentation(node).ariaLabel"
           aria-describedby="canvas-node-keyboard-instructions"
-          :title="getNodeTitle(node)"
-          :class="[getNodeVisualTierClass(node), { 'trace-active': isNodeInTrace(node) }, { 'trace-not-represented': isTraceActive && !isNodeRepresentedInTrace(node) }, { 'trace-changed': isNodeTraceChanged(node) }, { 'trace-change-pulse': shouldAnimateTraceChange(node) }, { 'device-attacked': isDeviceAttacked(node.id) }, { 'device-at-violation': isNodeAtViolation(node) }, { 'node-focused': props.focusedNodeId === node.id }, { 'cursor-default': interactionLocked }]"
-          :style="{
-          left: getNodeRenderPosition(node).x + 'px',
-          top: getNodeRenderPosition(node).y + 'px',
-          width: node.width + 'px',
-          height: node.height + 'px',
-          '--canvas-zoom': props.zoom,
-          '--node-accent-color': getNodeAccentColor(node.id),
-          backgroundColor: getNodeSurfaceColor(node.id),
-          borderColor: isDeviceAttacked(node.id) ? 'var(--danger)' : getNodeBorderColor(node.id),
-          ...(isNodeInTrace(node) ? { '--trace-glow-color': isDeviceAttacked(node.id) ? 'var(--danger)' : getNodeBorderColor(node.id) } : {}),
-          ...getNodeResizeHandleGeometry(node)
-        }"
+          :title="getNodePresentation(node).title"
+          :class="getNodePresentation(node).classes"
+          :style="`left:${getNodeRenderPosition(node).x}px;top:${getNodeRenderPosition(node).y}px;${getNodePresentation(node).style}`"
           @pointerdown.stop="onNodePointerDown($event, node)"
           @contextmenu.stop.prevent="onNodeContextInternal(node, $event)"
           @keydown="onNodeKeydown($event, node)"
       >
-        <div class="device-node-content">
-          <!-- Attack indicator arrow -->
-          <div 
-            v-if="isDeviceAttacked(node.id)"
-            class="attack-indicator"
-            :title="t('app.deviceUnderAttack')"
-          >
-            <span class="material-symbols-outlined">arrow_downward</span>
-            <span>{{ t('app.attacked') }}</span>
-          </div>
+        <!-- The attack marker remains outside the clipped card content. -->
+        <div
+          v-if="isDeviceAttacked(node.id)"
+          class="attack-indicator"
+          :title="t('app.deviceUnderAttack')"
+        >
+          <span class="material-symbols-outlined">arrow_downward</span>
+          <span>{{ t('app.attacked') }}</span>
+        </div>
+        <div class="device-node-content" :style="getNodePresentation(node).contentStyle">
           <!-- 上部分：图标 -->
           <div class="device-top-row">
             <Transition name="trace-device-icon">
               <img
-                  :key="getNodeVisualStateKey(node)"
-                  class="device-img"
-                  :src="getCurrentNodeIcon(node)"
+                  :key="getNodePresentation(node).stateKey"
+                  class="device-img iot-device-artwork"
+                  :src="getNodePresentation(node).icon"
                   :alt="node.label"
                   draggable="false"
                   @error="handleImageError($event)"
@@ -1765,74 +1834,47 @@ onMounted(() => {
           <!-- 名字 -->
           <div class="device-label-wrapper">
             <div class="device-label" :title="node.label">
-              {{ getNodeVisualTier(node) === 'compact' ? getCompactNodeLabel(node) : node.label }}
+              {{ getNodePresentation(node).label }}
             </div>
           </div>
           <!-- 下部分：设备状态显示 -->
-          <div class="device-state" :class="getStateDisplayClass(node)" :title="getNodeStateTitle(node)">
+          <div class="device-state" :class="getNodePresentation(node).stateClass" :title="getNodePresentation(node).stateTitle">
             <span class="device-state-dot"></span>
-            <Transition name="trace-device-state" mode="out-in">
-              <span :key="getNodeVisualStateKey(node)" class="device-state-value">{{ getNodeDisplayState(node) }}</span>
-            </Transition>
+            <span class="device-reading-slot">
+              <Transition name="trace-device-state">
+                <span :key="getNodePresentation(node).stateKey" class="device-state-value">{{ getNodePresentation(node).stateText }}</span>
+              </Transition>
+            </span>
           </div>
-          <!--
-            One call, destructured: `getNodeRuntimeBadges` was invoked twice per node per render — once for the
-            `v-if` and once for the `v-for` — and it walks the trace to find each variable's previous value, so
-            the duplicate was not free on a board of thirty nodes.
-          -->
           <div
-            v-if="getNodeRuntimeBadges(node).badges.length > 0"
+            v-if="getNodePresentation(node).runtime.badges.length > 0"
             class="device-runtime-strip"
           >
             <span
-                v-for="badge in getNodeRuntimeBadges(node).badges"
+                v-for="badge in getNodePresentation(node).runtime.badges"
                 :key="badge.label"
                 class="device-runtime-chip"
                 :class="{ 'device-runtime-chip--changed': badge.changed }"
                 :title="badge.title"
             >
               <span class="device-runtime-chip__label">{{ badge.label }}</span>
-              <!--
-                The chip shows only the destination value, and that is deliberate.
-
-                `getNodeRuntimeBadges` computes `previousValue`, `board.css` styles
-                `.device-runtime-chip__previous` with a line-through, and `CanvasBoard.spec.ts` asserts the
-                element must **not** render. That looked like an oversight, so I rendered the pair — and
-                measurement showed the old assertion was right: `.device-runtime-chip--changed` is capped at
-                `58cqmin`, which is **64px on a standard 150×110 node**. "Temperature 24 → 26" cannot fit
-                there; it truncates to a fragment, which is worse than the destination value alone.
-
-                The transition therefore belongs where there is room for it — the popover anchored to this
-                node — while the node carries the destination value plus the `--changed` tint that says
-                *this* is what moved. `badge.title` keeps the full `previous → current` for hover and for
-                assistive technology, so the fact is never unavailable, only unprinted at 64px.
-              -->
+              <!-- Full previous/current pairs belong in the popover. -->
               <span class="device-runtime-chip__value">{{ badge.value }}</span>
             </span>
-            <!--
-              The remainder, named rather than dropped.
-
-              The strip prints three variables because a node is 187px wide. That cap used to be silent, which
-              was survivable only while the trace timeline repeated the same data with a complete
-              `traceDeviceSummary`. Once the node is the authority for device state, a fourth variable that
-              simply vanishes is a hole rather than a redundancy — so it says how many it is holding back, and
-              the tooltip names them.
-            -->
+            <!-- Name the variables omitted from the compact strip. -->
             <HintTooltip
-              v-if="getNodeRuntimeBadges(node).hiddenVariableCount > 0"
-              :content="getHiddenVariableNames(node)"
+              v-if="getNodePresentation(node).runtime.hiddenVariableCount > 0"
+              :content="getNodePresentation(node).hiddenVariableNames"
             >
               <span
                 class="device-runtime-chip device-runtime-chip--overflow"
-                :aria-label="t('app.traceVisualization.moreVariables', {
-                  count: getNodeRuntimeBadges(node).hiddenVariableCount
-                })"
-              >+{{ getNodeRuntimeBadges(node).hiddenVariableCount }}</span>
+                :aria-label="getNodePresentation(node).hiddenVariableLabel"
+              >+{{ getNodePresentation(node).runtime.hiddenVariableCount }}</span>
             </HintTooltip>
           </div>
-          <div v-if="getNodeSecurityBadges(node).length > 0" class="device-node-actions">
+          <div v-if="getNodePresentation(node).security.length > 0" class="device-node-actions">
             <span
-              v-for="badge in getNodeSecurityBadges(node)"
+              v-for="badge in getNodePresentation(node).security"
               :key="badge.kind"
               class="device-node-trust"
               :class="`device-node-trust--${badge.kind}`"
@@ -1849,29 +1891,66 @@ onMounted(() => {
         <div
             v-if="!interactionLocked && canShowAllPointerResizeHandles(node)"
             class="resize-handle tl"
+            :style="getNodePresentation(node).resizeStyle"
             aria-hidden="true"
             @pointerdown.stop="onPointerDownResize($event, node, 'tl')"
         ></div>
         <div
             v-if="!interactionLocked && canShowAllPointerResizeHandles(node)"
             class="resize-handle tr"
+            :style="getNodePresentation(node).resizeStyle"
             aria-hidden="true"
             @pointerdown.stop="onPointerDownResize($event, node, 'tr')"
         ></div>
         <div
             v-if="!interactionLocked && canShowAllPointerResizeHandles(node)"
             class="resize-handle bl"
+            :style="getNodePresentation(node).resizeStyle"
             aria-hidden="true"
             @pointerdown.stop="onPointerDownResize($event, node, 'bl')"
         ></div>
         <div
-            v-if="!interactionLocked && canPointerResizeNode(node)"
+            v-if="!interactionLocked"
             class="resize-handle br"
+            :style="getNodePresentation(node).resizeStyle"
             aria-hidden="true"
             @pointerdown.stop="onPointerDownResize($event, node, 'br')"
         ></div>
       </div>
     </div>
+    <section
+      v-if="activeEdgeDetail"
+      id="canvas-edge-details"
+      data-testid="canvas-edge-details"
+      :data-edge-id="activeEdgeDetail.edge.id"
+      ref="edgePopover"
+      class="edge-label iot-scroll-region"
+      role="tooltip"
+      :style="edgePopoverStyle"
+      @pointerenter="clearEdgeLeaveTimer()"
+      @pointerleave="setHoveredEdge(null)"
+      @pointerdown.stop
+      @wheel.stop
+    >
+      <header class="edge-label__heading">
+        <span class="material-symbols-outlined" aria-hidden="true">rule</span>
+        <span>{{ t('app.edgeRuleDetails') }}</span>
+      </header>
+      <div class="edge-label__group">
+        <h4>{{ t('app.edgeTriggerConditions') }}</h4>
+        <ol class="edge-label__conditions">
+          <li v-for="(condition, index) in activeEdgeDetail.presentation.conditions" :key="index">{{ condition }}</li>
+        </ol>
+      </div>
+      <div class="edge-label__group edge-label__command">
+        <h4>{{ t('app.edgeAction') }}</h4>
+        <p><span>{{ activeEdgeDetail.presentation.target }}</span><strong>{{ activeEdgeDetail.presentation.action }}</strong></p>
+      </div>
+      <div v-if="activeEdgeDetail.presentation.contentSource" class="edge-label__group">
+        <h4>{{ t('app.contentLabelSource') }}</h4>
+        <p>{{ activeEdgeDetail.presentation.contentSource }}</p>
+      </div>
+    </section>
   </div>
 </template>
 
@@ -1880,6 +1959,7 @@ onMounted(() => {
   fill: none;
   stroke: transparent;
   stroke-width: 18;
+  vector-effect: non-scaling-stroke;
   stroke-linecap: round;
   pointer-events: stroke;
   cursor: help;
@@ -1897,22 +1977,62 @@ onMounted(() => {
 }
 
 .edge-label {
-  pointer-events: none;
-  filter: drop-shadow(0 3px 8px rgba(15, 23, 42, 0.18));
+  position: absolute;
+  z-index: 30;
+  box-sizing: border-box;
+  padding: var(--iot-space-md);
+  border: 1px solid var(--control-border);
+  border-radius: var(--iot-radius-card);
+  background: var(--surface-elevated);
+  color: var(--text);
+  box-shadow: var(--shadow-floating);
+  font-size: var(--iot-font-label);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  user-select: text;
+  touch-action: pan-y;
 }
 
-.edge-label__bg {
-  fill: color-mix(in srgb, var(--surface-elevated) 92%, transparent);
-  stroke: color-mix(in srgb, var(--border) 88%, transparent);
-  stroke-width: 1;
+.edge-label__heading {
+  display: flex;
+  align-items: center;
+  gap: var(--iot-space-sm);
+  padding-bottom: var(--iot-space-sm);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--iot-font-control);
+  font-weight: 600;
 }
 
-.edge-label__text {
-  fill: var(--text);
-  font-size: var(--iot-font-min);
-  font-weight: 700;
-  letter-spacing: 0;
+.edge-label__heading .material-symbols-outlined { font-size: 1rem; }
+.edge-label__group { margin-top: var(--iot-space-sm); }
+.edge-label__group h4 {
+  margin: 0 0 var(--iot-space-2xs);
+  color: var(--text-muted);
+  font-size: var(--iot-font-label);
+  font-weight: 600;
 }
+.edge-label__group p { margin: 0; }
+.edge-label__conditions {
+  display: grid;
+  gap: var(--iot-space-xs);
+  margin: 0;
+  padding-left: var(--iot-space-lg);
+  list-style: decimal;
+}
+.edge-label__conditions li { padding-left: var(--iot-space-2xs); }
+.edge-label__conditions li::marker { color: var(--text-muted); }
+.edge-label__command {
+  padding: var(--iot-space-sm);
+  border: 1px solid var(--border);
+  border-radius: var(--iot-radius-action);
+  background: var(--surface-muted);
+}
+.edge-label__command p {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--iot-space-2xs) var(--iot-space-sm);
+}
+.edge-label__command strong { font-weight: 600; }
 
 /* Attack indicator - longer arrow with text */
 .attack-indicator {
@@ -1920,15 +2040,11 @@ onMounted(() => {
   top: -32px;
   left: 50%;
   transform: translateX(-50%);
-  /* `var(--danger)` is the ink half of the role — the dark theme lightens it to #fca5a5, which put this
-     badge's white label at 1.90:1. The fill half is theme-stable and solved for white ink.
-     The gradient was `135deg, X 0%, X 100%`: gradient syntax with nothing to interpolate. It now deepens
-     rather than lightens, so both stops clear AA (4.83:1 at the lit end, 5.36:1 at the shaded end) —
-     mixing the fill toward white for a highlight had dropped the top stop to 4.22:1. */
+  /* The fill role keeps light labels readable in both modes. */
   background: linear-gradient(160deg,
       var(--danger-fill) 0%,
-      color-mix(in srgb, var(--danger-fill) 85%, #7f1d1d) 100%);
-  color: #ffffff;
+      color-mix(in srgb, var(--danger-fill) 85%, var(--danger-fill-hover)) 100%);
+  color: var(--text-on-fill);
   padding: 3px 8px;
   border-radius: var(--iot-radius-well);
   display: flex;
@@ -1963,21 +2079,15 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: clamp(0.2rem, 2.4cqmin, 0.5rem);
-  justify-self: center;
+  gap: calc(0.25rem / var(--node-ui-scale));
+  justify-self: stretch;
   min-width: 0;
-  min-height: clamp(1.15rem, 13cqmin, 10rem);
-  width: 82%;
-  padding: clamp(0.18rem, 1.7cqmin, 1.5rem) clamp(0.4rem, 4cqmin, 4rem);
-  border: 1px solid var(--border);
-  border-radius: var(--iot-radius-pill);
-  background: color-mix(in srgb, var(--surface-elevated) 86%, transparent);
+  width: 100%;
   color: var(--text);
-  font-weight: 700;
+  font-weight: 500;
   z-index: 5;
   box-sizing: border-box;
-  box-shadow: 0 1px 3px color-mix(in srgb, var(--text) 12%, transparent);
-  line-height: 1;
+  line-height: 1.2;
   overflow: hidden;
 }
 
@@ -1988,8 +2098,8 @@ onMounted(() => {
 }
 
 .device-state-dot {
-  width: clamp(0.35rem, 3.5cqmin, 0.75rem);
-  height: clamp(0.35rem, 3.5cqmin, 0.75rem);
+  width: calc(0.3125rem / var(--node-ui-scale));
+  height: calc(0.3125rem / var(--node-ui-scale));
   border-radius: 50%;
   flex-shrink: 0;
   display: inline-block;
@@ -2001,18 +2111,8 @@ onMounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  /*
-   * Static for the same reason as the node chips in `board.css`: `5cqmin` of a node whose measured height is
-   * 110-137px is 5.5-6.9px, so the middle term never won and this rendered at its 10px floor. The `5rem`
-   * ceiling made it look like a size that could grow.
-   */
-  font-size: var(--iot-font-min);
-  line-height: 1;
-}
-
-.state-defined {
-  border-color: color-mix(in srgb, var(--node-accent-color) 44%, var(--border));
-  background: color-mix(in srgb, var(--node-accent-color) 13%, var(--surface-elevated));
+  font-size: calc(var(--iot-font-caption) / var(--node-ui-scale));
+  line-height: 1.2;
 }
 
 .state-defined .device-state-dot {
@@ -2021,7 +2121,6 @@ onMounted(() => {
 }
 
 .state-stateless {
-  background: color-mix(in srgb, var(--surface-muted) 88%, transparent);
   color: var(--text-muted);
 }
 
@@ -2030,183 +2129,13 @@ onMounted(() => {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .attack-indicator,
-  .device-state-dot,
-  .trace-state-dot {
+  .attack-indicator {
     animation: none !important;
   }
-}
-
-.trace-info-card {
-  position: absolute;
-  bottom: -4px;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 90%;
-  padding: 4px 6px;
-  border-radius: var(--iot-radius-control);
-  font-size: var(--iot-font-min);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-  z-index: 10;
-}
-
-.trace-info-card.violated {
-  background: linear-gradient(135deg, #fef2f2 0%, var(--danger-surface) 100%);
-  border: 1px solid var(--danger-border);
-}
-
-.trace-info-card.intermediate {
-  background: linear-gradient(135deg, #fefce8 0%, #fef9c3 100%);
-  border: 1px solid var(--warning);
-}
-
-.trace-state-row {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin-bottom: 3px;
-}
-
-.trace-state-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-}
-
-.violated .trace-state-dot {
-  background-color: var(--danger);
-  box-shadow: 0 0 4px var(--danger);
-  animation: pulse-red 1s infinite;
-}
-
-.intermediate .trace-state-dot {
-  background-color: var(--warning);
-  box-shadow: 0 0 4px var(--warning);
-  animation: pulse-amber 1s infinite;
-}
-
-@keyframes pulse-red {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
-}
-
-@keyframes pulse-amber {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.6; }
-}
-
-.trace-state-label {
-  color: var(--text-muted);
-  font-weight: 500;
-}
-
-.trace-state-value {
-  font-weight: bold;
-}
-
-.violated .trace-state-value {
-  color: var(--danger);
-}
-
-.intermediate .trace-state-value {
-  color: var(--warning);
-}
-
-.trace-variables-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding-top: 3px;
-  border-top: 1px dashed;
-}
-
-.violated .trace-variables-list {
-  border-color: var(--danger-border);
-}
-
-.intermediate .trace-variables-list {
-  border-color: var(--warning);
-}
-
-.trace-variable-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.trace-var-name {
-  color: var(--text-muted);
-  font-size: var(--iot-font-min);
-}
-
-.trace-var-value {
-  font-weight: bold;
-  /* Token, not a light-theme slate: `#1f2937` rendered dark-on-dark, and a trace value is the number the
-     replay exists to show. */
-  color: var(--text);
-  font-size: var(--iot-font-min);
-}
-
-/* Device content keeps a stable footprint while trace values cross-fade. */
-.device-node-content {
-  display: grid;
-  grid-template-rows: minmax(0, 1fr) auto auto;
-  align-items: center;
-  justify-items: center;
-  width: 100%;
-  height: 100%;
-  min-width: 0;
-  min-height: 0;
-  gap: clamp(0.15rem, 3%, 0.35rem);
-  transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .device-top-row {
   position: relative;
 }
 
-.trace-device-icon-enter-active,
-.trace-device-icon-leave-active {
-  position: absolute;
-  transition:
-    opacity 0.24s ease,
-    transform 0.38s cubic-bezier(0.22, 1, 0.36, 1),
-    filter 0.3s ease;
-}
-
-.trace-device-icon-enter-from {
-  opacity: 0;
-  transform: translateY(5px) scale(0.9);
-  filter: blur(2px);
-}
-
-.trace-device-icon-leave-to {
-  opacity: 0;
-  transform: translateY(-4px) scale(0.96);
-  filter: blur(1px);
-}
-
-.trace-device-state-enter-active,
-.trace-device-state-leave-active {
-  transition: opacity 0.16s ease, transform 0.2s cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.trace-device-state-enter-from {
-  opacity: 0;
-  transform: translateY(3px);
-}
-
-.trace-device-state-leave-to {
-  opacity: 0;
-  transform: translateY(-2px);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .trace-device-icon-enter-active,
-  .trace-device-icon-leave-active,
-  .trace-device-state-enter-active,
-  .trace-device-state-leave-active {
-    transition: none;
-  }
-}
 </style>

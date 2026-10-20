@@ -21,6 +21,7 @@ import cn.edu.nju.Iot_Verify.po.BoardEditOperation;
 import cn.edu.nju.Iot_Verify.po.BoardEnvironmentVariablePo;
 import cn.edu.nju.Iot_Verify.po.DeviceNodePo;
 import cn.edu.nju.Iot_Verify.po.DeviceTemplatePo;
+import cn.edu.nju.Iot_Verify.po.RulePo;
 import cn.edu.nju.Iot_Verify.po.UserPo;
 import cn.edu.nju.Iot_Verify.repository.*;
 import cn.edu.nju.Iot_Verify.service.impl.BoardStorageServiceImpl;
@@ -29,9 +30,16 @@ import cn.edu.nju.Iot_Verify.util.mapper.DeviceTemplateMapper;
 import cn.edu.nju.Iot_Verify.util.mapper.RuleMapper;
 import cn.edu.nju.Iot_Verify.util.mapper.SpecificationMapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.EntityManagerFactory;
+import org.hibernate.SessionFactory;
+import org.hibernate.stat.Statistics;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
@@ -41,6 +49,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import javax.sql.DataSource;
@@ -81,8 +90,11 @@ class BoardEditUndoIntegrationTest {
     @Autowired private DeviceTemplateRepository templates;
     @Autowired private UserRepository users;
     @Autowired private BoardEditJournalRepository journalRepo;
+    @Autowired private AiSessionStateRepository aiSessionStates;
     @Autowired private PlatformTransactionManager transactionManager;
     @Autowired private DataSource dataSource;
+    @Autowired private EntityManager entityManager;
+    @Autowired private EntityManagerFactory entityManagerFactory;
 
     private BoardStorageServiceImpl service;
     private BoardEditJournal journal;
@@ -497,6 +509,7 @@ class BoardEditUndoIntegrationTest {
     @Test
     void deviceDeletionRoundTripsItsCascadeIdsOrderAndEnvironment() {
         Long ruleId = service.addRule(userId, newRule("r1")).getAffectedItem().getId();
+        RuleDto originalRule = persistedRuleWithHistoricTime(ruleId);
         String specId = service.addSpec(userId, newSpec("on")).getAffectedItem().getId();
         var preview = service.previewNodeDeletion(userId, "light-1");
 
@@ -510,6 +523,7 @@ class BoardEditUndoIntegrationTest {
         assertTrue(undone.isApplied());
         assertEquals(List.of("light-1"), undone.getNodes().stream().map(DeviceNodeDto::getId).toList());
         assertEquals(List.of(ruleId), undone.getRules().stream().map(RuleDto::getId).toList());
+        assertEquals(originalRule, undone.getRules().get(0));
         assertEquals(List.of(specId), undone.getSpecs().stream().map(SpecificationDto::getId).toList());
         assertEquals("10", undone.getEnvironmentVariables().get(0).getValue());
         DeviceJournalSnapshot restoredSnapshot = journal.readJson(
@@ -634,7 +648,7 @@ class BoardEditUndoIntegrationTest {
     @Test
     void undoRestoresADeletedRuleUnderItsOriginalId() {
         Long ruleId = service.addRule(userId, newRule("r1")).getAffectedItem().getId();
-        RuleDto persisted = service.getRules(userId).get(0);
+        RuleDto persisted = persistedRuleWithHistoricTime(ruleId);
         service.removeRuleIfUnchanged(userId, ruleId, persisted);
         assertTrue(service.getRules(userId).isEmpty());
 
@@ -644,6 +658,7 @@ class BoardEditUndoIntegrationTest {
         assertEquals(1, undone.getRules().size());
         // The original id must come back: rules and specifications reference it.
         assertEquals(ruleId, undone.getRules().get(0).getId());
+        assertEquals(persisted, undone.getRules().get(0));
         assertTrue(undone.isCanRedo());
     }
 
@@ -720,9 +735,18 @@ class BoardEditUndoIntegrationTest {
                 .findFirst().orElseThrow();
     }
 
+    private RuleDto persistedRuleWithHistoricTime(Long ruleId) {
+        RulePo stored = rules.findById(ruleId).orElseThrow();
+        stored.setCreatedAt(LocalDateTime.of(2001, 2, 3, 4, 5, 6));
+        rules.saveAndFlush(stored);
+        entityManager.clear();
+        return ruleById(ruleId);
+    }
+
     @Test
     void anAutomaticFixIsOneReversibleRuleSetEditAndPreservesOlderHistory() {
         Long ruleId = service.addRule(userId, newRule("r1")).getAffectedItem().getId();
+        RuleDto originalRule = persistedRuleWithHistoricTime(ruleId);
         assertTrue(journal.availability(userId).canUndo());
 
         CollectionMutationResultDto<RuleDto> fixed =
@@ -739,10 +763,93 @@ class BoardEditUndoIntegrationTest {
         BoardUndoResultDto undone = service.undoLastEdit(userId);
         assertEquals("RULE_SET", undone.getEntityType());
         assertEquals(List.of(ruleId), ruleIdsInOrder());
+        assertEquals(originalRule, ruleById(ruleId));
 
         BoardUndoResultDto redone = service.redoLastUndoneEdit(userId);
         assertEquals("RULE_SET", redone.getEntityType());
         assertTrue(service.getRules(userId).isEmpty());
+    }
+
+    @Test
+    void clientCreationTimeCannotOverrideNewOrExistingRuleCreationTime() {
+        LocalDateTime supplied = LocalDateTime.of(1999, 1, 2, 3, 4, 5);
+        RuleDto input = newRule("r1");
+        input.setCreatedAt(supplied);
+        Long ruleId = service.addRule(userId, input).getAffectedItem().getId();
+        rules.flush();
+        entityManager.clear();
+        LocalDateTime saved = ruleById(ruleId).getCreatedAt();
+        assertNotNull(saved);
+        assertNotEquals(supplied, saved);
+
+        service.updateRulesAgainstSnapshot(userId, snapshot -> {
+            RuleDto update = newRule("updated description");
+            update.setId(ruleId);
+            update.setCreatedAt(supplied);
+            return List.of(update);
+        });
+        rules.flush();
+        entityManager.clear();
+        assertEquals(saved, ruleById(ruleId).getCreatedAt());
+    }
+
+    @Test
+    void targetedRuleUpdateKeepsAnUntouchedOversizedStoredRuleAndItsUndoHistory() {
+        Long legacyId = service.addRule(userId, newRule("legacy")).getAffectedItem().getId();
+        Long changedId = service.addRule(userId, newRule("other", "off", "on")).getAffectedItem().getId();
+        RulePo legacy = rules.findById(legacyId).orElseThrow();
+        legacy.setRuleString("x".repeat(cn.edu.nju.Iot_Verify.dto.RequestLimits.MAX_DESCRIPTION_LENGTH + 1));
+        rules.saveAndFlush(legacy);
+        entityManager.clear();
+        List<RuleDto> original = service.getRules(userId);
+
+        assertDoesNotThrow(() -> service.updateRulesAgainstSnapshot(userId, snapshot -> {
+            RuleDto changed = newRule("updated description", "off", "on");
+            changed.setId(changedId);
+            return List.of(snapshot.rules().get(0), changed);
+        }));
+
+        assertEquals(original.get(0), service.getRules(userId).get(0));
+        assertEquals(changedId, service.getRules(userId).get(1).getId());
+        assertEquals("updated description", service.getRules(userId).get(1).getRuleString());
+        assertTrue(service.undoLastEdit(userId).isApplied());
+        assertEquals(original, service.getRules(userId));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"RULE,true", "RULE,false", "DEVICE,true", "DEVICE,false", "RULE_SET,true", "RULE_SET,false"})
+    void missingRuleCreationTimeIsUnreadableHistoryInEitherDirection(String kind, boolean undo) throws Exception {
+        Long ruleId = service.addRule(userId, newRule("r1")).getAffectedItem().getId();
+        RuleDto original = persistedRuleWithHistoricTime(ruleId);
+        switch (kind) {
+            case "RULE" -> service.removeRuleIfUnchanged(userId, ruleId, original);
+            case "DEVICE" -> service.deleteNodeCascade(userId, "light-1",
+                    service.previewNodeDeletion(userId, "light-1").getImpactToken());
+            default -> service.updateRulesAgainstSnapshot(userId, snapshot -> List.of());
+        }
+        if (!undo) service.undoLastEdit(userId);
+        BoardEditJournalPo entry = (undo ? journal.nextToUndo(userId) : journal.nextToRedo(userId)).orElseThrow();
+        ObjectNode before = (ObjectNode) new ObjectMapper().readTree(entry.getBeforeJson());
+        ObjectNode snapshotRule = switch (kind) {
+            case "RULE" -> before;
+            case "DEVICE" -> (ObjectNode) before.path("rules").get(0).path("rule");
+            default -> (ObjectNode) before.path("rules").get(0);
+        };
+        snapshotRule.remove("createdAt");
+        entry.setBeforeJson(before.toString());
+        journalRepo.saveAndFlush(entry);
+        List<DeviceNodeDto> previousNodes = service.getNodes(userId);
+        List<RuleDto> previousRules = service.getRules(userId);
+
+        ConflictException conflict = assertThrows(ConflictException.class,
+                () -> { if (undo) service.undoLastEdit(userId); else service.redoLastUndoneEdit(userId); });
+
+        assertEquals(409, conflict.getCode());
+        assertEquals("This edit can no longer be reversed because its saved details are unreadable.", conflict.getMessage());
+        assertEquals(previousNodes, service.getNodes(userId));
+        assertEquals(previousRules, service.getRules(userId));
+        assertEquals(!undo, journalRepo.findById(entry.getId()).orElseThrow().isUndone(),
+                "unreadable history must remain unconsumed");
     }
 
     @Test
@@ -972,6 +1079,172 @@ class BoardEditUndoIntegrationTest {
 
     private List<Long> ruleIdsInOrder() {
         return service.getRules(userId).stream().map(RuleDto::getId).toList();
+    }
+
+    @Test
+    void consecutiveRuleDeletionsCanBeUndoneAcrossExecutionOrderGaps() {
+        Long first = service.addRule(userId, newRule("r1", "on", "off")).getAffectedItem().getId();
+        Long second = service.addRule(userId, newRule("r2", "off", "on")).getAffectedItem().getId();
+        service.removeRuleIfUnchanged(userId, first, ruleById(first));
+        service.removeRuleIfUnchanged(userId, second, ruleById(second));
+
+        assertTrue(service.undoLastEdit(userId).isApplied());
+        assertEquals(List.of(second), ruleIdsInOrder());
+        assertTrue(service.undoLastEdit(userId).isApplied());
+        assertEquals(List.of(first, second), ruleIdsInOrder());
+        assertTrue(service.redoLastUndoneEdit(userId).isApplied());
+        assertEquals(List.of(second), ruleIdsInOrder());
+        assertTrue(service.redoLastUndoneEdit(userId).isApplied());
+        assertTrue(service.getRules(userId).isEmpty());
+    }
+
+    @Test
+    void creatingASpecificationWithAnExistingIdPreservesTheOriginalAndHistory() {
+        SpecificationDto original = service.addSpec(userId, newSpec("on")).getAffectedItem();
+        SpecificationDto other = newSpec("off");
+        other.setId(original.getId());
+        long historyCount = journalRepo.countByUserId(userId);
+
+        assertThrows(ConflictException.class, () -> service.addSpec(userId, other));
+
+        assertEquals(List.of(original), service.getSpecs(userId));
+        assertEquals(historyCount, journalRepo.countByUserId(userId));
+        assertTrue(service.undoLastEdit(userId).isApplied());
+        assertTrue(service.getSpecs(userId).isEmpty());
+    }
+
+    @Test
+    void sceneReplacementRejectsDuplicateSpecificationIdsBeforeChangingTheBoard() {
+        service.addRule(userId, newRule("original"));
+        var originalRules = service.getRules(userId);
+        SpecificationDto first = newSpec("on");
+        SpecificationDto second = newSpec("off");
+        second.setId(first.getId());
+        var batch = new cn.edu.nju.Iot_Verify.dto.board.BoardBatchDto(
+                service.getNodes(userId), service.getEnvironmentVariables(userId), List.of(), List.of(first, second));
+        batch.setImpactToken(service.previewBoardReplacement(userId).getImpactToken());
+        long historyCount = journalRepo.countByUserId(userId);
+
+        assertThrows(ConflictException.class, () -> service.saveBoardBatch(userId, batch));
+
+        assertEquals(originalRules, service.getRules(userId));
+        assertTrue(service.getSpecs(userId).isEmpty());
+        assertEquals(historyCount, journalRepo.countByUserId(userId));
+    }
+
+    @Test
+    @org.springframework.transaction.annotation.Transactional(
+            propagation = org.springframework.transaction.annotation.Propagation.NOT_SUPPORTED)
+    void sceneReplacementAndApplicationStateConsumptionCommitOrRollbackTogether() {
+        try {
+            service.addRule(userId, newRule("original"));
+            var originalRules = service.getRules(userId);
+            long historyCount = journalRepo.countByUserId(userId);
+            var draft = new cn.edu.nju.Iot_Verify.po.AiSessionStatePo();
+            draft.setStateKey("SCENARIO_DRAFT:" + userId + ":atomic-scene");
+            draft.setUserId(userId);
+            draft.setSessionId("atomic-scene");
+            draft.setStateKind(cn.edu.nju.Iot_Verify.component.ai.state.AiSessionStateStore.Kind.SCENARIO_DRAFT);
+            draft.setPayloadJson("{}");
+            draft.setExpiresAt(java.time.Instant.now().plusSeconds(600));
+            var persistedDraft = aiSessionStates.saveAndFlush(draft);
+            var batch = new cn.edu.nju.Iot_Verify.dto.board.BoardBatchDto(
+                    List.of(newDevice("light-2", "Light 2", 100)),
+                    service.getEnvironmentVariables(userId), List.of(), List.of());
+            batch.setImpactToken(service.previewBoardReplacement(userId).getImpactToken());
+
+            assertThrows(IllegalStateException.class, () -> service.saveBoardBatch(userId, batch, () -> {
+                assertEquals(1, aiSessionStates.deleteByStateKeyAndVersion(
+                        persistedDraft.getStateKey(), persistedDraft.getVersion()));
+                throw new IllegalStateException("Application state consumption failed");
+            }));
+
+            assertEquals(List.of("light-1"), service.getNodes(userId).stream().map(DeviceNodeDto::getId).toList());
+            assertEquals(originalRules, service.getRules(userId));
+            assertEquals(historyCount, journalRepo.countByUserId(userId));
+            assertTrue(aiSessionStates.existsById(persistedDraft.getStateKey()));
+
+            service.saveBoardBatch(userId, batch, () -> assertEquals(1,
+                    aiSessionStates.deleteByStateKeyAndVersion(
+                            persistedDraft.getStateKey(), persistedDraft.getVersion())));
+
+            assertEquals(List.of("light-2"), service.getNodes(userId).stream().map(DeviceNodeDto::getId).toList());
+            assertTrue(service.getRules(userId).isEmpty());
+            assertEquals(0, journalRepo.countByUserId(userId));
+            assertFalse(aiSessionStates.existsById(persistedDraft.getStateKey()));
+        } finally {
+            new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+                for (Long owner : List.of(userId, otherUserId)) {
+                    aiSessionStates.deleteUser(owner);
+                    journalRepo.deleteByUserId(owner);
+                    rules.deleteByUserId(owner);
+                    specs.deleteByUserId(owner);
+                    environments.deleteByUserId(owner);
+                    nodes.deleteByUserId(owner);
+                    templates.deleteByUserId(owner);
+                    users.deleteById(owner);
+                }
+            });
+        }
+    }
+
+    @Test
+    void readingAnUnchangedEnvironmentPoolDoesNotWriteEntities() {
+        service.getEnvironmentVariables(userId);
+        entityManager.flush();
+        Statistics statistics = clearedDatabaseStatistics();
+
+        assertEquals(List.of(new BoardEnvironmentVariableDto("illuminance", "10", "untrusted", "public")),
+                service.getEnvironmentVariables(userId));
+        entityManager.flush();
+
+        var writes = statistics.getEntityStatistics(BoardEnvironmentVariablePo.class.getName());
+        assertEquals(0, writes.getInsertCount());
+        assertEquals(0, writes.getDeleteCount());
+        assertEquals(0, writes.getUpdateCount());
+    }
+
+    @Test
+    void addingOneDevicePreservesUnchangedDeviceAndEnvironmentRows() {
+        service.addNodes(userId, List.of(newDevice("light-2", "Light 2", 100)), null);
+        entityManager.flush();
+        Statistics statistics = clearedDatabaseStatistics();
+
+        var result = service.addNodes(userId, List.of(newDevice("light-3", "Light 3", 200)), null);
+        entityManager.flush();
+
+        assertEquals(3, result.getCurrentNodes().size());
+        var nodeWrites = statistics.getEntityStatistics(DeviceNodePo.class.getName());
+        assertEquals(1, nodeWrites.getInsertCount());
+        assertEquals(0, nodeWrites.getDeleteCount());
+        assertEquals(0, nodeWrites.getUpdateCount());
+        var environmentWrites = statistics.getEntityStatistics(BoardEnvironmentVariablePo.class.getName());
+        assertEquals(0, environmentWrites.getInsertCount());
+        assertEquals(0, environmentWrites.getDeleteCount());
+        assertEquals(0, environmentWrites.getUpdateCount());
+    }
+
+    @Test
+    void addingOneSpecificationPreservesTheUnchangedSpecificationRow() {
+        service.addSpec(userId, newSpec("on"));
+        entityManager.flush();
+        Statistics statistics = clearedDatabaseStatistics();
+
+        var result = service.addSpec(userId, newSpec("off"));
+        entityManager.flush();
+
+        assertEquals(2, result.getCurrentCount());
+        var writes = statistics.getEntityStatistics(cn.edu.nju.Iot_Verify.po.SpecificationPo.class.getName());
+        assertEquals(1, writes.getInsertCount());
+        assertEquals(0, writes.getDeleteCount());
+        assertEquals(0, writes.getUpdateCount());
+    }
+
+    private Statistics clearedDatabaseStatistics() {
+        Statistics statistics = entityManagerFactory.unwrap(SessionFactory.class).getStatistics();
+        statistics.setStatisticsEnabled(true);
+        statistics.clear();
+        return statistics;
     }
 
     @Test

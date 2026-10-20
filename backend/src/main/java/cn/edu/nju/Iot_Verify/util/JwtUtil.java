@@ -4,8 +4,7 @@ import cn.edu.nju.Iot_Verify.configure.JwtConfig;
 import cn.edu.nju.Iot_Verify.configure.ProductionSafetyCheck;
 import cn.edu.nju.Iot_Verify.exception.UnauthorizedException;
 import io.jsonwebtoken.Claims;
-import io.jsonwebtoken.ExpiredJwtException;
-import io.jsonwebtoken.JwtException;
+import io.jsonwebtoken.JwtParser;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.SignatureAlgorithm;
 import io.jsonwebtoken.security.Keys;
@@ -18,6 +17,7 @@ import lombok.extern.slf4j.Slf4j;
 import javax.crypto.SecretKey;
 import java.nio.charset.StandardCharsets;
 import java.util.Date;
+import java.util.UUID;
 
 @Slf4j
 @Component
@@ -29,6 +29,7 @@ public class JwtUtil {
     private final Environment environment;
 
     private SecretKey signingKey;
+    private JwtParser parser;
 
     public JwtUtil(JwtConfig config, Environment environment) {
         this.config = config;
@@ -39,6 +40,8 @@ public class JwtUtil {
     public void init() {
         byte[] keyBytes = config.getSecret().getBytes(StandardCharsets.UTF_8);
         this.signingKey = Keys.hmacShaKeyFor(keyBytes);
+        // The built parser is immutable and thread-safe; provider discovery belongs to initialization.
+        this.parser = Jwts.parserBuilder().setSigningKey(signingKey).build();
 
         if (config.getSecret().startsWith(INSECURE_DEFAULT_PREFIX) && ProductionSafetyCheck.isProductionProfile(environment)) {
             log.warn("JWT secret is still using the insecure default value — "
@@ -53,27 +56,38 @@ public class JwtUtil {
         return signingKey;
     }
 
-    public String generateToken(Long userId, String phone) {
+    public String generateToken(Long userId, String phone, long authVersion) {
         Date now = new Date();
         Date expiryDate = new Date(now.getTime() + config.getExpiration());
 
         return Jwts.builder()
                 .setSubject(String.valueOf(userId))
                 .claim("phone", phone)
+                .claim("authVersion", authVersion)
+                .setId(UUID.randomUUID().toString())
                 .setIssuedAt(now)
                 .setExpiration(expiryDate)
                 .signWith(getSigningKey(), SignatureAlgorithm.HS256)
                 .compact();
     }
 
-    public Long getUserIdFromToken(String token) {
+    public TokenIdentity parseIdentity(String token) {
         Claims claims = parseClaims(token);
         try {
-            return Long.parseLong(claims.getSubject());
+            long userId = Long.parseLong(claims.getSubject());
+            Object version = claims.get("authVersion");
+            if (claims.getExpiration() == null || userId <= 0
+                    || !(version instanceof Integer || version instanceof Long)
+                    || ((Number) version).longValue() < 0) {
+                throw UnauthorizedException.invalidToken();
+            }
+            return new TokenIdentity(userId, ((Number) version).longValue());
         } catch (NumberFormatException e) {
-            throw new UnauthorizedException("Invalid token: malformed user ID");
+            throw UnauthorizedException.invalidToken();
         }
     }
+
+    public record TokenIdentity(Long userId, long authVersion) { }
     /**
      * 获取Token剩余过期时间（秒）
      * 用于黑名单设置合理的TTL
@@ -85,25 +99,8 @@ public class JwtUtil {
         return Math.max(60, (expMillis - nowMillis) / 1000);
     }
 
-    public boolean validateToken(String token) {
-        try {
-            Claims claims = parseClaims(token);
-            return !claims.getExpiration().before(new Date());
-        } catch (ExpiredJwtException e) {
-            return false;
-        } catch (JwtException e) {
-            return false;
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    /* No throwing `validateTokenOrThrow` variant: only the boolean `validateToken` above has callers. */
     private Claims parseClaims(String token) {
-        return Jwts.parserBuilder()
-                .setSigningKey(getSigningKey())
-                .build()
-                .parseClaimsJws(token)
+        return parser.parseClaimsJws(token)
                 .getBody();
     }
 }

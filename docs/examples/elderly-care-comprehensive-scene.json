@@ -171,77 +171,6 @@
 			}
 		},
 		{
-			"name": "Window",
-			"manifest": {
-				"Name": "Window",
-				"Description": "",
-				"InternalVariables": [
-					{
-						"Name": "contact",
-						"Description": "",
-						"IsInside": true,
-						"FalsifiableWhenCompromised": true,
-						"Trust": "untrusted",
-						"Privacy": "private",
-						"Values": [
-							"closed",
-							"open"
-						]
-					}
-				],
-				"ImpactedVariables": [],
-				"Modes": [
-					"WindowState"
-				],
-				"InitState": "closed",
-				"WorkingStates": [
-					{
-						"Name": "closed",
-						"Dynamics": [
-							{
-								"VariableName": "contact",
-								"Value": "closed"
-							}
-						],
-						"Description": "",
-						"Trust": "trusted",
-						"Privacy": "private"
-					},
-					{
-						"Name": "open",
-						"Dynamics": [
-							{
-								"VariableName": "contact",
-								"Value": "open"
-							}
-						],
-						"Description": "",
-						"Trust": "trusted",
-						"Privacy": "private"
-					}
-				],
-				"Transitions": [],
-				"APIs": [
-					{
-						"Name": "close",
-						"StartState": "",
-						"EndState": "closed",
-						"Trigger": null,
-						"Signal": true,
-						"Description": ""
-					},
-					{
-						"Name": "open",
-						"StartState": "",
-						"EndState": "open",
-						"Trigger": null,
-						"Signal": true,
-						"Description": ""
-					}
-				]
-			}
-		},
-		{
 			"name": "Alarm",
 			"manifest": {
 				"Name": "Alarm",
@@ -815,6 +744,95 @@
 			}
 		},
 		{
+			"name": "Care Ventilation Window",
+			"manifest": {
+				"Name": "Care Ventilation Window",
+				"Description": "An open care-apartment window lowers the normalized indoor CO2 level",
+				"InternalVariables": [
+					{
+						"Name": "contact",
+						"Description": "",
+						"IsInside": true,
+						"FalsifiableWhenCompromised": true,
+						"Trust": "untrusted",
+						"Privacy": "private",
+						"Values": [
+							"closed",
+							"open"
+						]
+					},
+					{
+						"Name": "carbonDioxide",
+						"Description": "",
+						"IsInside": false,
+						"Reads": false,
+						"FalsifiableWhenCompromised": false,
+						"Trust": "untrusted",
+						"Privacy": "public",
+						"LowerBound": 0,
+						"UpperBound": 100,
+						"NaturalChangeRate": "[-1, 1]"
+					}
+				],
+				"ImpactedVariables": [
+					"carbonDioxide"
+				],
+				"Modes": [
+					"WindowState"
+				],
+				"InitState": "closed",
+				"WorkingStates": [
+					{
+						"Name": "closed",
+						"Dynamics": [
+							{
+								"VariableName": "contact",
+								"Value": "closed"
+							}
+						],
+						"Description": "",
+						"Trust": "trusted",
+						"Privacy": "private"
+					},
+					{
+						"Name": "open",
+						"Dynamics": [
+							{
+								"VariableName": "contact",
+								"Value": "open"
+							},
+							{
+								"VariableName": "carbonDioxide",
+								"ChangeRate": "-2"
+							}
+						],
+						"Description": "",
+						"Trust": "trusted",
+						"Privacy": "private"
+					}
+				],
+				"Transitions": [],
+				"APIs": [
+					{
+						"Name": "close",
+						"StartState": "",
+						"EndState": "closed",
+						"Trigger": null,
+						"Signal": true,
+						"Description": ""
+					},
+					{
+						"Name": "open",
+						"StartState": "",
+						"EndState": "open",
+						"Trigger": null,
+						"Signal": true,
+						"Description": ""
+					}
+				]
+			}
+		},
+		{
 			"name": "Vital Signs Monitor",
 			"manifest": {
 				"Name": "Vital Signs Monitor",
@@ -1068,7 +1086,7 @@
 		},
 		{
 			"id": "window_1",
-			"templateName": "Window",
+			"templateName": "Care Ventilation Window",
 			"label": "Electric Window",
 			"position": {
 				"x": 580,
@@ -1369,8 +1387,9 @@
 	],
 	"specs": [
 		{
-			"templateId": "3",
-			"aConditions": [
+			"templateId": "4",
+			"aConditions": [],
+			"ifConditions": [
 				{
 					"deviceId": "bed_sensor",
 					"targetType": "variable",
@@ -1386,17 +1405,17 @@
 					"variableSource": "environment",
 					"relation": "in",
 					"value": "22,23,0,1,2,3,4,5,6"
-				},
-				{
-					"deviceId": "smart_lamp",
-					"targetType": "state",
-					"key": "state",
-					"relation": "=",
-					"value": "off"
 				}
 			],
-			"ifConditions": [],
-			"thenConditions": []
+			"thenConditions": [
+				{
+					"deviceId": "smart_lamp",
+					"targetType": "mode",
+					"key": "SwitchState",
+					"relation": "=",
+					"value": "on"
+				}
+			]
 		},
 		{
 			"templateId": "5",

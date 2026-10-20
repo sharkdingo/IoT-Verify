@@ -26,7 +26,7 @@ import java.util.Optional;
  *
  * <p><b>Deployment boundary.</b> {@link #record} allocates {@code sequence} by reading the current
  * maximum and adding one, which the JVM-level per-user write lock alone cannot make safe across
- * instances. The database fences it: {@code BoardEditJournalSequenceUniqueness} adds a unique
+ * instances. The database fences it: {@link BoardEditJournalPo} declares a unique
  * {@code (user_id, sequence)} constraint, so a lost race fails with a duplicate key instead of
  * producing two entries that share an ordinal.
  *
@@ -92,7 +92,7 @@ public class BoardEditJournal {
         }
 
         // Allocation is read-max-then-add-one, and the per-user lock guarding it is in-JVM only. The
-        // unique (user_id, sequence) index (BoardEditJournalSequenceUniqueness) turns a cross-instance
+        // unique (user_id, sequence) index declared by BoardEditJournalPo turns a cross-instance
         // race into a duplicate-key failure instead of two entries sharing an ordinal — which would make
         // "the newest edit still in effect" ambiguous and silently strand one of them.
         //
@@ -155,9 +155,7 @@ public class BoardEditJournal {
     }
 
     public BoardUndoAvailability availability(Long userId) {
-        return new BoardUndoAvailability(
-                journalRepo.countByUserIdAndUndoneFalse(userId) > 0,
-                journalRepo.countByUserIdAndUndoneTrue(userId) > 0);
+        return journalRepo.findAvailabilityByUserId(userId);
     }
 
     /** Complete journal revision used by the clear-history preview/confirmation fence. */

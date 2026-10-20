@@ -2,23 +2,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
-/**
- * The deletion warning must name everything the cascade actually removes.
- *
- * `AuthServiceImpl.deleteUserOwnedData` deletes from 14 repositories. Verified against the database: an account
- * with rows in `device_templates` (45), `board_edit_journal` (2), `board_environment_variable`, `chat_session`,
- * `device_node` and `specification` had **zero** owned rows afterwards, with zero join-orphans in
- * `chat_message`, `ai_session_state`, `chat_session_pre_admission_stop` and `trace`.
- *
- * The dialog's inventory listed seven of those and omitted three: **counterexamples** (`trace`,
- * `simulation_trace`, `fuzz_finding`), the **Environment Pool** (`board_environment_variable`) and the **undo
- * history** (`board_edit_journal`). All three vision reviews of the dialog noticed counterexamples were missing.
- * For a verification tool they are the hardest-won artefact on the list, and a consent screen that under-states
- * what it destroys is not consent.
- *
- * This check exists because the drift is silent in both directions: adding a repository to the cascade breaks no
- * test, and neither does dropping an item from the copy.
- */
+/** Scene contents may be grouped, but complete deletion and irrecoverable result/history loss stay explicit. */
 
 const i18n = () => readFileSync(join(__dirname, '../../assets/i18n.ts'), 'utf8')
 
@@ -31,25 +15,20 @@ const warningFor = (locale: 'en' | 'zh') => {
 }
 
 describe('account deletion scope', () => {
-  it('names every category the cascade removes, in English', () => {
+  it('states all account data is removed and names the principal artifact groups in English', () => {
     const text = warningFor('en').toLowerCase()
+    expect(text).toContain('your account and all its data')
     for (const category of [
-      'device',            // device_node
-      'environment pool',  // board_environment_variable
-      'rule',              // rules
-      'specification',     // specification
-      'template',          // device_templates
-      'edit history',      // board_edit_journal — before/after snapshots of board content
-      'counterexample',    // trace / simulation_trace / fuzz_finding
-      'ai conversation'    // chat_session / chat_message / ai_session_state
+      'scene', 'template', 'run and edit history', 'counterexample', 'ai conversation'
     ]) {
       expect(text, `the warning should name "${category}"`).toContain(category)
     }
   })
 
-  it('names every category the cascade removes, in Chinese', () => {
+  it('states all account data is removed and names the principal artifact groups in Chinese', () => {
     const text = warningFor('zh')
-    for (const category of ['画布设备', '环境变量池', '规则', '规约', '模板', '编辑历史', '反例', 'AI 会话']) {
+    expect(text).toContain('账号及其全部数据')
+    for (const category of ['场景', '模板', '运行和编辑历史', '反例', 'AI 会话']) {
       expect(text, `警告文案应包含「${category}」`).toContain(category)
     }
   })
@@ -81,11 +60,12 @@ describe('account deletion scope', () => {
 
   it('keeps the flow addressable, since it is the one irreversible action', () => {
     const dialog = readFileSync(join(__dirname, '../AccountDeleteDialog.vue'), 'utf8')
+    const account = readFileSync(join(__dirname, '../../views/Account.vue'), 'utf8')
     const logout = readFileSync(join(__dirname, '../LogoutConfirmDialog.vue'), 'utf8')
 
-    // None of these existed, so nothing outside the component could reach the flow: a browser check looking for
-    // it found no route and reported the affordance missing.
-    expect(logout).toContain('data-testid="open-account-delete"')
+    // Deletion has its own page entry; the sign-out confirmation only answers the sign-out question.
+    expect(account).toContain('data-testid="open-account-delete"')
+    expect(logout).not.toContain('data-testid="open-account-delete"')
     for (const id of [
       'account-delete-dialog',
       'account-delete-confirmation',

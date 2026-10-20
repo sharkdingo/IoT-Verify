@@ -5,6 +5,7 @@ import cn.edu.nju.Iot_Verify.component.aitool.AbstractAiTool;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
+import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
 import cn.edu.nju.Iot_Verify.exception.BaseException;
 import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
 import cn.edu.nju.Iot_Verify.service.BoardStorageService;
@@ -62,9 +63,10 @@ public class ListSpecsTool extends AbstractAiTool {
             requireOnlyFields(args, "arguments", Set.of("keyword"));
             String keyword = optionalTextArg(args, "keyword", "", 100);
 
-            List<SpecificationDto> specs = safeList(boardStorageService.getSpecs(userId));
-            List<DeviceNodeDto> nodes = safeList(boardStorageService.getNodes(userId));
-            List<DeviceTemplateDto> templates = safeList(boardStorageService.getDeviceTemplates(userId));
+            BoardSemanticSnapshotDto snapshot = boardStorageService.getSemanticSnapshot(userId);
+            List<SpecificationDto> specs = snapshot.specifications();
+            List<DeviceNodeDto> nodes = snapshot.nodes();
+            List<DeviceTemplateDto> templates = snapshot.deviceTemplates();
             SpecificationFormulaPreview.Context presentationContext =
                     SpecificationToolPresenter.context(nodes, templates);
             if (!keyword.isEmpty()) {

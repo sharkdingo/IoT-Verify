@@ -14,7 +14,8 @@ import type { SpecCondition, Specification } from '@/types/spec'
  * to the unresolved key rather than being dropped, because a verdict about an unanswered question is
  * something the user needs to see.
  */
-export const verdictVariableSourceKeys = (spec: Specification | undefined | null): string[] => {
+export const verdictVariableSourceKeys = (spec: Pick<Specification,
+    'aConditions' | 'ifConditions' | 'thenConditions'> | undefined | null): string[] => {
     if (!spec) return []
     const conditions: (SpecCondition | undefined | null)[] = [
         ...(spec.aConditions || []),

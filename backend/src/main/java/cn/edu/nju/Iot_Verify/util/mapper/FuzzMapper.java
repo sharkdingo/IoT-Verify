@@ -4,7 +4,7 @@ import cn.edu.nju.Iot_Verify.component.fuzz.FuzzInputEventKind;
 import cn.edu.nju.Iot_Verify.component.fuzz.FuzzInputEventSource;
 import cn.edu.nju.Iot_Verify.component.fuzz.FuzzLimitationContract;
 import cn.edu.nju.Iot_Verify.component.fuzz.FuzzMetadataPolicy;
-import cn.edu.nju.Iot_Verify.component.fuzz.FuzzModelFingerprint;
+import cn.edu.nju.Iot_Verify.util.ModelFingerprint;
 import cn.edu.nju.Iot_Verify.component.fuzz.FuzzModelInputSnapshotCodec;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
@@ -34,7 +34,10 @@ import cn.edu.nju.Iot_Verify.po.FuzzFindingPo;
 import cn.edu.nju.Iot_Verify.po.FuzzTaskPo;
 import cn.edu.nju.Iot_Verify.repository.projection.FuzzFindingSummaryProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.FuzzTaskSummaryProjection;
+import cn.edu.nju.Iot_Verify.repository.projection.FuzzSpecificationPresentationProjection;
+import jakarta.validation.Validator;
 import cn.edu.nju.Iot_Verify.util.JsonUtils;
+import cn.edu.nju.Iot_Verify.util.DeviceNameNormalizer;
 import cn.edu.nju.Iot_Verify.util.TraceStateIntegrity;
 import cn.edu.nju.Iot_Verify.util.ModelPlaybackSceneSnapshot;
 import cn.edu.nju.Iot_Verify.util.mapper.BoardDataConverter.ModelInputSnapshot;
@@ -62,10 +65,12 @@ public class FuzzMapper {
     private static final Pattern STABLE_CODE = Pattern.compile("^[A-Z][A-Z0-9_]*$");
     private static final Pattern MODEL_FINGERPRINT = Pattern.compile("^[0-9a-f]{64}$");
 
-    private final FuzzModelFingerprint modelFingerprint;
+    private final ModelFingerprint modelFingerprint;
+    private final Validator validator;
 
-    public FuzzMapper(FuzzModelFingerprint modelFingerprint) {
+    public FuzzMapper(ModelFingerprint modelFingerprint, Validator validator) {
         this.modelFingerprint = Objects.requireNonNull(modelFingerprint, "modelFingerprint");
+        this.validator = Objects.requireNonNull(validator, "validator");
     }
 
     public FuzzTaskDto toTaskDto(FuzzTaskPo task) {
@@ -192,6 +197,8 @@ public class FuzzMapper {
                 .modelSnapshot(data.modelSnapshot())
                 .playbackScene(data.playbackScene())
                 .eligibility(data.eligibility())
+                .eligibleSpecifications(data.eligibleSpecifications())
+                .modelTokenSourcesByDeviceId(data.modelTokenSourcesByDeviceId())
                 .limitations(data.limitations())
                 .createdAt(task.getCreatedAt())
                 .completedAt(task.getCompletedAt())
@@ -218,6 +225,8 @@ public class FuzzMapper {
                 .elapsedMs(task.getElapsedMs())
                 .modelSnapshot(data.modelSnapshot())
                 .eligibility(data.eligibility())
+                .eligibleSpecifications(data.eligibleSpecifications())
+                .modelTokenSourcesByDeviceId(data.modelTokenSourcesByDeviceId())
                 .limitations(data.limitations())
                 .createdAt(task.getCreatedAt())
                 .completedAt(task.getCompletedAt())
@@ -239,9 +248,26 @@ public class FuzzMapper {
      * the detail endpoint loads the complete task/finding rows.
      */
     public FuzzRunSummaryDto toRunSummaryDtoFromTaskProjection(
-            FuzzTaskSummaryProjection task, List<FuzzFindingSummaryProjection> findings) {
+            FuzzTaskSummaryProjection task, List<FuzzFindingSummaryProjection> findings,
+            FuzzSpecificationPresentationProjection presentation) {
         ProjectedRunContext context = readAndValidateProjectedRunContext(task, findings);
         ProjectedRunData data = context.data();
+        Map<String, SpecificationDto> specifications = readProjectedSpecifications(
+                task, presentation, data.modelSnapshot(), data.eligibility());
+        Map<String, ModelTokenSource> tokenSources = readProjectedTokenSources(
+                task, presentation, data.modelSnapshot());
+        Set<String> deviceIds = new HashSet<>();
+        for (String id : tokenSources.keySet()) {
+            if (!deviceIds.add(DeviceNameNormalizer.normalize(id))) {
+                throw invalidProjectedRun(task, "modelTokenSourcesByDeviceId", "frozen device identities are ambiguous");
+            }
+        }
+        if (specifications.values().stream().anyMatch(specification ->
+                List.of(specification.getAConditions(), specification.getIfConditions(), specification.getThenConditions())
+                        .stream().flatMap(List::stream)
+                        .anyMatch(condition -> !deviceIds.contains(DeviceNameNormalizer.normalize(condition.getDeviceId()))))) {
+            throw invalidProjectedRun(task, "specificationPresentation", "frozen conditions reference an uncaptured device");
+        }
         return FuzzRunSummaryDto.builder()
                 .id(task.getId())
                 .initiator(task.getInitiator())
@@ -253,6 +279,8 @@ public class FuzzMapper {
                 .elapsedMs(task.getElapsedMs())
                 .modelSnapshot(data.modelSnapshot())
                 .eligibility(data.eligibility())
+                .eligibleSpecifications(specifications)
+                .modelTokenSourcesByDeviceId(tokenSources)
                 .limitations(data.limitations())
                 .createdAt(task.getCreatedAt())
                 .completedAt(task.getCompletedAt())
@@ -263,6 +291,7 @@ public class FuzzMapper {
                 .findings(findings == null ? List.of() : findings.stream()
                         .map(finding -> toFindingSummaryDto(
                                 finding,
+                                specifications.get(finding.getViolatedSpecId()),
                                 data.eligibility().getEligibleSpecLabels()
                                         .get(finding.getViolatedSpecId())))
                         .toList())
@@ -352,17 +381,17 @@ public class FuzzMapper {
 
     public FuzzFindingSummaryDto toFindingSummaryDto(FuzzFindingSummaryProjection finding) {
         if (finding == null) return null;
-        return toFindingSummaryDto(finding, finding.getViolatedSpecId());
+        return toFindingSummaryDto(finding, null, finding.getViolatedSpecId());
     }
 
     private FuzzFindingSummaryDto toFindingSummaryDto(
-            FuzzFindingSummaryProjection finding, String frozenLabel) {
+            FuzzFindingSummaryProjection finding, SpecificationDto specification, String frozenLabel) {
         validateFindingSummaryProjection(finding);
         return FuzzFindingSummaryDto.builder()
                 .id(finding.getId())
                 .fuzzTaskId(finding.getFuzzTaskId())
                 .violatedSpecId(finding.getViolatedSpecId())
-                .violatedSpec(null)
+                .violatedSpec(specification)
                 .specificationLabel(hasText(frozenLabel)
                         ? frozenLabel : finding.getViolatedSpecId())
                 .firstViolationStep(finding.getFirstViolationStep())
@@ -947,6 +976,56 @@ public class FuzzMapper {
                 && new HashSet<>(targetSpecIds).size() == targetSpecIds.size();
     }
 
+    private void validatePresentationOwner(FuzzTaskSummaryProjection task,
+                                            FuzzSpecificationPresentationProjection presentation) {
+        if (presentation == null || !Objects.equals(task.getId(), presentation.getId())) {
+            throw invalidProjectedRun(task, "specificationPresentation", "frozen presentation ownership is missing");
+        }
+    }
+
+    private Map<String, SpecificationDto> readProjectedSpecifications(
+            FuzzTaskSummaryProjection task, FuzzSpecificationPresentationProjection presentation,
+            ModelRunSnapshotDto snapshot, FuzzEligibilityDto eligibility) {
+        validatePresentationOwner(task, presentation);
+        List<SpecificationDto> specifications = JsonUtils.readPersistedJsonRequired(
+                "FuzzTask", task.getId(), "specificationPresentation", presentation.getSpecificationsJson(),
+                () -> JsonUtils.fromJson(presentation.getSpecificationsJson(), new TypeReference<List<SpecificationDto>>() {}));
+        if (specifications.size() > 100 || specifications.size() != snapshot.getSpecificationCount()) {
+            throw invalidProjectedRun(task, "specificationPresentation", "frozen specification count is invalid");
+        }
+        Map<String, SpecificationDto> byId = new LinkedHashMap<>();
+        for (SpecificationDto specification : specifications) {
+            if (specification == null || !validator.validate(specification).isEmpty()
+                    || byId.putIfAbsent(specification.getId(), specification) != null) {
+                throw invalidProjectedRun(task, "specificationPresentation", "frozen specifications are invalid");
+            }
+        }
+        Map<String, SpecificationDto> eligible = new LinkedHashMap<>();
+        for (String id : eligibility.getEligibleSpecIds()) {
+            SpecificationDto specification = byId.get(id);
+            if (!isSupportedFiniteSpecification(specification)) {
+                throw invalidProjectedRun(task, "specificationPresentation", "eligible frozen specification is missing or unsupported");
+            }
+            eligible.put(id, specification);
+        }
+        return Map.copyOf(eligible);
+    }
+
+    private Map<String, ModelTokenSource> readProjectedTokenSources(
+            FuzzTaskSummaryProjection task, FuzzSpecificationPresentationProjection presentation,
+            ModelRunSnapshotDto snapshot) {
+        validatePresentationOwner(task, presentation);
+        Map<String, ModelTokenSource> sources = JsonUtils.readPersistedJsonRequired(
+                "FuzzTask", task.getId(), "modelTokenSourcesByDeviceId", presentation.getModelTokenSourcesJson(),
+                () -> JsonUtils.fromJson(presentation.getModelTokenSourcesJson(), new TypeReference<Map<String, ModelTokenSource>>() {}));
+        if (sources.size() > 100 || sources.size() != snapshot.getDeviceCount()
+                || sources.entrySet().stream().anyMatch(entry -> !hasText(entry.getKey())
+                || entry.getKey().length() > 100 || entry.getValue() == null)) {
+            throw invalidProjectedRun(task, "modelTokenSourcesByDeviceId", "frozen token sources are invalid");
+        }
+        return Map.copyOf(sources);
+    }
+
     private PersistedDataIntegrityException invalidProjectedTask(
             FuzzTaskSummaryProjection task, String detail) {
         return new PersistedDataIntegrityException(
@@ -980,8 +1059,13 @@ public class FuzzMapper {
         if (task.getOutcome() != FuzzOutcome.INCONCLUSIVE && eligibility.getEligibleSpecCount() == 0) {
             throw invalidRun(task, "eligibilityJson", "search outcomes require an eligible specification");
         }
+        Map<String, SpecificationDto> eligibleSpecifications = new LinkedHashMap<>();
+        for (String id : eligibility.getEligibleSpecIds()) {
+            eligibleSpecifications.put(id, specificationsById.get(id));
+        }
         PersistedRunData data = new PersistedRunData(
-                targetSpecIds, modelSnapshot, frozenInput.playbackScene(), eligibility, limitations);
+                targetSpecIds, modelSnapshot, frozenInput.playbackScene(), eligibility, limitations,
+                Map.copyOf(eligibleSpecifications), frozenInput.tokenSources().deviceSources());
         return new PersistedRunContext(
                 data, specificationsById, new HashSet<>(eligibility.getEligibleSpecIds()),
                 frozenInput.rules(), frozenInput.tokenSources());
@@ -1580,7 +1664,9 @@ public class FuzzMapper {
             ModelRunSnapshotDto modelSnapshot,
             ModelPlaybackSceneDto playbackScene,
             FuzzEligibilityDto eligibility,
-            List<String> limitations) {
+            List<String> limitations,
+            Map<String, SpecificationDto> eligibleSpecifications,
+            Map<String, ModelTokenSource> modelTokenSourcesByDeviceId) {
     }
 
     private record PersistedRunContext(

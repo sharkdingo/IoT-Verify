@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import postcss from 'postcss'
 
 /**
  * Arriving at the violating step must change the canvas, not only the rail.
@@ -166,7 +167,7 @@ describe('violation emphasis reaches the canvas', () => {
     // Reads the single owner rather than the finding, which is what makes a safety counterexample marked.
     expect(body, 'one owner for the violating step').toContain('counterexampleViolationStep.value')
 
-    const popover = readFileSync(join(root, 'src/components/PlaybackChangePopover.vue'), 'utf8')
+    const popover = readFileSync(join(root, 'src/components/PlaybackChangesPanel.vue'), 'utf8')
     const predicate = popover.slice(popover.indexOf('const isViolationState'), popover.indexOf('const isViolationState') + 220)
     expect(predicate, 'the component must not re-gate on the kind, which excluded counterexamples')
       .not.toContain("props.kind === 'fuzzing'")
@@ -189,35 +190,23 @@ describe('violation emphasis reaches the canvas', () => {
     const aria = board.slice(board.indexOf('const getTraceStateAriaLabel'), at + 2000)
     expect(aria, 'the accessible name must read the helper, not its own copy of the wording')
       .toMatch(/getTraceStateAriaLabel[\s\S]{0,600}traceStateViolationLabel\(index\)/)
-    // The visible marker must render the print-once wrapper of the same helper. Anchored on the `v-if`
-    // because the helper also drives the ring class a few lines earlier, and a window from there stops
-    // before the label.
-    const marker = board.slice(board.indexOf('v-if="traceStateViolationMarker(Number(index))"'))
-    expect(marker.slice(0, 400), 'the visible marker renders the helper')
-      .toContain('{{ traceStateViolationMarker(Number(index)) }}')
-    // The ring is the one that must stay on every step of a cycle, because it carries the extent. Matched
-    // as the predicate immediately preceding the ring classes rather than by a fixed byte window, which any
-    // unrelated edit above it would shift.
-    expect(board, 'the ring reads the per-step helper, not the print-once one')
-      .toMatch(/traceStateViolationLabel\(Number\(index\)\)\s*\n\s*\? 'ring-2 ring-\[color:var\(--danger\)\] ring-offset-2'/)
+    const terminal = readFileSync(join(root, 'src/components/PlaybackTerminal.vue'), 'utf8')
+    expect(board).toContain(':violation-steps="counterexampleViolationSteps"')
+    expect(board).toContain(':violation-label="traceStateViolationLabel"')
+    expect(terminal).toContain(':aria-label="markerLabel(index)"')
+    const markerLabel = terminal.slice(terminal.indexOf('const markerLabel'), terminal.indexOf('const rail ='))
+    expect(markerLabel).toContain('props.stateLabel(index)')
+    expect(markerLabel).toContain("t('app.playbackInitialState')")
+    expect(terminal).toContain(':data-violation="violationSteps.includes(index)"')
+    expect(terminal).toContain('{{ index + 1 }}')
+
   })
 
-  it('prints the cycle word once, though every cycle step is ringed and named', () => {
-    // The label is `whitespace-nowrap` at roughly 80px while the rail packs markers 38px apart, so
-    // rendering it on each step of a multi-state cycle stacks overlapping labels across its own rings.
-    const at = board.indexOf('const traceStateViolationMarker')
-    expect(at, 'the print-once wrapper should exist').toBeGreaterThan(-1)
-    const body = board.slice(at, at + 400)
-    expect(body, 'the cycle prints at its first step only')
-      .toContain('counterexampleViolationSteps.value[0] === index')
-    // The single-step violation must be exempt, or a safety counterexample's own marker depends on the
-    // cycle set being non-empty — which it is not for a safety template.
-    expect(body, 'a single-step violation always prints')
-      .toContain('counterexampleViolationStep.value === index')
-    // And the accessible name keeps every step, so a reader landing mid-cycle still learns they are in it.
-    const aria = board.slice(board.indexOf('const getTraceStateAriaLabel'))
-    expect(aria.slice(0, 600), 'the accessible name uses the per-step helper')
-      .toContain('traceStateViolationLabel(index)')
+  it('keeps violation words outside the small rail markers', () => {
+    const terminal = readFileSync(join(root, 'src/components/PlaybackTerminal.vue'), 'utf8')
+    expect(terminal).not.toContain('board-playback-violation')
+    expect(board).toContain('data-testid="trace-timeline-violation-chip"')
+    expect(board).toContain('{{ traceStateViolationLabel(traceAnimationState.selectedStateIndex) }}')
   })
 
   it('marks a liveness cycle on the rail, not only on the canvas', () => {
@@ -268,8 +257,8 @@ describe('violation emphasis reaches the canvas', () => {
     // On a one-state cycle NuSMV re-prints the loop entry with no variable lines, so the delta merge makes
     // the final state identical to its predecessor: "No observable changes" is then true but reads as a
     // broken animation. (A longer cycle prints real deltas, so the block must be ordered ahead of the
-    // change list's own empty state rather than replacing it — see PlaybackChangePopover.spec.ts.)
-    const popover = readFileSync(join(root, 'src/components/PlaybackChangePopover.vue'), 'utf8')
+    // change list's own empty state rather than replacing it — see PlaybackChangesPanel.spec.ts.)
+    const popover = readFileSync(join(root, 'src/components/PlaybackChangesPanel.vue'), 'utf8')
     const loopAt = popover.indexOf('data-testid="playback-change-loop-back"')
     const emptyAt = popover.indexOf('data-testid="playback-change-empty"')
     expect(loopAt, 'the loop explanation must exist').toBeGreaterThan(-1)
@@ -319,9 +308,18 @@ describe('violation emphasis reaches the canvas', () => {
     expect(css).toContain('.iot-board .device-node.device-at-violation')
     expect(css, 'the persistent statement is an outline, not an animation')
       .toMatch(/\.device-node\.device-at-violation\s*\{[^}]*outline:\s*3px solid var\(--danger-fill\)/)
-    const reduced = css.slice(css.indexOf('@media (prefers-reduced-motion: reduce)', css.indexOf('device-at-violation')))
-    expect(reduced.slice(0, 1200), 'the flash must be listed for suppression')
-      .toContain('device-at-violation')
+    let flashSuppressed = false
+    postcss.parse(css).walkAtRules('media', media => {
+      if (!media.params.includes('prefers-reduced-motion: reduce')) return
+      media.walkRules(rule => {
+        const selectors = rule.selectors.map(selector => selector.replace(/\/\*[\s\S]*?\*\//g, '').trim())
+        if (!selectors.includes('.iot-board .device-node.device-at-violation')) return
+        rule.walkDecls('animation', declaration => {
+          if (declaration.value === 'none' && declaration.important) flashSuppressed = true
+        })
+      })
+    })
+    expect(flashSuppressed, 'the flash must be suppressed throughout the reduced-motion block').toBe(true)
   })
 
   it('uses the non-text indicator token rather than a literal red', () => {

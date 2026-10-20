@@ -1,6 +1,5 @@
 package cn.edu.nju.Iot_Verify.component.aitool.rule;
 
-import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvRelationUtils;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import com.fasterxml.jackson.databind.JsonNode;
 
@@ -19,8 +18,6 @@ final class RuleCandidateArgument {
             Set.of("deviceName", "attribute", "targetType", "relation", "value");
     private static final Set<String> COMMAND_FIELDS =
             Set.of("deviceName", "action", "contentDevice", "content");
-    private static final Set<String> TARGET_TYPES = Set.of("api", "variable", "mode", "state");
-    private static final Set<String> ENUM_RELATIONS = Set.of("=", "!=", "in", "not in");
 
     private RuleCandidateArgument() {
     }
@@ -43,33 +40,9 @@ final class RuleCandidateArgument {
 
             String deviceName = requiredText(conditionNode, "deviceName", path);
             String attribute = requiredText(conditionNode, "attribute", path);
-            String targetType = requiredText(conditionNode, "targetType", path).toLowerCase(java.util.Locale.ROOT);
-            if (!TARGET_TYPES.contains(targetType)) {
-                throw invalid(path + ".targetType must be one of api, variable, mode, state.");
-            }
-
+            String targetType = requiredText(conditionNode, "targetType", path);
             String relation = optionalText(conditionNode, "relation", path);
             String value = optionalText(conditionNode, "value", path);
-            if ("api".equals(targetType)) {
-                if (relation != null || value != null) {
-                    throw invalid(path + " is an API signal and must omit relation and value.");
-                }
-            } else {
-                if (relation == null || value == null) {
-                    throw invalid(path + " must include textual relation and value.");
-                }
-                relation = SmvRelationUtils.normalizeRelation(relation);
-                if (!SmvRelationUtils.isSupportedRelation(relation)) {
-                    throw invalid(path + ".relation must be one of =, !=, >, >=, <, <=, in, not in.");
-                }
-                if (("state".equals(targetType) || "mode".equals(targetType))
-                        && !ENUM_RELATIONS.contains(relation)) {
-                    throw invalid(path + " uses state/mode semantics and only supports =, !=, in, not in.");
-                }
-                if (("in".equals(relation) || "not in".equals(relation)) && hasNoListItem(value)) {
-                    throw invalid(path + ".value must contain at least one item for relation " + relation + ".");
-                }
-            }
 
             conditions.add(RuleDto.Condition.builder()
                     .deviceName(deviceName)
@@ -88,12 +61,8 @@ final class RuleCandidateArgument {
         String action = requiredText(commandNode, "action", "newRule.command");
         String contentDevice = optionalText(commandNode, "contentDevice", "newRule.command");
         String content = optionalText(commandNode, "content", "newRule.command");
-        if ((contentDevice == null) != (content == null)) {
-            throw invalid("newRule.command.contentDevice and content must be provided together.");
-        }
-
         return RuleDto.builder()
-                .id(optionalPositiveId(node))
+                .id(optionalId(node))
                 .conditions(conditions)
                 .command(RuleDto.Command.builder()
                         .deviceName(commandDevice)
@@ -143,7 +112,7 @@ final class RuleCandidateArgument {
         return Collections.unmodifiableMap(rule);
     }
 
-    private static Long optionalPositiveId(JsonNode node) throws ValidationException {
+    private static Long optionalId(JsonNode node) throws ValidationException {
         JsonNode value = node.get("id");
         if (value == null || value.isNull()) {
             return null;
@@ -152,7 +121,8 @@ final class RuleCandidateArgument {
             throw invalid("newRule.id must be a positive integer when provided.");
         }
         BigInteger id = value.bigIntegerValue();
-        if (id.signum() <= 0 || id.compareTo(BigInteger.valueOf(Long.MAX_VALUE)) > 0) {
+        if (id.compareTo(BigInteger.valueOf(Long.MIN_VALUE)) < 0
+                || id.compareTo(BigInteger.valueOf(Long.MAX_VALUE)) > 0) {
             throw invalid("newRule.id must be a positive integer when provided.");
         }
         return id.longValue();
@@ -174,8 +144,7 @@ final class RuleCandidateArgument {
         if (!value.isTextual()) {
             throw invalid(path + "." + field + " must be a string when provided.");
         }
-        String text = value.textValue().trim();
-        return text.isEmpty() ? null : text;
+        return value.textValue();
     }
 
     private static void requireObject(JsonNode value, String path) throws ValidationException {
@@ -197,15 +166,6 @@ final class RuleCandidateArgument {
             Collections.sort(unknown);
             throw invalid(path + " contains unsupported field(s): " + String.join(", ", unknown) + ".");
         }
-    }
-
-    private static boolean hasNoListItem(String value) {
-        for (String item : value.split("[,;|]")) {
-            if (!item.trim().isEmpty()) {
-                return false;
-            }
-        }
-        return true;
     }
 
     private static ValidationException invalid(String message) {

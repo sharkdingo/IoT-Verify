@@ -36,6 +36,21 @@ export interface UserInfo {
   username: string;
 }
 
+export interface AccountProfile extends UserInfo {
+  createdAt: string;
+}
+
+export interface UpdateUsernameRequest {
+  username: string;
+  currentPassword: string;
+  expectedUsername: string;
+}
+
+export interface ChangePasswordRequest {
+  currentPassword: string;
+  newPassword: string;
+}
+
 // 全局Result响应包装
 export interface Result<T> {
   code: number;

@@ -36,7 +36,13 @@ public class PromptCompletionService {
      * @return the assistant's text content, or empty string if the model returned nothing
      */
     public String complete(String systemPrompt, String userPrompt, double temperature, int maxTokens) {
-        return complete(systemPrompt, userPrompt, temperature, maxTokens, null, "general");
+        return complete(systemPrompt, userPrompt, temperature, maxTokens, null, "general", null);
+    }
+
+    /** The bounded authorization JSON budget must remain available for the decision itself. */
+    public String completeClassification(String systemPrompt, String userPrompt, double temperature, int maxTokens) {
+        String effort = LlmConfig.requiresResponsesForToolReasoning(llmConfig.getModel()) ? "none" : null;
+        return complete(systemPrompt, userPrompt, temperature, maxTokens, null, "classification", effort);
     }
 
     public String completeRecommendation(
@@ -44,11 +50,11 @@ public class PromptCompletionService {
         String recommendationModel = llmConfig.getRecommendationModel();
         String model = recommendationModel == null || recommendationModel.isBlank()
                 ? null : recommendationModel.trim();
-        return complete(systemPrompt, userPrompt, temperature, maxTokens, model, "recommendation");
+        return complete(systemPrompt, userPrompt, temperature, maxTokens, model, "recommendation", null);
     }
 
     private String complete(String systemPrompt, String userPrompt, double temperature, int maxTokens,
-                            String model, String purpose) {
+                            String model, String purpose, String reasoningEffort) {
         long startedAt = System.nanoTime();
         LlmChatRequest request = LlmChatRequest.builder()
                 .messages(List.of(
@@ -57,6 +63,7 @@ public class PromptCompletionService {
                 .temperature(temperature)
                 .maxTokens(maxTokens)
                 .model(model)
+                .reasoningEffort(reasoningEffort)
                 .build();
 
         LlmChatResponse response = llmProvider.chat(request, LlmRequestControlHolder.currentOrNew());

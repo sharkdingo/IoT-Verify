@@ -61,7 +61,7 @@ class DismissSimulateTaskToolTest {
         assertEquals(20, preview.path("requestedSteps").asInt());
         verify(simulationService, never()).deleteTask(1L, 4L);
 
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", preview.path("impactToken").asText());
         JsonNode json = objectMapper.readTree(tool.execute(
                 "{\"taskId\":4,\"confirmed\":true,\"impactToken\":\""
                         + preview.path("impactToken").asText() + "\"}"));
@@ -87,7 +87,7 @@ class DismissSimulateTaskToolTest {
     void dismiss_confirmWithoutTokenIsRejected() throws Exception {
         when(simulationService.getTask(1L, 4L)).thenReturn(
                 SimulationTaskDto.builder().id(4L).status("FAILED").build());
-        UserContextHolder.setDestructiveActionConfirmed(true);
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", "missing-token");
 
         JsonNode json = objectMapper.readTree(
                 tool.execute("{\"taskId\":4,\"confirmed\":true}"));
