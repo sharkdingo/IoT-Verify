@@ -268,15 +268,15 @@ Consequence: `vite.config.ts` needs its `/api` proxy declared under `preview` as
 
 ### Known-flaky specs, with measured causes
 
-CI runs with `--fail-on-flaky-tests`, so one retry-passing test still fails the job.
+Full CI runs with `--fail-on-flaky-tests`, so one retry-passing test still fails the job.
 
 - **A pointer position computed from the canvas is stale the moment you await.** The edge-label hover
   check measured a hitarea midpoint once and moved the mouse there; under CI load the canvas was
   still settling, the edge had moved, and no label appeared. Re-derive the coordinate *inside* the
   poll and re-hover each attempt rather than widening the timeout around a single stale move.
 - **A lingering Element Plus tooltip popper eats the next click, and `force: true` makes it worse.**
-  `HintTooltip` teleports its popper to `body` at `z-index: 2009` with an 80ms fade, so clicking a
-  board dock button leaves a popper floating over the panel that button just opened — on top of the
+  The original `HintTooltip` popper teleported to `body` at `z-index: 2009` with an 80ms fade, so
+  clicking a board dock button left a popper over the panel that button just opened — on top of the
   controls inside it. Without `force`, the click retries against an element that "intercepts pointer
   events" and times out, which at least names the cause. **`force: true` does not fix this**: it
   skips Playwright's hit-target *check*, not the interception, so the browser still delivers the
@@ -296,7 +296,9 @@ CI runs with `--fail-on-flaky-tests`, so one retry-passing test still fails the 
   unrelated feature branch 2 in 9).
   Pointer parking alone does not dismiss a focus-triggered hint: Undo can correctly move focus to
   Redo, leaving its hint open while the pointer is already elsewhere. The helper blurs only a
-  control whose `aria-describedby` names a tooltip popper, preserving unrelated field drafts.
+  focused control whose own or ancestor's `aria-describedby` names a tooltip popper, preserving
+  unrelated field drafts. Panel toggles put that relation on a wrapper span while focus remains on
+  its nested button; checking only the button misses the open hint after modal focus restoration.
   It repeats that scoped dismissal within the same bounded wait, because delayed popper mounting
   or modal focus restoration can leave a new hint open after a single early blur.
 - **A route mock must satisfy the same validators as the real response.** `api/chat.ts` validates

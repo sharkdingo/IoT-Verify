@@ -557,6 +557,27 @@ test.describe('board accessibility contracts', () => {
     await expect(page.getByTestId('open-verification-panel')).toBeFocused()
   })
 
+  test('retracts wrapped panel hints while preserving an unrelated draft focus', async ({ page, request }) => {
+    await openLayoutTestBoard(page, request)
+    await page.mouse.move(4, 4)
+    const hint = page.locator('.iot-hint-tooltip-popper:not([aria-hidden="true"])')
+    for (const panel of ['control-center', 'system-inspector']) {
+      const toggle = page.getByTestId(`${panel}-toggle`)
+      await toggle.focus()
+      await expect(toggle).toBeFocused()
+      await expect(hint).toBeVisible()
+      await dismissHintTooltips(page)
+      await expect(hint).toHaveCount(0)
+      await expect(toggle).not.toBeFocused()
+    }
+
+    const draft = page.getByTestId('inspector-search-devices')
+    await draft.fill('Keep my draft')
+    await dismissHintTooltips(page)
+    await expect(draft).toBeFocused()
+    await expect(draft).toHaveValue('Keep my draft')
+  })
+
   test('drives both side panel tab strips from the keyboard', async ({ page, request }) => {
     await openLayoutTestBoard(page, request)
 
