@@ -5,7 +5,7 @@ colour roles, type scale, depth, CSS precedence, and replay. These are **rules, 
 when code and this document disagree, one of them is a bug. Keep them short; they exist to stop the
 same argument being re-litigated per PR, and each carries the measurement that settled it.
 
-Verified against code on 2026-10-20. Source: `frontend/src/styles/`, `frontend/src/composables/`,
+Verified against code on 2026-10-21. Source: `frontend/src/styles/`, `frontend/src/composables/`,
 `frontend/src/utils/feedback.ts`, and the spec files each rule names.
 
 ## 1. What belongs in the URL
@@ -1236,8 +1236,9 @@ Card layout lives in `board.css`; `CanvasBoard.vue` owns density selection and s
 The card uses the shared action radius and palette surface. Its content clips inside that shape,
 while the attack marker is a sibling outside the clipped content. Saved node dimensions and
 positions remain the geometry used by connections and resize handles. Real browser coverage in
-`canvas-runtime-environment.spec.ts` checks complete names, text size, containment and icon/name
-separation at multiple shapes, zoom levels and themes.
+`canvas-runtime-environment.spec.ts` checks complete names where the footprint has room, and
+two-line ellipsis with full-name tooltips and accessible labels on constrained compact cards.
+It also checks text size, containment and icon/name separation across shapes, zoom levels and themes.
 
 Expanded cards center their content within a maximum 30rem screen-space column. Enlarging the
 card gives its content room without separating the artwork, name, readings, and security labels
@@ -1332,6 +1333,8 @@ collapsed states, so the two controls remain distinguishable when the headings a
 The collapse toggle remains mounted to preserve keyboard focus. Content fades before the rail
 finishes narrowing and keeps its expanded width during the transition; leaving controls are inert.
 Both sides use the same panel duration and easing, with motion disabled under reduced motion.
+On narrow screens, a panel opened during initial loading stays open when the saved layout arrives.
+This temporary overlay does not change the saved desktop layout.
 
 Section navigation stays outside each panel's scrolling body. Counts sit below section names.
 Both panels keep their four tabs in one row, omit decorative tab icons,

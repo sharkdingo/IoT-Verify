@@ -15,6 +15,13 @@ history into a technical spec. The spec content itself now lives under
 
 ## [Unreleased]
 
+### 2026-10-21 (narrow panel hydration)
+
+#### Fixed
+
+- A side panel opened during initial loading on a narrow screen stays open when the saved layout
+  arrives, instead of collapsing over the user's current selection.
+
 ### 2026-10-21 (model fingerprints and CI coverage)
 
 #### Fixed

@@ -190,8 +190,9 @@ for (const theme of ['light', 'dark'] as const) {
       { width: 80, height: 60, zoom: 1, label: '台灯' },
       { width: 424, height: 318, zoom: 0.2, label: 'Bed Occupancy Sensor' },
       { width: 176, height: 112, zoom: 0.4, label: 'Emergency Alarm' },
-      { width: 176, height: 128, zoom: 0.32, label: 'Front Door Lock' },
-      { width: 176, height: 128, zoom: 0.32, label: 'Electric Window' },
+      // At 56×41 screen pixels, keep readable prefixes and the full name in the tooltip and ARIA label.
+      { width: 176, height: 128, zoom: 0.32, label: 'Front Door Lock', clampedName: true },
+      { width: 176, height: 128, zoom: 0.32, label: 'Electric Window', clampedName: true },
       { width: 80, height: 60, zoom: 0.4, label: 'Lamp', mobile: true },
       { width: 80, height: 60, zoom: 0.2, label: 'Study lamp', micro: true },
       { width: 80, height: 220, zoom: 0.2, label: 'Narrow overview light', micro: true },
@@ -256,9 +257,16 @@ for (const theme of ['light', 'dark'] as const) {
           await expect(node.locator('.device-img')).toBeVisible()
         } else {
           await expect(name).toBeVisible()
-          const textFits = await name.evaluate(label =>
-            label.scrollWidth <= label.clientWidth + 1 && label.scrollHeight <= label.clientHeight + 1)
-          expect(textFits, `${item.label} should use the space in its ${item.width}×${item.height} card at ${item.zoom}`).toBe(true)
+          if (item.clampedName) {
+            await expect(name).toHaveText(item.label)
+            await expect(name).toHaveAttribute('title', item.label)
+            await expect(name).toHaveCSS('text-overflow', 'ellipsis')
+            await expect(name).toHaveCSS('-webkit-line-clamp', '2')
+          } else {
+            const textFits = await name.evaluate(label =>
+              label.scrollWidth <= label.clientWidth + 1 && label.scrollHeight <= label.clientHeight + 1)
+            expect(textFits, `${item.label} should use the space in its ${item.width}×${item.height} card at ${item.zoom}`).toBe(true)
+          }
         }
         if (item.readings) {
           await expect(node.locator('.device-runtime-chip__value')).toContainText('26')

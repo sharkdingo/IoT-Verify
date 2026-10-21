@@ -5592,7 +5592,7 @@ const applyLoadedBoardLayout = (layout: BoardLayoutDto | null, initialHydration:
   const layoutChangedBeforeHydration = initialHydration
     && (panelStateTouchedBeforeLayout || canvasStateTouchedBeforeLayout)
   if (isNarrowViewport()) {
-    applyViewportPanelConstraints()
+    if (!panelStateTouchedBeforeLayout) applyViewportPanelConstraints()
     const visibleNodes = getVisibleDeviceNodes()
     if (visibleNodes.length > 0) {
       void nextTick(() => fitNodesToCanvas(visibleNodes))

@@ -8,6 +8,7 @@ import {
   type AuthUser
 } from './support/auth'
 import type { PersistedChatMessage, StreamProgress } from '../src/types/chat'
+import { collapseChatSidebar } from './support/chatSidebar'
 
 const rgba = (value: string): [number, number, number, number] => {
   const channels = value.match(/[\d.]+/g)?.map(Number)
@@ -302,7 +303,7 @@ for (const { width, theme } of [{ width: 1440, theme: 'light' }, { width: 320, t
     await expect.poll(() => deleteButton.evaluate(element => element.getBoundingClientRect().width)).toBeGreaterThanOrEqual(44)
     await sessionRow.click()
     const sidebarScrim = page.getByTestId('chat-sidebar-scrim')
-    if (await sidebarScrim.isVisible()) await sidebarScrim.click()
+    if (await sidebarScrim.isVisible()) await collapseChatSidebar(page)
     const task = panel.locator('.task-card').first()
     await page.getByTestId('chat-close').press('Tab')
     const resize = page.getByTestId('chat-resize-handle')
@@ -378,7 +379,7 @@ test('reopening the assistant exposes existing history without creating or sendi
   await page.getByTestId('chat-sidebar-toggle').click()
   await expect(page.getByTestId(`chat-session-${session.id}`)).toBeVisible()
 
-  await page.getByTestId('chat-sidebar-scrim').click()
+  await collapseChatSidebar(page)
   await page.getByTestId('chat-close').click()
   await expect(page.getByTestId('chat-panel')).toBeHidden()
 

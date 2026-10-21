@@ -1,6 +1,7 @@
 import { type APIRequestContext, type Locator, type Page, type Route } from '@playwright/test'
 import { createAuthenticatedUser, expect, test, type AuthUser } from './support/auth'
 import { clickUnderTooltip, dismissHintTooltips } from './support/tooltips'
+import { collapseChatSidebar } from './support/chatSidebar'
 
 /**
  * Covers the routing, session, and accessibility contracts that unit tests can only
@@ -357,7 +358,7 @@ for (const { theme, palette, width } of [
     await expect(chat.getByTestId('chat-input')).toHaveCSS('font-size', '14px')
     await chat.getByTestId('chat-sidebar-toggle').click()
     await expectAction(chat.getByRole('button', { name: 'New Chat', exact: true }))
-    await chat.getByTestId('chat-sidebar-scrim').click()
+    await collapseChatSidebar(page)
     await page.getByTestId('chat-close').click()
     await expect(chat).toBeHidden()
     await dismissHintTooltips(page)

@@ -50,10 +50,11 @@ const layoutState = () => {
     persistedWideLayout: null, panelStateTouchedBeforeLayout: false, canvasStateTouchedBeforeLayout: false,
     MAX_ZOOM: 2, DEFAULT_CONTROL_PANEL_WIDTH: 320, DEFAULT_INSPECTOR_PANEL_WIDTH: 320,
     clampPanelWidth: (width: number) => width, isControlCenterSection: () => true,
-    isInspectorSection: () => true, applyViewportPanelConstraints: vi.fn(),
+    isInspectorSection: () => true, getVisibleDeviceNodes: () => [],
     saveBoardLayout: vi.fn().mockResolvedValue(true)
   }
-  for (const name of ['buildBoardLayoutPayload', 'applyBoardLayout', 'scheduleBoardLayoutSave', 'applyLoadedBoardLayout']) {
+  for (const name of ['applyViewportPanelConstraints', 'buildBoardLayoutPayload', 'applyBoardLayout',
+    'scheduleBoardLayoutSave', 'applyLoadedBoardLayout']) {
     ports[name] = bind(name, ports)
   }
   const watchers = source.statements.filter(statement => ts.isExpressionStatement(statement)
@@ -333,6 +334,27 @@ describe('Board authoritative read feedback', () => {
       vi.useRealTimers()
     }
   })
+
+  it.each(['control', 'inspector', null] as const)(
+    'preserves the early narrow panel choice %s when the saved layout arrives', async panel => {
+      const { ports, stop } = layoutState()
+      ports.isNarrowViewport = () => true
+      if (panel) {
+        ports.boardPanels.control.collapsed = panel !== 'control'
+        ports.boardPanels.inspector.collapsed = panel !== 'inspector'
+        ports.panelStateTouchedBeforeLayout = true
+      }
+      try {
+        ports.applyLoadedBoardLayout(savedLayout, true)
+        await nextTick()
+        expect(ports.boardPanels.control.collapsed).toBe(panel !== 'control')
+        expect(ports.boardPanels.inspector.collapsed).toBe(panel !== 'inspector')
+        expect(ports.layoutHydrated.value).toBe(true)
+        expect(ports.persistedWideLayout).toEqual(savedLayout)
+        expect(ports.saveBoardLayout).not.toHaveBeenCalled()
+      } finally { stop() }
+    }
+  )
 
   it('restores layout after the snapshot is ready without waiting for the task inbox', async () => {
     const ports = state()
