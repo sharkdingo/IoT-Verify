@@ -802,6 +802,7 @@ import { defaultSpecTemplates, specTemplateDetails } from '../assets/config/spec
 // API
 import boardApi, {
   BOARD_RESPONSE_INCOMPLETE_CODE,
+  type CollectionMutationResult,
   type BoardReplacementPreview,
   type DeviceLayout,
   type DeviceRecommendation,
@@ -1616,6 +1617,8 @@ const allEdges = computed(() => activePlaybackScene.value ? playbackEdges.value 
 const renderedCanvasPan = computed(() => activePlaybackScene.value ? playbackCanvasPan.value : canvasPan.value)
 const renderedCanvasZoom = computed(() => activePlaybackScene.value ? playbackCanvasZoom.value : canvasZoom.value)
 const specifications = ref<Specification[]>([])
+const editingRule = ref<RuleForm | null>(null)
+const editingSpecification = ref<Specification | null>(null)
 
 type BoardDataKey = 'templates' | 'nodes' | 'environment' | 'rules' | 'specs'
 type BoardDataLoadState = 'loading' | 'ready' | 'error'
@@ -4400,6 +4403,8 @@ watch(
 )
 
 const openControlSection = (section: InspectorSection) => {
+  if (section === 'rules') editingRule.value = null
+  if (section === 'specs') editingSpecification.value = null
   const controlSection: ControlCenterSection = section === 'rules'
     ? 'rules'
     : section === 'specs'
@@ -6418,6 +6423,97 @@ const handleCreateDevices = async (data: {
     }
   })
 }
+
+// Both editors retain their opened baseline; a refresh must not silently authorise overwriting newer work.
+const saveBoardItemEdit = async <T extends { id?: string }>(options: {
+  expected: T
+  desired: T
+  requiredKeys: BoardDataKey[]
+  update: (expected: T, desired: T) => Promise<CollectionMutationResult<T>>
+  commit: (result: CollectionMutationResult<T>) => void
+  focus: (id?: string) => unknown
+  refresh: (token?: string | null) => Promise<boolean>
+  complete: (saved: boolean, failure?: ApiErrorDetails) => void
+}) => {
+  const token = getToken()
+  const authScopeEpoch = boardAuthScopeEpoch
+  const ownsRequest = () => isCurrentSessionToken(token) && isCurrentBoardAuthScope(authScopeEpoch)
+  const expected = deepClone(options.expected)
+  const desired = deepClone(options.desired)
+  let saved = false
+  let failure: ApiErrorDetails | undefined
+  try {
+    if (!ensurePlaybackClosedForMutation()) return
+    await enqueueBoardMutation(async () => {
+      try {
+        if (!ownsRequest() || !ensurePlaybackClosedForMutation()
+          || !ensureBoardDataReady(options.requiredKeys)) return
+        const mutation = await options.update(expected, desired)
+        if (!ownsRequest()) return
+        options.commit(mutation)
+        saved = true
+        await options.focus(mutation.affectedItem.id)
+      } catch (error: unknown) {
+        if (!ownsRequest()) return
+        failure = errorDetails(error)
+        // Recovery owns the queue too: a late refresh must not replace a later edit's snapshot.
+        await options.refresh(token)
+        if (!ownsRequest()) { failure = undefined; return }
+        await reloadUndoAvailability()
+        if (!ownsRequest()) failure = undefined
+      }
+    })
+  } catch (error: unknown) {
+    if (ownsRequest()) failure = errorDetails(error)
+  } finally {
+    options.complete(saved && ownsRequest(), ownsRequest() ? failure : undefined)
+  }
+}
+
+const handleSaveRule = (request: {
+  rule: RuleForm; expected?: RuleForm
+  complete: (saved: boolean, failure?: ApiErrorDetails) => void
+}) => request.expected ? saveBoardItemEdit({
+  expected: request.expected, desired: request.rule, complete: request.complete,
+  requiredKeys: ['nodes', 'templates', 'rules'], update: boardApi.updateRule,
+  commit: mutation => commitSemanticScene({ rules: mutation.currentItems, availability: mutation, semanticChanged: mutation.operation !== 'unchanged' }),
+  focus: focusRuleOnCanvas, refresh: refreshRules
+}) : handleAddRule(request)
+
+const handleSaveSpecification = (data: Parameters<typeof handleAddSpec>[0] & { expected?: Specification }) => {
+  if (!data.expected) return handleAddSpec(data)
+  const desired: Specification = {
+    ...data.expected, templateId: data.templateId as SpecTemplateId,
+    aConditions: data.aConditions, ifConditions: data.ifConditions, thenConditions: data.thenConditions
+  }
+  return saveBoardItemEdit({
+    expected: data.expected, desired, complete: data.complete,
+    requiredKeys: ['nodes', 'templates', 'specs'], update: boardApi.updateSpec,
+    commit: mutation => commitSemanticScene({ specs: mutation.currentItems, availability: mutation, semanticChanged: mutation.operation !== 'unchanged' }),
+    focus: focusSpecInInspector, refresh: refreshSpecifications
+  })
+}
+
+const editRuleFromInspector = (id: string) => {
+  if (!ensurePlaybackClosedForMutation() || !ensureBoardDataReady(['rules'])) return
+  const rule = rules.value.find(item => item.id === id)
+  if (!rule) return
+  openControlSection('rules')
+  editingRule.value = deepClone(rule)
+}
+
+const editSpecificationFromInspector = (id: string) => {
+  if (!ensurePlaybackClosedForMutation() || !ensureBoardDataReady(['specs'])) return
+  const specification = specifications.value.find(item => item.id === id)
+  if (!specification) return
+  openControlSection('specs')
+  editingSpecification.value = deepClone(specification)
+}
+
+watch(() => [authState.token, authState.user?.userId, isSceneReplacementInProgress.value], () => {
+  editingRule.value = null
+  editingSpecification.value = null
+}, { flush: 'sync' })
 
 const openRuleBuilder = () => {
   if (!ensurePlaybackClosedForMutation()) return
@@ -14479,11 +14575,20 @@ const downloadCurrentSimulationRunSmv = () => {
 }
 const verificationSpecResultSummary = computed(() => {
   const results = (verificationResult.value?.specResults || []).map((result, index) => {
+    const interpretation = presentSpecificationResult(result, t)
     return {
       ...result,
-      ...presentSpecificationResult(result, t),
+      ...interpretation,
       displayTitle: t('app.specificationNumber', { number: index + 1 }),
-      presentation: result.outcome === 'SATISFIED'
+      presentation: result.outcome === 'SATISFIED' && interpretation.triggerWarning
+        ? {
+            borderClass: 'board-border-subtle',
+            badgeClass: 'board-surface-warning board-text-warning',
+            icon: 'report',
+            label: t(result.antecedentReachability === 'UNREACHABLE'
+              ? 'household.triggerUnreachable' : 'household.triggerUnknown')
+          }
+        : result.outcome === 'SATISFIED'
         ? {
             borderClass: 'board-border-subtle',
             badgeClass: 'board-surface-success board-text-success',
@@ -14513,7 +14618,8 @@ const verificationSpecResultSummary = computed(() => {
     total: results.length,
     satisfied,
     violated,
-    inconclusive
+    inconclusive,
+    triggerWarnings: results.filter(result => result.triggerWarning).length
   }
 })
 /**
@@ -14603,6 +14709,15 @@ const verificationResultStatus = computed(() => {
       icon: 'report',
       title: t('app.verificationPassedWithGenerationWarnings'),
       detail: t('app.emittedSpecsPassedWithGenerationWarnings')
+    }
+  }
+
+  if (outcome === 'SATISFIED' && verificationSpecResultSummary.value.triggerWarnings > 0) {
+    return {
+      ...verificationVerdictTone('warning'),
+      icon: 'report',
+      title: t('household.coverageTitle'),
+      detail: t('household.coverageDetail', { count: verificationSpecResultSummary.value.triggerWarnings })
     }
   }
 
@@ -15196,6 +15311,8 @@ const attackSelectionSummary = (
       :collapsed="boardPanels.control.collapsed"
       :width="effectiveControlPanelWidth"
       :active-section="boardPanels.control.activeSection"
+      :edit-rule="editingRule"
+      :edit-specification="editingSpecification"
       :read-only="isModelPlaybackActive || isSceneReplacementInProgress"
       :read-only-message="isSceneReplacementInProgress ? t('app.sceneReplacementInProgress') : t('app.playbackReadOnlyCloseFirst')"
       :run-board-mutation="enqueueBoardMutation"
@@ -15204,8 +15321,10 @@ const attackSelectionSummary = (
       @create-devices="handleCreateDevices"
       @template-drag-start="handleTemplateDragStart"
       @template-drag-end="handleTemplateDragEnd"
-      @save-rule="handleAddRule"
-      @add-spec="handleAddSpec"
+      @save-rule="handleSaveRule"
+      @add-spec="handleSaveSpecification"
+      @finish-rule-edit="editingRule = null"
+      @finish-spec-edit="editingSpecification = null"
       @replace-template-catalog="replaceTemplateCatalog"
       @replace-template-state="replaceTemplateState"
       @edit-history-cleared="notifyUndoJournalCleared"
@@ -15235,8 +15354,10 @@ const attackSelectionSummary = (
       :class="{ 'board-panel--interaction-read-only': isModelPlaybackActive || isSceneReplacementInProgress }"
       @delete-device="deleteNodeFromStatus"
       @delete-rule="deleteRule"
+      @edit-rule="editRuleFromInspector"
       @move-rule="moveRule"
       @delete-spec="deleteSpecification"
+      @edit-spec="editSpecificationFromInspector"
       @device-click="focusDeviceFromInspector"
       @open-rule-builder="openRuleBuilder"
       @open-control-section="openControlSection"
@@ -15992,6 +16113,15 @@ const attackSelectionSummary = (
       <div class="board-run-panel__body iot-scroll-region p-3 space-y-3">
         <BackgroundTaskSummary v-if="runningVerificationTask" kind="verification" :task="runningVerificationTask" />
         <template v-if="!isVerifying || !asyncVerificationActive">
+        <section class="text-xs leading-relaxed board-text-muted" aria-labelledby="verification-scope-title">
+          <h4 id="verification-scope-title" class="board-section-title">{{ t('household.scopeTitle') }}</h4>
+          <p class="mt-1">{{ t('household.verificationScope') }}</p>
+          <details class="mt-2">
+            <summary class="cursor-pointer">{{ t('household.assumptions') }}</summary>
+            <p class="mt-1">{{ t('household.modelingBoundary') }}</p>
+            <p class="mt-1">{{ t('household.customizeBoundary') }}</p>
+          </details>
+        </section>
         <section
           v-if="fuzzVerificationHandoff"
           data-testid="fuzz-verification-handoff"
@@ -17665,6 +17795,7 @@ const attackSelectionSummary = (
       <div class="board-run-panel__body iot-scroll-region p-3 space-y-3">
         <BackgroundTaskSummary v-if="runningSimulationTask" kind="simulation" :task="runningSimulationTask" />
         <template v-if="!isSimulating || !asyncSimulationActive">
+        <p class="text-xs leading-relaxed board-text-muted">{{ t('household.simulationScope') }}</p>
         <!-- Steps -->
         <div class="board-card p-3 rounded-xl">
           <div class="mb-2 flex items-center justify-between gap-3">
@@ -18471,6 +18602,9 @@ const attackSelectionSummary = (
                 <h4 class="board-copy my-2 break-words" data-testid="spec-result-description">
                   {{ result.description || result.displayTitle }}
                 </h4>
+                <p v-if="result.triggerDetail" class="mb-2 text-xs leading-relaxed"
+                  :class="result.triggerWarning ? 'board-text-warning' : 'board-text-muted'"
+                  data-testid="spec-result-trigger-evidence">{{ result.triggerDetail }}</p>
                 <p v-if="!result.description" class="mb-2 text-xs board-text-muted" data-testid="spec-result-snapshot-unavailable">{{ t('app.specificationSnapshotUnavailable') }}</p>
                 <details class="spec-formula-disclosure" data-testid="spec-result-formula-details">
                   <summary class="text-xs font-medium board-text-muted">

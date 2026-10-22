@@ -5,6 +5,8 @@ import cn.edu.nju.Iot_Verify.component.aitool.AbstractAiTool;
 import cn.edu.nju.Iot_Verify.component.aitool.AiDestructiveActionGuard;
 import cn.edu.nju.Iot_Verify.component.aitool.BoardSemanticValidator;
 import cn.edu.nju.Iot_Verify.dto.board.CollectionMutationResultDto;
+import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
+import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvRelationUtils;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
@@ -79,35 +81,39 @@ public class ManageSpecTool extends AbstractAiTool {
         Map<String, Object> props = new HashMap<>();
         props.put("action", Map.of(
                 "type", "string",
-                "enum", List.of("add", "delete"),
-                "description", "Action to perform: add to create a new specification, delete to remove one."
+                "enum", List.of("add", "update", "delete"),
+                "description", "Add a new specification, update one in place while preserving its ID and order, or delete one."
         ));
         props.put("templateId", Map.of(
                 "type", "string",
-                "description", "Required for add. Template ID 1,2,3,7 use aConditions only; 4,5,6 use ifConditions and thenConditions only."
+                "description", "Required for add/update. Template ID 1,2,3,7 use aConditions only; 4,5,6 use ifConditions and thenConditions only."
         ));
         props.put("aConditions", Map.of(
                 "type", "array",
-                "description", "For add. A-part conditions. Required for templateId 1,2,3,7 and must be empty for 4,5,6.",
+                "description", "For add/update. Complete desired A-part conditions. Required for templateId 1,2,3,7 and must be empty for 4,5,6.",
                 "items", conditionItemSchema
         ));
         props.put("ifConditions", Map.of(
                 "type", "array",
-                "description", "For add. IF-part conditions. Required for templateId 4,5,6 and must be empty for 1,2,3,7.",
+                "description", "For add/update. Complete desired IF-part conditions. Required for templateId 4,5,6 and must be empty for 1,2,3,7.",
                 "items", conditionItemSchema
         ));
         props.put("thenConditions", Map.of(
                 "type", "array",
-                "description", "For add. THEN-part conditions. Required for templateId 4,5,6 and must be empty for 1,2,3,7.",
+                "description", "For add/update. Complete desired THEN-part conditions. Required for templateId 4,5,6 and must be empty for 1,2,3,7.",
                 "items", conditionItemSchema
         ));
         props.put("specId", Map.of(
                 "type", "string",
-                "description", "Required for delete. The ID of the specification to delete."
+                "description", "Required for update/delete. The existing specification ID from list_specs."
+        ));
+        props.put("expectedSpec", Map.of(
+                "type", "object",
+                "description", "Required only for update. Copy the complete specification object from list_specs unchanged, including specId, condition groups and previews. A stale or incomplete snapshot is rejected; read list_specs again before retrying."
         ));
         props.put("confirmed", Map.of(
                 "type", "boolean",
-                "description", "For delete: use false to preview the exact specification without changing it; use true only in a later turn after the user explicitly confirms that preview. Omit it entirely for add, which accepts no confirmation fields."
+                "description", "For delete: use false to preview the exact specification without changing it; use true only in a later turn after the user explicitly confirms that preview. Omit it entirely for add/update, which accept no confirmation fields."
         ));
         props.put("impactToken", Map.of(
                 "type", "string",
@@ -116,7 +122,7 @@ public class ManageSpecTool extends AbstractAiTool {
 
         FunctionParameterSchema schema = new FunctionParameterSchema("object", props, List.of("action"));
 
-        return LlmToolSpec.of(getName(), "Add a formal specification, or preview/delete one through explicit two-turn confirmation. Use list_specs before deleting.", schema);
+        return LlmToolSpec.of(getName(), "Add or update a structured requirement, or preview/delete one through explicit two-turn confirmation. Read list_specs before updating or deleting. An edit is not formal verification.", schema);
     }
 
     protected String doExecute(Long userId, String argsJson) {
@@ -129,13 +135,14 @@ public class ManageSpecTool extends AbstractAiTool {
             }
             requireOnlyFields(args, "arguments", Set.of(
                     "action", "templateId", "aConditions", "ifConditions", "thenConditions",
-                    "specId", "confirmed", "impactToken"));
+                    "specId", "expectedSpec", "confirmed", "impactToken"));
             String action = requiredTextField(args, "action", "arguments").toLowerCase(Locale.ROOT);
 
             return switch (action) {
-                case "add" -> executeAdd(userId, args);
+                case "add" -> executeWrite(userId, args, false);
+                case "update" -> executeWrite(userId, args, true);
                 case "delete" -> executeDelete(userId, args);
-                default -> errorJson("Unknown action: " + action + ". Use 'add' or 'delete'.",
+                default -> errorJson("Unknown action: " + action + ". Use 'add', 'update', or 'delete'.",
                         "VALIDATION_ERROR", 400);
             };
         } catch (ArgValidationException e) {
@@ -156,15 +163,36 @@ public class ManageSpecTool extends AbstractAiTool {
         }
     }
 
-    private String executeAdd(Long userId, JsonNode args) throws Exception {
-        requireOnlyFields(args, "arguments", Set.of(
-                "action", "templateId", "aConditions", "ifConditions", "thenConditions"));
+    private String executeWrite(Long userId, JsonNode args, boolean update) throws Exception {
+        requireOnlyFields(args, "arguments", update
+                ? Set.of("action", "specId", "expectedSpec", "templateId", "aConditions", "ifConditions", "thenConditions")
+                : Set.of("action", "templateId", "aConditions", "ifConditions", "thenConditions"));
+        SpecificationDto before = null;
+        DeviceLookup deviceLookup = null;
+        if (update) {
+            String specId = requiredTextField(args, "specId", "arguments");
+            JsonNode expected = args.get("expectedSpec");
+            if (expected == null || !expected.isObject() || !specId.equals(expected.path("specId").asText())) {
+                return errorJson("expectedSpec must copy the complete specification from list_specs with the same specId.",
+                        "VALIDATION_ERROR", 400);
+            }
+            BoardSemanticSnapshotDto snapshot = boardStorageService.getSemanticSnapshot(userId);
+            deviceLookup = buildDeviceLookup(snapshot.nodes(), snapshot.deviceTemplates(), snapshot.environmentVariables());
+            before = snapshot.specifications().stream().filter(spec -> specId.equals(spec.getId()))
+                    .findFirst().orElse(null);
+            if (before == null) return errorJson("Specification not found: " + specId, "NOT_FOUND", 404);
+            if (!expected.equals(objectMapper.valueToTree(
+                    SpecificationToolPresenter.present(before, deviceLookup.presentationContext())))) {
+                throw new ConflictException(
+                        "This specification changed after it was read. Read list_specs again before updating it.");
+            }
+        }
         String templateId = requiredTextField(args, "templateId", "arguments");
         if (!TEMPLATE_IDS.contains(templateId)) {
             return errorJson("Unsupported templateId '" + templateId + "'. Allowed: 1,2,3,4,5,6,7.",
                     "VALIDATION_ERROR", 400);
         }
-        DeviceLookup deviceLookup = buildDeviceLookup(userId);
+        if (deviceLookup == null) deviceLookup = buildDeviceLookup(userId);
         List<SpecConditionDto> aConditions = parseConditions(args.path("aConditions"), "a", deviceLookup);
         List<SpecConditionDto> ifConditions = parseConditions(args.path("ifConditions"), "if", deviceLookup);
         List<SpecConditionDto> thenConditions = parseConditions(args.path("thenConditions"), "then", deviceLookup);
@@ -192,22 +220,28 @@ public class ManageSpecTool extends AbstractAiTool {
         }
 
         SpecificationDto spec = new SpecificationDto();
-        spec.setId(UUID.randomUUID().toString());
+        spec.setId(update ? before.getId() : UUID.randomUUID().toString());
         spec.setTemplateId(templateId);
         spec.setAConditions(aConditions);
         spec.setIfConditions(ifConditions);
         spec.setThenConditions(thenConditions);
 
-        CollectionMutationResultDto<SpecificationDto> mutation = boardStorageService.addSpec(userId, spec);
+        CollectionMutationResultDto<SpecificationDto> mutation = update
+                ? boardStorageService.updateSpecIfUnchanged(userId, before.getId(), before, spec)
+                : boardStorageService.addSpec(userId, spec);
 
         Map<String, Object> response = new LinkedHashMap<>();
-        response.put("message", "Specification created as a structured property. It has not been formally verified.");
-        response.put("operation", "created");
+        boolean unchanged = "unchanged".equals(mutation.getOperation());
+        String message = unchanged ? "The specification is unchanged. No edit was recorded."
+                : update ? "Specification updated in place. It has not been formally re-verified."
+                : "Specification created as a structured property. It has not been formally verified.";
+        response.put("message", message);
+        response.put("operation", mutation.getOperation());
         response.put("verificationStatus", "NOT_VERIFIED");
         response.put("specification", SpecificationToolPresenter.present(
                 mutation.getAffectedItem(), deviceLookup.presentationContext()));
         response.put("totalSpecs", mutation.getCurrentCount());
-        return successJson(response, "Specification created but not formally verified.");
+        return unchanged ? readOnlySuccessJson(response, message) : successJson(response, message);
     }
 
     private String executeDelete(Long userId, JsonNode args) throws Exception {
@@ -432,8 +466,14 @@ public class ManageSpecTool extends AbstractAiTool {
     }
 
     private DeviceLookup buildDeviceLookup(Long userId) {
-        List<DeviceNodeDto> nodes = safeList(boardStorageService.getNodes(userId));
-        List<DeviceTemplateDto> templates = safeList(boardStorageService.getDeviceTemplates(userId));
+        return buildDeviceLookup(safeList(boardStorageService.getNodes(userId)),
+                safeList(boardStorageService.getDeviceTemplates(userId)),
+                safeList(boardStorageService.getEnvironmentVariables(userId)));
+    }
+
+    private DeviceLookup buildDeviceLookup(List<DeviceNodeDto> nodes,
+                                          List<DeviceTemplateDto> templates,
+                                          List<BoardEnvironmentVariableDto> environment) {
         Map<String, String> idsByKey = new HashMap<>();
         Map<String, String> labelsById = new HashMap<>();
         for (DeviceNodeDto node : nodes) {
@@ -453,8 +493,7 @@ public class ManageSpecTool extends AbstractAiTool {
         return new DeviceLookup(
                 idsByKey,
                 labelsById,
-                BoardSemanticValidator.context(
-                        nodes, templates, safeList(boardStorageService.getEnvironmentVariables(userId))),
+                BoardSemanticValidator.context(nodes, templates, environment),
                 SpecificationToolPresenter.context(nodes, templates)
         );
     }

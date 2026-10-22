@@ -292,7 +292,7 @@ ends up destroying work.
 
 | Intent | Mechanism | Scope |
 | :--- | :--- | :--- |
-| Reverse a persisted board edit | **Undo** (`Ctrl/Meta+Z`), server journal | Device create/update/rename/delete, Environment Pool edits, rule/spec create/delete, rule reorder, automatic-fix apply |
+| Reverse a persisted board edit | **Undo** (`Ctrl/Meta+Z`), server journal | Device create/update/rename/delete, Environment Pool edits, rule/spec create/update/delete, rule reorder, automatic-fix apply |
 | Re-apply an undone edit | **Redo** (`Ctrl/Meta+Shift+Z`, `Ctrl+Y`) | Same |
 | Stop work that is still running | **Cancel / Stop** on the task | Verification, simulation, exploration, fix search |
 | Discard a finished run's record | **Delete** in run history | Completed runs (not reversible) |

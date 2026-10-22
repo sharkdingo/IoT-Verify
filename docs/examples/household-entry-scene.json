@@ -1,0 +1,395 @@
+{
+	"schema": "iot-verify.board-scene",
+	"version": 5,
+	"templates": [
+		{
+			"name": "Door",
+			"manifest": {
+				"Name": "Door",
+				"Description": "",
+				"InternalVariables": [],
+				"Modes": [
+					"LockState"
+				],
+				"InitState": "locked",
+				"WorkingStates": [
+					{
+						"Name": "locked",
+						"Dynamics": [],
+						"Description": "",
+						"Trust": "trusted",
+						"Privacy": "private"
+					},
+					{
+						"Name": "unlocked",
+						"Dynamics": [],
+						"Description": "",
+						"Trust": "trusted",
+						"Privacy": "private"
+					}
+				],
+				"Transitions": [],
+				"APIs": [
+					{
+						"Name": "lock",
+						"StartState": "",
+						"EndState": "locked",
+						"Trigger": null,
+						"Signal": true,
+						"Description": ""
+					},
+					{
+						"Name": "unlock",
+						"StartState": "",
+						"EndState": "unlocked",
+						"Trigger": null,
+						"Signal": true,
+						"Description": ""
+					}
+				]
+			}
+		},
+		{
+			"name": "Light",
+			"manifest": {
+				"Name": "Light",
+				"Description": "",
+				"InternalVariables": [
+					{
+						"Name": "illuminance",
+						"Description": "Ambient illuminance",
+						"IsInside": false,
+						"Reads": false,
+						"FalsifiableWhenCompromised": false,
+						"Trust": "untrusted",
+						"Privacy": "public",
+						"LowerBound": 0,
+						"UpperBound": 100,
+						"NaturalChangeRate": "[-1, 1]"
+					}
+				],
+				"ImpactedVariables": [
+					"illuminance"
+				],
+				"Modes": [
+					"SwitchState"
+				],
+				"InitState": "on",
+				"WorkingStates": [
+					{
+						"Name": "on",
+						"Dynamics": [
+							{
+								"VariableName": "illuminance",
+								"ChangeRate": "1"
+							}
+						],
+						"Description": "",
+						"Trust": "trusted",
+						"Privacy": "public"
+					},
+					{
+						"Name": "off",
+						"Dynamics": [],
+						"Description": "",
+						"Trust": "trusted",
+						"Privacy": "public"
+					}
+				],
+				"Transitions": [],
+				"APIs": [
+					{
+						"Name": "on",
+						"StartState": "",
+						"EndState": "on",
+						"Trigger": null,
+						"Signal": true,
+						"Description": ""
+					},
+					{
+						"Name": "off",
+						"StartState": "",
+						"EndState": "off",
+						"Trigger": null,
+						"Signal": true,
+						"Description": ""
+					}
+				]
+			}
+		},
+		{
+			"name": "Occupancy Sensor",
+			"manifest": {
+				"Name": "Occupancy Sensor",
+				"Description": "Reports whether a resident is present, as a shared environment reading",
+				"InternalVariables": [
+					{
+						"Name": "occupancy",
+						"Description": "Whether a resident is currently present",
+						"IsInside": false,
+						"Reads": true,
+						"FalsifiableWhenCompromised": true,
+						"Trust": "trusted",
+						"Privacy": "private",
+						"Values": [
+							"present",
+							"absent"
+						]
+					}
+				],
+				"ImpactedVariables": [],
+				"Modes": [],
+				"InitState": "",
+				"WorkingStates": [],
+				"Transitions": [],
+				"APIs": []
+			}
+		},
+		{
+			"name": "Entrance Request Sensor",
+			"manifest": {
+				"Name": "Entrance Request Sensor",
+				"Description": "External request classification supplied by a trusted authentication system; identity verification is outside this model",
+				"InternalVariables": [
+					{
+						"Name": "entryRequest",
+						"Description": "Current classified entry request",
+						"IsInside": false,
+						"Reads": true,
+						"FalsifiableWhenCompromised": false,
+						"Trust": "trusted",
+						"Privacy": "private",
+						"Values": [
+							"none",
+							"visitor",
+							"authorized_owner"
+						]
+					}
+				],
+				"ImpactedVariables": [],
+				"Modes": [],
+				"InitState": "",
+				"WorkingStates": [],
+				"Transitions": [],
+				"APIs": []
+			}
+		}
+	],
+	"devices": [
+		{
+			"id": "occupancy_1",
+			"templateName": "Occupancy Sensor",
+			"label": "Resident Presence",
+			"position": {
+				"x": 60,
+				"y": 50
+			},
+			"width": 176,
+			"height": 128
+		},
+		{
+			"id": "entry_1",
+			"templateName": "Entrance Request Sensor",
+			"label": "Entry Request",
+			"position": {
+				"x": 60,
+				"y": 270
+			},
+			"width": 176,
+			"height": 128
+		},
+		{
+			"id": "light_1",
+			"templateName": "Light",
+			"label": "Porch Light",
+			"position": {
+				"x": 380,
+				"y": 50
+			},
+			"state": "off",
+			"currentStateTrust": "trusted",
+			"currentStatePrivacy": "public",
+			"width": 176,
+			"height": 128
+		},
+		{
+			"id": "door_1",
+			"templateName": "Door",
+			"label": "Front Door",
+			"position": {
+				"x": 380,
+				"y": 270
+			},
+			"state": "locked",
+			"currentStateTrust": "trusted",
+			"currentStatePrivacy": "private",
+			"width": 176,
+			"height": 128
+		}
+	],
+	"environmentVariables": [
+		{
+			"name": "occupancy",
+			"value": "absent",
+			"trust": "trusted",
+			"privacy": "private"
+		},
+		{
+			"name": "entryRequest",
+			"value": "none",
+			"trust": "trusted",
+			"privacy": "private"
+		},
+		{
+			"name": "illuminance",
+			"value": "20",
+			"trust": "untrusted",
+			"privacy": "public"
+		}
+	],
+	"rules": [
+		{
+			"name": "Light the porch for a visitor while nobody is home",
+			"sources": [
+				{
+					"fromId": "occupancy_1",
+					"fromApi": "occupancy",
+					"itemType": "variable",
+					"relation": "=",
+					"value": "absent"
+				},
+				{
+					"fromId": "entry_1",
+					"fromApi": "entryRequest",
+					"itemType": "variable",
+					"relation": "=",
+					"value": "visitor"
+				}
+			],
+			"toId": "light_1",
+			"toApi": "on"
+		},
+		{
+			"name": "Unsafe convenience: a lit porch unlocks the door",
+			"sources": [
+				{
+					"fromId": "light_1",
+					"fromApi": "state",
+					"itemType": "state",
+					"relation": "=",
+					"value": "on"
+				}
+			],
+			"toId": "door_1",
+			"toApi": "unlock"
+		},
+		{
+			"name": "Unlock for an authorized owner",
+			"sources": [
+				{
+					"fromId": "entry_1",
+					"fromApi": "entryRequest",
+					"itemType": "variable",
+					"relation": "=",
+					"value": "authorized_owner"
+				}
+			],
+			"toId": "door_1",
+			"toApi": "unlock"
+		}
+	],
+	"specs": [
+		{
+			"templateId": "4",
+			"aConditions": [],
+			"ifConditions": [
+				{
+					"deviceId": "occupancy_1",
+					"targetType": "variable",
+					"key": "occupancy",
+					"variableSource": "environment",
+					"relation": "=",
+					"value": "absent"
+				},
+				{
+					"deviceId": "entry_1",
+					"targetType": "variable",
+					"key": "entryRequest",
+					"variableSource": "environment",
+					"relation": "=",
+					"value": "visitor"
+				},
+				{
+					"deviceId": "door_1",
+					"targetType": "mode",
+					"key": "LockState",
+					"relation": "=",
+					"value": "locked"
+				}
+			],
+			"thenConditions": [
+				{
+					"deviceId": "door_1",
+					"targetType": "mode",
+					"key": "LockState",
+					"relation": "=",
+					"value": "locked"
+				}
+			]
+		},
+		{
+			"templateId": "4",
+			"aConditions": [],
+			"ifConditions": [
+				{
+					"deviceId": "occupancy_1",
+					"targetType": "variable",
+					"key": "occupancy",
+					"variableSource": "environment",
+					"relation": "=",
+					"value": "absent"
+				},
+				{
+					"deviceId": "entry_1",
+					"targetType": "variable",
+					"key": "entryRequest",
+					"variableSource": "environment",
+					"relation": "=",
+					"value": "visitor"
+				}
+			],
+			"thenConditions": [
+				{
+					"deviceId": "light_1",
+					"targetType": "mode",
+					"key": "SwitchState",
+					"relation": "=",
+					"value": "on"
+				}
+			]
+		},
+		{
+			"templateId": "4",
+			"aConditions": [],
+			"ifConditions": [
+				{
+					"deviceId": "entry_1",
+					"targetType": "variable",
+					"key": "entryRequest",
+					"variableSource": "environment",
+					"relation": "=",
+					"value": "authorized_owner"
+				}
+			],
+			"thenConditions": [
+				{
+					"deviceId": "door_1",
+					"targetType": "mode",
+					"key": "LockState",
+					"relation": "=",
+					"value": "unlocked"
+				}
+			]
+		}
+	]
+}

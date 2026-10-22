@@ -45,6 +45,7 @@ final class VerificationToolPresenter {
             row.put("formulaPreview", specResult.getFormulaPreview());
             row.put("formulaKind", specResult.getFormulaKind());
             row.put("outcome", specResult.getOutcome());
+            row.put("antecedentReachability", specResult.getAntecedentReachability());
             row.put("checkedExpression", specResult.getExpression());
             presented.add(row);
         }

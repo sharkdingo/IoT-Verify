@@ -1443,15 +1443,16 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
             }
             parseIncomplete = true;
         } else {
-            List<SpecCheckResult> specCheckResults = alignSpecResultsToEmittedSpecs(rawSpecCheckResults, effectiveSpecs, checkLogs);
+            SpecResultAlignment.Alignment alignment = alignSpecResultsToEmittedSpecs(rawSpecCheckResults, effectiveSpecs, checkLogs);
+            List<SpecCheckResult> specCheckResults = alignment.aligned();
             boolean hasMissingResult = specCheckResults.stream().anyMatch(Objects::isNull);
 
-            if (rawSpecCheckResults.size() != effectiveSpecs.size() || hasMissingResult) {
+            if (rawSpecCheckResults.size() != alignment.expectedResultCount() || hasMissingResult) {
             // 数量不一致：结果不可信，不把未知结果误报为通过或违反。
             log.warn("Spec count mismatch: NuSMV returned {} results but {} specs were generated. Reporting the run as inconclusive.",
-                    rawSpecCheckResults.size(), effectiveSpecs.size());
+                    rawSpecCheckResults.size(), alignment.expectedResultCount());
             checkLogs.add("Warning: spec result count mismatch (got " + rawSpecCheckResults.size()
-                    + ", expected " + effectiveSpecs.size() + ")");
+                    + ", expected " + alignment.expectedResultCount() + ")");
             parseIncomplete = true;
 
             for (int specIdx = 0; specIdx < effectiveSpecs.size(); specIdx++) {
@@ -1469,8 +1470,8 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                 }
             }
 
-            if (rawSpecCheckResults.size() > effectiveSpecs.size()) {
-                checkLogs.add("Warning: " + (rawSpecCheckResults.size() - effectiveSpecs.size())
+            if (rawSpecCheckResults.size() > alignment.expectedResultCount()) {
+                checkLogs.add("Warning: " + (rawSpecCheckResults.size() - alignment.expectedResultCount())
                         + " extra NuSMV result(s) discarded");
             }
             } else {
@@ -1480,6 +1481,17 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                             userId, taskId, checkLogs, deviceSmvMap, rules,
                             formulaPreviewContext);
                     specIdx++;
+                }
+            }
+            for (int i = 0; i < effectiveSpecs.size(); i++) {
+                var reachability = alignment.antecedentReachability(i, effectiveSpecs.get(i));
+                specResults.get(i).setAntecedentReachability(reachability);
+                if (reachability == cn.edu.nju.Iot_Verify.dto.verification.AntecedentReachability.INCONCLUSIVE) {
+                    parseIncomplete = true;
+                    checkLogs.add("Response trigger reachability could not be established for " + describeSpec(effectiveSpecs.get(i), i));
+                } else if (reachability == cn.edu.nju.Iot_Verify.dto.verification.AntecedentReachability.UNREACHABLE) {
+                    checkLogs.add("Response trigger is unreachable for " + describeSpec(effectiveSpecs.get(i), i)
+                            + "; satisfaction does not demonstrate a response to that trigger.");
                 }
             }
         }
@@ -1522,7 +1534,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                 .build();
     }
 
-    private List<SpecCheckResult> alignSpecResultsToEmittedSpecs(List<SpecCheckResult> rawSpecResults,
+    private SpecResultAlignment.Alignment alignSpecResultsToEmittedSpecs(List<SpecCheckResult> rawSpecResults,
                                                                   List<SmvGenerationContext.EmittedSpec> emittedSpecs,
                                                                   List<String> checkLogs) {
         SpecResultAlignment.Alignment alignment = SpecResultAlignment.align(rawSpecResults, emittedSpecs);
@@ -1540,7 +1552,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
         if (alignment.reordered() && checkLogs != null) {
             checkLogs.add("NuSMV returned specification results in a different order; results were matched by expression.");
         }
-        return alignment.aligned();
+        return alignment;
     }
 
     private void appendParsedSpecResult(List<SpecResultDto> specResults,
@@ -1606,6 +1618,9 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                 .specificationSnapshot(spec != null ? snapshotSpecification(spec, deviceSmvMap) : null)
                 .formulaKind(checkedFormulaKind(checkedExpression, templateId))
                 .outcome(outcome)
+                .antecedentReachability(cn.edu.nju.Iot_Verify.dto.verification.AntecedentReachability.appliesTo(templateId)
+                        ? cn.edu.nju.Iot_Verify.dto.verification.AntecedentReachability.INCONCLUSIVE
+                        : cn.edu.nju.Iot_Verify.dto.verification.AntecedentReachability.NOT_APPLICABLE)
                 .expression(checkedExpression)
                 .build();
     }

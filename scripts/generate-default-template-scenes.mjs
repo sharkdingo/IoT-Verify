@@ -130,6 +130,60 @@ careVentilationWindowTemplate.manifest.WorkingStates.find(state => state.Name ==
 
 const scenes = [
   {
+    file: 'household-entry-scene.json',
+    templateNames: ['Door', 'Light'],
+    extraTemplates: [occupancySensorTemplate, {
+      name: 'Entrance Request Sensor',
+      manifest: {
+        Name: 'Entrance Request Sensor',
+        Description: 'External request classification supplied by a trusted authentication system; identity verification is outside this model',
+        InternalVariables: [{
+          Name: 'entryRequest', Description: 'Current classified entry request',
+          IsInside: false, Reads: true, FalsifiableWhenCompromised: false,
+          Trust: 'trusted', Privacy: 'private', Values: ['none', 'visitor', 'authorized_owner']
+        }],
+        ImpactedVariables: [], Modes: [], InitState: '', WorkingStates: [], Transitions: [], APIs: []
+      }
+    }],
+    devices: [
+      device('occupancy_1', 'Occupancy Sensor', 'Resident Presence', 60, 50),
+      device('entry_1', 'Entrance Request Sensor', 'Entry Request', 60, 270),
+      device('light_1', 'Light', 'Porch Light', 380, 50,
+        { state: 'off', currentStateTrust: 'trusted', currentStatePrivacy: 'public' }),
+      device('door_1', 'Door', 'Front Door', 380, 270,
+        { state: 'locked', currentStateTrust: 'trusted', currentStatePrivacy: 'private' })
+    ],
+    environmentVariables: [
+      { name: 'occupancy', value: 'absent', trust: 'trusted', privacy: 'private' },
+      { name: 'entryRequest', value: 'none', trust: 'trusted', privacy: 'private' },
+      { name: 'illuminance', value: '20', trust: 'untrusted', privacy: 'public' }
+    ],
+    rules: [
+      { name: 'Light the porch for a visitor while nobody is home',
+        sources: [valueSource('occupancy_1', 'occupancy', '=', 'absent'), valueSource('entry_1', 'entryRequest', '=', 'visitor')],
+        toId: 'light_1', toApi: 'on' },
+      { name: 'Unsafe convenience: a lit porch unlocks the door',
+        sources: [{ fromId: 'light_1', fromApi: 'state', itemType: 'state', relation: '=', value: 'on' }],
+        toId: 'door_1', toApi: 'unlock' },
+      { name: 'Unlock for an authorized owner',
+        sources: [valueSource('entry_1', 'entryRequest', '=', 'authorized_owner')],
+        toId: 'door_1', toApi: 'unlock' }
+    ],
+    specs: [
+      implicationSpec('4', [
+        condition('occupancy_1', 'variable', 'occupancy', '=', 'absent', null, 'environment'),
+        condition('entry_1', 'variable', 'entryRequest', '=', 'visitor', null, 'environment'),
+        condition('door_1', 'mode', 'LockState', '=', 'locked')
+      ], [condition('door_1', 'mode', 'LockState', '=', 'locked')]),
+      implicationSpec('4', [
+        condition('occupancy_1', 'variable', 'occupancy', '=', 'absent', null, 'environment'),
+        condition('entry_1', 'variable', 'entryRequest', '=', 'visitor', null, 'environment')
+      ], [condition('light_1', 'mode', 'SwitchState', '=', 'on')]),
+      implicationSpec('4', [condition('entry_1', 'variable', 'entryRequest', '=', 'authorized_owner', null, 'environment')],
+        [condition('door_1', 'mode', 'LockState', '=', 'unlocked')])
+    ]
+  },
+  {
     file: 'default-fire-evacuation-scene.json',
     templateNames: ['Alarm', 'Door', 'Light', 'Smoke Sensor'],
     devices: [

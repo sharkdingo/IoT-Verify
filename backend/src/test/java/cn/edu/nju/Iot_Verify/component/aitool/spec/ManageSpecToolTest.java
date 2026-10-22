@@ -1,10 +1,14 @@
 package cn.edu.nju.Iot_Verify.component.aitool.spec;
 
 import cn.edu.nju.Iot_Verify.component.aitool.AiDestructiveActionGuard;
+import cn.edu.nju.Iot_Verify.component.aitool.AiToolResultContract;
 import cn.edu.nju.Iot_Verify.dto.board.CollectionMutationResultDto;
+import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
+import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
+import cn.edu.nju.Iot_Verify.exception.ConflictException;
 import cn.edu.nju.Iot_Verify.security.UserContextHolder;
 import cn.edu.nju.Iot_Verify.service.BoardStorageService;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -26,6 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -55,6 +60,108 @@ class ManageSpecToolTest {
     @AfterEach
     void tearDown() {
         UserContextHolder.clear();
+    }
+
+    @Test
+    void updateKeepsTheSpecificationIdentityAndUsesTheExpectedSnapshot() throws Exception {
+        SpecificationDto before = prepareSpecificationUpdate();
+        when(boardStorageService.updateSpecIfUnchanged(eq(1L), eq("spec-1"), eq(before), any()))
+                .thenAnswer(invocation -> {
+                    SpecificationDto desired = invocation.getArgument(3);
+                    assertEquals("spec-1", desired.getId());
+                    assertEquals("3", desired.getTemplateId());
+                    return CollectionMutationResultDto.of("updated", desired, List.of(desired));
+                });
+
+        JsonNode result = new ObjectMapper().readTree(tool.execute(specificationUpdateArgs(before)));
+
+        assertEquals("updated", result.path("operation").asText());
+        assertEquals("spec-1", result.path("specification").path("specId").asText());
+        assertEquals("NOT_VERIFIED", result.path("verificationStatus").asText());
+        assertTrue(AiToolResultContract.hasValidKnownToolPayload("manage_spec", result));
+        verify(boardStorageService, never()).addSpec(anyLong(), any());
+        verify(boardStorageService, never()).removeSpecIfUnchanged(anyLong(), anyString(), any());
+    }
+
+    @Test
+    void updateRefusesAnExpectedSnapshotThatNoLongerMatchesTheRead() throws Exception {
+        SpecificationDto before = prepareSpecificationUpdate();
+        String args = specificationUpdateArgs(before);
+        before.setTemplateId("2");
+
+        JsonNode result = new ObjectMapper().readTree(tool.execute(args));
+
+        assertEquals(409, result.path("status").asInt());
+        verify(boardStorageService, never()).updateSpecIfUnchanged(anyLong(), anyString(), any(), any());
+    }
+
+    @Test
+    void updatePreservesAConflictDetectedAtTheCommitBoundary() throws Exception {
+        SpecificationDto before = prepareSpecificationUpdate();
+        when(boardStorageService.updateSpecIfUnchanged(eq(1L), eq("spec-1"), eq(before), any()))
+                .thenThrow(new ConflictException("The specification changed before saving."));
+
+        JsonNode result = new ObjectMapper().readTree(tool.execute(specificationUpdateArgs(before)));
+
+        assertEquals(409, result.path("status").asInt());
+        assertFalse(result.has("operation"));
+    }
+
+    @Test
+    void updateNoOpRetainsTheAuthoritativeUnchangedOperation() throws Exception {
+        SpecificationDto before = prepareSpecificationUpdate();
+        when(boardStorageService.updateSpecIfUnchanged(eq(1L), eq("spec-1"), eq(before), any()))
+                .thenReturn(CollectionMutationResultDto.of("unchanged", before, List.of(before)));
+
+        JsonNode result = new ObjectMapper().readTree(tool.execute(specificationUpdateArgs(before)));
+
+        assertEquals("unchanged", result.path("operation").asText());
+        assertTrue(AiToolResultContract.hasValidKnownToolPayload("manage_spec", result));
+    }
+
+    @Test
+    void updateRequiresACompleteExpectedSpecification() throws Exception {
+        JsonNode result = new ObjectMapper().readTree(tool.execute(
+                "{\"action\":\"update\",\"specId\":\"spec-1\",\"templateId\":\"3\"}"));
+        assertEquals(400, result.path("status").asInt());
+        verify(boardStorageService, never()).updateSpecIfUnchanged(anyLong(), anyString(), any(), any());
+    }
+
+    private SpecificationDto prepareSpecificationUpdate() {
+        DeviceNodeDto node = new DeviceNodeDto();
+        node.setId("sensor_1");
+        node.setLabel("Sensor");
+        node.setTemplateName("Sensor");
+        node.setState("on");
+        when(boardStorageService.getNodes(1L)).thenReturn(List.of(node));
+        SpecConditionDto condition = new SpecConditionDto();
+        condition.setDeviceId("sensor_1");
+        condition.setTargetType("state");
+        condition.setKey("state");
+        condition.setRelation("=");
+        condition.setValue("on");
+        condition.setSide("a");
+        SpecificationDto before = new SpecificationDto();
+        before.setId("spec-1");
+        before.setTemplateId("1");
+        before.setAConditions(List.of(condition));
+        when(boardStorageService.getSemanticSnapshot(1L)).thenReturn(new BoardSemanticSnapshotDto(
+                List.of(node), List.of(), List.of(), List.of(before), List.of(sensorTemplate())));
+        return before;
+    }
+
+    private String specificationUpdateArgs(SpecificationDto before) throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        var args = mapper.createObjectNode();
+        args.put("action", "update");
+        args.put("specId", before.getId());
+        args.put("templateId", "3");
+        args.set("expectedSpec", mapper.valueToTree(SpecificationToolPresenter.present(before,
+                SpecificationToolPresenter.context(boardStorageService.getNodes(1L), List.of(sensorTemplate())))));
+        args.set("aConditions", mapper.readTree("""
+                [{"deviceId":"sensor_1","targetType":"state","key":"state","relation":"=","value":"on"}]
+                """));
+        return args.toString();
     }
 
     @Test

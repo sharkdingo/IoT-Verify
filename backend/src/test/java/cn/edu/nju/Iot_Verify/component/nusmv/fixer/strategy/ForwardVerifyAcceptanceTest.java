@@ -228,6 +228,57 @@ class ForwardVerifyAcceptanceTest {
         return FixStrategyUtils.forwardVerify(smvGenerator, nusmvExecutor, ctx, candidateRules, strategyName);
     }
 
+    @Test
+    void allPassingResponsesCannotBypassAnUnknownReachabilityBaseline() throws Exception {
+        ctx.getSpecs().get(0).setTemplateId("4");
+        givenVerdicts(candidateModel, true, true, true);
+        assertEquals(Verification.inconclusive(), judge(NAME),
+                "an all-true result without the response reachability evidence must not count as a repair");
+    }
+
+    @Test
+    void anAllPassingCandidateThatDisablesAFormerlyReachableResponseIsRejected() throws Exception {
+        givenResponseEvidence(false, true);
+        assertEquals(Verification.rejected(), judge(NAME));
+        assertTrue(ctx.diagnosticsSnapshot().stream().anyMatch(d -> d.contains("response triggers unreachable")));
+    }
+
+    @Test
+    void preservingAReachableResponseAllowsTheRepair() throws Exception {
+        givenResponseEvidence(true, true);
+        assertEquals(Verification.accepted(List.of()), judge(NAME));
+    }
+
+    @Test
+    void anAlreadyUnreachableResponseDoesNotInventAReachabilityRequirement() throws Exception {
+        givenResponseEvidence(false, false);
+        assertEquals(Verification.accepted(List.of()), judge(NAME));
+    }
+
+    @Test
+    void aMissingBaselineDiagnosticDoesNotPretendTheTriggerWasUnreachable() throws Exception {
+        givenResponseEvidence(true, true);
+        givenVerdicts(baselineModel, false, true, true);
+        assertEquals(Verification.inconclusive(), judge(NAME));
+    }
+
+    private void givenResponseEvidence(boolean candidateReachable, boolean baselineReachable) throws Exception {
+        ctx.getSpecs().get(1).setTemplateId("5");
+        List<EmittedSpec> emitted = List.of(EMITTED.get(0),
+                new EmittedSpec(ctx.getSpecs().get(1), "other", "CTLSPEC AG(o)", "CTLSPEC !EF(trigger)"), EMITTED.get(2));
+        for (var entry : Map.of(candidateModel, candidateRules, baselineModel, originalRules).entrySet()) {
+            when(smvGenerator.generateWithResolvedDeviceModel(any(), any(), any(), same(entry.getValue()),
+                    any(), any(), anyBoolean(), any(), any(), any(), any()))
+                    .thenReturn(new SmvGenerator.GenerateResult(entry.getKey(), Map.of(), List.of(), 0, 0, emitted));
+        }
+        when(nusmvExecutor.executeRepairSearch(eq(candidateModel), anyLong())).thenReturn(NusmvResult.success("", List.of(
+                new SpecCheckResult("!(EF trigger)", !candidateReachable, null), new SpecCheckResult("AG h", true, null),
+                new SpecCheckResult("AG o", true, null), new SpecCheckResult("AG t", true, null))));
+        when(nusmvExecutor.executeRepairSearch(eq(baselineModel), anyLong())).thenReturn(NusmvResult.success("", List.of(
+                new SpecCheckResult("AG h", true, null), new SpecCheckResult("AG o", true, null),
+                new SpecCheckResult("AG t", false, null), new SpecCheckResult("!(EF trigger)", !baselineReachable, null))));
+    }
+
     private File model(String name) throws Exception {
         File dir = tempDir.resolve(name).toFile();
         assertTrue(dir.mkdirs());

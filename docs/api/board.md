@@ -98,12 +98,14 @@ URL delimiters, and internal whitespace. Device identity validation is defined i
 | GET | `/api/board/rules` | → `RuleDto[]` | List rules in effective execution order |
 | POST | `/api/board/rules` | `RuleDto` → `CollectionMutationResultDto<RuleDto>` | Create exactly one validated rule; request `id` is ignored and the server assigns identity. Reversible: the result carries `canUndo`/`canRedo`, and the journal entry records the execution position so a redo re-creates the rule where it was |
 | PUT | `/api/board/rules/order` | `{ expectedRuleIds: Long[], ruleIds: Long[] }` → `CollectionMutationResultDto<RuleDto>` | Compare-and-set replacement of execution order only. Both lists accept at most 100 positive ids and must contain every current rule id exactly once. `expectedRuleIds` must match the current order element-for-element; stale, duplicate, partial, or unchanged input is rejected without writing (`400` for unchanged order). Reversible: one button press is one edit, recorded as a `RULE_ORDER` journal entry holding the previous ordering, so the result carries `canUndo`/`canRedo` |
+| PUT | `/api/board/rules/{ruleId}` | `RuleUpdateRequestDto` → `CollectionMutationResultDto<RuleDto>` | Edit one rule with complete `expected` and `desired` snapshots; see [targeted rule/specification edits](#targeted-rulespecification-edits) |
 | DELETE | `/api/board/rules/{ruleId}` | `RuleDto` (the confirmed current snapshot) → `CollectionMutationResultDto<RuleDto>` | Delete only when the id and authored rule semantics still match; a stale snapshot returns `409` without writing, and a missing rule returns `404`. Reversible: the result carries `canUndo`/`canRedo`. Undo restores the original id at the recorded index in the ordered rule list (`entity_order`), even when persisted execution numbers have gaps. Surviving rules are renumbered contiguously. Missing or impossible recorded positions return `409` without writing |
 | GET | `/api/board/specs` | → `SpecificationDto[]` | List specs in stable authored order |
 | POST | `/api/board/specs` | `SpecificationDto` → `CollectionMutationResultDto<SpecificationDto>` | Create exactly one validated specification. An existing `id` returns `409` without overwriting the original or recording history. Reversible: the result carries `canUndo`/`canRedo`, and the journal entry records the list position so a redo re-creates it where it was |
+| PUT | `/api/board/specs/{specId}` | `SpecificationUpdateRequestDto` → `CollectionMutationResultDto<SpecificationDto>` | Edit one requirement with complete `expected` and `desired` snapshots; see [targeted rule/specification edits](#targeted-rulespecification-edits) |
 | DELETE | `/api/board/specs/{specId}` | `SpecificationDto` (the confirmed current snapshot) → `CollectionMutationResultDto<SpecificationDto>` | Delete only when the id and authored specification semantics still match; a stale snapshot returns `409` without writing, and a missing specification returns `404`. Reversible: the result carries `canUndo`/`canRedo`, and undo restores the specification at its recorded list position (same `entity_order` mechanism as rules). Missing or impossible recorded positions return `409` without writing |
 | GET | `/api/board/edits/availability` | → `BoardUndoResultDto` (`applied: false`, `AVAILABILITY_ONLY`, all four semantic collections empty) | Current undo/redo availability from the per-user edit journal, with no side effects. Read `canUndo`/`canRedo` only — the empty collections are not an authoritative board state. Read on board load so the affordance survives reload, a second tab, and another device |
-| POST | `/api/board/edits/undo` | → `BoardUndoResultDto` | Reverse the newest reversible edit: device create/update/rename/delete, Environment Pool update, rule/spec create/delete, rule reorder, or an assistant rule edit / automatic-fix rule-set update. Returns authoritative nodes, Environment Pool, rules, specs, and remaining availability. Device deletion restores the complete cascade under the original rule ids and collection positions. `applied: false` with `NOTHING_TO_APPLY` when there is no history — a normal, idempotent outcome. `409` when any affected state changed after the edit was recorded, leaving the board untouched. History is capped at the 50 most recent edits per account; confirmed scene replacement/clear is a history boundary. Ordinal allocation is fenced by a unique `(user_id, sequence)` constraint, so a concurrent write fails rather than producing two entries that share a position |
+| POST | `/api/board/edits/undo` | → `BoardUndoResultDto` | Reverse the newest reversible edit: device create/update/rename/delete, Environment Pool update, rule/spec create/update/delete, rule reorder, or an assistant rule edit / automatic-fix rule-set update. Returns authoritative nodes, Environment Pool, rules, specs, and remaining availability. Device deletion restores the complete cascade under the original rule ids and collection positions. `applied: false` with `NOTHING_TO_APPLY` when there is no history — a normal, idempotent outcome. `409` when any affected state changed after the edit was recorded, leaving the board untouched. History is capped at the 50 most recent edits per account; confirmed scene replacement/clear is a history boundary. Ordinal allocation is fenced by a unique `(user_id, sequence)` constraint, so a concurrent write fails rather than producing two entries that share a position |
 | POST | `/api/board/edits/redo` | → `BoardUndoResultDto` | Re-apply the oldest undone edit. Same conflict and idempotency rules. A new edit discards the abandoned redo branch |
 | GET | `/api/board/edits/clear-preview` | → `BoardEditHistoryClearPreviewDto` | Return the current entry count, availability, and opaque impact token that must be shown/bound to an explicit history-clear confirmation |
 | POST | `/api/board/edits/clear` | `BoardEditHistoryClearRequestDto` → `BoardUndoResultDto` (`applied: false`, `HISTORY_CLEARED`, empty collections, both availability flags false) | Explicitly discard unusable undo/redo history without changing any Board collection. The SHA-256 `impactToken` from the preview is required; if any entry is added, undone, redone, changed, or removed before submit, stale confirmation returns `409` and preserves all history |
@@ -112,6 +114,35 @@ URL delimiters, and internal whitespace. Device identity validation is defined i
 | POST | `/api/board/batch` | `BoardBatchDto` → `BoardBatchDto` | **Explicit atomic full-scene replacement** of complete `nodes` + `environmentVariables` + `rules` + `specs` plus exact `templateSnapshots`; requires the still-current preview `impactToken`. Used directly for scene clear; portable files go through `/api/board/scene` |
 | GET | `/api/board/layout` | → `BoardLayoutDto` | Panel/canvas layout |
 | POST | `/api/board/layout` | `BoardLayoutDto` → `BoardLayoutDto` | |
+
+### Targeted rule/specification edits
+
+`RuleUpdateRequestDto` and `SpecificationUpdateRequestDto` each contain required
+`expected` and `desired` objects of the corresponding item DTO type. Send the record
+read when editing began as `expected`, and the complete edited record as `desired`.
+Both ids must equal the path id; omission or retargeting returns `400`. A missing or
+other-account record returns `404`. The current authored semantics must still match
+`expected`; a stale snapshot returns `409` without changing the record or edit history,
+with `data.reasonCode: RULE_EDIT_STALE` or `SPEC_EDIT_STALE` and an `errors.expected`
+message. Keep the user's draft and reload the current record before opening a new edit.
+Rule comparison includes its display string; specification display caches are derived
+and do not participate in this comparison. Condition ordering is immaterial, while
+condition multiplicity remains part of the snapshot.
+
+The update preserves the record's id, owner, and current collection position, including
+rule execution priority and server-managed `createdAt`. Only the requested record is
+written. The desired record passes the same reference, domain, size, and duplicate checks
+as creation, and specification previews and device labels are rebuilt by the server.
+Every edited variable condition must choose `variableSource`; an older unresolved
+condition is allowed in `expected`, so editing can supply the missing choice.
+
+The result uses `operation: "updated"`, the canonical saved `affectedItem`, the complete
+authoritative `currentItems`/`currentCount`, and `canUndo`/`canRedo`. One edit records one
+`UPDATE` journal entry in the same transaction. Undo/redo checks both record content and
+its recorded position before applying the inverse; it never moves an independently
+reordered item. An unchanged request returns `operation: "unchanged"` with current
+availability, writes no history, and preserves any redo branch. Neither outcome is a
+verification result: rerun the relevant check after changing rules or requirements.
 
 ### Current model fingerprints
 
@@ -348,7 +379,7 @@ details, rename, context-menu, preview, or confirmation surface, all stale surfa
 one localized external-deletion warning is shown, and keyboard focus moves to the visible
 Devices tab instead of remaining on a detached element.
 
-Rule/spec create/delete returns `CollectionMutationResultDto<T>`:
+Rule/spec create/update/delete returns `CollectionMutationResultDto<T>`:
 `{ operation, affectedItem, currentItems, currentCount, canUndo, canRedo }`. This is deliberately richer
 than success/id/count so clients can explain exactly what changed and reconcile stale
 local state. A REST delete must include the complete item snapshot that the user confirmed
@@ -359,7 +390,7 @@ performs no write, so a second tab cannot silently delete a newer edit. The retu
 New rules receive a server-managed `createdAt` at the database's microsecond precision;
 the creation response, edit journal, reload, and redo preserve the same complete rule metadata.
 Every committed reversible mutation, including device create/update/rename/delete, Environment Pool
-update, rule/spec create/delete, rule reorder, assistant rule edit, and automatic-fix apply, returns
+update, rule/spec create/update/delete, rule reorder, assistant rule edit, and automatic-fix apply, returns
 `canUndo: true` and `canRedo: false`: the newly recorded entry is reversible and it discards any
 abandoned redo branch. Clients reject missing or contradictory values instead of guessing.
 

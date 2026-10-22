@@ -129,13 +129,14 @@ class ChatServiceImplToolLoopControlTest {
         assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim(statement));
     }
 
-    @Test
-    void completedStaticAnalysisRemainsVisibleAndSavedWithoutAnOperationWarning() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"我已完成当前规则的静态分析，没有运行验证。",
+            "这些检查要求目前只是已配置的 specifications，本次没有读取到正式验证结果，因此不能称为已经验证通过。"})
+    void readOnlyAnalysisRemainsVisibleAndSavedWithoutAnOperationWarning(String statement) throws Exception {
         when(messageRepo.findTop80BySessionIdOrderByIdDesc("s1")).thenReturn(List.of());
         when(aiToolManager.getAllToolDefinitions()).thenReturn(List.of(toolSpec("board_overview")));
         when(aiToolManager.execute("board_overview", "{}"))
                 .thenReturn("{\"devices\":[],\"rules\":[],\"specs\":[],\"edges\":[],\"environmentVariables\":[]}");
-        String statement = "我已完成当前规则的静态分析，没有运行验证。";
         AtomicInteger round = new AtomicInteger();
         when(llmChatService.chatWithTools(anyList(), anyList(), any())).thenAnswer(invocation -> {
             if (round.incrementAndGet() == 1) return toolCallResult("board_overview", "{}");
@@ -157,6 +158,30 @@ class ChatServiceImplToolLoopControlTest {
                 "assistant".equals(message.getRole()) && body.equals(message.getContent())
                         && message.getExecutionStatus() == ChatExecutionStatus.COMPLETED));
         assertSingleFinalTerminal(frames, "turn-analysis", ChatExecutionStatus.COMPLETED);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"本次没有读取到正式验证结果，因此不能称为已经验证通过。",
+            "本轮没有验证记录，所以无法声称已经验证通过。",
+            "正式验证不能称为已经完成。", "验证还不应宣称已经运行。",
+            "不能声称已经完成验证。", "我已完成当前规则的静态分析，并不能声称已经完成验证。"})
+    void negatedVerificationClaimsDoNotExcuseAdjacentCompletedOperations(String statement) {
+        assertFalse(ChatServiceImpl.containsUnsupportedPlatformClaim(statement));
+        assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim(
+                statement.replace("。", "，但当前验证已经完成。")));
+        assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim(
+                "当前验证已经完成，但" + statement));
+        assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim(
+                statement.replace("。", "并且我已经删除所有设备。")));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"当前验证不能称为已经完成，但已经运行。",
+            "当前验证无法声称已经完成，但已经启动。",
+            "当前验证已经运行，但不能称为已经完成。",
+            "不能声称已经完成验证，但已经运行。", "不能声称已经验证通过，但已经运行。"})
+    void negatedCompletionDoesNotHideAnOperationSharingItsSubject(String statement) {
+        assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim(statement));
     }
 
     @ParameterizedTest
@@ -260,7 +285,8 @@ class ChatServiceImplToolLoopControlTest {
     @ParameterizedTest
     @CsvSource({"The tool result confirms success.,MISSING_TOOL_EVIDENCE",
             "I read your current board.,MISSING_BOARD_SNAPSHOT",
-            "I deleted every device.,MISSING_OPERATION_RECEIPT"})
+            "I deleted every device.,MISSING_OPERATION_RECEIPT",
+            "当前验证不能称为已经完成，但已经运行。,MISSING_OPERATION_RECEIPT"})
     void replyCheckKeepsTheOriginalPublicSentenceAndTheActualMissingEvidence(String original, String reason) throws Exception {
         Method method = ChatServiceImpl.class.getDeclaredMethod("unsupportedPlatformClaim", String.class, List.class, Set.class);
         method.setAccessible(true);
@@ -1290,7 +1316,7 @@ class ChatServiceImplToolLoopControlTest {
         assertTrue(visible.contains("without repeating the entire topology"));
         assertTrue(visible.contains("combine shared chain segments"));
         assertTrue(visible.contains("one compact chain table with complete guards/actions"));
-        assertTrue(visible.contains("do not replace its IF with a downstream device"));
+        assertTrue(visible.matches("(?s).*Do not replace\\s+its IF with a downstream device.*"));
         assertTrue(visible.contains("list only actual specifications returned by tools"));
         assertTrue(visible.contains("label related automation rules separately"));
         assertTrue(visible.contains("mark suggested properties as not yet configured"));

@@ -3,7 +3,8 @@
 When verification finds a violation, the fix system localizes potentially responsible
 rules. Callers choose which repair strategy to try; REST/AI callers that omit the list use
 the three-strategy default order. Each offered candidate is re-verified against all specs:
-the violated one must hold and none the original rules satisfied may break.
+the violated one must hold, none the original rules satisfied may break, and previously
+reachable response triggers must remain reachable.
 
 A suggestion is only advisory until the user chooses to **apply** it; applying writes the
 repaired rules back to the board (see [Applying a suggestion](#applying-a-suggestion-fixstrategyapplier)).
@@ -11,7 +12,7 @@ repaired rules back to the board (see [Applying a suggestion](#applying-a-sugges
 API contract (`fault-rules`, `fix`, `fix/apply`) → [../api/verification.md](../api/verification.md).
 Spec formulas → [spec-templates.md](spec-templates.md).
 
-Verified against code on 2026-10-13. Source: `component/nusmv/fixer/` — `RuleFixer`,
+Verified against code on 2026-10-22. Source: `component/nusmv/fixer/` — `RuleFixer`,
 `localize/{FaultLocalizer, RuleInfluenceScope}`, `strategy/{ParameterAdjustStrategy, ConditionAdjustStrategy,
 RemoveRulesFixStrategy, FixAlternatives, CommandEffects, FixStrategyUtils, FixStrategyApplier}`, `BoardSemanticFingerprint`,
 `parameterize/{ParameterExtractor, CounterexampleInitialStateConstraints}`;
@@ -115,8 +116,8 @@ statuses in [../api/verification.md](../api/verification.md).
 
 ## Listing alternatives (`FixAlternatives`)
 
-Forward verification checks the target and guards against newly broken specifications, not an
-unstated preference such as "keep this event trigger", so formally equivalent repairs can differ in what the user
+Forward verification protects the documented properties and response triggers, but it cannot
+infer unstated household preferences. Accepted repairs can still differ in what the user
 actually wants. A strategy lists verified change sets, removes supersets of listed
 repairs, and orders them by change count. The list is exhaustive only when `alternativesComplete`
 is true; an interrupted search may not reach a smaller repair.
@@ -411,8 +412,8 @@ fix request contract; users can avoid the destructive strategy, review the exact
 condition edits before apply, or edit the rule manually. This is a product boundary rather
 than a claimed implementation of the paper's full rule-protection control.
 
-Forward verification proves only the submitted formal specifications. It does not infer an
-unstated preference such as "retain this event trigger" or "do not broaden this automation."
+The [forward-verification checks](#forward-verification-fixstrategyutilsforwardverify) do not infer an
+unstated preference such as "do not broaden this automation."
 That is why several equal-size edits that satisfy the complete model are all listed, and the
 user chooses between them; a formally verified edit can still be undesirable under an
 unmodeled user intent. Acceptance scenarios must select the concrete edit they expect from the
@@ -455,21 +456,33 @@ fixed attack scenario is rejected. If generation disables any rule or skips any 
 neither listed nor counted as rejected, and the listing cannot be
 [complete](#listing-alternatives-fixalternatives) while it is uncovered.
 
-A candidate is accepted when every specification holds, or when the **violated (target)
-specification holds and every specification still false was already false for the original
-rules**. A fix repairs one counterexample; requiring an unrelated, already-broken property to pass
+A candidate must make the **violated (target) specification hold and every specification
+still false must already have been false for the original rules**. A fix repairs one
+counterexample; requiring an unrelated, already-broken property to pass
 as well would reject every candidate on a Board with more than one violation. So the original
 rules are checked on the same forward-verification model the first time a candidate repairs the
-target while other specifications still fail, that verdict is reused for the rest of the request,
+target while other specifications still fail or any response specification is present. That verdict is reused for the rest of the request,
 and a candidate that breaks a property they satisfied is rejected. The remaining pre-existing
 violations travel with the suggestion as `preexistingViolations[]` and are shown beside it
 ([response shape](../api/verification.md)), so "verified" never hides a broken property.
 
-The relaxed rule applies only when every verdict is attributable to a specification id: NuSMV
+Response templates `4`/`5`/`6` also receive the same-run [trigger diagnostic](../api/verification.md#specresultdto).
+Every trigger
+reachable in the original complete model must remain reachable in the candidate, including
+triggers of originally violated responses. This is a conservative product acceptance constraint:
+it prevents an automatic repair from switching off a required response. It does not redefine
+CTL/LTL satisfaction, prove the response action useful, or require every trigger to occur on
+every path. These templates can also express conditional safety, so preserving their IF side
+is a conservative refusal policy, not an inference that the author wanted every IF event to
+occur. Use prohibition templates `3`/`7` when eliminating a dangerous condition is the
+requirement; they have no response trigger to preserve. An all-true candidate cannot bypass
+this check. Missing candidate or baseline reachability evidence leaves it inconclusive.
+
+The comparison applies only when every verdict is attributable to a specification id: NuSMV
 results are matched to emitted specifications by expression. With any positional guess, blank,
-placeholder, or duplicate id, an unidentifiable target, or a failed baseline check, only a
-candidate under which every specification holds is accepted, and any other is left unjudged
-rather than rejected. A failed baseline is not retried and adds a diagnostic saying so. Two
+placeholder, or duplicate id, an unidentifiable target, or a failed baseline check, the candidate
+is left unjudged rather than rejected. Boards without response templates may retain the
+order-independent all-properties-true shortcut. A failed baseline is not retried and adds a diagnostic saying so. Two
 baseline outcomes are not failures and are not kept: a capacity refusal, which is retried, and a
 run cut off by the deadline or a cancellation, which is reported through the strategy's
 `TIMED_OUT` status and which a later strategy's time may still complete.

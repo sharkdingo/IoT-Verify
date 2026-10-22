@@ -30,6 +30,28 @@ class AiToolResultContractTest {
     }
 
     @Test
+    void specificationUpdateNeedsTheSavedIdentityConditionsAndUnverifiedStatus() throws Exception {
+        String valid = """
+                {"operation":"updated","verificationStatus":"NOT_VERIFIED","totalSpecs":1,
+                 "specification":{"specId":"spec-1","templateId":"3","aConditions":[{}],
+                 "ifConditions":[],"thenConditions":[]}}
+                """;
+        assertTrue(AiToolResultContract.hasValidKnownToolPayload("manage_spec", objectMapper.readTree(valid)));
+        assertFalse(AiToolResultContract.hasValidKnownToolPayload("manage_spec",
+                objectMapper.readTree("{\"operation\":\"updated\"}")));
+        for (String field : java.util.List.of("specification", "verificationStatus", "totalSpecs")) {
+            var incomplete = (com.fasterxml.jackson.databind.node.ObjectNode) objectMapper.readTree(valid);
+            incomplete.remove(field);
+            assertFalse(AiToolResultContract.hasValidKnownToolPayload("manage_spec", incomplete), field);
+        }
+        for (String field : java.util.List.of("specId", "templateId", "aConditions", "ifConditions", "thenConditions")) {
+            var incomplete = (com.fasterxml.jackson.databind.node.ObjectNode) objectMapper.readTree(valid);
+            ((com.fasterxml.jackson.databind.node.ObjectNode) incomplete.path("specification")).remove(field);
+            assertFalse(AiToolResultContract.hasValidKnownToolPayload("manage_spec", incomplete), field);
+        }
+    }
+
+    @Test
     void everyMutationCapableToolHasARecognizedAuthoritativeResultMarker() throws Exception {
         Map<String, String> examples = Map.ofEntries(
                 Map.entry("add_device", "{\"operation\":\"created\"}"),

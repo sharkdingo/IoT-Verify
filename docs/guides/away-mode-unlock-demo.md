@@ -6,7 +6,7 @@ automation that can leave the front door unlocked while the house is empty.
 Scene file: [`../examples/default-away-mode-unlock-scene.json`](../examples/default-away-mode-unlock-scene.json).
 Scene semantics and expected counts: [default-template-scenarios.md](default-template-scenarios.md#away-mode-unlock).
 
-Verified against code and real NuSMV 2.7.1 on 2026-08-08. Every number below is pinned by
+Verified against code on 2026-10-22; regression uses real NuSMV 2.7.1. Every number below is pinned by
 `AwayModeUnlockSceneNusmvTest`; if that test fails, this walkthrough is wrong.
 
 ---
@@ -107,7 +107,7 @@ green is not being asked anything.
 
 Properties 2 and 3 are deliberately two different questions about the same worry. Property 2
 asks "can this ever happen?"; property 3 asks "if it happens, does the home recover?" Both
-fail, and one removal clears both — that is the shared-root-cause story. Step 7 comes back to
+fail, while deleting the sole unlock path makes one response vacuous. Step 7 comes back to
 *how* each of them goes green, because it is not the same way.
 
 **Two of the four green properties carry no information at baseline, and knowing which is the
@@ -125,8 +125,8 @@ point.** Both readings are measured on this scene, not inferred:
 
 Properties 0 and 1 are the ones that genuinely earn their green: their antecedents are
 reachable and their conclusions depend on rules that really fire. If you have time for only one
-sentence, say that a satisfied property is only evidence when the situation it forbids can
-arise at all — which is exactly the trap the scene's own regression test exists to catch.
+sentence, distinguish a response whose trigger is reachable from a prohibition whose
+forbidden state is unreachable: the latter is precisely what the prohibition asks for.
 
 **3. Run verification.** Synchronous, attack mode `NONE`. Properties 2 and 3 come back
 violated.
@@ -141,7 +141,7 @@ violated.
 
 Name the rules rather than numbering them when you narrate this, and be careful if you do number
 them: the UI lists rules from 1, while the model's own firing flags (`iot_verify_rule_fired_0…2`)
-and the fix suggestion's `removedRuleIndices` are **0-based** — the verified removal targets index
+and removal indices are **0-based** — the rejected deletion would target index
 `1`, which is the *second* rule in the list.
 
 Read the last column carefully, because this is the one place the demo's temporal convention shows
@@ -165,56 +165,23 @@ step. Say plainly what this list is: rules that *actually executed* on the count
 read from recorded firings rather than re-guessing which rule looks suspicious. Narrowing
 three candidates to one repair is the next step's job, not localization's.
 
-**6. Let the strategies disagree, and say why.** Request a fix. Three strategies report:
+**6. Inspect why automatic repair declines.** Parameter adjustment reports no numeric
+thresholds; condition adjustment cannot avoid the counterexample; removal is rejected.
+Deleting the only unlock rule would make all six properties true, but would disable the
+previously reachable template-5 re-lock trigger. The returned warning names this trigger
+regression. An automatic suggestion must preserve those response triggers as well as
+satisfied properties, under the [repair contract](../architecture/auto-fix.md#forward-verification-fixstrategyutilsforwardverify).
 
-| Strategy | Result |
-| :--- | :--- |
-| Parameter adjustment | `SKIPPED_NO_PARAMETERIZABLE_VALUES` — nothing numeric to move |
-| Condition adjustment | `NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE` — no condition change prevents this counterexample |
-| Rule removal | **Verified**: delete the convenience-unlock rule |
+**7. Compare an explicit edit with a useful repair.** If demonstrating vacuity, manually delete
+only the convenience-unlock rule and re-run verification. The property counts are `6 / 0`,
+but the re-lock response has an **unreachable trigger**: the door can no longer become
+unlocked. The Never property has achieved its objective; the response says nothing about
+recovery from an unlocked state. Undo this edit before the attack demonstration.
 
-This is the most honest minute of the demo, so do not rush it. Two strategies decline, and
-both decline for a *reason the tool states*. Parameter tuning has no threshold to move
-because the scene is entirely enum-valued. Condition tightening genuinely cannot repair this
-property: occupancy evolves freely, so any guard permitting an unlock while someone is home
-is still followed by a step where they leave — and nothing re-locks the door. Adding "only
-unlock when someone is home" really does not fix it. The tool proves this over every allowed
-condition change and says so, rather than offering a guard that only looks plausible.
-
-The verified repair is the destructive one: remove the convenience-unlock rule. Every
-candidate was re-checked against **all six** properties on the complete model before being
-offered.
-
-**7. Apply and re-verify.** Apply the removal (confirm the destructive board mutation), then
-verify again: **6 satisfied, 0 violated.** One removal cleared both violations.
-
-**Then read the 6/0 honestly, because the two properties did not go green the same way.** In the
-repaired model the front door is permanently locked — measured, not inferred: `AG (LockState =
-locked)` is provable and `EF (LockState = unlocked)` is false, because the convenience rule was the
-only automation that ever unlocked it. The porch light and the alarm still work. Now apply that to
-each property:
-
-- **Property 2, `Never (nobody home & door unlocked)` — genuinely achieved.** It exists to make that
-  state impossible, and now it is. This is what a prohibition property succeeding looks like.
-- **Property 3, the Response property — now vacuously true.** Its antecedent
-  `EF (occupancy = absent & door unlocked)` is **false** in the repaired model, so "if the door is
-  ever unlocked while nobody is home, it must eventually re-lock" holds for the empty reason:
-  the situation it talks about can no longer arise. It passes while telling you nothing.
-
-That asymmetry is the single most useful thing this scene teaches, and it is not a tool defect: a
-green forward verification means "the target property holds and no property the original rules
-satisfied is violated", never "every property is still meaningful". An implication property whose
-antecedent a repair removes is reported as verified. (The three shapes this takes, and why the
-boundary sits there, are in
-[../architecture/theory-sources.md](../architecture/theory-sources.md).)
-Saying "one removal repaired both properties" without this distinction is the one place this demo
-could fairly be called dishonest — and it sets up the closing note below, where a different repair
-satisfies property 3 *without* emptying it.
-
-That is the loop: authored automations → machine-checked properties → proof of failure →
-executed-rule attribution → verified repair → confirmed clean. And a tool that tells you
-"the convenient fix does not work" is worth more than one that always has an answer.
-
+For the successful product workflow, switch to the [household entry scene](default-template-scenarios.md#household-entry).
+It explicitly requires both visitor lighting and authorized-owner entry, diagnoses the unsafe
+lamp-to-door coupling, and accepts a guard that preserves those useful responses. Do not
+present the old permanently locked model as that demonstration.
 ### The repair the tool cannot propose (a strong closing note, 90 seconds)
 
 If the room is technical, this is the most honest thing you can show. All three strategies edit or
@@ -226,27 +193,19 @@ convenience rule, and keep the convenience unlock. Measured on this scene with r
 
 Put the two repairs side by side. Both make property 3 green; only one makes it *mean* anything.
 
-| | Verified removal (what the tool offers) | Add an auto-lock rule (what it cannot) |
+| | Explicit deletion (automatic repair rejects it) | Add an auto-lock rule (what it cannot) |
 | :--- | :--- | :--- |
 | Property 3 (Response) | satisfied — but **vacuously**: `EF (absent & unlocked)` is `false` | satisfied **substantively**: the antecedent stays reachable and the door really does re-lock |
 | Property 2 (Never) | satisfied | **still violated** |
 | Convenience feature (`EF door = unlocked`) | gone — door permanently locked | **kept** |
 
-So a better repair exists than the one the tool offers, and it costs a *specification* change rather
+This alternative costs a *specification* change rather
 than a code change: you accept "if it happens, the home recovers" instead of "it can never happen".
 The Never property cannot hold while the unlock rule exists, because rules act in one step — the
 resident leaves, and the lock command needs the next step to take effect, so one intermediate state
 always shows the door open with nobody home.
 
-This is the payoff of reading the 6/0 carefully in step 7. The tool's repair scores 2 green
-properties by deleting the feature and emptying one of them; this one keeps the feature and earns a
-green property that still describes real behaviour, at the price of a weaker safety claim you have to
-state out loud. No automated strategy can make that trade for you, because it is a decision about
-what you are willing to promise.
-
-That is the honest division of labour: the checker proves what is broken and what any candidate
-repair really guarantees. Which trade-off to accept is a human decision it deliberately does not
-make for you.
+This trades an absolute prohibition for a recovery requirement. No automatic strategy may change that promise on the user's behalf.
 
 ## Act 2 (optional) — one spoofed sensor
 
@@ -277,7 +236,7 @@ Two things to pre-empt rather than be asked:
   particular sensor will be compromised, and the compromise model is a fixed set chosen once
   per run, not a different device each step.
 
-Note that the Act 1 repair is a *removal*, so it does not hand the attacker a new lever the
+Note that the optional Act 1 manual edit is a *removal*, so it does not hand the attacker a new lever the
 way a guard on a falsifiable reading would. If someone asks whether a condition-based repair
 would have survived this act: it would not have, and that is part of why the tool declined to
 offer one.
@@ -322,11 +281,10 @@ model trajectory, not a prediction of a physical house.
 
 ## Claims to make, and claims to avoid
 
-Say: these properties hold on **this finite model** of the authored automations; the counterexample
-is a real path in that model; the repair was re-verified against every submitted property before
-being offered — **and one of those properties is now vacuous**, which is a fact about the repair, not
-a caveat to bury. If you say the first three and not the fourth, you have overstated the result.
-
+Say: the violation and trigger diagnostics describe the declared finite model. Automatic
+repair refuses to disable a formerly reachable response trigger. Explicit deletion can still
+satisfy the formulas vacuously, and the result identifies that fact. For a repair preserving
+useful household entry, demonstrate the linked household scene.
 Do not say: the house is secure; the door cannot be opened; this covers firmware, network,
 authentication, encryption, physical installation, or real-world timing. None of those are
 in the model. The attack results describe a modeled attack space with a stated budget, not

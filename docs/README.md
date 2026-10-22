@@ -78,7 +78,8 @@ CI and diagnosed development failures.
 
 | Document | Owns |
 | :--- | :--- |
-| [docs/guides/acceptance-demo.md](guides/acceptance-demo.md) | End-to-end acceptance scene: three construction paths, simulation/verification animation, attack/privacy contrast, and verified repair |
+| [docs/guides/household-workflow.md](guides/household-workflow.md) | Household intent, editable boundaries, choice of analysis, and the explain–revise–recheck workflow |
+| [docs/guides/acceptance-demo.md](guides/acceptance-demo.md) | Night-watch diagnostics: three construction paths, observation and counterexample replay, attack/privacy contrast, and rejection of vacuous repair |
 | [docs/guides/default-template-scenarios.md](guides/default-template-scenarios.md) | **Scene semantics SSOT** for additional importable default-template and elderly-care scenes (fire response, rule priority, RFID trust/privacy, away-mode unlock, care response timing, ventilation, attack contrast, verified repair), including each scene's expected verification counts |
 | [docs/guides/away-mode-unlock-demo.md](guides/away-mode-unlock-demo.md) | Presenter walkthrough for the away-mode unlock scene: composition defect, three-state counterexample, two strategies declining with stated reasons, verified removal, optional budget-one attack act, and on-stage failure modes |
 

@@ -1191,6 +1191,51 @@ public class BoardStorageServiceImpl implements BoardStorageService {
     }
 
     @Override
+    public CollectionMutationResultDto<SpecificationDto> updateSpecIfUnchanged(
+            Long userId, String specId, SpecificationDto expected, SpecificationDto desired) {
+        synchronized (getUserWriteLock(userId)) {
+            return transactionTemplate.execute(status -> {
+                requireActiveUserForWrite(userId);
+                if (!hasText(specId) || expected == null || desired == null
+                        || !specId.equals(expected.getId()) || !specId.equals(desired.getId())) {
+                    throw new BadRequestException(
+                            "Expected and desired specification snapshots must identify the specification being edited.");
+                }
+                List<SpecificationPo> records = specRepo.findByUserId(userId);
+                List<SpecificationDto> current = records.stream().map(specificationMapper::toDto).toList();
+                int position = indexOfSpecification(current, specId);
+                if (position == current.size()) throw new ResourceNotFoundException("Specification", specId);
+                SpecificationDto before = current.get(position);
+                if (!sameSpecificationDeletionSnapshot(expected, before)) {
+                    String message = "The specification changed before this edit. Refresh it before saving your changes.";
+                    throw new BoardContentConflictException("SPEC_EDIT_STALE", message, Map.of("expected", message));
+                }
+                requireResolvedVariableSource(desired);
+                requireSpecWithinDeclaredBounds(desired);
+                List<DeviceNodeDto> nodes = getNodesInternal(userId);
+                List<SpecificationDto> next = new ArrayList<>(current);
+                next.set(position, desired);
+                validateNoIdenticalSpecifications(next, nodes);
+                validateBoardReferences(userId, nodes, null, next);
+                if (sameSpecificationDeletionSnapshot(before, desired)) {
+                    return withUndoAvailability(userId,
+                            CollectionMutationResultDto.of("unchanged", before, current));
+                }
+                SpecificationFormulaPreview.Context previewContext = SpecificationFormulaPreview.context(
+                        nodes, getDeviceTemplatesInternal(userId));
+                SpecificationDto canonical = canonicalizeSpecificationForStorage(desired, previewContext);
+                SpecificationPo updated = specificationMapper.toEntity(canonical, userId);
+                updated.setListOrder(records.get(position).getListOrder());
+                SpecificationDto saved = specificationMapper.toDto(specRepo.save(updated));
+                editJournal.record(userId, BoardEditEntityType.SPECIFICATION, BoardEditOperation.UPDATE,
+                        specId, before, saved, position);
+                return withUndoAvailability(userId,
+                        CollectionMutationResultDto.of("updated", saved, getSpecsInternal(userId)));
+            });
+        }
+    }
+
+    @Override
     public CollectionMutationResultDto<SpecificationDto> removeSpecIfUnchanged(
             Long userId, String specId, SpecificationDto expected) {
         synchronized (getUserWriteLock(userId)) {
@@ -4248,6 +4293,50 @@ public class BoardStorageServiceImpl implements BoardStorageService {
     }
 
     @Override
+    public CollectionMutationResultDto<RuleDto> updateRuleIfUnchanged(
+            Long userId, long ruleId, RuleDto expected, RuleDto desired) {
+        synchronized (getUserWriteLock(userId)) {
+            return transactionTemplate.execute(status -> {
+                requireActiveUserForWrite(userId);
+                if (ruleId <= 0 || expected == null || desired == null
+                        || !Objects.equals(expected.getId(), ruleId) || !Objects.equals(desired.getId(), ruleId)) {
+                    throw new BadRequestException(
+                            "Expected and desired rule snapshots must identify the rule being edited.");
+                }
+                List<RulePo> records = ruleRepo.findByUserIdOrderByExecutionOrderAscIdAsc(userId);
+                RulePo record = records.stream().filter(rule -> Objects.equals(rule.getId(), ruleId))
+                        .findFirst().orElseThrow(() -> new ResourceNotFoundException("Rule", ruleId));
+                RuleDto before = ruleMapper.toDto(record);
+                if (!sameRuleDeletionSnapshot(expected, before)) {
+                    String message = "The rule changed before this edit. Refresh it before saving your changes.";
+                    throw new BoardContentConflictException("RULE_EDIT_STALE", message, Map.of("expected", message));
+                }
+                RuleDto canonical = canonicalizeRuleRelationsForStorage(desired);
+                requireRuleWithinDeclaredBounds(canonical);
+                List<RuleDto> current = records.stream().map(ruleMapper::toDto).toList();
+                int position = records.indexOf(record);
+                List<RuleDto> next = new ArrayList<>(current);
+                next.set(position, canonical);
+                List<DeviceNodeDto> nodes = getNodesInternal(userId);
+                validateNoIdenticalRules(next, nodes);
+                validateBoardReferences(userId, nodes, next, null);
+                if (sameRuleDeletionSnapshot(before, canonical)) {
+                    return withUndoAvailability(userId,
+                            CollectionMutationResultDto.of("unchanged", before, current));
+                }
+                RulePo updated = ruleMapper.toEntity(canonical, userId);
+                updated.setCreatedAt(record.getCreatedAt());
+                updated.setExecutionOrder(record.getExecutionOrder());
+                RuleDto saved = ruleMapper.toDto(ruleRepo.save(updated));
+                editJournal.record(userId, BoardEditEntityType.RULE, BoardEditOperation.UPDATE,
+                        String.valueOf(ruleId), before, saved, position);
+                return withUndoAvailability(userId,
+                        CollectionMutationResultDto.of("updated", saved, getRulesInternal(userId)));
+            });
+        }
+    }
+
+    @Override
     public CollectionMutationResultDto<RuleDto> reorderRules(
             Long userId, List<Long> expectedRuleIds, List<Long> ruleIds) {
         synchronized (getUserWriteLock(userId)) {
@@ -5185,7 +5274,10 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                 || (targetJson != null && target == null)
                 || (expectedJson != null && expected == null)
                 || (target != null && target.getCreatedAt() == null)
-                || (expected != null && expected.getCreatedAt() == null)) {
+                || (expected != null && expected.getCreatedAt() == null)
+                || (entry.getOperation() == BoardEditOperation.UPDATE && target != null && expected != null
+                        && (sameRuleDeletionSnapshot(target, expected)
+                            || !Objects.equals(target.getCreatedAt(), expected.getCreatedAt())))) {
             throw new ConflictException(UNREADABLE_JOURNAL_ENTRY_MESSAGE);
         }
 
@@ -5227,6 +5319,11 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         RuleDto restored = canonicalizeRuleRelationsForStorage(target);
         restored.setId(ruleId);
         List<RuleDto> nextRules = new ArrayList<>(getRulesInternal(userId));
+        if (entry.getOperation() == BoardEditOperation.UPDATE
+                && (entry.getEntityOrder() >= nextRules.size()
+                    || !Objects.equals(nextRules.get(entry.getEntityOrder()).getId(), ruleId))) {
+            throw new ConflictException("This rule moved after the edit, so its recorded position no longer matches.");
+        }
         nextRules.removeIf(rule -> Objects.equals(rule.getId(), ruleId));
         // Reinsert at the recorded position. getRulesInternal returns execution order, so the index is
         // a list position. A position that no longer fits is drift or malformed history, not permission
@@ -5253,7 +5350,13 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         // Deletion leaves a gap in execution_order, so the restored index can collide with a survivor.
         // A collision is resolved by the id tiebreak in the ordering query rather than by intent, which
         // would give a third ordering. Renumbering the survivors contiguously removes the ambiguity.
-        renumberSurvivingRules(ruleRepo.findByUserId(userId), nextRules.stream().map(RuleDto::getId).toList(), ruleId);
+        if (entry.getOperation() == BoardEditOperation.UPDATE) {
+            RulePo existing = ruleRepo.findById(ruleId).orElseThrow();
+            po.setExecutionOrder(existing.getExecutionOrder());
+            po.setCreatedAt(existing.getCreatedAt());
+        } else {
+            renumberSurvivingRules(ruleRepo.findByUserId(userId), nextRules.stream().map(RuleDto::getId).toList(), ruleId);
+        }
         if (current == null) {
             // `rules.id` is a single global primary key, unlike device_node's composite (id, user_id),
             // but the drift check above only sees this account's rows. If another account now holds the
@@ -5313,7 +5416,9 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         // pass for the legal "record already gone" case that skips the drift check.
         if (!validSingleRecordJournalTransition(entry)
                 || (targetJson != null && target == null)
-                || (expectedJson != null && expected == null)) {
+                || (expectedJson != null && expected == null)
+                || (entry.getOperation() == BoardEditOperation.UPDATE && target != null && expected != null
+                        && sameSpecificationDeletionSnapshot(target, expected))) {
             throw new ConflictException(UNREADABLE_JOURNAL_ENTRY_MESSAGE);
         }
 
@@ -5340,6 +5445,11 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                     "This specification changed after the edit, so reversing it would discard newer work.");
         }
 
+        if (entry.getOperation() == BoardEditOperation.UPDATE
+                && indexOfSpecification(existing, specId) != entry.getEntityOrder()) {
+            throw new ConflictException(
+                    "This specification moved after the edit, so its recorded position no longer matches.");
+        }
         existing.removeIf(candidate -> specId.equals(candidate.getId()));
         if (target != null) {
             target.setId(specId);
@@ -5364,7 +5474,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         return switch (entry.getOperation()) {
             case CREATE -> !hasBefore && hasAfter;
             case DELETE -> hasBefore && !hasAfter;
-            case UPDATE -> false;
+            case UPDATE -> hasBefore && hasAfter;
         };
     }
 

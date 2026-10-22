@@ -268,6 +268,11 @@ const validateSpecResults = (result: Record<string, any>, context: string): Spec
     if (!['SATISFIED', 'VIOLATED', 'INCONCLUSIVE'].includes(row.outcome)) {
       throw new RunResponseContractError(context, `specResults[${index}].outcome is invalid`)
     }
+    const allowedReachability = ['4', '5', '6'].includes(row.templateId)
+      ? ['REACHABLE', 'UNREACHABLE', 'INCONCLUSIVE'] : ['NOT_APPLICABLE']
+    if (!allowedReachability.includes(row.antecedentReachability)) {
+      throw new RunResponseContractError(context, `specResults[${index}].antecedentReachability is invalid for its template`)
+    }
   })
   return specResults as SpecResult[]
 }
@@ -363,7 +368,8 @@ const validateVerificationOutcomeAgainstResults = (
   context: string
 ) => {
   const violatedCount = specResults.filter(result => result.outcome === 'VIOLATED').length
-  const inconclusiveCount = specResults.filter(result => result.outcome === 'INCONCLUSIVE').length
+  const inconclusiveCount = specResults.filter(result => result.outcome === 'INCONCLUSIVE'
+    || result.antecedentReachability === 'INCONCLUSIVE').length
   if (outcome === 'SATISFIED'
       && (specResults.length === 0 || violatedCount !== 0 || inconclusiveCount !== 0)) {
     throw new RunResponseContractError(context, 'SATISFIED contradicts per-specification results')

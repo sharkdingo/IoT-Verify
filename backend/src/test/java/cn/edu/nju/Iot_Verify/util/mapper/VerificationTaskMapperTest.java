@@ -90,7 +90,8 @@ class VerificationTaskMapperTest {
                 .violatedSpecCount(1)
                 .disabledRuleCount(1)
                 .skippedSpecCount(0)
-                .specResultsJson("[{\"specId\":\"s1\",\"outcome\":\"SATISFIED\",\"expression\":\"CTLSPEC AG(light.on)\"}]")
+                .specResultsJson("[{\"specId\":\"s1\",\"templateId\":\"1\",\"outcome\":\"SATISFIED\","
+                        + "\"antecedentReachability\":\"NOT_APPLICABLE\",\"expression\":\"CTLSPEC AG(light.on)\"}]")
                 .generationIssuesJson("[{\"issueType\":\"RULE_DISABLED\",\"itemLabel\":\"Hall automation\","
                         + "\"reasonCode\":\"RULE_UNRESOLVABLE_TRIGGER_CONDITION\",\"reason\":\"Unsupported action\"}]")
                 .checkLogsJson("[\"generated\",\"checked\"]")
@@ -132,6 +133,14 @@ class VerificationTaskMapperTest {
         assertEquals(1, run.getCounterexampleCount());
         assertEquals("raw output", run.getNusmvOutput());
         assertEquals(java.util.List.of("generated", "checked"), run.getCheckLogs());
+        for (String invalid : java.util.List.of(
+                "{\"templateId\":\"4\"}",
+                "{\"templateId\":\"4\",\"antecedentReachability\":\"NOT_APPLICABLE\"}",
+                "{\"templateId\":\"1\",\"antecedentReachability\":\"REACHABLE\"}")) {
+            po.setSpecResultsJson("[" + invalid + "]");
+            assertThrows(PersistedDataIntegrityException.class, () -> mapper.toDto(po));
+            assertThrows(PersistedDataIntegrityException.class, () -> mapper.toRunDto(po, 1));
+        }
     }
 
     @Test

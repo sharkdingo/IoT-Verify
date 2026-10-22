@@ -343,7 +343,7 @@ const toBackendSpecificationWriteDto = (spec: Specification) => ({
 });
 
 /**
- * The create/delete shape of the backend's collection-mutation envelope.
+ * Targeted item changes in the backend's collection-mutation envelope.
  *
  * Rule reorder shares the envelope on the wire but not this type: it reports
  * `operation: "reordered"` with a null `affectedItem`, because one up/down press changes no single
@@ -351,13 +351,13 @@ const toBackendSpecificationWriteDto = (spec: Specification) => ({
  * `validateCollectionMutationResult`, which requires `affectedItem`.
  */
 export interface CollectionMutationResult<T> {
-    operation: 'created' | 'deleted';
+    operation: 'created' | 'deleted' | 'updated' | 'unchanged';
     affectedItem: T;
     currentItems: T[];
     currentCount: number;
     /** Undo availability after this reversible mutation, as reported by the server journal. */
-    canUndo: true;
-    canRedo: false;
+    canUndo: boolean;
+    canRedo: boolean;
 }
 
 type CommittedDeviceMutationResult = DeviceMutationResult & {
@@ -1462,7 +1462,7 @@ const validateCollectionMutationResult = <T>(
             'reversible collection mutations must report boolean canUndo and canRedo values'
         )
     }
-    if (!result.canUndo || result.canRedo) {
+    if (expectedOperation !== 'unchanged' && (!result.canUndo || result.canRedo)) {
         throw new BoardResponseContractError(
             context,
             'a committed collection mutation must be undoable and must clear redo history'
@@ -1489,7 +1489,7 @@ const validateCollectionMutationResult = <T>(
             )
         }
         const affectedIsCurrent = currentItems.some(item => identityOf(item) === affectedIdentity)
-        if ((expectedOperation === 'created' && !affectedIsCurrent)
+        if ((expectedOperation !== 'deleted' && !affectedIsCurrent)
             || (expectedOperation === 'deleted' && affectedIsCurrent)) {
             throw new BoardResponseContractError(
                 context,
@@ -1499,6 +1499,23 @@ const validateCollectionMutationResult = <T>(
     }
     requireCurrentCount({ ...result, currentItems }, currentItems, context)
     return { ...result, affectedItem, currentItems } as CollectionMutationResult<T>
+}
+
+const validateCollectionEditResult = <T>(
+    value: unknown, context: string, validateItem: (value: unknown, context: string) => T,
+    identityOf: (item: T) => string | number, expectedIdentity: string | number,
+    snapshotOf: (item: T) => unknown
+): CollectionMutationResult<T> => {
+    const operation = requireResponseRecord(value, context).operation
+    if (operation !== 'updated' && operation !== 'unchanged') {
+        throw new BoardResponseContractError(context, 'operation must be updated or unchanged')
+    }
+    const result = validateCollectionMutationResult(value, operation, context, validateItem, identityOf, expectedIdentity)
+    const current = result.currentItems.find(item => identityOf(item) === expectedIdentity)!
+    if (JSON.stringify(snapshotOf(current)) !== JSON.stringify(snapshotOf(result.affectedItem))) {
+        throw new BoardResponseContractError(context, 'affectedItem disagrees with the authoritative current item')
+    }
+    return result
 }
 
 /**
@@ -2438,6 +2455,17 @@ export default {
             spec.id
         );
     },
+    updateSpec: async (expected: Specification, desired: Specification): Promise<CollectionMutationResult<Specification>> => {
+        const id = String(expected.id || '').trim()
+        if (!id || desired.id !== id) throw new Error('A specification edit must preserve its persisted identity')
+        return validateCollectionEditResult(
+            unpack<unknown>(await api.put(`/board/specs/${encodeURIComponent(id)}`, {
+                expected: toBackendSpecificationWriteDto(expected), desired: toBackendSpecificationWriteDto(desired)
+            })),
+            'Specification update', validateBoardSpecificationResult, spec => spec.id, id,
+            toBackendSpecificationWriteDto
+        )
+    },
     removeSpec: async (spec: Specification): Promise<CollectionMutationResult<Specification>> => {
         const specId = String(spec.id || '').trim()
         if (!specId) throw new Error('Persisted specification id is required for deletion')
@@ -2479,6 +2507,21 @@ export default {
             affectedItem: fromRuleDto(result.affectedItem),
             currentItems: result.currentItems.map(fromRuleDto)
         };
+    },
+    updateRule: async (expected: RuleForm, desired: RuleForm): Promise<CollectionMutationResult<RuleForm>> => {
+        const id = Number(expected.id)
+        if (!Number.isSafeInteger(id) || id <= 0 || desired.id !== expected.id) {
+            throw new Error('A rule edit must preserve its persisted identity')
+        }
+        assertRuleHasTrigger(desired)
+        const result = validateCollectionEditResult(
+            unpack<unknown>(await api.put(`/board/rules/${id}`, {
+                expected: toRuleDto(expected), desired: toRuleDto(desired)
+            })),
+            'Rule update', validateBackendRuleResult, rule => Number(rule.id), id,
+            rule => toRuleDto(fromRuleDto(rule))
+        )
+        return { ...result, affectedItem: fromRuleDto(result.affectedItem), currentItems: result.currentItems.map(fromRuleDto) }
     },
     /**
      * Persists a new rule execution order. Reversible, so the result carries undo availability

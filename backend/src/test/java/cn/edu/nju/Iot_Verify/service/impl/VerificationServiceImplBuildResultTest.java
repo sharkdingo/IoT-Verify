@@ -104,6 +104,34 @@ import static org.mockito.Mockito.*;
 @ExtendWith(MockitoExtension.class)
 class VerificationServiceImplBuildResultTest {
     @Test
+    void satisfiedResponseReportsUnreachableTriggerWithoutCreatingAnAuxiliaryViolation() throws Exception {
+        SpecificationDto spec = makeEffectiveSpec("response");
+        spec.setTemplateId("4");
+        var emitted = new SmvGenerationContext.EmittedSpec(spec, "response", "CTLSPEC AG(a -> AX b)", "CTLSPEC !EF(a)");
+        var result = invoke(NusmvResult.success("", List.of(
+                new SpecCheckResult("!(EF a)", true, "auxiliary diagnostic text"),
+                new SpecCheckResult("AG (a -> AX b)", true, null))), singleDevice(), List.of(spec), new ArrayList<>(), List.of(emitted));
+        assertEquals(VerificationOutcome.SATISFIED, result.getOutcome());
+        assertEquals(1, result.getSpecResults().size());
+        assertEquals(cn.edu.nju.Iot_Verify.dto.verification.AntecedentReachability.UNREACHABLE,
+                result.getSpecResults().get(0).getAntecedentReachability());
+        assertTrue(result.getTraces().isEmpty());
+        verifyNoInteractions(smvTraceParser);
+    }
+
+    @Test
+    void missingResponseDiagnosticMakesTheRunInconclusive() throws Exception {
+        SpecificationDto spec = makeEffectiveSpec("response");
+        spec.setTemplateId("6");
+        var emitted = new SmvGenerationContext.EmittedSpec(spec, "response", "LTLSPEC G(a -> F G b)", "CTLSPEC !EF(a)");
+        var result = invoke(NusmvResult.success("", List.of(new SpecCheckResult("G(a -> F G b)", true, null))),
+                singleDevice(), List.of(spec), new ArrayList<>(), List.of(emitted));
+        assertEquals(VerificationOutcome.INCONCLUSIVE, result.getOutcome());
+        assertEquals(VerificationOutcome.SATISFIED, result.getSpecResults().get(0).getOutcome());
+        assertEquals(cn.edu.nju.Iot_Verify.dto.verification.AntecedentReachability.INCONCLUSIVE,
+                result.getSpecResults().get(0).getAntecedentReachability());
+    }
+    @Test
     void progressUsesOnlyOwnedScalarsAndPreservesTerminalFallbacks() {
         var progress = mock(VerificationTaskProgressProjection.class);
         when(progress.getProgress()).thenReturn(null);
@@ -2103,6 +2131,7 @@ class VerificationServiceImplBuildResultTest {
                         .formulaPreview("CTL AG(\"Hall sensor\".state = \"active\")")
                         .formulaKind("CTL")
                         .outcome(VerificationOutcome.SATISFIED)
+                        .antecedentReachability(cn.edu.nju.Iot_Verify.dto.verification.AntecedentReachability.NOT_APPLICABLE)
                         .expression("expr")
                         .build()),
                 List.of("done"), "", List.of(), 1, 2, "MODULE main");
@@ -2115,7 +2144,7 @@ class VerificationServiceImplBuildResultTest {
                         + "\"formulaPreview\":\"CTL AG(\\\"Hall sensor\\\".state = \\\"active\\\")\","
                         + "\"specificationSnapshot\":null,"
                         + "\"formulaKind\":\"CTL\",\"outcome\":\"SATISFIED\","
-                        + "\"expression\":\"expr\"}]"),
+                        + "\"antecedentReachability\":\"NOT_APPLICABLE\",\"expression\":\"expr\"}]"),
                 // checkLogsJson, generationIssuesJson, nusmvOutput, then the model, then errorMessage,
                 // processingTimeMs, runningStatus. The model slot sits between nusmvOutput and
                 // errorMessage, so it is inserted here rather than appended.

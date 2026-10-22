@@ -19,6 +19,19 @@ class SmvSpecificationBuilderNegationTest {
 
     private final SmvSpecificationBuilder builder = new SmvSpecificationBuilder();
 
+    @Test
+    void responseTemplatesEmitReachabilityDiagnosticsButNegatedSearchDoesNot() {
+        for (String template : List.of("4", "5", "6")) {
+            SpecificationDto spec = buildSpec(template, null,
+                    List.of(buildCondition("sensor_1", "state", null, "=", "active")),
+                    List.of(buildCondition("sensor_1", "state", null, "=", "idle")));
+            String generated = builder.build(List.of(spec), buildDeviceMap(), false);
+            assertTrue(generated.contains("CTLSPEC !EF(sensor_1.SensorState=active)"), generated);
+            assertEquals(2, generated.lines().filter(line -> line.contains("SPEC ")).count());
+            assertFalse(builder.generateNegatedSpec(spec, buildDeviceMap()).contains("\n"));
+        }
+    }
+
     private SpecificationDto buildSpec(String templateId,
                                         List<SpecConditionDto> aConditions,
                                         List<SpecConditionDto> ifConditions,

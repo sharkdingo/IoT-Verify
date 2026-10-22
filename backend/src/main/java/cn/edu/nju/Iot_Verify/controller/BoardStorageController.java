@@ -44,9 +44,11 @@ import cn.edu.nju.Iot_Verify.dto.recommendation.StandaloneRecommendationRequestD
 import cn.edu.nju.Iot_Verify.dto.recommendation.SpecificationRecommendationDto;
 import cn.edu.nju.Iot_Verify.dto.rule.DuplicateRuleCheckResultDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
+import cn.edu.nju.Iot_Verify.dto.rule.RuleUpdateRequestDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleOrderRequestDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleSimilarityResultDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
+import cn.edu.nju.Iot_Verify.dto.spec.SpecificationUpdateRequestDto;
 import cn.edu.nju.Iot_Verify.exception.BadRequestException;
 import cn.edu.nju.Iot_Verify.exception.BoardContentConflictException;
 import cn.edu.nju.Iot_Verify.exception.ValidationException;
@@ -205,6 +207,15 @@ public class BoardStorageController {
         return Result.success(boardService.addSpec(userId, spec));
     }
 
+    @PutMapping("/specs/{specId}")
+    public Result<CollectionMutationResultDto<SpecificationDto>> updateSpec(
+            @CurrentUser Long userId,
+            @PathVariable String specId,
+            @NotNull @Valid @RequestBody SpecificationUpdateRequestDto request) {
+        return Result.success(boardService.updateSpecIfUnchanged(
+                userId, specId, request.getExpected(), request.getDesired()));
+    }
+
     @DeleteMapping("/specs/{specId}")
     public Result<CollectionMutationResultDto<SpecificationDto>> removeSpec(
             @CurrentUser Long userId,
@@ -231,6 +242,15 @@ public class BoardStorageController {
             @NotNull @Valid @RequestBody RuleOrderRequestDto request) {
         return Result.success(boardService.reorderRules(
                 userId, request.getExpectedRuleIds(), request.getRuleIds()));
+    }
+
+    @PutMapping("/rules/{ruleId}")
+    public Result<CollectionMutationResultDto<RuleDto>> updateRule(
+            @CurrentUser Long userId,
+            @PathVariable long ruleId,
+            @NotNull @Valid @RequestBody RuleUpdateRequestDto request) {
+        return Result.success(boardService.updateRuleIfUnchanged(
+                userId, ruleId, request.getExpected(), request.getDesired()));
     }
 
     @DeleteMapping("/rules/{ruleId}")

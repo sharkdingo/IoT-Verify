@@ -307,16 +307,16 @@ public class FixContext {
 
     /**
      * @param violatedSpecIds the specifications the original rules violate; {@code null} when that
-     *                        could not be established, in which case no candidate may leave any
-     *                        specification failing
+     *                        could not be established
+     * @param reachableResponseIds response specifications whose triggers the original model can reach
      */
-    public record BaselineVerdict(Set<String> violatedSpecIds) {
+    public record BaselineVerdict(Set<String> violatedSpecIds, Set<String> reachableResponseIds) {
         public static BaselineVerdict unavailable() {
-            return new BaselineVerdict(null);
+            return new BaselineVerdict(null, null);
         }
 
         public boolean available() {
-            return violatedSpecIds != null;
+            return violatedSpecIds != null && reachableResponseIds != null;
         }
     }
 

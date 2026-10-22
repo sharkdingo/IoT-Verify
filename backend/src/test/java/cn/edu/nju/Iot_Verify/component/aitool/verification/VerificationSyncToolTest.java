@@ -105,6 +105,7 @@ class VerificationSyncToolTest {
                         .specificationLabel("Kitchen light must stay off")
                         .formulaPreview("AG(kitchen_light.off)")
                         .formulaKind("CTL")
+                        .antecedentReachability(cn.edu.nju.Iot_Verify.dto.verification.AntecedentReachability.REACHABLE)
                         .outcome(VerificationOutcome.VIOLATED)
                         .expression("CTLSPEC AG(light.on)")
                         .build()))
@@ -137,6 +138,7 @@ class VerificationSyncToolTest {
         assertEquals("CTLSPEC AG(light.on)",
                 json.path("specResults").get(0).path("checkedExpression").asText());
         assertEquals("VIOLATED", json.path("specResults").get(0).path("outcome").asText());
+        assertEquals("REACHABLE", json.path("specResults").get(0).path("antecedentReachability").asText());
         assertEquals(1, json.path("modelSnapshot").path("deviceCount").asInt());
         assertEquals("Kitchen light must stay off",
                 json.path("traces").get(0).path("violatedSpecificationLabel").asText());

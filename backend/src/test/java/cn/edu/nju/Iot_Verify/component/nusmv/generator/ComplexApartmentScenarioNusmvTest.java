@@ -67,7 +67,7 @@ class ComplexApartmentScenarioNusmvTest {
         assertTrue(smv.contains("CTLSPEC AG((home_mode_1.Mode=sleep) -> AX(!(camera_1.MachineState=takingphoto)))"));
         assertTrue(smv.contains("CTLSPEC AG((window_1.WindowState=open) -> AF(thermostat_1.ThermostatMode=off))"));
 
-        NusmvExecutor.NusmvResult result = buildExecutor(nusmvPath).execute(generated.smvFile());
+        NusmvExecutor.NusmvResult result = FormalCheckTestSupport.checkProperties(buildExecutor(nusmvPath), generated);
         assertTrue(result.isSuccess(), () -> "NuSMV failed: " + result.getErrorMessage());
         assertTrue(result.hasAnyViolation(), "The conflict scenario should produce at least one violation");
         assertTrue(result.getSpecResults().stream()

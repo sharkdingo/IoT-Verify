@@ -16,6 +16,7 @@ import type {
   SpecTemplateType, 
   SpecCondition, 
   SpecSide,
+  Specification,
 } from '@/types/spec'
 import type { DeviceTemplate, InternalVariable } from '@/types/device'
 import { useI18n } from 'vue-i18n'
@@ -111,6 +112,8 @@ interface Props {
   templatesLoading?: boolean
   readOnly?: boolean
   readOnlyMessage?: string
+  editRule?: RuleForm | null
+  editSpecification?: Specification | null
   runBoardMutation?: <T>(work: () => Promise<T>) => Promise<T>
 }
 
@@ -160,7 +163,9 @@ const emit = defineEmits<{
   'create-devices': [data: DeviceCreateItemsPayload]
   'template-drag-start': [templateName: string]
   'template-drag-end': []
-  'save-rule': [request: { rule: RuleForm; complete: MutationCompletion }]
+  'save-rule': [request: { rule: RuleForm; expected?: RuleForm; complete: MutationCompletion }]
+  'finish-rule-edit': []
+  'finish-spec-edit': []
   'add-spec': [data: {
     templateId: string,
     templateType: string,
@@ -169,6 +174,7 @@ const emit = defineEmits<{
     aConditions: SpecCondition[],
     ifConditions: SpecCondition[],
     thenConditions: SpecCondition[],
+    expected?: Specification,
     complete: MutationCompletion
   }]
   'replace-template-catalog': [templates: DeviceTemplate[]]
@@ -1018,6 +1024,8 @@ const specForm = reactive({
   thenConditions: [] as unknown as SpecCondition[]
 })
 const specSaveFailure = ref<ApiErrorDetails | null>(null)
+const editingSpecBaseline = ref<Specification | null>(null)
+let specDraftEpoch = 0
 const hasSpecificationConditions = computed(() =>
   specForm.aConditions.length + specForm.ifConditions.length + specForm.thenConditions.length > 0)
 let specSaveVersion = 0
@@ -1810,6 +1818,7 @@ const createSpecification = async () => {
   if (creatingSpecification.value || !validateSpecification()) return
   specSaveFailure.value = null
   const submittedVersion = specSaveVersion
+  const submittedDraftEpoch = specDraftEpoch
   const ownerToken = getToken()
 
   const cloneConditions = (conditions: SpecCondition[]) =>
@@ -1830,6 +1839,7 @@ const createSpecification = async () => {
   const saved = await new Promise<boolean>(resolve => {
     emit('add-spec', {
       ...submittedForm,
+      expected: editingSpecBaseline.value ? cloneSpecification(editingSpecBaseline.value) : undefined,
       complete: (saved, failure) => {
         if (!saved && failure && submittedVersion === specSaveVersion
           && !controlCenterDisposed && isCurrentSessionToken(ownerToken)) specSaveFailure.value = failure
@@ -1838,7 +1848,11 @@ const createSpecification = async () => {
     })
   })
   creatingSpecification.value = false
-  if (saved && !controlCenterDisposed && isCurrentSessionToken(ownerToken)) resetSpecForm()
+  if (saved && submittedDraftEpoch === specDraftEpoch
+    && !controlCenterDisposed && isCurrentSessionToken(ownerToken)) {
+    if (editingSpecBaseline.value) emit('finish-spec-edit')
+    resetSpecForm()
+  }
 }
 
 // Reset specification form
@@ -1850,6 +1864,42 @@ const resetSpecForm = () => {
   specForm.aConditions = []
   specForm.ifConditions = []
   specForm.thenConditions = []
+}
+
+const cloneSpecification = (spec: Specification): Specification => ({
+  ...spec,
+  aConditions: spec.aConditions.map(condition => ({ ...condition })),
+  ifConditions: spec.ifConditions.map(condition => ({ ...condition })),
+  thenConditions: spec.thenConditions.map(condition => ({ ...condition })),
+  devices: spec.devices?.map(device => ({ ...device, selectedApis: [...device.selectedApis] }))
+})
+
+watch(() => props.editSpecification, spec => {
+  specDraftEpoch += 1
+  closeSpecDialog()
+  resetSpecForm()
+  editingSpecBaseline.value = spec ? cloneSpecification(spec) : null
+  if (spec) {
+    const draft = cloneSpecification(spec)
+    Object.assign(specForm, {
+      templateId: draft.templateId,
+      aConditions: draft.aConditions,
+      ifConditions: draft.ifConditions,
+      thenConditions: draft.thenConditions,
+      templateType: specTemplateDetails.find(template => template.id === spec.templateId)?.type || '',
+      selectedDevices: draft.devices || [],
+      formula: draft.formula || ''
+    })
+  }
+}, { immediate: true, flush: 'sync' })
+
+const cancelSpecificationEdit = () => {
+  if (creatingSpecification.value || !ensureWritable()) return
+  specDraftEpoch += 1
+  editingSpecBaseline.value = null
+  closeSpecDialog()
+  resetSpecForm()
+  emit('finish-spec-edit')
 }
 
 const handleCreateDevice = async () => {
@@ -2145,6 +2195,9 @@ watch(() => props.deviceTemplates, current => {
 })
 
 watch(() => [authState.token, authState.user?.userId], () => {
+  specDraftEpoch += 1
+  editingSpecBaseline.value = null
+  resetSpecForm()
   templateImportVersion += 1
   deviceImportReadVersion += 1
   specSaveVersion += 1
@@ -3494,7 +3547,7 @@ watch(() => props.readOnly, readOnly => {
               <span class="material-symbols-outlined text-white text-lg">function</span>
             </div>
             <div class="board-section-heading__copy">
-              <span class="board-section-title">{{ t('app.createRule') }}</span>
+              <span class="board-section-title">{{ t(props.editRule ? 'app.editRule' : 'app.createRule') }}</span>
             </div>
           </div>
           <span aria-hidden="true" class="board-section-heading__chevron material-symbols-outlined board-text-muted transition-transform group-open:rotate-180 text-lg">expand_more</span>
@@ -3506,6 +3559,8 @@ watch(() => props.readOnly, readOnly => {
             :device-templates="deviceTemplates"
             :active="activeSection === 'rules' && !isCollapsed && ruleSectionExpanded"
             :read-only="props.readOnly"
+            :edit-rule="props.editRule"
+            @finish-edit="emit('finish-rule-edit')"
             @save-rule="emit('save-rule', $event)"
           />
         </div>
@@ -3527,7 +3582,7 @@ watch(() => props.readOnly, readOnly => {
               <span class="material-symbols-outlined text-white text-lg">verified</span>
             </div>
             <div class="board-section-heading__copy">
-              <span class="board-section-title">{{ t('app.createSpecification') }}</span>
+              <span class="board-section-title">{{ t(editingSpecBaseline ? 'app.editSpecification' : 'app.createSpecification') }}</span>
             </div>
           </div>
           <span aria-hidden="true" class="board-section-heading__chevron material-symbols-outlined board-text-muted transition-transform group-open:rotate-180 text-lg">expand_more</span>
@@ -3875,7 +3930,7 @@ watch(() => props.readOnly, readOnly => {
               <p class="font-semibold">{{ t(specSaveFailure.reasonCode === 'DUPLICATE_SPECIFICATION'
                 ? 'app.specDuplicate' : 'app.saveSpecsFailed') }}</p>
               <FailureDetails :suggestion="specSaveFailure.reasonCode === 'DUPLICATE_SPECIFICATION'
-                ? t('app.specSaveDuplicateHint') : ''" v-bind="specSaveFailure" />
+                ? t('app.specSaveDuplicateHint') : specSaveFailure.reasonCode === 'SPEC_EDIT_STALE' ? t('app.editConflictRecoveryHint') : ''" v-bind="specSaveFailure" />
             </div>
 
             <!-- Step 3: Generated Specification Description -->
@@ -3911,6 +3966,10 @@ watch(() => props.readOnly, readOnly => {
             </div>
 
             <!-- Create Button -->
+            <button v-if="editingSpecBaseline" type="button" class="board-action-secondary"
+              data-testid="spec-cancel-edit" @click="cancelSpecificationEdit">
+              {{ t('app.cancelEditing') }}
+            </button>
             <p
               v-if="specificationBlockedReason"
               id="spec-create-blocked-reason"
@@ -3930,7 +3989,7 @@ watch(() => props.readOnly, readOnly => {
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
               </svg>
-              {{ creatingSpecification ? t('app.saving') : t('app.createSpecification') }}
+              {{ creatingSpecification ? t('app.saving') : t(editingSpecBaseline ? 'app.saveChanges' : 'app.createSpecification') }}
             </button>
           </fieldset>
         </div>

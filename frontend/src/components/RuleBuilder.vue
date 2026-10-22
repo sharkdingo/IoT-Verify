@@ -27,6 +27,7 @@ const { t } = useI18n()
 interface Props {
   active?: boolean
   readOnly?: boolean
+  editRule?: RuleForm | null
   nodes: DeviceNode[]
   deviceTemplates: any[]
 }
@@ -47,7 +48,8 @@ const resolveDeviceNode = (ref?: string | null): DeviceNode | undefined => {
 
 // Emits
 const emit = defineEmits<{
-  'save-rule': [request: { rule: RuleForm; complete: (saved: boolean, failure?: ApiErrorDetails) => void }]
+  'save-rule': [request: { rule: RuleForm; expected?: RuleForm; complete: (saved: boolean, failure?: ApiErrorDetails) => void }]
+  'finish-edit': []
 }>()
 
 // Rule data
@@ -69,6 +71,7 @@ const currentSource = reactive({
   relation: '=',
   value: ''
 })
+const editingSourceIndex = ref<number | null>(null)
 
 interface SourceOption {
   name: string
@@ -425,6 +428,7 @@ const hasSourceValue = (value: unknown) =>
 const formatSourceValue = (value: unknown, fallback: string, templateName = '') =>
   hasSourceValue(value) ? formatTemplateModelToken(templateName, value) : fallback
 
+// Reset dependents before restoring an existing condition's remaining fields.
 watch(() => currentSource.fromId, () => {
   currentSource.itemType = ''
   currentSource.fromApi = ''
@@ -433,7 +437,7 @@ watch(() => currentSource.fromId, () => {
   if (sourceItemTypeOptions.value.length === 1) {
     currentSource.itemType = sourceItemTypeOptions.value[0].value
   }
-})
+}, { flush: 'sync' })
 
 watch(deviceNodes, nodes => {
   if (currentSource.fromId && !nodes.some(node => node.id === currentSource.fromId)) {
@@ -451,13 +455,13 @@ watch(() => currentSource.itemType, (newType) => {
   currentSource.fromApi = newType === 'state' ? 'state' : ''
   currentSource.relation = '='
   currentSource.value = ''
-})
+}, { flush: 'sync' })
 
 watch(() => currentSource.fromApi, () => {
   if (currentSource.itemType !== 'api') {
     currentSource.value = ''
   }
-})
+}, { flush: 'sync' })
 
 watch(conditionRelationOptions, options => {
   if (!options.some(option => option.value === currentSource.relation)) {
@@ -470,7 +474,7 @@ watch(() => currentSource.relation, () => {
   if (!isSetRelation.value && splitRuleValueList(currentSource.value).length > 1) {
     currentSource.value = splitRuleValueList(currentSource.value)[0] || ''
   }
-})
+}, { flush: 'sync' })
 
 watch(() => ruleData.contentDevice, () => {
   if (!availableContentItems.value.some(item => item.name === ruleData.content)) {
@@ -503,6 +507,7 @@ const rulePreview = computed(() => {
 
 // Methods
 const clearSourceDraft = () => {
+  editingSourceIndex.value = null
   currentSource.fromId = ''
   currentSource.itemType = ''
   currentSource.fromApi = ''
@@ -510,23 +515,39 @@ const clearSourceDraft = () => {
   currentSource.value = ''
 }
 
+const editSource = (index: number) => {
+  const source = ruleData.sources[index]
+  if (!source) return
+  Object.assign(currentSource, {
+    fromId: source.fromId,
+    itemType: source.itemType,
+    fromApi: source.fromApi,
+    relation: source.relation || '=',
+    value: source.value || ''
+  })
+  editingSourceIndex.value = index
+  nextTick(() => document.getElementById('rule-source-device')?.focus())
+}
+
 const addSource = () => {
   // 添加源设备及其条件
   if (canAddSource.value && currentSource.itemType) {
-    if (ruleData.sources.length >= REQUEST_LIMITS.ruleConditions) {
+    if (editingSourceIndex.value === null && ruleData.sources.length >= REQUEST_LIMITS.ruleConditions) {
       notifyBlocked(t('app.itemLimitReached', {
         resource: t('app.ruleConditions'),
         limit: REQUEST_LIMITS.ruleConditions
       }))
       return
     }
-    ruleData.sources.push({
+    const source = {
       fromId: currentSource.fromId,
       fromApi: currentSource.itemType === 'state' ? 'state' : currentSource.fromApi,
       itemType: currentSource.itemType,
       relation: currentSource.relation,
       value: currentSource.value
-    })
+    }
+    if (editingSourceIndex.value === null) ruleData.sources.push(source)
+    else ruleData.sources.splice(editingSourceIndex.value, 1, source)
 
     clearSourceDraft()
   }
@@ -534,6 +555,8 @@ const addSource = () => {
 
 const removeSource = (index: number) => {
   ruleData.sources.splice(index, 1)
+  if (editingSourceIndex.value === index) clearSourceDraft()
+  else if (editingSourceIndex.value !== null && index < editingSourceIndex.value) editingSourceIndex.value -= 1
 }
 
 // No toast here: `ruleDraftIncompleteReason` is already rendered inline, linked by aria-describedby,
@@ -580,6 +603,8 @@ const ruleSaveFailureDetails = computed(() => {
 })
 const ruleSaveFailureElement = ref<HTMLElement | null>(null)
 let ruleDraftEpoch = 0
+const editingBaseline = ref<RuleForm | null>(null)
+const cloneRule = (rule: RuleForm): RuleForm => ({ ...rule, sources: rule.sources.map(source => ({ ...source })) })
 
 watch(ruleDraftFingerprint, () => { ruleSaveFailure.value = null })
 watch(ruleSaveFailure, async failure => {
@@ -599,14 +624,14 @@ const emitRuleSave = async () => {
   savingRule.value = true
   const rule: RuleForm = {
     ...ruleData,
-    id: 'rule_' + Date.now(),
+    id: editingBaseline.value?.id || 'rule_' + Date.now(),
     name: ruleData.name || buildReadableRuleName(),
     sources: ruleData.sources.map(source => ({ ...source })),
     contentDevice: ruleData.contentDevice || undefined,
     content: ruleData.content || undefined
   }
   const saved = await new Promise<boolean>(resolve => {
-    emit('save-rule', { rule, complete: (saved, failure) => {
+    emit('save-rule', { rule, expected: editingBaseline.value ? cloneRule(editingBaseline.value) : undefined, complete: (saved, failure) => {
       if (isRuleActionCurrent(actionEpoch) && fingerprint === ruleDraftFingerprint()) {
         ruleSaveFailure.value = failure || null
       }
@@ -617,6 +642,7 @@ const emitRuleSave = async () => {
   // A successful save can open the inspector and hide this panel on narrow screens.
   // It still owns its submitted draft; visibility only retires prechecks and failure feedback.
   if (saved && draftEpoch === ruleDraftEpoch && fingerprint === ruleDraftFingerprint()) {
+    if (editingBaseline.value) emit('finish-edit')
     resetDraft()
     await nextTick()
     if (props.active && !props.readOnly) ruleNameInput.value?.focus()
@@ -759,6 +785,11 @@ const handleSave = async () => {
 
   const actionEpoch = beginRuleAction()
   const fingerprint = ruleDraftFingerprint()
+  // Creation checks include the existing rule itself; targeted updates validate duplicates server-side.
+  if (editingBaseline.value) {
+    await emitRuleSave()
+    return
+  }
   const duplicateResult = await runDuplicateCheck(actionEpoch)
   if (duplicateResult === 'cancel' || !isRuleActionCurrent(actionEpoch)) return
   if (!validateAfterAsyncCheck(fingerprint)) return
@@ -797,11 +828,20 @@ const resetDraft = () => {
 
 const resetRuleDraft = () => {
   if (savingRule.value || props.readOnly) return
+  if (editingBaseline.value) emit('finish-edit')
+  editingBaseline.value = null
   resetDraft()
 }
 
+watch(() => props.editRule, rule => {
+  resetDraft()
+  editingBaseline.value = rule ? cloneRule(rule) : null
+  if (rule) Object.assign(ruleData, cloneRule(rule))
+}, { immediate: true, flush: 'sync' })
+
 const { state: authState } = useAuth()
 watch(() => [authState.token, authState.user?.userId], () => {
+  editingBaseline.value = null
   resetDraft()
 }, { flush: 'sync' })
 onBeforeUnmount(() => {
@@ -1032,7 +1072,7 @@ const sourceShowsRelationValue = (type?: RuleSourceItemType) =>
             @click="clearSourceDraft"
             data-testid="rule-clear-source"
             class="board-action-secondary min-w-0"
-          >{{ t('app.clearRuleSourceDraft') }}</button>
+          >{{ t(editingSourceIndex !== null ? 'app.cancelEditing' : 'app.clearRuleSourceDraft') }}</button>
           <button
             type="button"
             @click="addSource"
@@ -1041,8 +1081,8 @@ const sourceShowsRelationValue = (type?: RuleSourceItemType) =>
             :disabled="!canAddSource"
             :aria-describedby="showSourceBlockedReason ? 'rule-source-readiness' : undefined"
           >
-            <span class="material-icons-round text-lg" aria-hidden="true">add_circle_outline</span>
-            {{ t('app.addSource') }}
+            <span class="material-icons-round text-lg" aria-hidden="true">{{ editingSourceIndex !== null ? 'check' : 'add_circle_outline' }}</span>
+            {{ t(editingSourceIndex !== null ? 'app.saveChanges' : 'app.addSource') }}
           </button>
         </div>
 
@@ -1064,6 +1104,10 @@ const sourceShowsRelationValue = (type?: RuleSourceItemType) =>
                   <span v-else class="board-text-info"> · {{ getSourceTypeLabel(source.itemType) }}</span>
                 </p>
               </div>
+              <button type="button" @click="editSource(index)" class="rule-builder-remove board-text-muted hover:board-control-hover"
+                :data-testid="`rule-edit-source-${index}`" :aria-label="t('app.editConditionNumbered', { number: index + 1 })">
+                <span class="material-icons-round text-lg" aria-hidden="true">edit</span>
+              </button>
               <button type="button" @click="removeSource(index)" class="rule-builder-remove board-text-muted hover:board-text-danger hover:board-control-hover"
                 :aria-label="t('app.remove')">
                 <span class="material-icons-round text-lg" aria-hidden="true">close</span>
@@ -1190,14 +1234,14 @@ const sourceShowsRelationValue = (type?: RuleSourceItemType) =>
           <p class="font-semibold board-text-danger">{{ t(ruleSaveFailureDetails.reasonCode === 'DUPLICATE_RULE'
             ? 'app.identicalRuleNotSaved' : 'app.saveRulesFailed') }}</p>
           <FailureDetails v-bind="ruleSaveFailureDetails" :message="t(ruleSaveFailureDetails.reasonCode === 'DUPLICATE_RULE' ? 'app.identicalRuleNotSaved' : 'app.saveRulesFailed')" :suggestion="ruleSaveFailureDetails.reasonCode === 'DUPLICATE_RULE'
-            ? t('app.ruleSaveDuplicateHint') : ''" />
+            ? t('app.ruleSaveDuplicateHint') : ruleSaveFailureDetails.reasonCode === 'RULE_EDIT_STALE' ? t('app.editConflictRecoveryHint') : ''" />
         </div>
         <p v-if="ruleDraftIncompleteReason && ruleDraftDescriptionId === 'rule-draft-readiness'" id="rule-draft-readiness" data-testid="rule-draft-readiness"
           role="status" class="text-xs leading-5 board-text-muted">{{ ruleDraftIncompleteReason }}</p>
-        <div class="grid grid-cols-2 gap-2">
+        <div class="grid gap-2" :class="editingBaseline ? 'grid-cols-1' : 'grid-cols-2'">
           <button type="button" @click="resetRuleDraft" data-testid="rule-reset"
-            class="board-action-secondary min-w-0">{{ t('app.resetRuleDraft') }}</button>
-          <button type="button" @click="handleCheckSimilarity" data-testid="rule-check-duplicate"
+            class="board-action-secondary min-w-0">{{ t(editingBaseline ? 'app.cancelEditing' : 'app.resetRuleDraft') }}</button>
+          <button v-if="!editingBaseline" type="button" @click="handleCheckSimilarity" data-testid="rule-check-duplicate"
             :disabled="!isRuleDraftComplete || ruleActionBusy"
             :aria-describedby="ruleDraftDescriptionId"
             class="board-action-secondary min-w-0">
@@ -1208,8 +1252,8 @@ const sourceShowsRelationValue = (type?: RuleSourceItemType) =>
           :disabled="!isRuleDraftComplete || ruleActionBusy"
           :aria-describedby="ruleDraftDescriptionId"
           class="board-panel-submit board-action-disarmed">
-          <span class="material-symbols-outlined text-lg" aria-hidden="true">add</span>
-          {{ savingRule ? t('app.saving') : t('app.createRule') }}
+          <span class="material-symbols-outlined text-lg" aria-hidden="true">{{ editingBaseline ? 'save' : 'add' }}</span>
+          {{ savingRule ? t('app.saving') : t(editingBaseline ? 'app.saveChanges' : 'app.createRule') }}
         </button>
       </div>
     </fieldset>
@@ -1233,7 +1277,7 @@ const sourceShowsRelationValue = (type?: RuleSourceItemType) =>
 
 .rule-builder-condition {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) var(--iot-target-min);
+  grid-template-columns: minmax(0, 1fr) repeat(2, var(--iot-target-min));
   align-items: center;
   overflow-wrap: anywhere;
 }

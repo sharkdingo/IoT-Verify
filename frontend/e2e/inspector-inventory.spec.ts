@@ -227,12 +227,14 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(rules.first().locator('dl')).toContainText('25')
       await expect(rules.first().getByTestId('inspector-rule-conditions').locator('li')).toHaveCount(2)
       await expect(rules.first().getByTestId('inspector-rule-command')).toContainText('Study light')
-      await compactAction(rules.first().locator('.board-panel-icon-action').last())
+      const deleteRule = rules.first().getByRole('button', { name: width < 640 ? '删除规则' : 'Delete rule', exact: true })
+      await compactAction(deleteRule)
+      await compactAction(rules.first().getByRole('button', { name: width < 640 ? '编辑规则' : 'Edit rule', exact: true }))
       expect((await dock.boundingBox())!.y).toBeCloseTo(dockTop, 0)
       const orderingBox = (await rules.first().getByRole('group').boundingBox())!
-      const deleteBox = (await rules.first().locator('.board-panel-icon-action--danger').boundingBox())!
+      const deleteBox = (await deleteRule.boundingBox())!
       expect(orderingBox.x + orderingBox.width).toBeLessThan(deleteBox.x)
-      const unavailable = rules.first().locator('.board-panel-icon-action').first()
+      const unavailable = rules.first().getByRole('button', { name: width < 640 ? '向前移动' : 'Move earlier', exact: true })
       await expect(unavailable).toBeDisabled()
       await expect(unavailable).toHaveCSS('opacity', '1')
       const disabledFace = await unavailable.evaluate(element => getComputedStyle(element, '::before').backgroundColor)
@@ -246,7 +248,8 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(spec.getByTestId('inspector-spec-description')).toContainText('100')
       await spec.getByTestId('inspector-spec-formula-details').locator('summary').click()
       await expect(spec.getByTestId('inspector-spec-formula')).toBeVisible()
-      await compactAction(spec.locator('.board-panel-icon-action'))
+      await compactAction(spec.getByRole('button', { name: width < 640 ? '删除规约' : 'Delete specification', exact: true }))
+      await compactAction(spec.getByRole('button', { name: width < 640 ? '编辑规约' : 'Edit specification', exact: true }))
       await page.screenshot({ path: testInfo.outputPath('specs.png') })
 
       await page.getByTestId('inspector-tab-environment').click()

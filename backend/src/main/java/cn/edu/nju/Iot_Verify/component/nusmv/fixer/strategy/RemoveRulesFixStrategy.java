@@ -88,7 +88,8 @@ public class RemoveRulesFixStrategy implements FixStrategy {
             ctx.recordStrategyNoResult(NAME, "ALL_CANDIDATES_REJECTED",
                     "Every combination of the rules that can influence the violated property was checked;"
                             + " removing any of them either leaves the target specification violated, breaks a"
-                            + " specification the original rules satisfied, or changes the fixed attack scenario.");
+                            + " specification the original rules satisfied, makes a previously reachable response"
+                            + " trigger unreachable, or changes the fixed attack scenario.");
         } else if (outcome.suggestions().isEmpty() && !exhausted && !ctx.isExpired()) {
             ctx.recordStrategyNoResult(NAME, "SEARCH_BUDGET_EXHAUSTED",
                     "Rule-removal search reached its candidate limit before all candidate combinations"

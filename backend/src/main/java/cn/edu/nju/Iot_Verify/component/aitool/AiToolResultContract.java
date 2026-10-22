@@ -88,7 +88,15 @@ public final class AiToolResultContract {
             case "apply_scenario" -> operation(root, "preview", "replaced");
             case "reset_default_templates" -> operation(root, "reset")
                     || nestedPreviewDecision(root, "canApply");
-            case "manage_spec" -> operation(root, "created", "preview", "deleted");
+            case "manage_spec" -> operation(root, "created", "preview", "deleted")
+                    || (operation(root, "updated", "unchanged")
+                        && hasNonBlankText(root.path("specification"), "specId")
+                        && enumText(root.path("specification"), "templateId", Set.of("1", "2", "3", "4", "5", "6", "7"))
+                        && root.path("specification").path("aConditions").isArray()
+                        && root.path("specification").path("ifConditions").isArray()
+                        && root.path("specification").path("thenConditions").isArray()
+                        && "NOT_VERIFIED".equals(root.path("verificationStatus").asText())
+                        && positiveId(root, "totalSpecs"));
             case "add_template" -> operation(root, "created");
             case "delete_template" -> operation(root, "deleted")
                     || nestedPreviewDecision(root, "canDelete");

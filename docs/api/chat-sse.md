@@ -4,7 +4,7 @@ Contract for `/api/chat` — session management plus the streaming completion en
 Session endpoints use the standard `Result<T>` envelope ([overview.md](overview.md));
 the streaming endpoint does **not** — it is an SSE stream.
 
-Verified against code on 2026-10-22. Source: `controller/ChatController.java`,
+Verified against code on 2026-10-23. Source: `controller/ChatController.java`,
 `service/impl/ChatServiceImpl.java`, `dto/chat/`, `frontend/src/api/chat.ts`,
 `frontend/src/App.vue`, and `frontend/src/components/ChatView.vue`.
 
@@ -515,8 +515,10 @@ Progress stages and outcomes:
 
 Absent completed/saved run records, including empty history-query results, and explicit completion of analysis, review, or
 explanation are descriptions of evidence or assistant work, not claims of a new platform
-operation. Mixed sentences still check a later actual operation independently; saying that
-an analysis is complete does not authorize or prove a rule edit or formal verification.
+operation. The Chinese reply check also recognizes explicit phrases declining to claim
+verification completion. These exclusions apply only to the
+covered phrase: mixed sentences still check actual operations before or after it independently.
+Saying that an analysis is complete does not authorize or prove a rule edit or formal verification.
 Visible replacement notices state the specific missing-evidence reason before listing any
 confirmed results. The execution details retain the original for inspection.
 

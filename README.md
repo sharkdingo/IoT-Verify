@@ -1,9 +1,10 @@
 # IoT-Verify
 
-A formal-verification platform for smart-home IoT systems. Build a device topology on a
-visual canvas, define automation rules and safety specifications, and have the NuSMV
-model checker verify them formally — with counterexample-trace analysis and automatic
-fix suggestions when a specification is violated.
+A smart-home automation checker: describe what should happen, what must not happen,
+and what must keep working, then inspect and revise a modeled home on the visual canvas.
+NuSMV checks the saved requirements under explicit model assumptions, with counterexample
+replay and verified repair suggestions. Start with the
+[household workflow](docs/guides/household-workflow.md).
 
 ## Features
 
@@ -12,7 +13,8 @@ fix suggestions when a specification is violated.
 - **Authoritative device-template schema** — `backend/device-template-schema.json`
   defines the manifest contract used by REST import, AI template creation, default
   templates, and documentation.
-- **Rule engine** — IFTTT-style multi-condition automation rules (conditions → command).
+- **Rule engine** — IFTTT-style multi-condition automation rules (conditions → command),
+  with in-place rule and requirement editing, conflict detection, and undo/redo.
 - **Safety specifications** — 7 templates (Always / Eventually / Never / Immediate /
   Response / Persistence / Safety) mapped to CTL/LTL formulas.
 - **NuSMV formal verification** — auto-generates an SMV model and runs NuSMV, with
@@ -20,11 +22,11 @@ fix suggestions when a specification is violated.
 - **Counterexample analysis** — parses NuSMV counterexamples into a step-by-step
   state timeline.
 - **Bounded counterexample exploration** — a reproducible, HAFuzz-inspired background
-  search finds candidate violating paths before formal verification without presenting
+  search finds candidate violating paths as an optional analysis without presenting
   budget exhaustion as a safety proof.
 - **Automatic fix** — parameter adjustment, condition adjustment, and permanent rule removal,
   each candidate re-verified before it is offered.
-- **Attack simulation** and **interactive simulation** (random N-step traces).
+- **Observe a possible run** — random N-step simulation, with optional modeled attack assumptions.
 - **AI assistant** — any OpenAI-compatible LLM endpoint with SSE-streamed final replies
   and [built-in tools](docs/api/ai-tools.md); device / rule / specification recommendations, confirmed
   atomic application of a generated full-scene draft, and confirmed bundled-template reset.

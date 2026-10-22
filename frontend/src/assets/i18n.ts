@@ -1,4 +1,5 @@
 import { createI18n } from 'vue-i18n'
+import { householdMessages } from './householdMessages'
 
 const specTemplateMessages = {
     'zh-CN': {
@@ -65,6 +66,7 @@ const specTemplateMessages = {
 
 const messages = {
     'zh-CN': {
+        household: householdMessages['zh-CN'],
         app: {
             title: 'IoT-Verify',
             resetWorkspace: '重置视图',
@@ -645,7 +647,7 @@ const messages = {
             clearSearch: '清除搜索',
             addConditionTitle: '添加条件',
 
-            simulationTitle: '仿真',
+            simulationTitle: '观察运行',
             fuzzSearch: '反例探索',
             /* 工具栏专用短标签：竖排栏宽度只够约 70px，完整名称会被截断成“反例探…”。 */
             fuzzSearchShort: '探索',
@@ -1231,6 +1233,11 @@ const messages = {
 
             ruleName: '规则名称',
             resetRuleDraft: '重置草稿',
+            editRule: '编辑规则',
+            editConflictRecoveryHint: '草稿已保留。请在列表查看最新内容，再重新打开编辑；保存前请核对要重新应用的修改。',
+            editSpecification: '编辑规约',
+            saveChanges: '保存修改',
+            cancelEditing: '取消编辑',
             ruleNamePlaceholder: '留空自动生成',
             rulePreview: '规则预览',
             checkDuplicate: '检查重复',
@@ -1261,7 +1268,7 @@ const messages = {
             attacked: '受损',
             environmentPool: '环境变量池',
             environmentPoolHint: '设备共同读取或影响的场景变量。来源标签用于追踪控制来源，敏感性标签用于传播分析；它们不代表身份认证、访问权限或加密。',
-            environmentInspectorHint: '每次运行从这些初值开始；运行轨迹不会改写初值。',
+            environmentInspectorHint: '验证、观察运行和画布初态探索从这些初值开始；随机初态探索另选合法初值。轨迹不会改写这里的值。',
             environmentTool: '环境变量',
             searchEnvironmentVariables: '搜索变量或关联设备',
             noMatchingEnvironmentVariables: '没有匹配的环境变量',
@@ -1700,7 +1707,7 @@ const messages = {
             traceSpecResponse: '若 {ifPart}，则 {thenPart} 必须最终成立（可以在同一状态成立）',
             traceSpecPersistence: '若 {ifPart}，则 {thenPart} 必须最终成立并持续保持',
             traceSpecSafety: '{condition} 同时成立时，任一条件的控制来源都不得标为不可信',
-            verification: '验证',
+            verification: '检查联动',
             simulation: '仿真',
             statesCount: '{count} 个状态',
             failedToLoadVerificationHistory: '加载验证历史失败',
@@ -2482,6 +2489,7 @@ const messages = {
     },
 
     en: {
+        household: householdMessages.en,
         app: {
             title: 'IoT-Verify',
             resetWorkspace: 'Reset view',
@@ -3062,7 +3070,7 @@ const messages = {
             clearSearch: 'Clear search',
             addConditionTitle: 'Add Condition',
 
-            simulationTitle: 'Simulation',
+            simulationTitle: 'Observe',
             fuzzSearch: 'Counterexample Exploration',
             /* The narrow tool rail uses a short label; its accessible name stays complete. */
             fuzzSearchShort: 'Explore',
@@ -3647,6 +3655,11 @@ const messages = {
 
             ruleName: 'Rule Name',
             resetRuleDraft: 'Reset draft',
+            editRule: 'Edit rule',
+            editConflictRecoveryHint: 'Your draft is preserved. Review the latest item in the list, then reopen it to edit. Check which changes you want to reapply before saving.',
+            editSpecification: 'Edit specification',
+            saveChanges: 'Save changes',
+            cancelEditing: 'Cancel editing',
             ruleNamePlaceholder: 'Leave blank to generate a name',
             rulePreview: 'Rule Preview',
             checkDuplicate: 'Check Duplicate',
@@ -3677,7 +3690,7 @@ const messages = {
             attacked: 'Compromised',
             environmentPool: 'Environment Pool',
             environmentPoolHint: 'Scene variables shared by devices that read or affect them. Source labels track control sources; sensitivity labels support propagation analysis. They do not provide authentication, access permissions, or encryption.',
-            environmentInspectorHint: 'Each run starts from these initial values; traces do not overwrite them.',
+            environmentInspectorHint: 'Verification, simulation, and board-initial exploration start here; random-initial exploration selects other legal values. Traces never overwrite these values.',
             environmentTool: 'Env.',
             searchEnvironmentVariables: 'Search variables or related devices',
             noMatchingEnvironmentVariables: 'No matching environment variables',
@@ -4116,7 +4129,7 @@ const messages = {
             traceSpecResponse: 'If {ifPart}, {thenPart} must eventually hold (it may hold in the same state)',
             traceSpecPersistence: 'If {ifPart}, {thenPart} must eventually hold and remain true',
             traceSpecSafety: 'When {condition} hold together, no condition may have an untrusted control source',
-            verification: 'Verification',
+            verification: 'Check',
             simulation: 'Simulation',
             statesCount: '{count} states',
             failedToLoadVerificationHistory: 'Failed to load verification history',

@@ -162,7 +162,7 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                     + "(?:更新|修改|重置|替换)(?:了)?(?:当前|你的|您的)?模型"
                     + "|(?:当前|你的|您的)模型[^.!?。！？]{0,40}(?:已经|已)(?:成功)?(?:被)?"
                     + "(?:更新|修改|重置|替换)"
-                    + "|(?:当前|该)?(?:仿真|模拟|验证)[^.!?。！？]{0,80}(?:已经|已)(?:成功)?(?:被)?"
+                    + "|(?:当前|该)?(?:仿真|模拟|验证)[^.!?。！？]{0,80}?(?:已经|已)(?:成功)?(?:被)?"
                     + "(?:运行|启动|停止|取消|验证|模拟|完成))");
     private static final Pattern NON_OPERATIONAL_PLATFORM_CONTENT = Pattern.compile(
             "(?is)(?:\\b(?:created|drafted|wrote|generated|proposed)\\b[^.!?。！？]{0,48}"
@@ -184,6 +184,9 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                     + "|\\b(?:I|we)(?:'ve|\\s+have)?\\s+(?:completed|finished)\\s+(?:the\\s+)?"
                     + "(?:static\\s+)?(?:analysis|review|inspection|explanation|audit)\\s+(?:of|for)\\s+"
                     + "(?:(?:the|current|these|all|your)\\s+)*(?:devices?|rules?|specs?|specifications?|board|scene|model)\\b");
+    private static final Pattern NEGATED_COMPLETION_CLAIM = Pattern.compile(
+            "(?:不能|无法|不应)(?:声称|宣称|称为|说成)(已经|已)(?:成功)?(?:被)?"
+                    + "(?:运行|启动|停止|取消|验证|模拟|完成)");
     private static final Pattern UNSUPPORTED_PLATFORM_READ_CLAIM = Pattern.compile(
             "(?is)(?:\\b(?:your(?:\\s+current)?|the\\s+current|current)\\s+"
                     + "(?:board|scene)\\s+(?:currently\\s+)?(?:contains?|has|includes?|shows?|lists?)\\b"
@@ -1518,8 +1521,10 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
           For a multi-device topology request, prefer one compact chain table with complete guards/actions
           and one short ordered inspection list. Do not add another overall checklist or an unrelated
           specification inventory. Expand only where the requested analysis needs it, not to repeat coverage.
-          When citing a configured specification, preserve its exact IF and THEN from the tool result;
-          do not replace its IF with a downstream device just because an automation chain connects them.
+          When citing a configured specification, including final summaries and table labels, preserve its
+          complete IF, THEN and temporal scope from the tool result. Keep current-state preconditions such as
+          "the door is already locked"; omitting one broadens the claim beyond what was checked. Do not replace
+          its IF with a downstream device just because an automation chain connects them.
           For a full formal cross-check, start with the outcome, then use one compact rule/chain table,
           one specification/result table, one indexed value table per counterexample, and one prioritized
           list. Put shared-variable dependencies and gaps beside their relevant chain or check; include
@@ -1706,6 +1711,27 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
         - When the user explicitly delegates a multi-step Board change, validated recommendations are inputs to the
           task rather than a mandatory stopping point. Apply the supported candidates with targeted mutation tools,
           then continue with the remaining requested steps and report any part that could not be completed.
+
+        Household requirements:
+        - Help household users state desired behavior, forbidden situations, and functions that must remain usable.
+          Keep these three distinct. Map each stated requirement to proposed automation and an independent
+          specification using actual device capabilities. Mark unstated requirements as unknown, not inferred consent.
+        - Do not derive every requirement from the rules being checked: a rule and its restatement can agree while
+          both violate the user's goal. When a requested behavior cannot be expressed by the current templates,
+          state the gap and ask for the missing decision instead of inventing a sensor, authentication, room or timer.
+          Propose only operations the platform exposes. Rules support in-place updates and confirmed deletion;
+          there is no enable/disable toggle, so do not offer "disable this rule" as an available operation.
+        - For edits to an existing specification, read list_specs and use manage_spec action=update with its specId,
+          exact expectedSpec, and the complete desired condition groups. Preserve its identity and unrelated fields.
+          Changed rules and specifications remain unverified until a fresh verification run checks the saved model.
+        - Explain formal outcomes together with antecedentReachability. SATISFIED with UNREACHABLE means a response
+          passed without its trigger ever occurring; INCONCLUSIVE reachability does not establish useful behavior.
+          REACHABLE only establishes the trigger is possible, not that the response is guaranteed. Do not call a fix
+          useful merely because formulas passed, or weaken requirements to obtain a pass without the user's request.
+        - Simulation observes one possible path. Bounded exploration searches for candidates within its budget and
+          input assumptions. Formal verification checks the saved requirements under the modeled assumptions.
+          These are different questions, not mandatory sequential stages. Current-board verification does not confirm
+          an older exploration finding's initial state, events, or path. A model step has no fixed duration in seconds.
 
         Rule Recommendation Guidelines:
         - Use recommend_rules when the user asks for suggestions or has not supplied enough rule logic. When the user
@@ -3035,7 +3061,18 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
             Pattern pattern,
             boolean allowNonOperationalContent,
             boolean leadingHistoryOverridesCurrentContext) {
-        Matcher matcher = pattern.matcher(reply);
+        String checkableReply = reply;
+        if (allowNonOperationalContent) {
+            char[] checkable = reply.toCharArray();
+            Matcher negated = NEGATED_COMPLETION_CLAIM.matcher(reply);
+            while (negated.find()) {
+                // Mask only the denied completion marker, preserving offsets and nouns that
+                // an adjacent affirmative predicate may share without repeating "verification".
+                Arrays.fill(checkable, negated.start(1), negated.end(1), ' ');
+            }
+            checkableReply = new String(checkable);
+        }
+        Matcher matcher = pattern.matcher(checkableReply);
         while (matcher.find()) {
             String claimClause = claimClause(reply, matcher.start(), matcher.end());
             String trimmedClause = claimClause.trim();
@@ -3057,7 +3094,7 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                     if (noun.start() < matcher.end() && noun.end() >= matcher.end()) {
                         // "Completed analysis and deleted devices" shares its completed subject.
                         // Check that continuation with the same operation pattern before exempting the analysis.
-                        Matcher coordinated = COORDINATED_CLAIM_SUFFIX.matcher(reply.substring(noun.end()));
+                        Matcher coordinated = COORDINATED_CLAIM_SUFFIX.matcher(checkableReply.substring(noun.end()));
                         if (coordinated.find() && (hasUnsupportedClaim("我已经" + coordinated.group(1), pattern, false, false)
                                 || hasUnsupportedClaim("I " + coordinated.group(1), pattern, false, false))) continue;
                         nounModifier = true;

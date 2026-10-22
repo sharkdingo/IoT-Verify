@@ -16,6 +16,8 @@ import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import cn.edu.nju.Iot_Verify.exception.BadRequestException;
 import cn.edu.nju.Iot_Verify.exception.ConflictException;
 import cn.edu.nju.Iot_Verify.exception.UnauthorizedException;
+import cn.edu.nju.Iot_Verify.exception.ResourceNotFoundException;
+import cn.edu.nju.Iot_Verify.exception.ValidationException;
 import cn.edu.nju.Iot_Verify.po.BoardEditJournalPo;
 import cn.edu.nju.Iot_Verify.po.BoardEditOperation;
 import cn.edu.nju.Iot_Verify.po.BoardEnvironmentVariablePo;
@@ -30,6 +32,7 @@ import cn.edu.nju.Iot_Verify.util.mapper.DeviceTemplateMapper;
 import cn.edu.nju.Iot_Verify.util.mapper.RuleMapper;
 import cn.edu.nju.Iot_Verify.util.mapper.SpecificationMapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import jakarta.persistence.EntityManager;
@@ -40,6 +43,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
@@ -140,14 +144,18 @@ class BoardEditUndoIntegrationTest {
         // cannot write.
         journal = new BoardEditJournal(journalRepo,
                 new ObjectMapper().registerModule(new JavaTimeModule()));
-        service = new BoardStorageServiceImpl(
-                nodes, environments, specs, rules, null, templates, null,
-                new TransactionTemplate(transactionManager), null,
-                new SpecificationMapper(), new RuleMapper(), new DeviceNodeMapper(), null,
-                new DeviceTemplateMapper(), null, users, journal);
+        service = serviceWithJournal(journal);
         userId = createUser("13800138001", "undo-owner");
         otherUserId = createUser("13800138002", "undo-other");
         seedDevice(userId);
+    }
+
+    private BoardStorageServiceImpl serviceWithJournal(BoardEditJournal editJournal) {
+        return new BoardStorageServiceImpl(
+                nodes, environments, specs, rules, null, templates, null,
+                new TransactionTemplate(transactionManager), null,
+                new SpecificationMapper(), new RuleMapper(), new DeviceNodeMapper(), null,
+                new DeviceTemplateMapper(), null, users, editJournal);
     }
 
     private Long createUser(String phone, String username) {
@@ -493,7 +501,7 @@ class BoardEditUndoIntegrationTest {
     }
 
     @Test
-    void ruleJournalRejectsAnUnsupportedOperationWithoutDeletingTheRule() {
+    void ruleJournalRejectsAnUpdateMissingItsBeforeSnapshotWithoutDeletingTheRule() {
         Long ruleId = service.addRule(userId, newRule("r1")).getAffectedItem().getId();
         BoardEditJournalPo entry = journal.nextToUndo(userId).orElseThrow();
         entry.setOperation(BoardEditOperation.UPDATE);
@@ -503,7 +511,7 @@ class BoardEditUndoIntegrationTest {
 
         assertEquals(List.of(ruleId), ruleIdsInOrder());
         assertTrue(journal.availability(userId).canUndo(),
-                "an unsupported operation must not consume the entry");
+                "an incomplete update must not consume the entry");
     }
 
     @Test
@@ -559,6 +567,312 @@ class BoardEditUndoIntegrationTest {
         assertFalse(journal.availability(userId).canRedo(),
                 "a new edit after undo must discard the abandoned redo branch");
         assertTrue(journal.availability(userId).canUndo(), "the new layout edit must be undoable");
+    }
+
+    @Test
+    void editingOneRuleKeepsItsIdentityCreationTimeAndPositionThroughUndoRedo() {
+        Long first = service.addRule(userId, newRule("first")).getAffectedItem().getId();
+        RuleDto original = persistedRuleWithHistoricTime(first);
+        RuleDto other = service.addRule(userId, newRule("other", "off", "on")).getAffectedItem();
+        RuleDto desired = newRule("keep the light on", "on", "on");
+        desired.setId(first);
+        desired.setUserId(otherUserId);
+        desired.setCreatedAt(LocalDateTime.of(1999, 1, 1, 0, 0));
+        entityManager.flush();
+        Statistics statistics = clearedDatabaseStatistics();
+
+        var result = service.updateRuleIfUnchanged(userId, first, original, desired);
+        entityManager.flush();
+        assertEquals("updated", result.getOperation());
+        assertEquals(List.of(first, other.getId()), ruleIdsInOrder());
+        assertEquals(original.getCreatedAt(), result.getAffectedItem().getCreatedAt());
+        assertEquals(userId, result.getAffectedItem().getUserId());
+        assertEquals(other, result.getCurrentItems().get(1));
+        assertEquals(1, statistics.getEntityStatistics(RulePo.class.getName()).getUpdateCount());
+        assertEquals(3, journalRepo.countByUserId(userId));
+        assertEquals(BoardEditOperation.UPDATE, journal.nextToUndo(userId).orElseThrow().getOperation());
+        assertTrue(result.getCanUndo());
+        assertFalse(result.getCanRedo());
+
+        assertTrue(service.undoLastEdit(userId).isApplied());
+        entityManager.flush();
+        entityManager.clear();
+        assertEquals(List.of(original, other), service.getRules(userId));
+        assertTrue(service.redoLastUndoneEdit(userId).isApplied());
+        assertEquals(result.getCurrentItems(), service.getRules(userId));
+    }
+
+    @Test
+    void editingOneSpecificationRebuildsDisplayCachesAndRoundTripsWithoutMovingIt() {
+        SpecificationDto original = service.addSpec(userId, newSpec("on")).getAffectedItem();
+        SpecificationDto other = service.addSpec(userId, newSpec("off")).getAffectedItem();
+        SpecificationDto desired = newSpec("on");
+        desired.setTemplateId("3");
+        desired.setTemplateLabel("forged template label");
+        desired.setFormula("forged formula");
+        desired.getAConditions().get(0).setDeviceLabel("forged device label");
+        entityManager.flush();
+        Statistics statistics = clearedDatabaseStatistics();
+
+        var result = service.updateSpecIfUnchanged(userId, original.getId(), original, desired);
+        entityManager.flush();
+        assertEquals("updated", result.getOperation());
+        assertEquals(List.of(original.getId(), other.getId()), specIdsInOrder());
+        assertNotEquals("forged formula", result.getAffectedItem().getFormula());
+        assertNotEquals("forged template label", result.getAffectedItem().getTemplateLabel());
+        assertEquals("Light 1", result.getAffectedItem().getAConditions().get(0).getDeviceLabel());
+        assertEquals(other, result.getCurrentItems().get(1));
+        assertEquals(1, statistics.getEntityStatistics(
+                cn.edu.nju.Iot_Verify.po.SpecificationPo.class.getName()).getUpdateCount());
+        assertEquals(3, journalRepo.countByUserId(userId));
+
+        assertTrue(service.undoLastEdit(userId).isApplied());
+        assertEquals(List.of(original, other), service.getSpecs(userId));
+        assertTrue(service.redoLastUndoneEdit(userId).isApplied());
+        assertEquals(result.getCurrentItems(), service.getSpecs(userId));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void unchangedEditDoesNotConsumeAnExistingRedoBranch(boolean rule) {
+        RuleDto originalRule = service.addRule(userId, newRule("original")).getAffectedItem();
+        SpecificationDto originalSpec = service.addSpec(userId, newSpec("on")).getAffectedItem();
+        service.addRule(userId, newRule("later", "off", "on"));
+        service.undoLastEdit(userId);
+        long entries = journalRepo.countByUserId(userId);
+
+        var result = rule
+                ? service.updateRuleIfUnchanged(userId, originalRule.getId(), originalRule, originalRule)
+                : service.updateSpecIfUnchanged(userId, originalSpec.getId(), originalSpec, originalSpec);
+
+        assertEquals("unchanged", result.getOperation());
+        assertTrue(result.getCanRedo());
+        assertEquals(entries, journalRepo.countByUserId(userId));
+        assertTrue(service.redoLastUndoneEdit(userId).isApplied());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void staleEditCannotOverwriteANewerRecordOrAppendHistory(boolean rule) {
+        RuleDto originalRule = service.addRule(userId, newRule("original")).getAffectedItem();
+        SpecificationDto originalSpec = service.addSpec(userId, newSpec("on")).getAffectedItem();
+        RuleDto changedRule = newRule("newer", "on", "on");
+        changedRule.setId(originalRule.getId());
+        SpecificationDto changedSpec = newSpec("on");
+        changedSpec.setTemplateId("3");
+        if (rule) service.updateRuleIfUnchanged(userId, originalRule.getId(), originalRule, changedRule);
+        else service.updateSpecIfUnchanged(userId, originalSpec.getId(), originalSpec, changedSpec);
+        var rulesBefore = service.getRules(userId);
+        var specsBefore = service.getSpecs(userId);
+        long entries = journalRepo.countByUserId(userId);
+
+        var conflict = assertThrows(ConflictException.class, () -> {
+            if (rule) service.updateRuleIfUnchanged(userId, originalRule.getId(), originalRule, originalRule);
+            else service.updateSpecIfUnchanged(userId, originalSpec.getId(), originalSpec, originalSpec);
+        });
+        assertEquals(rule ? "RULE_EDIT_STALE" : "SPEC_EDIT_STALE", conflict.getReasonCode());
+
+        assertEquals(rulesBefore, service.getRules(userId));
+        assertEquals(specsBefore, service.getSpecs(userId));
+        assertEquals(entries, journalRepo.countByUserId(userId));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void updateCannotRetargetIdentityOrModifyAnotherAccountsRecord(boolean rule) {
+        RuleDto originalRule = service.addRule(userId, newRule("original")).getAffectedItem();
+        SpecificationDto originalSpec = service.addSpec(userId, newSpec("on")).getAffectedItem();
+        RuleDto wrongRule = newRule("wrong identity");
+        wrongRule.setId(originalRule.getId() + 1000);
+        SpecificationDto wrongSpec = newSpec("off");
+        long entries = journalRepo.countByUserId(userId);
+
+        assertThrows(BadRequestException.class, () -> {
+            if (rule) service.updateRuleIfUnchanged(userId, originalRule.getId(), originalRule, wrongRule);
+            else service.updateSpecIfUnchanged(userId, originalSpec.getId(), originalSpec, wrongSpec);
+        });
+        assertThrows(ResourceNotFoundException.class, () -> {
+            if (rule) service.updateRuleIfUnchanged(otherUserId, originalRule.getId(), originalRule, originalRule);
+            else service.updateSpecIfUnchanged(otherUserId, originalSpec.getId(), originalSpec, originalSpec);
+        });
+        assertEquals(List.of(originalRule), service.getRules(userId));
+        assertEquals(List.of(originalSpec), service.getSpecs(userId));
+        assertEquals(entries, journalRepo.countByUserId(userId));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void duplicateEditIsRejectedWithoutDeletingEitherRecord(boolean rule) {
+        RuleDto originalRule = service.addRule(userId, newRule("original")).getAffectedItem();
+        RuleDto otherRule = service.addRule(userId, newRule("other", "off", "on")).getAffectedItem();
+        SpecificationDto originalSpec = service.addSpec(userId, newSpec("on")).getAffectedItem();
+        service.addSpec(userId, newSpec("off"));
+        RuleDto duplicateRule = newRule("different text", "off", "on");
+        duplicateRule.setId(originalRule.getId());
+        SpecificationDto duplicateSpec = newSpec("off");
+        duplicateSpec.setId(originalSpec.getId());
+        var specsBefore = service.getSpecs(userId);
+        long entries = journalRepo.countByUserId(userId);
+
+        assertThrows(ConflictException.class, () -> {
+            if (rule) service.updateRuleIfUnchanged(userId, originalRule.getId(), originalRule, duplicateRule);
+            else service.updateSpecIfUnchanged(userId, originalSpec.getId(), originalSpec, duplicateSpec);
+        });
+
+        assertEquals(List.of(originalRule, otherRule), service.getRules(userId));
+        assertEquals(specsBefore, service.getSpecs(userId));
+        assertEquals(entries, journalRepo.countByUserId(userId));
+    }
+
+    @Test
+    void editedRuleAndSpecificationMustStillResolveCurrentDeviceCapabilities() {
+        RuleDto originalRule = service.addRule(userId, newRule("original")).getAffectedItem();
+        RuleDto invalidRule = newRule("unknown command", "on", "nonexistent");
+        invalidRule.setId(originalRule.getId());
+        SpecificationDto originalSpec = service.addSpec(userId, newSpec("on")).getAffectedItem();
+        SpecificationDto invalidSpec = newSpec("on");
+        invalidSpec.getAConditions().get(0).setDeviceId("deleted-device");
+
+        assertThrows(ValidationException.class, () -> service.updateRuleIfUnchanged(
+                userId, originalRule.getId(), originalRule, invalidRule));
+        assertThrows(ValidationException.class, () -> service.updateSpecIfUnchanged(
+                userId, originalSpec.getId(), originalSpec, invalidSpec));
+        assertEquals(List.of(originalRule), service.getRules(userId));
+        assertEquals(List.of(originalSpec), service.getSpecs(userId));
+        assertEquals(2, journalRepo.countByUserId(userId));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"true,false", "false,false", "true,true", "false,true"})
+    void updateJournalCannotReplayANoOpSnapshotOrAnImpossiblePosition(boolean rule, boolean invalidPosition) {
+        RuleDto originalRule = service.addRule(userId, newRule("original")).getAffectedItem();
+        SpecificationDto originalSpec = service.addSpec(userId, newSpec("on")).getAffectedItem();
+        RuleDto desiredRule = newRule("updated");
+        desiredRule.setId(originalRule.getId());
+        SpecificationDto desiredSpec = newSpec("on");
+        desiredSpec.setTemplateId("3");
+        if (rule) service.updateRuleIfUnchanged(userId, originalRule.getId(), originalRule, desiredRule);
+        else service.updateSpecIfUnchanged(userId, originalSpec.getId(), originalSpec, desiredSpec);
+        var rulesBefore = service.getRules(userId);
+        var specsBefore = service.getSpecs(userId);
+        BoardEditJournalPo entry = journal.nextToUndo(userId).orElseThrow();
+        if (invalidPosition) entry.setEntityOrder(99);
+        else entry.setBeforeJson(entry.getAfterJson());
+        journalRepo.saveAndFlush(entry);
+
+        assertThrows(ConflictException.class, () -> service.undoLastEdit(userId));
+        assertFalse(journalRepo.findById(entry.getId()).orElseThrow().isUndone());
+        assertEquals(rulesBefore, service.getRules(userId));
+        assertEquals(specsBefore, service.getSpecs(userId));
+    }
+
+    @Test
+    void editingAnUnresolvedSpecificationCanSupplyItsMissingVariableSource() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        DeviceTemplatePo template = templates.findByUserId(userId).get(0);
+        JsonNode manifest = mapper.readTree(template.getManifestJson());
+        ((ObjectNode) manifest.path("InternalVariables").get(0)).put("Reads", true);
+        template.setManifestJson(mapper.writeValueAsString(manifest));
+        templates.saveAndFlush(template);
+        SpecificationDto desired = newSpec("on");
+        SpecConditionDto condition = desired.getAConditions().get(0);
+        condition.setTargetType("variable");
+        condition.setKey("illuminance");
+        condition.setValue("10");
+        condition.setVariableSource("reported");
+        SpecificationDto resolved = service.addSpec(userId, desired).getAffectedItem();
+        SpecificationDto missingSource = mapper.readValue(mapper.writeValueAsString(desired), SpecificationDto.class);
+        missingSource.getAConditions().get(0).setVariableSource(null);
+        assertThrows(ValidationException.class, () -> service.updateSpecIfUnchanged(
+                userId, resolved.getId(), resolved, missingSource));
+        var stored = specs.findByUserId(userId).get(0);
+        JsonNode conditions = mapper.readTree(stored.getAConditionsJson());
+        ((ObjectNode) conditions.get(0)).remove("variableSource");
+        stored.setAConditionsJson(mapper.writeValueAsString(conditions));
+        specs.saveAndFlush(stored);
+        SpecificationDto unresolved = service.getSpecs(userId).get(0);
+
+        var result = service.updateSpecIfUnchanged(userId, desired.getId(), unresolved, desired);
+
+        assertEquals("updated", result.getOperation());
+        assertEquals("reported", result.getAffectedItem().getAConditions().get(0).getVariableSource());
+        assertTrue(service.undoLastEdit(userId).isApplied());
+        assertNull(service.getSpecs(userId).get(0).getAConditions().get(0).getVariableSource());
+        assertTrue(service.redoLastUndoneEdit(userId).isApplied());
+        assertEquals(result.getAffectedItem(), service.getSpecs(userId).get(0));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void updateJournalRefusesAChangedRecordWithoutConsumingHistory(boolean rule) {
+        RuleDto originalRule = service.addRule(userId, newRule("original")).getAffectedItem();
+        SpecificationDto originalSpec = service.addSpec(userId, newSpec("on")).getAffectedItem();
+        if (rule) {
+            RuleDto desired = newRule("updated");
+            desired.setId(originalRule.getId());
+            service.updateRuleIfUnchanged(userId, originalRule.getId(), originalRule, desired);
+            RulePo changed = rules.findById(originalRule.getId()).orElseThrow();
+            changed.setRuleString("newer work");
+            rules.saveAndFlush(changed);
+        } else {
+            SpecificationDto desired = newSpec("on");
+            desired.setTemplateId("3");
+            service.updateSpecIfUnchanged(userId, originalSpec.getId(), originalSpec, desired);
+            var changed = specs.findByUserId(userId).get(0);
+            changed.setTemplateId("2");
+            specs.saveAndFlush(changed);
+        }
+        var beforeRules = service.getRules(userId);
+        var beforeSpecs = service.getSpecs(userId);
+        BoardEditJournalPo entry = journal.nextToUndo(userId).orElseThrow();
+
+        assertThrows(ConflictException.class, () -> service.undoLastEdit(userId));
+
+        assertFalse(journalRepo.findById(entry.getId()).orElseThrow().isUndone());
+        assertEquals(beforeRules, service.getRules(userId));
+        assertEquals(beforeSpecs, service.getSpecs(userId));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    @org.springframework.transaction.annotation.Transactional(
+            propagation = org.springframework.transaction.annotation.Propagation.NOT_SUPPORTED)
+    void failureToRecordAnEditRollsBackItsDatabaseChange(boolean rule) {
+        try {
+            RuleDto originalRule = service.addRule(userId, newRule("original")).getAffectedItem();
+            SpecificationDto originalSpec = service.addSpec(userId, newSpec("on")).getAffectedItem();
+            BoardEditJournal failing = org.mockito.Mockito.spy(journal);
+            org.mockito.Mockito.doThrow(new IllegalStateException("journal unavailable")).when(failing).record(
+                    org.mockito.ArgumentMatchers.eq(userId), org.mockito.ArgumentMatchers.any(),
+                    org.mockito.ArgumentMatchers.eq(BoardEditOperation.UPDATE), org.mockito.ArgumentMatchers.anyString(),
+                    org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+            BoardStorageServiceImpl failingService = serviceWithJournal(failing);
+            RuleDto desiredRule = newRule("updated", "on", "on");
+            desiredRule.setId(originalRule.getId());
+            SpecificationDto desiredSpec = newSpec("on");
+            desiredSpec.setTemplateId("3");
+
+            assertThrows(IllegalStateException.class, () -> {
+                if (rule) failingService.updateRuleIfUnchanged(userId, originalRule.getId(), originalRule, desiredRule);
+                else failingService.updateSpecIfUnchanged(userId, originalSpec.getId(), originalSpec, desiredSpec);
+            });
+
+            assertEquals(List.of(originalRule), service.getRules(userId));
+            assertEquals(List.of(originalSpec), service.getSpecs(userId));
+            assertEquals(2, journalRepo.countByUserId(userId));
+        } finally {
+            new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+                for (Long owner : List.of(userId, otherUserId)) {
+                    journalRepo.deleteByUserId(owner);
+                    rules.deleteByUserId(owner);
+                    specs.deleteByUserId(owner);
+                    environments.deleteByUserId(owner);
+                    nodes.deleteByUserId(owner);
+                    templates.deleteByUserId(owner);
+                    users.deleteById(owner);
+                }
+            });
+        }
     }
 
     /** A minimal rule that passes board validation against the Light template. */

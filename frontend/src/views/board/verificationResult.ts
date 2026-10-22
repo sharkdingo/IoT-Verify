@@ -6,7 +6,12 @@ import { verdictVariableSourceKeys } from './verdictVariableSource'
 export const presentSpecificationResult = (result: SpecResult, t: ModelPresentationContext['t']) => {
   const snapshot = result.specificationSnapshot
   const prefix = `${result.formulaKind} `
+  const reachability = result.antecedentReachability
   return {
+    triggerWarning: reachability === 'UNREACHABLE' || reachability === 'INCONCLUSIVE',
+    triggerDetail: reachability === 'UNREACHABLE' ? t('household.triggerUnreachableDetail')
+      : reachability === 'INCONCLUSIVE' ? t('household.triggerUnknownDetail')
+      : reachability === 'REACHABLE' ? t('household.triggerReachable') : null,
     description: snapshot ? describeSpecification(snapshot, {
       t,
       resolveDevice: id => snapshot.devices[id],

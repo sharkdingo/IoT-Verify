@@ -272,7 +272,18 @@ public class VerificationTaskMapper {
 
     private List<SpecResultDto> readSpecResults(VerificationResultView po) {
         return JsonUtils.readPersisted("verification task", po.getId(), "specResultsJson",
-                () -> JsonUtils.fromJsonList(po.getSpecResultsJson(), SpecResultDto.class));
+                () -> {
+                    List<SpecResultDto> results = JsonUtils.fromJsonList(po.getSpecResultsJson(), SpecResultDto.class);
+                    for (SpecResultDto result : results) {
+                        if (result == null || result.getAntecedentReachability() == null
+                                || cn.edu.nju.Iot_Verify.dto.verification.AntecedentReachability.appliesTo(result.getTemplateId())
+                                == (result.getAntecedentReachability()
+                                == cn.edu.nju.Iot_Verify.dto.verification.AntecedentReachability.NOT_APPLICABLE)) {
+                            throw new IllegalArgumentException("Missing or inconsistent response-trigger reachability evidence");
+                        }
+                    }
+                    return results;
+                });
     }
 
     private List<ModelGenerationIssueDto> readGenerationIssues(VerificationResultView po) {

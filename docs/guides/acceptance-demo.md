@@ -1,23 +1,24 @@
-# Acceptance Demo: Night-Watch Repair Loop
+# Acceptance Demo: Night-Watch Diagnostics
 
-This runbook exercises the main IoT-Verify product loop with one deliberately unsafe,
-repairable smart-home scene. It is designed for an acceptance demonstration, not as a
-claim that one scenario covers every possible template or formal property.
+This runbook exercises authoring, observation, verification and repair rejection with a
+deliberately conflicting night-watch scene. For a successful household repair that retains
+useful functions, start with the [household workflow](household-workflow.md#run-the-entrance-demo).
 
-Verified against code on 2026-10-12. Sources:
+Verified against code on 2026-10-22. Sources:
 [`../examples/acceptance-demo-scene.json`](../examples/acceptance-demo-scene.json), the additional
 scenes linked below, and `AcceptanceDemoScenarioNusmvTest`.
 
 The canonical scene file is that document. It contains four device instances, two shared environment
 values, three automation rules, and five formal specifications.
 
-For a deterministic multi-violation repair demonstration, use
+For a deterministic multi-violation diagnostic demonstration, use
 [`../examples/multi-violation-repair-scene.json`](../examples/multi-violation-repair-scene.json).
 It keeps the same four default-template devices and rule chain but marks the shared motion
 source as `untrusted`. Its baseline emits five specifications, with two violations: the
 camera `Never` property and the untrusted-labelled event safety property. The first rule is
-the shared root cause; removing it is forward-verified against all five specifications and
-leaves the remaining two response rules intact.
+the shared root cause. Removing it makes all five formulas true, but also makes the camera
+response trigger unreachable. Automatic repair therefore rejects that removal; retaining
+the response rule's text alone does not preserve its usefulness.
 
 For additional default-template examples covering fire evacuation, first-match rule
 priority, RFID trust/privacy attack propagation, and away-mode unlock, see
@@ -48,9 +49,8 @@ the import preview can truthfully confirm semantic equality.
   Board timeline.
 - Attack modeling with budget `1` exposes additional untrusted-source and compromised-
   automation-link failures while the camera-sensitivity property remains satisfied.
-- Automatic fix can forward-verify removal of the camera-photo rule. Applying
-  that suggestion is a destructive Board mutation and requires confirmation; the next
-  baseline verification satisfies all five emitted properties.
+- Automatic fix rejects camera-rule removal because it makes a formerly reachable
+  response trigger unreachable, despite making every submitted formula true.
 
 ## Scene semantics
 
@@ -202,10 +202,9 @@ For the canonical scene, the expected complete result is:
 - violated: `1`
 
 For the multi-violation JSON variant, the same completeness checks apply, but the result is
-`3` satisfied and `2` violated. Select the **Never camera taking photo** trace for automatic
-repair. Do not apply the second old trace after the first repair: applying the root-rule
-removal changes the board and makes the earlier trace stale; re-run verification to obtain
-fresh traces.
+`3` satisfied and `2` violated. Select the **Never camera taking photo** trace to inspect
+repair attempts. Neither variant can earn an automatic removal recommendation by making
+the response triggers disappear.
 
 Open the **Never camera taking photo** violation. Its counterexample reaches Hall Camera
 `taking photo`, and the transition identifies the first camera-photo automation as the
@@ -231,61 +230,52 @@ two immediate-response properties. The camera sensitivity property remains satis
 This is verification over modeled budget-one attack choices, not a claim that an attack
 will occur.
 
-### 4. Automatic fix and apply
+### 4. Inspect why removal is rejected
 
-Return to the baseline violation trace and request automatic fix. Select the verified
-`remove` suggestion for the first camera-photo automation. In the canonical scene it is
-**When hall motion is active, take a camera photo**; in the multi-violation variant it is
-**When an untrusted hall motion signal is active, take a camera photo**.
+Return to the baseline violation trace and request automatic fix. The `remove` attempt
+must report `ALL_CANDIDATES_REJECTED`: deleting the first camera-photo automation makes
+the camera-response trigger unreachable. The Board stays unchanged. This is a deliberate
+conservative repair constraint, not a change to the truth of the CTL implication; see
+[automatic repair acceptance](../architecture/auto-fix.md).
 
 The **condition adjustment** strategy may correctly finish without a suggestion for this
 violation. The property forbids the camera's resulting `taking photo` state, while condition
 adjustment can only change when the existing automation triggers; it cannot change that
 command result. The UI therefore reports "no condition adjustment passed full-model
 rechecking" rather than treating the strategy as not run. This is not a verification or
-transport failure, and it does not imply that the other strategies have no proposal.
+transport failure.
 
-The suggestion means rule removal, not temporary disablement. Confirm
-**Remove Rules and Apply** only after reviewing the exact rule. Application follows the
-[signed-fix contract](../api/verification.md#post-apiverifytracesidfixapply--apply-a-fix-suggestion).
-
-Expected after apply:
-
-- rules: `2`
-- the camera-photo rule is absent;
-- the camera/alarm/light devices and all five specifications remain;
-- a new baseline verification emits `5` properties and reports `5` satisfied, `0`
-  violated, `0` skipped, and `0` disabled rules.
-
-Passing means the five emitted model properties hold after this explicit removal. It is
-not a guarantee about unmodeled physical behavior.
+The household author must decide whether taking photos is wanted at all. If it is forbidden,
+a camera-dependent response is a poor description of the intended alarm behavior. If it is
+wanted in some situations, the blanket prohibition is too broad. Review the intent before
+editing either requirement; do not weaken a requirement merely to obtain green results.
 
 ## Extended UI coverage
 
 Use the same Board to demonstrate these secondary features without changing the core
-expected verification counts until the repair step:
+expected verification counts:
 
 - move and resize a device, zoom/pan the canvas, and reload to show layout persistence;
 - inspect device type versus device instance labels and runtime trust/privacy fields;
 - inspect the Environment Pool and reset one value only after showing the consequences;
 - open rule/specification recommendation panels and show kept/filtered/truncated details;
 - submit async simulation/verification, inspect task progress, and replay saved history;
-- export the scene before repair and after repair to show the exact rule difference;
+- export the scene and confirm a rejected repair did not change it;
 - use AI assistant list/overview tools, while keeping raw NuSMV output and persistence ids
   in technical/debug surfaces only.
 
 ## Automated evidence
 
-The real-NuSMV regression includes a strategy-specific repair matrix. Every row starts from a
-complete model with exactly one counterexample, parses an animatable trace, localizes a rule,
-requires the requested strategy attempt to report `VERIFIED`, applies the concrete suggestion,
-and verifies the complete repaired model again:
+The real-NuSMV regression includes a strategy-specific repair matrix. Each row starts from a
+complete model with exactly one counterexample, parses an animatable trace and localizes a
+rule. Successful strategies apply the concrete suggestion and verify the complete model
+again; the camera removal must instead report a rejected candidate:
 
 | Strategy | Deliberately unsafe scene | Required concrete edit | Repaired result |
 | --- | --- | --- | --- |
 | `parameter` | Temperature `>= 28` heats the room while the policy requires `off` below `35` and `heat` from `35` | Move that threshold from `28` to `35` | `2 / 2` specifications satisfied; `0` disabled rules; `0` skipped specifications |
 | `condition` | A cold-room rule heats while a separate occupancy sensor reports `absent` | Add `occupied = present` to the heating rule | `1 / 1` specification satisfied; `0` disabled rules; `0` skipped specifications |
-| `remove` | Hall motion commands a privacy-forbidden camera photo | Remove the camera-photo automation | `5 / 5` specifications satisfied; `0` disabled rules; `0` skipped specifications |
+| `remove` (rejected) | Hall motion commands a privacy-forbidden camera photo, while another requirement responds to photos | No automatic edit; response triggers would become unreachable | No verified removal suggestion; the Board stays unchanged |
 
 An additional interaction regression combines all three strategies on one trace. An early
 `temperature >= 28 -> heat` rule conflicts with an occupancy-aware low-temperature policy,
@@ -324,8 +314,11 @@ mvn -Dtest=AcceptanceDemoScenarioNusmvTest test
 
 The test is skipped only when the NuSMV executable is unavailable.
 
-The browser acceptance regression exercises all three rows and the combined-response case through scene import, the live REST
-API, the Board verification UI, repair application, persistence reload, and a new verification.
+The browser acceptance regression exercises verified parameter/condition repairs and the
+combined-response case through scene import, the live REST API, the Board verification UI,
+repair application, persistence reload, and a new verification. The night-watch and
+multi-violation scenes additionally require camera-removal rejection. The household
+entrance demo covers successful removal with reachable response triggers.
 It also repeats the redundant same-command scenario independently for parameter, condition,
 and removal, requiring all two-item signed operations to survive apply and database reload
 before the complete model is verified again.

@@ -308,6 +308,14 @@ for (const { width, theme } of [{ width: 1440, theme: 'light' }, { width: 320, t
     await page.getByTestId('chat-close').press('Tab')
     const resize = page.getByTestId('chat-resize-handle')
     if (await resize.isVisible()) await resize.press('Tab')
+    await expect(panel.getByTestId('household-draft')).toBeDisabled()
+    for (const name of ['希望发生什么', '哪些事情不能发生（选填）', '修改后仍要保留什么（选填）']) {
+      const goalField = panel.getByRole('textbox', { name, exact: true })
+      await expect(goalField).toBeFocused()
+      await expect(goalField).toHaveCSS('outline-width', '2px')
+      await expect(goalField).toHaveCSS('outline-style', 'solid')
+      await goalField.press('Tab')
+    }
     await expect(task).toBeFocused()
     await expect(task).toHaveCSS('outline-width', '2px')
     await expect(task).toHaveCSS('outline-style', 'solid')

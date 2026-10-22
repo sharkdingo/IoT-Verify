@@ -9,9 +9,17 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SpecResultAlignmentTest {
+
+    @Test
+    void aDiagnosticMustNeverBeBackfilledAsTheMissingProperty() {
+        var emitted = new EmittedSpec(null, "response", "CTLSPEC AG(a -> AX b)", "CTLSPEC !EF(a)");
+        var alignment = SpecResultAlignment.align(List.of(new SpecCheckResult("!(EF a)", false, null)), List.of(emitted));
+        assertNull(alignment.aligned().get(0));
+    }
 
     private static EmittedSpec emitted(String id, String expression) {
         return new EmittedSpec(null, id, expression);

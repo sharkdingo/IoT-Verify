@@ -221,7 +221,7 @@ class ConditionAdjustStrategyTest {
                 .repairRuleIndices(List.of(3, 0, 4, 5, 1, 2)).allRules(rules).devices(List.of()).specs(specs)
                 .deviceSmvMap(deviceMap).violatedSpecIndex(0).userId(1L)
                 .attackScenario(AttackScenarioDto.none()).maxAttempts(20).build();
-        context.recordBaselineVerdict(new FixContext.BaselineVerdict(Set.of("s1")));
+        context.recordBaselineVerdict(new FixContext.BaselineVerdict(Set.of("s1"), Set.of()));
         Set<String> targetPair = Set.of("r3_c1", "r4_c1");
         Set<String> combined = Set.of("r0_c1", "r1_c1", "r3_c1", "r4_c1");
         AtomicReference<ParameterizationConfig> active = new AtomicReference<>();

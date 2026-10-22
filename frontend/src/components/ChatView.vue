@@ -44,6 +44,7 @@ import { useChatStore } from '@/stores/chat';
 import { useAuth } from '@/stores/auth';
 import { errorDetails, localizedTextOrFallback, type ApiErrorDetails } from '@/utils/userMessage';
 import FailureDetails from '@/components/FailureDetails.vue';
+import HouseholdGoalComposer from '@/components/HouseholdGoalComposer.vue';
 import { REQUEST_LIMITS } from '@/constants/requestLimits';
 import { confirmDestructive, notifyBlocked, notifyError, notifyInfo, notifySuccess } from '@/utils/feedback'
 import HintTooltip from '@/components/common/HintTooltip.vue'
@@ -2617,6 +2618,12 @@ const handleTaskClick = (text: string) => {
   nextTick(() => inputRef.value?.focus());
 };
 
+const prepareHouseholdDraft = (text: string) => {
+  if (props.interactionLocked || isLoading.value || historyLoadFailed.value || inputValue.value.trim()) return;
+  inputValue.value = text;
+  nextTick(() => inputRef.value?.focus());
+};
+
 const scrollToBottom = (force = false) => {
   nextTick(() => {
     if (!scrollRef.value) return;
@@ -2831,7 +2838,12 @@ const scrollToBottom = (force = false) => {
             </div>
 
             <div v-else-if="messages.length === 0" class="welcome-screen">
-              <div class="brand-logo">
+              <HouseholdGoalComposer v-if="boardMode"
+                :key="`${authenticatedUserId}:${currentSessionId}`"
+                :disabled="interactionLocked || isLoading || historyLoadFailed"
+                :draft-occupied="!!inputValue.trim()"
+                @draft="prepareHouseholdDraft" />
+              <div v-if="!boardMode" class="brand-logo">
                 <div class="logo-inner">
                   <img src="/AI.png" :alt="t('app.aiAssistant')" class="custom-logo-img iot-device-artwork" />
                 </div>

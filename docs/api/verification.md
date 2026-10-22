@@ -8,7 +8,7 @@ Responses are wrapped in the standard `Result<T>` envelope (authoritative defini
 [overview.md](overview.md)). The `data` shapes below are what appears under that
 envelope's `data` field.
 
-Verified against code on 2026-10-19. Source:
+Verified against code on 2026-10-22. Source:
 `controller/VerificationController.java`, `controller/SimulationController.java`,
 `service/InteractiveFixExecutionService.java`, and the DTOs under
 `dto/verification/`, `dto/simulation/`, `dto/device/`,
@@ -420,8 +420,22 @@ clients do not combine a percentage from one phase with a label from another pha
 | `formulaPreview` | `String` | Descriptive formula rebuilt from the submitted structured conditions, submitted device labels, and frozen template semantics; contains user concepts rather than generated NuSMV identifiers |
 | `specificationSnapshot` | `SpecificationSnapshotDto \| null` | Frozen structured interpretation of the emitted property. New emitted results include it; historical rows without it cannot provide a natural-language reconstruction from current Board data. |
 | `formulaKind` | `CTL \| LTL` | Language of the emitted property, derived from the actual emitted expression/template |
+| `antecedentReachability` | `NOT_APPLICABLE \| REACHABLE \| UNREACHABLE \| INCONCLUSIVE` | Independent trigger diagnostic: response templates `4`/`5`/`6` use the latter three values; other templates use `NOT_APPLICABLE` |
 | `outcome` | `SATISFIED \| VIOLATED \| INCONCLUSIVE` | Per-property conclusion. Missing or unreliable parser output is `INCONCLUSIVE`, never a synthetic violation. |
 | `expression` | `String` | Actual NuSMV CTL/LTL expression checked for this emitted specification; technical detail that may contain generated identifiers |
+
+Response diagnostics check `!EF(IF)` in the same generated transition system as the property,
+including the selected attack/privacy semantics. NuSMV evaluates a property at every initial
+state, so a false negated query witnesses reachability from at least one allowed initial state;
+a true one proves the trigger unreachable from all of them. Testing `EF(IF)` directly would
+mistake one unreachable initial branch for global unreachability. `REACHABLE` means at least one allowed path
+can reach the trigger, not that the response succeeds or that the trigger occurs in a real home.
+`SATISFIED` plus `UNREACHABLE` is vacuous response satisfaction and must be visibly qualified;
+it does not change the original CTL/LTL truth value. Prohibition templates have no such trigger.
+Missing diagnostic output makes the run `INCONCLUSIVE`, while a reliably parsed property
+keeps its own outcome. Auxiliary queries create neither extra `specResults` nor violation traces.
+Persisted results with a missing or template-inconsistent diagnostic field are invalid evidence;
+readers reject them rather than supplying a default.
 
 ### `SpecificationSnapshotDto`
 

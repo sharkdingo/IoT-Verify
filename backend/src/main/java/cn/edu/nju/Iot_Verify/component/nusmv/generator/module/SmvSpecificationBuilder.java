@@ -172,8 +172,20 @@ public class SmvSpecificationBuilder {
 
             try {
                 String specString = generateSpecString(spec, deviceSmvMap);
+                String antecedentExpression = switch (spec.getTemplateId()) {
+                    // NuSMV checks a property at every initial state. Negating EF means a false
+                    // verdict witnesses reachability from any initial state, including attack choices.
+                    case "4", "5", "6" -> "CTLSPEC !EF("
+                            + buildConditionGroup(spec.getIfConditions(), deviceSmvMap) + ")";
+                    default -> null;
+                };
                 content.append("\n\t").append(specString);
-                recordEmittedSpec(context, spec, specString);
+                if (antecedentExpression != null) {
+                    content.append("\n\t").append(antecedentExpression);
+                }
+                if (context != null) {
+                    context.emittedSpec(spec, specString, antecedentExpression);
+                }
                 generatedSpecs++;
             } catch (InvalidConditionException e) {
                 // Invalid condition makes this spec invalid; skip and log warning.

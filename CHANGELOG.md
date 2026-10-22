@@ -15,6 +15,39 @@ history into a technical spec. The spec content itself now lives under
 
 ## [Unreleased]
 
+### 2026-10-23 (household intent and meaningful repair)
+
+#### Added
+
+- The Board assistant starts from desired behavior, forbidden outcomes and functions to
+  preserve. Preparing the request fills a reviewable draft without changing the scene.
+- Rules and requirements can be edited in place from the inspector, retaining identity
+  and order with undo/redo and conflict detection. The assistant can also update a
+  requirement against its expected saved value.
+- Formal response checks report whether their triggering condition is reachable in the
+  same model. Results distinguish an unreachable trigger or an inconclusive diagnostic
+  from a demonstrated useful response.
+- A household entrance example connects visitor lighting, a locked-door safety requirement
+  and authenticated-owner access through explanation, targeted editing and rechecking.
+
+#### Fixed
+
+- Automatic repair rejects candidates that make a formerly reachable response trigger
+  unreachable, even if all property formulas become true. Night-watch examples now expose
+  this conflict instead of presenting inactive responses as preserved functionality.
+- Recovery from a rejected rule or requirement edit stays inside the Board write queue,
+  so a late refresh cannot overwrite a newer queued mutation in the displayed scene.
+- Assistant instructions require complete preconditions in result summaries and restrict
+  proposed edits to supported operations, avoiding an unsupported rule-disable suggestion.
+- Reply checks preserve explicit statements that verification cannot be claimed complete,
+  while still checking adjacent positive operation claims against their evidence.
+
+#### Changed
+
+- Board analysis guidance distinguishes checking saved requirements, observing one possible
+  path and optional bounded candidate exploration, and explains the model assumptions
+  each conclusion depends on.
+
 ### 2026-10-22 (asynchronous ownership and frozen evidence)
 
 #### Fixed

@@ -4,7 +4,7 @@ These scenes exercise care, security, and comfort rules beyond the night-watch a
 file is a standard version 5 `iot-verify.board-scene` document that can be imported from
 the Board with its bundled and scene-specific template snapshots.
 
-Verified against code and real NuSMV on 2026-10-12. Sources:
+Verified against code on 2026-10-22. Real NuSMV checks include `HouseholdEntrySceneNusmvTest`. Sources:
 `scripts/generate-default-template-scenes.mjs`, the bundled manifests under
 `backend/src/main/resources/deviceTemplate/`, and
 `AcceptanceDemoScenarioNusmvTest`.
@@ -21,15 +21,49 @@ NuSMV. `Baseline` and `attack` show satisfied/violated specification counts.
 
 | Scene | Devices / environment / rules / specs | Baseline | Attack budget 1 | Verified repair |
 | :--- | :--- | :--- | :--- | :--- |
+| [Household entry](../examples/household-entry-scene.json) | `4 / 3 / 3 / 3` | `2 / 1`, all three triggers reachable | Not part of this example's claim | Add an authorized-owner guard to the lamp-to-door rule, or delete that coupling; then `3 / 0`, all three triggers still reachable |
 | [Fire evacuation](../examples/default-fire-evacuation-scene.json) | `4 / 2 / 3 / 5` | `4 / 1` | `1 / 4` | Remove the alarm-to-door unlock rule; then `5 / 0` |
 | [Climate conflict](../examples/default-climate-conflict-scene.json) | `2 / 2 / 2 / 4` | `2 / 2` | `1 / 3` | Remove the first hot-room heating rule; then `4 / 0` |
 | [RFID access](../examples/default-rfid-access-scene.json) | `3 / 0 / 2 / 5` | `5 / 0` | `2 / 3` | No baseline violation to repair |
-| [Away-mode unlock](../examples/default-away-mode-unlock-scene.json) | `5 / 3 / 3 / 6` | `4 / 2` | `1 / 5` | Remove the convenience-unlock rule; one removal clears both violations, then `6 / 0` — but see the section below for which of those greens carry information |
-| [Elderly care](../examples/elderly-care-comprehensive-scene.json) | `14 / 8 / 12 / 12` | `11 / 1` | Not covered by this baseline regression | Remove the lamp-to-camera photo rule while preserving night lighting, emergency response, and ventilation; then `12 / 0` |
+| [Away-mode unlock](../examples/default-away-mode-unlock-scene.json) | `5 / 3 / 3 / 6` | `4 / 2` | `1 / 5` | No accepted automatic repair: deletion would disable the previously reachable re-lock response |
+| [Elderly care](../examples/elderly-care-comprehensive-scene.json) | `14 / 8 / 12 / 12` | `11 / 1` | Not covered by this baseline regression | Removal is rejected because it would disable the photo-sending response trigger; a manual deletion makes the formulas pass vacuously |
 
 Every baseline and attack run emits all requested properties with zero disabled rules
 and zero skipped specifications. Simulation produces an animatable trajectory for each
 scene. These results describe the formal model, not guaranteed physical-home behavior.
+
+## Household entry
+
+Import [household-entry-scene.json](../examples/household-entry-scene.json) for the main
+end-to-end demonstration. It uses bundled `Door` and `Light` plus scene-defined resident
+presence and entry-request sensors. The shared `entryRequest` domain is `none`, `visitor`,
+or `authorized_owner`: classification is supplied by an assumed trusted external
+authentication system. The scene does not implement authentication or prove that this input
+cannot be forged in a physical home. Presence and request values may change on every step;
+the initial `none` value does not freeze them.
+
+Three automations light the porch for a visitor while nobody is home, unlock whenever the
+porch is lit (the unsafe coupling), and independently unlock for an authorized owner.
+The requirements are deliberately paired:
+
+1. If nobody is home, the request is a visitor, and the door is currently locked, it must
+   remain locked in the next state.
+2. A visitor while nobody is home must receive porch lighting in the next state.
+3. An authorized-owner request must unlock the door in the next state.
+
+The first property is about a visitor causing an unlock. It does not claim the door must
+be locked whenever a visitor is present: an owner may already have opened it. The baseline
+violates the first property through the lighting-to-unlock chain and satisfies the latter
+two, with all three antecedents reachable. Inspect the counterexample, then edit the unsafe
+rule in place to add `Entry Request.entryRequest = authorized_owner`. Verify again: all three
+properties hold and all three triggers remain reachable. Deleting only that unsafe coupling
+also passes. Removing the owner entry rule or visitor lighting fails a useful-response
+requirement. Undo the edit to recover the violation, and redo it to recover the passing model.
+
+The run proves these statements in the declared synchronous model, without attack selection
+or privacy modeling. It does not establish real authentication, physical timing, attack
+resistance, or behavior omitted from the scene. Trigger reachability and response satisfaction
+are separate evidence, as defined in [the result contract](../api/verification.md#specresultdto).
 
 ## Fire evacuation
 
@@ -106,30 +140,18 @@ Two properties are violated at baseline and they ask different questions about t
 ever unlocked while nobody is home it must eventually re-lock. The counterexample is three
 states — nobody home, alarm arms, then porch motion unlocks the door and lights the porch.
 
-All three rules fired in that trace, so all three appear as localization candidates; the
-porch-light rule shares the convenience rule's trigger. Only one removal is verified, and it
-clears **both** violated properties — though not in the same way, as the next paragraph but one explains.
+All three fired rules remain localization candidates. Parameter adjustment has no numeric
+threshold; condition adjustment cannot prevent an eventual empty-house unlocked state while
+keeping the convenience rule. Removal would make the Never property true, but would also
+make the re-lock response's formerly reachable antecedent unreachable. It is now rejected
+with a response-trigger warning rather than offered as a complete automatic repair.
 
-Repair is where this scene is most instructive, and it is not the flattering result. Parameter
-adjustment reports `SKIPPED_NO_PARAMETERIZABLE_VALUES` (the scene is entirely enum-valued) and
-condition adjustment reports `NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE` — adding "only unlock when someone is
-home" genuinely does not repair the property, because occupancy evolves freely and no rule
-re-locks the door after the resident leaves. Removing the convenience-unlock rule
-is the only verified repair, and forward verification confirms `6 / 0`. A tool that declines
-two strategies with stated reasons is more credible than one that always produces a guard.
-
-Read the repaired `6 / 0` property by property, because the two violations do not clear the same
-way. Removing the only rule that ever unlocked the door leaves it permanently locked
-(`AG (door_1.LockState = locked)` is provable), which *achieves* the Never property and makes the
-Response property **vacuously** true — its antecedent
-`EF (a_occupancy = absent & door_1.LockState = unlocked)` becomes unreachable, so it holds while
-describing nothing. Two of the four baseline greens are likewise uninformative: the template-7
-property cannot be violated without an attacker in the model (this scene's `motion` source is
-`trusted`), and the template-1 privacy property cannot be violated at all here. A green forward
-verification means "nothing violated", never "everything still meaningful";
-[away-mode-unlock-demo.md](away-mode-unlock-demo.md) walks the distinction, and
-`AwayModeUnlockSceneNusmvTest` pins it with reachability probes.
-
+If a user explicitly deletes the only unlock rule, the formal property counts become `6 / 0`,
+but the response is visibly qualified as having an unreachable trigger. That distinction does
+not change CTL truth. Two other baseline greens concern trust/privacy labels rather than
+successful entry behavior. This scene is therefore a useful diagnostic counterexample, while
+[household entry](#household-entry) is the demonstration of safety repaired without disabling
+useful visitor lighting or authorized entry.
 With attack budget `1`, five of six properties fail. The one to show is the untrusted-labelled
 event safety property, which held at baseline: a single compromised sensor spoofs its reading
 and the counterexample carries `door_1.trust_LockState_unlocked = untrusted`. The lock-state
@@ -157,11 +179,13 @@ declares a CO2 rate of `-1`, but the `+1` disturbance can exactly cancel that ef
 its modeled effect alone cannot guarantee a decrease. The eventual fresh-air requirement
 remains a guarantee over all modeled paths rather than a possibility check.
 
-Removing the lamp-to-camera rule resolves privacy without removing required lighting.
-Condition repair can also restrict when photography occurs; inspect the proposed trigger
-changes before applying them. Forward verification protects every requirement already
-satisfied, including night lighting and fresh air. The emergency chain and hub's idle
-response remain separate checks. This baseline does not certify the attacked scene.
+Removing the lamp-to-camera rule resolves the privacy formula while preserving lighting,
+but disables the previously reachable photo-sending antecedent of the hub's idle response.
+Automatic repair therefore rejects this deletion. This exposes an authoring decision:
+is photography required, or is the idle response only a conditional safety check? The tool
+does not silently choose that meaning. Inspect the response-trigger warning and revise the
+requirements or rules explicitly before re-verifying. This baseline does not certify the
+attacked scene.
 
 ## Reproduce
 
@@ -175,7 +199,7 @@ Run the real-NuSMV regression for the acceptance, default-template, and care sce
 
 ```bash
 cd backend
-mvn -Dtest=AcceptanceDemoScenarioNusmvTest test
+mvn -Dtest=HouseholdEntrySceneNusmvTest,AcceptanceDemoScenarioNusmvTest test
 ```
 
 On Windows, if Maven and the temporary directory are on different drives and Surefire
@@ -187,7 +211,7 @@ mvn -DforkCount=0 -Dtest=AcceptanceDemoScenarioNusmvTest test
 ```
 
 The away-mode scene has its own regression, which pins the numbers this guide and the
-presenter walkthrough publish (baseline verdict, blamed rule, non-destructive repair, and
+presenter walkthrough publish (baseline verdict, blamed rule, refusal of a vacuous repair, and
 the budget-one untrusted-label failure):
 
 ```bash

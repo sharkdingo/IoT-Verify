@@ -21,6 +21,7 @@ import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
+import cn.edu.nju.Iot_Verify.dto.verification.AntecedentReachability;
 import cn.edu.nju.Iot_Verify.exception.SmvGenerationException;
 import cn.edu.nju.Iot_Verify.util.RuleSemanticSignature;
 import lombok.extern.slf4j.Slf4j;
@@ -171,9 +172,11 @@ public final class FixStrategyUtils {
 
             List<SpecCheckResult> specResults = result.getSpecResults();
             int expectedSpecCount = ctx.getSpecs() != null ? ctx.getSpecs().size() : 0;
+            int expectedResultCount = expectedSpecCount + (genResult.emittedSpecs() == null ? 0 :
+                    (int) genResult.emittedSpecs().stream().filter(spec -> spec.antecedentExpression() != null).count());
             boolean resultCountComplete = specResults != null
                     && !specResults.isEmpty()
-                    && (expectedSpecCount == 0 || specResults.size() == expectedSpecCount);
+                    && (expectedSpecCount == 0 || specResults.size() == expectedResultCount);
             boolean emittedCountComplete = genResult.emittedSpecs() == null
                     || genResult.emittedSpecs().isEmpty()
                     || expectedSpecCount == 0
@@ -188,7 +191,9 @@ public final class FixStrategyUtils {
                 return Verification.inconclusive();
             }
 
-            if (specResults.stream().allMatch(SpecCheckResult::isPassed)) {
+            boolean hasResponses = ctx.getSpecs() != null && ctx.getSpecs().stream()
+                    .anyMatch(spec -> AntecedentReachability.appliesTo(spec.getTemplateId()));
+            if (!hasResponses && specResults.stream().allMatch(SpecCheckResult::isPassed)) {
                 log.info("Forward verification result: all specifications pass");
                 return Verification.accepted(List.of());
             }
@@ -229,7 +234,8 @@ public final class FixStrategyUtils {
             SmvGenerator smvGenerator, NusmvExecutor nusmvExecutor, FixContext ctx,
             List<SpecCheckResult> specResults, List<SmvGenerationContext.EmittedSpec> emittedSpecs)
             throws InterruptedException {
-        Map<String, SpecCheckResult> results = resultsBySpecId(specResults, emittedSpecs);
+        AttributedResults attributed = resultsBySpecId(specResults, emittedSpecs, ctx.getSpecs());
+        Map<String, SpecCheckResult> results = attributed == null ? null : attributed.properties();
         String targetSpecId = targetSpecId(ctx);
         SpecCheckResult target = results == null || targetSpecId == null ? null : results.get(targetSpecId);
         if (target == null) {
@@ -259,6 +265,12 @@ public final class FixStrategyUtils {
                     stillViolated, baseline.violatedSpecIds());
             return Verification.rejected(witness(newlyViolated, results.get(newlyViolated)));
         }
+        if (!attributed.reachableResponseIds().containsAll(baseline.reachableResponseIds())) {
+            Set<String> lost = new LinkedHashSet<>(baseline.reachableResponseIds());
+            lost.removeAll(attributed.reachableResponseIds());
+            ctx.addDiagnostic("A candidate was rejected because it made previously reachable response triggers unreachable: " + lost);
+            return Verification.rejected();
+        }
         log.info("Forward verification result: target passes, pre-existing violations remain {}", stillViolated);
         return Verification.accepted(stillViolated);
     }
@@ -269,12 +281,16 @@ public final class FixStrategyUtils {
     }
 
     /** The result per specification id, or {@code null} when any verdict's attribution is uncertain. */
-    private static Map<String, SpecCheckResult> resultsBySpecId(
-            List<SpecCheckResult> specResults, List<SmvGenerationContext.EmittedSpec> emittedSpecs) {
-        if (emittedSpecs == null || emittedSpecs.size() != specResults.size()) return null;
+    private record AttributedResults(Map<String, SpecCheckResult> properties, Set<String> reachableResponseIds) {}
+
+    private static AttributedResults resultsBySpecId(
+            List<SpecCheckResult> specResults, List<SmvGenerationContext.EmittedSpec> emittedSpecs,
+            List<SpecificationDto> expectedSpecs) {
+        if (emittedSpecs == null || expectedSpecs == null || emittedSpecs.size() != expectedSpecs.size()) return null;
         SpecResultAlignment.Alignment alignment = SpecResultAlignment.align(specResults, emittedSpecs);
-        if (alignment.backFilled() > 0) return null;
+        if (alignment.backFilled() > 0 || alignment.expectedResultCount() != specResults.size()) return null;
         Map<String, SpecCheckResult> results = new LinkedHashMap<>();
+        Set<String> reachable = new LinkedHashSet<>();
         for (int i = 0; i < emittedSpecs.size(); i++) {
             String specId = emittedSpecs.get(i) != null ? emittedSpecs.get(i).specId() : null;
             SpecCheckResult result = alignment.aligned().get(i);
@@ -284,8 +300,15 @@ public final class FixStrategyUtils {
                     || results.putIfAbsent(specId, result) != null) {
                 return null;
             }
+            SpecificationDto expected = expectedSpecs.stream().filter(spec -> specId.equals(spec.getId())).findFirst().orElse(null);
+            if (expected == null) return null;
+            if (AntecedentReachability.appliesTo(expected.getTemplateId())) {
+                SpecCheckResult antecedent = alignment.antecedents().get(i);
+                if (antecedent == null) return null;
+                if (!antecedent.isPassed()) reachable.add(specId);
+            }
         }
-        return results;
+        return new AttributedResults(results, Collections.unmodifiableSet(reachable));
     }
 
     private static String targetSpecId(FixContext ctx) {
@@ -313,8 +336,8 @@ public final class FixStrategyUtils {
             return verdict;
         }
         if (!verdict.available()) {
-            ctx.addDiagnostic("The original rules could not be re-checked, so a candidate was accepted only "
-                    + "if it satisfied every specification.");
+            ctx.addDiagnostic("The original rules could not be re-checked; candidates requiring baseline "
+                    + "property or response-trigger preservation remain inconclusive.");
         }
         ctx.recordBaselineVerdict(verdict);
         return ctx.baselineVerdict();
@@ -335,13 +358,13 @@ public final class FixStrategyUtils {
             if (!result.isSuccess() || result.getSpecResults() == null) {
                 return FixContext.BaselineVerdict.unavailable();
             }
-            Map<String, SpecCheckResult> results = resultsBySpecId(result.getSpecResults(), genResult.emittedSpecs());
+            AttributedResults results = resultsBySpecId(result.getSpecResults(), genResult.emittedSpecs(), ctx.getSpecs());
             if (results == null) return FixContext.BaselineVerdict.unavailable();
             Set<String> violated = new LinkedHashSet<>();
-            results.forEach((specId, specResult) -> {
+            results.properties().forEach((specId, specResult) -> {
                 if (!specResult.isPassed()) violated.add(specId);
             });
-            return new FixContext.BaselineVerdict(Collections.unmodifiableSet(violated));
+            return new FixContext.BaselineVerdict(Collections.unmodifiableSet(violated), results.reachableResponseIds());
         } catch (InterruptedException e) {
             throw e;
         } catch (Exception e) {

@@ -129,6 +129,28 @@ const mountChat = (props: Record<string, unknown> = {}) => {
 }
 
 describe('ChatView', () => {
+  it('drafts household goals for review without sending or overwriting a message', async () => {
+    chatStore.openChat()
+    const wrapper = mountChat()
+    await flushPromises()
+    expect(wrapper.find('[data-testid="household-goal-composer"]').exists()).toBe(true)
+    await wrapper.get('[data-testid="household-want"]').setValue('访客到门口就亮灯')
+    await wrapper.get('[data-testid="household-avoid"]').setValue('访客不能触发开门')
+    await wrapper.get('[data-testid="household-preserve"]').setValue('主人回来仍可开门')
+    await wrapper.get('[data-testid="household-draft"]').trigger('click')
+    const input = wrapper.get('[data-testid="chat-input"]')
+    const draft = (input.element as HTMLTextAreaElement).value
+    expect(draft).toContain('访客到门口就亮灯')
+    expect(draft).toContain('访客不能触发开门')
+    expect(draft).toContain('主人回来仍可开门')
+    expect(draft).toContain('不要修改画布')
+    expect(chatApi.sendStreamChat).not.toHaveBeenCalled()
+    expect(wrapper.get('[data-testid="household-draft"]').attributes('disabled')).toBeDefined()
+    await wrapper.get('[data-testid="household-want"]').setValue('另一个草稿')
+    await wrapper.get('[data-testid="household-draft"]').trigger('click')
+    expect((input.element as HTMLTextAreaElement).value).toBe(draft)
+  })
+
   beforeEach(() => {
     // Background-session polling changes how many one-shot list/activity responses a case may
     // consume. Reset implementations as well as call counts so an unused `mockResolvedValueOnce`

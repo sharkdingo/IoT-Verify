@@ -52,11 +52,12 @@ final class SmvGenerationWarningCollector {
         }
     }
 
-    public synchronized void emittedSpec(SpecificationDto spec, String expression) {
+    public synchronized void emittedSpec(SpecificationDto spec, String expression, String antecedentExpression) {
         emittedSpecs.add(new SmvGenerationContext.EmittedSpec(
                 spec,
                 specId(spec),
-                sanitizeExpression(expression)
+                sanitizeExpression(expression),
+                antecedentExpression == null ? null : sanitizeExpression(antecedentExpression)
         ));
     }
 

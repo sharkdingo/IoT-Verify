@@ -249,7 +249,7 @@ describe('inspector environment inventory', () => {
     expect(tab.attributes('aria-controls')).toBe('inspector-panel-environment')
     expect(wrapper.get('#inspector-panel-environment').attributes('aria-labelledby')).toBe(tab.attributes('id'))
     expect(wrapper.find('[data-testid="inspector-section-devices"]').exists()).toBe(false)
-    expect(wrapper.get('[data-testid="environment-pool"]').text()).toContain('traces do not overwrite')
+    expect(wrapper.get('[data-testid="environment-pool"]').text()).toContain('Traces never overwrite these values.')
     wrapper.unmount()
   })
 

@@ -325,6 +325,7 @@ public class ChatToolProgressPresenter {
                 }
             }
             if ("manage_spec".equals(functionName)) {
+                if (!hasValidKnownToolPayload(functionName, root)) return null;
                 String operation = root.path("operation").asText("").trim();
                 JsonNode spec = "deleted".equals(operation)
                         ? root.path("deletedSpecification") : root.path("specification");
@@ -334,10 +335,16 @@ public class ChatToolProgressPresenter {
                             ? "已预览规约删除影响；尚未写入，等待明确确认。"
                             : "Previewed the specification deletion impact; nothing was written and explicit confirmation is pending.");
                 }
-                if (Set.of("created", "deleted").contains(operation)) {
-                    String action = "created".equals(operation)
-                            ? (preferChinese ? "已创建规约" : "Created specification")
-                            : (preferChinese ? "已删除规约" : "Deleted specification");
+                if ("unchanged".equals(operation)) {
+                    return preferChinese ? "规约未改变，没有记录新的编辑。"
+                            : "The specification is unchanged; no new edit was recorded.";
+                }
+                if (Set.of("created", "updated", "deleted").contains(operation)) {
+                    String action = switch (operation) {
+                        case "created" -> preferChinese ? "已创建规约" : "Created specification";
+                        case "updated" -> preferChinese ? "已修改规约" : "Updated specification";
+                        default -> preferChinese ? "已删除规约" : "Deleted specification";
+                    };
                     return compactToolProgressDetail(formula.isBlank()
                             ? action + (preferChinese ? "。" : ".")
                             : action + (preferChinese ? "：" : ": ") + formula);
@@ -588,7 +595,7 @@ public class ChatToolProgressPresenter {
             case "manage_rule" -> Set.of("created", "updated", "deleted", "reordered").contains(operation)
                     ? "RULES_UPDATED" : null;
             case "apply_fix" -> "applied".equals(operation) ? "REPAIR_APPLIED" : null;
-            case "manage_spec" -> Set.of("created", "deleted").contains(operation)
+            case "manage_spec" -> Set.of("created", "updated", "deleted").contains(operation)
                     ? "SPECIFICATIONS_UPDATED" : null;
             case "manage_environment" -> root.path("changesApplied").asBoolean(false)
                     ? "ENVIRONMENT_UPDATED" : null;

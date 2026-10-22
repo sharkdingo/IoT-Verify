@@ -1971,7 +1971,7 @@ test.describe('board full-stack NuSMV user flow', () => {
     await expect(page.getByTestId('verification-result-dialog')).toContainText(/NuSMV|specification|规约/i)
   })
 
-  test('imports the acceptance scene, animates it, contrasts attacks, applies a verified repair, and re-verifies', async ({ page, request }) => {
+  test('imports the acceptance scene, animates it, contrasts attacks, and refuses a vacuous repair', async ({ page, request }) => {
     const auth = await createAuthenticatedUser(request)
     await saveEmptyBoard(request, auth)
     await openWorkspace(page, auth)
@@ -1987,8 +1987,8 @@ test.describe('board full-stack NuSMV user flow', () => {
       'Hall Alarm', 'Hall Camera', 'Hall Light', 'Hall Motion Sensor'
     ])
     await waitForApi<any[]>(request, auth, '/api/board/environment', values => values.length === 2)
-    await waitForApi<any[]>(request, auth, '/api/board/rules', rules => rules.length === 3)
-    await waitForApi<any[]>(request, auth, '/api/board/specs', specs => specs.length === 5)
+    const importedRules = await waitForApi<any[]>(request, auth, '/api/board/rules', rules => rules.length === 3)
+    const importedSpecs = await waitForApi<any[]>(request, auth, '/api/board/specs', specs => specs.length === 5)
 
     await page.getByTestId('open-simulation-panel').click()
     await page.getByTestId('simulation-mode-sync').click()
@@ -2076,43 +2076,17 @@ test.describe('board full-stack NuSMV user flow', () => {
       data: { strategies: ['remove'] }
     })
     const fix = await unwrap<any>(fixResponse)
-    const removal = listedRepair(fix, 'remove', suggestion => JSON.stringify(suggestion.removedRuleDescriptions)
-      === JSON.stringify(['When hall motion is active, take a camera photo']))
-
-    const applyResponse = await request.post(
-      `${apiBaseURL}/api/verify/traces/${baselineTrace.id}/fix/apply`,
-      {
-        headers: authHeaders(auth),
-        data: {
-          strategy: removal.strategy,
-          suggestion: removal,
-          suggestionToken: removal.suggestionToken
-        }
-      }
-    )
-    const applied = await unwrap<any>(applyResponse)
-    expect(applied.currentRuleCount).toBe(2)
-    expect(applied.rules.map((rule: any) => rule.ruleString)).not.toContain(
-      'When hall motion is active, take a camera photo')
-
-    await page.reload()
-    await expect(page.getByTestId('board-root')).toBeVisible({ timeout: 30_000 })
-    await page.getByTestId('open-verification-panel').click()
-    await page.getByTestId('verification-mode-sync').click()
-    const repairedResponsePromise = page.waitForResponse(response =>
-      response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/verify')
-    await page.getByTestId('run-verification').click()
-    const repairedResponse = await repairedResponsePromise
-    const repaired = await unwrap<any>(repairedResponse as any)
-    expect(repaired).toMatchObject({
-      outcome: 'SATISFIED',
-      modelComplete: true,
-      disabledRuleCount: 0,
-      skippedSpecCount: 0,
-      modelSnapshot: { specificationCount: 5 }
-    })
-    expect(repaired.specResults).toHaveLength(5)
-    expect(repaired.specResults.every((result: any) => result.outcome === 'SATISFIED')).toBe(true)
+    expect(fix.suggestions).toEqual([])
+    expect(fix.strategyAttempts).toEqual([expect.objectContaining({
+      strategy: 'remove', status: 'ALL_CANDIDATES_REJECTED'
+    })])
+    expect(fix.warnings.some((warning: string) => warning.includes('response triggers unreachable'))).toBe(true)
+    // Deleting the only camera trigger would make the response properties pass without activity.
+    // Automatic repair must preserve their formerly reachable triggers.
+    expect(await waitForApi<any[]>(request, auth, '/api/board/rules', rules => rules.length === 3))
+      .toEqual(importedRules)
+    expect(await waitForApi<any[]>(request, auth, '/api/board/specs', specs => specs.length === 5))
+      .toEqual(importedSpecs)
   })
 
   test('withdraws counterexample actions once an applied fix makes the open verdict stale', async ({ page, request }) => {
@@ -2120,13 +2094,13 @@ test.describe('board full-stack NuSMV user flow', () => {
     await saveEmptyBoard(request, auth)
     await openWorkspace(page, auth)
 
-    const scenePath = path.resolve(process.cwd(), '..', 'docs', 'examples', 'acceptance-demo-scene.json')
+    const scenePath = path.resolve(process.cwd(), '..', 'docs', 'examples', 'household-entry-scene.json')
     await page.getByTestId('scene-import-file').setInputFiles(scenePath)
     await page.getByRole('dialog', { name: 'Replace the current scene?' })
       .getByRole('button', { name: 'Replace scene' })
       .click()
     await waitForApi<any[]>(request, auth, '/api/board/rules', rules => rules.length === 3)
-    await waitForApi<any[]>(request, auth, '/api/board/specs', specs => specs.length === 5)
+    await waitForApi<any[]>(request, auth, '/api/board/specs', specs => specs.length === 3)
 
     await page.getByTestId('open-verification-panel').click()
     await page.getByTestId('verification-mode-sync').click()
@@ -2181,7 +2155,7 @@ test.describe('board full-stack NuSMV user flow', () => {
     expect(rerunRequests).toBe(1)
   })
 
-  test('imports the multi-violation JSON and repairs both baseline violations through one root removal', async ({ page, request }) => {
+  test('imports the multi-violation JSON and refuses removal that silences required responses', async ({ page, request }) => {
     const auth = await createAuthenticatedUser(request)
     await saveEmptyBoard(request, auth)
     await openWorkspace(page, auth)
@@ -2211,8 +2185,8 @@ test.describe('board full-stack NuSMV user flow', () => {
     await waitForApi<any[]>(request, auth, '/api/board/nodes', nodes => nodes.length === 4)
     await waitForApi<any[]>(request, auth, '/api/board/environment', values =>
       values.length === 2 && values.some(value => value.name === 'motion' && value.trust === 'untrusted'))
-    await waitForApi<any[]>(request, auth, '/api/board/rules', rules => rules.length === 3)
-    await waitForApi<any[]>(request, auth, '/api/board/specs', specs => specs.length === 5)
+    const importedRules = await waitForApi<any[]>(request, auth, '/api/board/rules', rules => rules.length === 3)
+    const importedSpecs = await waitForApi<any[]>(request, auth, '/api/board/specs', specs => specs.length === 5)
 
     await page.getByTestId('open-verification-panel').click()
     await page.getByTestId('verification-mode-sync').click()
@@ -2246,45 +2220,15 @@ test.describe('board full-stack NuSMV user flow', () => {
       }
     )
     const fix = await unwrap<any>(fixResponse)
-    const removal = listedRepair(fix, 'remove', suggestion => JSON.stringify(suggestion.removedRuleDescriptions)
-      === JSON.stringify(['When an untrusted hall motion signal is active, take a camera photo']))
-
-    const applyResponse = await request.post(
-      `${apiBaseURL}/api/verify/traces/${cameraNeverTrace.id}/fix/apply`,
-      {
-        headers: authHeaders(auth),
-        data: {
-          strategy: removal.strategy,
-          suggestion: removal,
-          suggestionToken: removal.suggestionToken
-        }
-      }
-    )
-    const applied = await unwrap<any>(applyResponse)
-    expect(applied).toMatchObject({
-      applied: true,
-      verificationEvidenceReused: true,
-      previousRuleCount: 3,
-      currentRuleCount: 2
-    })
-
-    await page.reload()
-    await expect(page.getByTestId('board-root')).toBeVisible({ timeout: 30_000 })
-    await page.getByTestId('open-verification-panel').click()
-    await page.getByTestId('verification-mode-sync').click()
-    const repairedResponsePromise = page.waitForResponse(response =>
-      response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/verify')
-    await page.getByTestId('run-verification').click()
-    const repaired = await unwrap<any>((await repairedResponsePromise) as any)
-    expect(repaired).toMatchObject({
-      outcome: 'SATISFIED',
-      modelComplete: true,
-      disabledRuleCount: 0,
-      skippedSpecCount: 0,
-      modelSnapshot: { specificationCount: 5 }
-    })
-    expect(repaired.specResults).toHaveLength(5)
-    expect(repaired.specResults.every((result: any) => result.outcome === 'SATISFIED')).toBe(true)
+    expect(fix.suggestions).toEqual([])
+    expect(fix.strategyAttempts).toEqual([expect.objectContaining({
+      strategy: 'remove', status: 'ALL_CANDIDATES_REJECTED'
+    })])
+    expect(fix.warnings.some((warning: string) => warning.includes('response triggers unreachable'))).toBe(true)
+    expect(await waitForApi<any[]>(request, auth, '/api/board/rules', rules => rules.length === 3))
+      .toEqual(importedRules)
+    expect(await waitForApi<any[]>(request, auth, '/api/board/specs', specs => specs.length === 5))
+      .toEqual(importedSpecs)
   })
 
   test('builds a board through left-panel dialogs, then simulates, verifies, replays history, and tracks async tasks', async ({ page, request }, testInfo) => {

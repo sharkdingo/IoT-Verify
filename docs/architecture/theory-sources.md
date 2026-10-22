@@ -9,7 +9,7 @@ different user-facing contract.
 Read the cited section before changing generated-model semantics, then keep the formal checker,
 bounded explorer, API contract, tests, and UI explanation aligned with the chosen product meaning.
 
-Verified against code on 2026-10-12. Source: `backend/src/main/java/cn/edu/nju/Iot_Verify/component/nusmv/`,
+Verified against code on 2026-10-22. Source: `backend/src/main/java/cn/edu/nju/Iot_Verify/component/nusmv/`,
 `component/fuzz/`. Conformance is also pinned by `TheorySourceConformanceTest`, so a claim here that
 the code contradicts fails the build.
 
@@ -245,22 +245,22 @@ they diverge. Verified conforming:
   model is incomplete (`disabledRuleCount`/`skippedSpecCount`), so a repair is never certified
   against a property that was never emitted.
 
-  **That covers one kind of vacuity, and this page used to claim it covered all of them.** It does
-  not, and the distinction matters because the uncovered kind looks identical on screen. A verified
-  repair can make an *implication* property's antecedent unreachable, and the property then holds
-  for the empty reason: nothing it talks about can happen any more. Measured on
-  `docs/examples/default-away-mode-unlock-scene.json` with real NuSMV: the verified removal makes
-  `EF (a_occupancy = absent & door_1.LockState = unlocked)` **false**, so its template-5 Response
-  property ("if the door is ever unlocked while nobody is home, it must eventually re-lock") passes
-  while carrying no information at all.
+  Complete emission alone does not prevent vacuous responses. Response templates `4`/`5`/`6`
+  now receive an independent same-model `!EF(IF)` diagnostic: a false result witnesses a
+  reachable trigger from some allowed initial state, including alternative attack choices.
+  An unreachable antecedent leaves
+  the original CTL/LTL property true but does not demonstrate a response. Automatic repair
+  preserves every response antecedent that the original model could reach, including those
+  of originally violated properties; missing evidence is inconclusive. This is an explicit
+  product constraint beyond the paper's forward-verification truth check, documented in
+  [auto-fix.md](auto-fix.md#forward-verification-fixstrategyutilsforwardverify).
 
-  The direction of the effect depends on the template, so no single rule covers both:
-
-  - For a **prohibition** shape (`1`, `3`, `7` — `AG !(P)`), `P` becoming unreachable is the property
-    *succeeding*. Eliminating `P` is what it was written to demand.
-  - For an **implication** shape (`4`, `5`, `6` — `AG (P -> …)`), `P` becoming unreachable makes the
-    formula vacuously true. The verdict stops describing behaviour.
-
+  The distinction remains directional: making the forbidden state of a prohibition (`3`/`7`)
+  unreachable achieves its purpose. It is not a response-trigger regression. The old away-mode
+  example demonstrates the difference: deleting its sole unlock rule satisfies its Never property
+  but empties its template-5 re-lock response. That deletion is therefore no longer offered as
+  an automatic repair, while an explicit user edit still receives the unchanged property truth
+  plus the unreachable-trigger diagnostic.
   **A third shape sits outside both, and it is structural rather than discovered: a property whose
   *subject cannot change*.** Trust and privacy labels on *variables* are propagation **sources**, never
   targets — MEDIC §3.3's relation drives the label of a rule's command target, and in this product that
@@ -283,12 +283,12 @@ they diverge. Verified conforming:
   repair can introduce or remove it. When explaining such a verdict, "no reachable violation" and "this
   subject never varies" are different claims, and only the first describes the automation.
 
-  So a green forward verification means "the target property holds and no property the original rules
-  satisfied is violated" (properties that were already violated are listed with the suggestion), never
-  "every property is still meaningful". A repair that satisfies an implication property by removing its antecedent is
-  reported as verified, and callers that present the result to a user should say which kind of
-  satisfaction they are showing rather than implying the stronger one.
-
+  Thus a verified repair preserves known response-trigger reachability as well as property
+  satisfaction. It still does not mean every authored requirement is useful: a trigger may
+  already have been unreachable, a condition may describe a constant label, and reachability
+  alone does not prove a desirable action. The [household entry example](../guides/default-template-scenarios.md#household-entry)
+  pairs a visitor safety condition with explicit lighting and authorized-entry responses to
+  make those useful behaviors part of the checked contract.
 ## Review discipline
 
 - A test or NuSMV run confirms what the implementation does; paper conformance still requires reading

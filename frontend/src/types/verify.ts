@@ -25,6 +25,7 @@ export interface SpecResult {
   specificationSnapshot?: SpecificationSnapshot | null;
   formulaKind: 'CTL' | 'LTL';
   outcome: VerificationOutcome;
+  antecedentReachability: 'NOT_APPLICABLE' | 'REACHABLE' | 'UNREACHABLE' | 'INCONCLUSIVE';
   expression: string;
 }
 

@@ -82,6 +82,7 @@ describe('specification explanations across both panels', () => {
         const result = presentSpecificationResult({
           specId: spec.id, templateId: spec.templateId, specificationLabel: spec.templateLabel,
           formulaPreview: '', formulaKind: 'LTL', outcome: 'SATISFIED', expression: '',
+          antecedentReachability: 'REACHABLE',
           specificationSnapshot: { ...spec, devices: {
             [node.id]: { label: node.label, modelTokenSource: 'BUNDLED', modeCount: 1 }
           } }

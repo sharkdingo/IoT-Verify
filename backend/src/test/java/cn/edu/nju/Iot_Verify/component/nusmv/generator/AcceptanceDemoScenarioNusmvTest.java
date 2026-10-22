@@ -136,7 +136,7 @@ class AcceptanceDemoScenarioNusmvTest {
     }
 
     @Test
-    void acceptanceScene_supportsVerificationSimulationAnimationAttackAndVerifiedRepair() throws Exception {
+    void acceptanceScene_explainsWhyRemovalWouldDisableTheCameraResponse() throws Exception {
         String nusmvPath = resolveNusmvPath();
         Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
                 "NuSMV executable is required for this acceptance smoke test");
@@ -162,7 +162,7 @@ class AcceptanceDemoScenarioNusmvTest {
         assertEquals(0, generated.disabledRuleCount());
         assertEquals(0, generated.skippedSpecCount());
 
-        NusmvExecutor.NusmvResult verification = executor.execute(generated.smvFile());
+        NusmvExecutor.NusmvResult verification = FormalCheckTestSupport.checkProperties(executor, generated);
         assertTrue(verification.isSuccess(), verification::getErrorMessage);
         assertEquals(specs.size(), verification.getSpecResults().size());
         assertEquals(1, verification.getSpecResults().stream().filter(result -> !result.isPassed()).count());
@@ -202,7 +202,7 @@ class AcceptanceDemoScenarioNusmvTest {
         SmvGenerator.GenerateResult attackedModel = generator.generateWithEnvironment(
                 USER_ID, devices, environment, rules, specs,
                 AttackScenarioDto.anyUpToBudget(1), true, SmvGenerator.GeneratePurpose.VERIFICATION);
-        NusmvExecutor.NusmvResult attackedVerification = executor.execute(attackedModel.smvFile());
+        NusmvExecutor.NusmvResult attackedVerification = FormalCheckTestSupport.checkProperties(executor, attackedModel);
         assertTrue(attackedVerification.isSuccess(), attackedVerification::getErrorMessage);
         assertEquals(specs.size(), attackedVerification.getSpecResults().size());
         assertEquals(4, attackedVerification.getSpecResults().stream()
@@ -229,40 +229,17 @@ class AcceptanceDemoScenarioNusmvTest {
                 List.of("remove"),
                 10,
                 Map.of());
-        assertTrue(fixResult.isFixable(), fixResult::getSummary);
-        assertVerifiedAttempt(fixResult, "remove");
+        assertTriggerPreservationRejected(fixResult);
         assertEquals(1, fixResult.getFaultRules().size(),
                 "The camera violation should localize only the photo automation");
-        assertTrue(fixResult.getUnusedPreferredRangeSelections().isEmpty(),
-                "An omitted preference list must serialize as an empty result collection");
-
-        FixSuggestionDto removal = fixResult.getSuggestions().stream()
-                .filter(suggestion -> "remove".equals(suggestion.getStrategy()))
-                .findFirst()
-                .orElseThrow();
-        assertEquals(List.of(0), removal.getRemovedRuleIndices());
-
-        Set<Integer> removedIndices = new HashSet<>(removal.getRemovedRuleIndices());
-        List<RuleDto> repairedRules = new ArrayList<>();
-        for (int index = 0; index < rules.size(); index++) {
-            if (!removedIndices.contains(index)) {
-                repairedRules.add(rules.get(index));
-            }
-        }
-        assertEquals(2, repairedRules.size());
-
-        SmvGenerator.GenerateResult repairedModel = generator.generateWithEnvironment(
-                USER_ID, devices, environment, repairedRules, specs,
-                AttackScenarioDto.none(), true, SmvGenerator.GeneratePurpose.VERIFICATION);
-        assertCompleteModel(repairedModel);
-        NusmvExecutor.NusmvResult repairedVerification = executor.execute(repairedModel.smvFile());
-        assertTrue(repairedVerification.isSuccess(), repairedVerification::getErrorMessage);
-        assertFalse(repairedVerification.hasAnyViolation(),
-                "The verified removal suggestion must make every emitted demo specification pass");
+        assertTrue(fixResult.getUnusedPreferredRangeSelections().isEmpty());
+        var repairedModel = generator.generateWithEnvironment(USER_ID, devices, environment,
+                rules.subList(1, rules.size()), specs, AttackScenarioDto.none(), true,
+                SmvGenerator.GeneratePurpose.VERIFICATION);
+        assertAllPropertiesPassWithUnreachableResponse(executor, repairedModel, 1);
     }
-
     @Test
-    void multiViolationScene_hasTwoCounterexamplesAndOneVerifiedRootCauseRemoval() throws Exception {
+    void multiViolationScene_rejectsRootCauseRemovalThatDisablesTheCameraResponse() throws Exception {
         String nusmvPath = resolveNusmvPath();
         Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
                 "NuSMV executable is required for the multi-violation scene regression");
@@ -290,7 +267,7 @@ class AcceptanceDemoScenarioNusmvTest {
         assertEquals(0, baselineModel.disabledRuleCount());
         assertEquals(0, baselineModel.skippedSpecCount());
 
-        NusmvExecutor.NusmvResult baseline = executor.execute(baselineModel.smvFile());
+        NusmvExecutor.NusmvResult baseline = FormalCheckTestSupport.checkProperties(executor, baselineModel);
         assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
         assertEquals(5, baseline.getSpecResults().size());
         assertEquals(2, violationCount(baseline));
@@ -346,25 +323,12 @@ class AcceptanceDemoScenarioNusmvTest {
                 List.of("remove"),
                 10,
                 Map.of());
-        FixSuggestionDto removal = fixResult.getSuggestions().stream()
-                .filter(suggestion -> "remove".equals(suggestion.getStrategy()))
-                .findFirst()
-                .orElseThrow();
-        assertEquals(List.of(0), removal.getRemovedRuleIndices());
-        assertEquals(List.of("When an untrusted hall motion signal is active, take a camera photo"),
-                removal.getRemovedRuleDescriptions());
-
-        List<RuleDto> repairedRules = new ArrayList<>(rules.subList(1, rules.size()));
-        SmvGenerator.GenerateResult repairedModel = generator.generateWithEnvironment(
-                USER_ID, devices, environment, repairedRules, specs,
-                AttackScenarioDto.none(), true, SmvGenerator.GeneratePurpose.VERIFICATION);
-        NusmvExecutor.NusmvResult repaired = executor.execute(repairedModel.smvFile());
-        assertTrue(repaired.isSuccess(), repaired::getErrorMessage);
-        assertEquals(5, repaired.getSpecResults().size());
-        assertFalse(repaired.hasAnyViolation(),
-                "Removing the root camera automation must satisfy all five specifications");
+        assertTriggerPreservationRejected(fixResult);
+        var repairedModel = generator.generateWithEnvironment(USER_ID, devices, environment,
+                rules.subList(1, rules.size()), specs, AttackScenarioDto.none(), true,
+                SmvGenerator.GeneratePurpose.VERIFICATION);
+        assertAllPropertiesPassWithUnreachableResponse(executor, repairedModel, 1);
     }
-
     @Test
     void coupledClimateThresholds_parameterStrategyFindsClosestSingleChange() throws Exception {
         String nusmvPath = resolveNusmvPath();
@@ -397,7 +361,7 @@ class AcceptanceDemoScenarioNusmvTest {
                 USER_ID, devices, environment, rules, specs,
                 AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
         assertCompleteModel(baselineModel);
-        NusmvExecutor.NusmvResult baseline = executor.execute(baselineModel.smvFile());
+        NusmvExecutor.NusmvResult baseline = FormalCheckTestSupport.checkProperties(executor, baselineModel);
         assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
         assertEquals(specs.size(), baseline.getSpecResults().size());
         assertEquals(1, violationCount(baseline));
@@ -444,7 +408,7 @@ class AcceptanceDemoScenarioNusmvTest {
                 USER_ID, devices, environment, repairedRules, specs,
                 AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
         assertCompleteModel(repairedModel);
-        NusmvExecutor.NusmvResult repaired = executor.execute(repairedModel.smvFile());
+        NusmvExecutor.NusmvResult repaired = FormalCheckTestSupport.checkProperties(executor, repairedModel);
         assertTrue(repaired.isSuccess(), repaired::getErrorMessage);
         assertEquals(specs.size(), repaired.getSpecResults().size());
         assertFalse(repaired.hasAnyViolation(),
@@ -479,7 +443,7 @@ class AcceptanceDemoScenarioNusmvTest {
                 USER_ID, devices, environment, rules, specs,
                 AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
         assertCompleteModel(baselineModel);
-        NusmvExecutor.NusmvResult baseline = executor.execute(baselineModel.smvFile());
+        NusmvExecutor.NusmvResult baseline = FormalCheckTestSupport.checkProperties(executor, baselineModel);
         assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
         assertEquals(specs.size(), baseline.getSpecResults().size());
         assertEquals(1, violationCount(baseline));
@@ -519,7 +483,7 @@ class AcceptanceDemoScenarioNusmvTest {
                 USER_ID, devices, environment, repairedRules, specs,
                 AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
         assertCompleteModel(repairedModel);
-        NusmvExecutor.NusmvResult repaired = executor.execute(repairedModel.smvFile());
+        NusmvExecutor.NusmvResult repaired = FormalCheckTestSupport.checkProperties(executor, repairedModel);
         assertTrue(repaired.isSuccess(), repaired::getErrorMessage);
         assertEquals(specs.size(), repaired.getSpecResults().size());
         assertFalse(repaired.hasAnyViolation(),
@@ -536,7 +500,7 @@ class AcceptanceDemoScenarioNusmvTest {
                 USER_ID, devices, environment, repairedRules, List.of(occupancySafety, occupiedHeating),
                 AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
         assertCompleteModel(occupiedModel);
-        NusmvExecutor.NusmvResult occupied = executor.execute(occupiedModel.smvFile());
+        NusmvExecutor.NusmvResult occupied = FormalCheckTestSupport.checkProperties(executor, occupiedModel);
         assertTrue(occupied.isSuccess(), occupied::getErrorMessage);
         assertFalse(occupied.hasAnyViolation(), "The repaired rule must still heat the occupied cold room");
     }
@@ -589,7 +553,7 @@ class AcceptanceDemoScenarioNusmvTest {
                 USER_ID, devices, environment, rules, specs,
                 AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
         assertCompleteModel(baselineModel);
-        NusmvExecutor.NusmvResult baseline = executor.execute(baselineModel.smvFile());
+        NusmvExecutor.NusmvResult baseline = FormalCheckTestSupport.checkProperties(executor, baselineModel);
         assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
         assertEquals(specs.size(), baseline.getSpecResults().size());
         assertEquals(2, violationCount(baseline),
@@ -625,7 +589,7 @@ class AcceptanceDemoScenarioNusmvTest {
                 AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
         assertCompleteModel(expectedParameterModel);
         NusmvExecutor.NusmvResult expectedParameterVerification =
-                executor.execute(expectedParameterModel.smvFile());
+                FormalCheckTestSupport.checkProperties(executor, expectedParameterModel);
         assertTrue(expectedParameterVerification.isSuccess(), expectedParameterVerification::getErrorMessage);
         assertFalse(expectedParameterVerification.hasAnyViolation(),
                 "The intended 28-to-37 threshold edit must be a valid, non-duplicate repair before search begins");
@@ -678,8 +642,9 @@ class AcceptanceDemoScenarioNusmvTest {
                 strategies, 20, Map.of());
         assertEquals("SKIPPED_NO_SPEC", attemptStatus(unknownSpecResult, "parameter"));
         assertEquals("SKIPPED_NO_SPEC", attemptStatus(unknownSpecResult, "condition"));
-        assertEquals("VERIFIED", attemptStatus(unknownSpecResult, "remove"));
-        assertFalse(listed(unknownSpecResult, "remove").isEmpty());
+        // Response preservation cannot establish a repair when its target is not attributable.
+        assertEquals("INCONCLUSIVE", attemptStatus(unknownSpecResult, "remove"));
+        assertTrue(listed(unknownSpecResult, "remove").isEmpty());
     }
 
     @Test
@@ -716,7 +681,7 @@ class AcceptanceDemoScenarioNusmvTest {
                 USER_ID, devices, environment, rules, specs,
                 AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
         assertCompleteModel(baselineModel);
-        NusmvExecutor.NusmvResult baseline = executor.execute(baselineModel.smvFile());
+        NusmvExecutor.NusmvResult baseline = FormalCheckTestSupport.checkProperties(executor, baselineModel);
         assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
         assertEquals(1, violationCount(baseline));
         NusmvExecutor.SpecCheckResult violation = baseline.getSpecResults().stream()
@@ -791,7 +756,7 @@ class AcceptanceDemoScenarioNusmvTest {
                 USER_ID, devices, environment, rules, specs,
                 AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
         assertCompleteModel(baselineModel);
-        NusmvExecutor.NusmvResult baseline = executor.execute(baselineModel.smvFile());
+        NusmvExecutor.NusmvResult baseline = FormalCheckTestSupport.checkProperties(executor, baselineModel);
         assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
         assertEquals(1, violationCount(baseline));
         assertTrue(verdictsBySpecId(baseline, baselineModel).get(requiredHeating.getId()).isPassed(),
@@ -872,7 +837,7 @@ class AcceptanceDemoScenarioNusmvTest {
                 USER_ID, devices, environment, rules, specs,
                 AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
         assertCompleteModel(baselineModel);
-        NusmvExecutor.NusmvResult baseline = executor.execute(baselineModel.smvFile());
+        NusmvExecutor.NusmvResult baseline = FormalCheckTestSupport.checkProperties(executor, baselineModel);
         assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
         Map<String, NusmvExecutor.SpecCheckResult> baselineVerdicts = verdictsBySpecId(baseline, baselineModel);
         assertFalse(baselineVerdicts.get(safety.getId()).isPassed());
@@ -953,7 +918,7 @@ class AcceptanceDemoScenarioNusmvTest {
                 USER_ID, devices, environment, rules, specs,
                 AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
         assertCompleteModel(baselineModel);
-        NusmvExecutor.NusmvResult baseline = executor.execute(baselineModel.smvFile());
+        NusmvExecutor.NusmvResult baseline = FormalCheckTestSupport.checkProperties(executor, baselineModel);
         assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
         assertEquals(1, violationCount(baseline));
         List<TraceStateDto> states = new SmvTraceParser().parseCounterexampleStates(
@@ -1037,7 +1002,7 @@ class AcceptanceDemoScenarioNusmvTest {
                     USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
                     SmvGenerator.GeneratePurpose.VERIFICATION);
             assertCompleteModel(model);
-            NusmvExecutor.NusmvResult baseline = executor.execute(model.smvFile());
+            NusmvExecutor.NusmvResult baseline = FormalCheckTestSupport.checkProperties(executor, model);
             assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
             Map<String, NusmvExecutor.SpecCheckResult> before = verdictsBySpecId(baseline, model);
             assertEquals(3 - round, violationCount(baseline));
@@ -1063,7 +1028,7 @@ class AcceptanceDemoScenarioNusmvTest {
                     USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
                     SmvGenerator.GeneratePurpose.VERIFICATION);
             assertCompleteModel(repairedModel);
-            NusmvExecutor.NusmvResult repaired = executor.execute(repairedModel.smvFile());
+            NusmvExecutor.NusmvResult repaired = FormalCheckTestSupport.checkProperties(executor, repairedModel);
             assertTrue(repaired.isSuccess(), repaired::getErrorMessage);
             Map<String, NusmvExecutor.SpecCheckResult> after = verdictsBySpecId(repaired, repairedModel);
             assertTrue(after.get(targetId).isPassed());
@@ -1114,7 +1079,7 @@ class AcceptanceDemoScenarioNusmvTest {
                     USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
                     SmvGenerator.GeneratePurpose.VERIFICATION);
             assertCompleteModel(model);
-            NusmvExecutor.NusmvResult baseline = executor.execute(model.smvFile());
+            NusmvExecutor.NusmvResult baseline = FormalCheckTestSupport.checkProperties(executor, model);
             assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
             Map<String, NusmvExecutor.SpecCheckResult> before = verdictsBySpecId(baseline, model);
             if (round == 0) {
@@ -1145,7 +1110,7 @@ class AcceptanceDemoScenarioNusmvTest {
                     USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
                     SmvGenerator.GeneratePurpose.VERIFICATION);
             assertCompleteModel(repairedModel);
-            NusmvExecutor.NusmvResult repaired = executor.execute(repairedModel.smvFile());
+            NusmvExecutor.NusmvResult repaired = FormalCheckTestSupport.checkProperties(executor, repairedModel);
             assertTrue(repaired.isSuccess(), repaired::getErrorMessage);
             Map<String, NusmvExecutor.SpecCheckResult> after = verdictsBySpecId(repaired, repairedModel);
             assertTrue(after.get(target).isPassed());
@@ -1156,7 +1121,7 @@ class AcceptanceDemoScenarioNusmvTest {
                 USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
                 SmvGenerator.GeneratePurpose.VERIFICATION);
         assertCompleteModel(finalModel);
-        NusmvExecutor.NusmvResult finalCheck = executor.execute(finalModel.smvFile());
+        NusmvExecutor.NusmvResult finalCheck = FormalCheckTestSupport.checkProperties(executor, finalModel);
         assertTrue(finalCheck.isSuccess(), finalCheck::getErrorMessage);
         assertEquals(0, violationCount(finalCheck));
 
@@ -1188,7 +1153,7 @@ class AcceptanceDemoScenarioNusmvTest {
                 USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
                 SmvGenerator.GeneratePurpose.VERIFICATION);
         assertCompleteModel(occupiedModel);
-        NusmvExecutor.NusmvResult occupiedCheck = executor.execute(occupiedModel.smvFile());
+        NusmvExecutor.NusmvResult occupiedCheck = FormalCheckTestSupport.checkProperties(executor, occupiedModel);
         assertTrue(occupiedCheck.isSuccess(), occupiedCheck::getErrorMessage);
         Map<String, NusmvExecutor.SpecCheckResult> occupiedVerdicts = verdictsBySpecId(occupiedCheck, occupiedModel);
         assertTrue(occupiedVerdicts.get(lighting.getId()).isPassed(),
@@ -1218,7 +1183,7 @@ class AcceptanceDemoScenarioNusmvTest {
                 USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
                 SmvGenerator.GeneratePurpose.VERIFICATION);
         assertCompleteModel(activeModel);
-        NusmvExecutor.NusmvResult activeCheck = executor.execute(activeModel.smvFile());
+        NusmvExecutor.NusmvResult activeCheck = FormalCheckTestSupport.checkProperties(executor, activeModel);
         assertTrue(activeCheck.isSuccess(), activeCheck::getErrorMessage);
         assertEquals(0, violationCount(activeCheck));
     }
@@ -1252,7 +1217,7 @@ class AcceptanceDemoScenarioNusmvTest {
                     USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
                     SmvGenerator.GeneratePurpose.VERIFICATION);
             assertCompleteModel(model);
-            NusmvExecutor.NusmvResult baseline = executor.execute(model.smvFile());
+            NusmvExecutor.NusmvResult baseline = FormalCheckTestSupport.checkProperties(executor, model);
             assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
             Map<String, NusmvExecutor.SpecCheckResult> before = verdictsBySpecId(baseline, model);
             if (round == 0) assertEquals(5, violationCount(baseline));
@@ -1296,7 +1261,7 @@ class AcceptanceDemoScenarioNusmvTest {
                     USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
                     SmvGenerator.GeneratePurpose.VERIFICATION);
             assertCompleteModel(repairedModel);
-            NusmvExecutor.NusmvResult repaired = executor.execute(repairedModel.smvFile());
+            NusmvExecutor.NusmvResult repaired = FormalCheckTestSupport.checkProperties(executor, repairedModel);
             assertTrue(repaired.isSuccess(), repaired::getErrorMessage);
             Map<String, NusmvExecutor.SpecCheckResult> after = verdictsBySpecId(repaired, repairedModel);
             assertTrue(after.get(target).isPassed());
@@ -1327,7 +1292,7 @@ class AcceptanceDemoScenarioNusmvTest {
                 USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
                 SmvGenerator.GeneratePurpose.VERIFICATION);
         assertCompleteModel(model);
-        NusmvExecutor.NusmvResult baseline = executor.execute(model.smvFile());
+        NusmvExecutor.NusmvResult baseline = FormalCheckTestSupport.checkProperties(executor, model);
         assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
         assertEquals(1, violationCount(baseline));
         assertEquals(4, baseline.getSpecResults().size());
@@ -1377,7 +1342,7 @@ class AcceptanceDemoScenarioNusmvTest {
                 USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
                 SmvGenerator.GeneratePurpose.VERIFICATION);
         assertCompleteModel(model);
-        NusmvExecutor.NusmvResult baseline = executor.execute(model.smvFile());
+        NusmvExecutor.NusmvResult baseline = FormalCheckTestSupport.checkProperties(executor, model);
         assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
         assertEquals(forked && fullScene ? 3 : 1, violationCount(baseline));
         assertTrue(verdictsBySpecId(baseline, model).get(specs.get(1).getId()).isPassed());
@@ -1428,7 +1393,7 @@ class AcceptanceDemoScenarioNusmvTest {
                 USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
                 SmvGenerator.GeneratePurpose.VERIFICATION);
         assertCompleteModel(model);
-        NusmvExecutor.NusmvResult baseline = executor.execute(model.smvFile());
+        NusmvExecutor.NusmvResult baseline = FormalCheckTestSupport.checkProperties(executor, model);
         assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
         assertEquals(1, violationCount(baseline));
         String target = specs.get(0).getId();
@@ -1463,7 +1428,7 @@ class AcceptanceDemoScenarioNusmvTest {
                 USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
                 SmvGenerator.GeneratePurpose.VERIFICATION);
         assertCompleteModel(revisedModel);
-        NusmvExecutor.NusmvResult revised = executor.execute(revisedModel.smvFile());
+        NusmvExecutor.NusmvResult revised = FormalCheckTestSupport.checkProperties(executor, revisedModel);
         assertTrue(revised.isSuccess(), revised::getErrorMessage);
         assertEquals(0, violationCount(revised));
     }
@@ -1530,7 +1495,7 @@ class AcceptanceDemoScenarioNusmvTest {
     }
 
     @Test
-    void elderlyCareScene_preservesNightLightingAndVentilationWhenRepairingPrivacy() throws Exception {
+    void elderlyCareScene_rejectsRemovalThatDisablesItsPhotoResponse() throws Exception {
         String nusmvPath = resolveNusmvPath();
         Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
                 "NuSMV executable is required for the care-apartment regression");
@@ -1547,7 +1512,7 @@ class AcceptanceDemoScenarioNusmvTest {
                 USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), true,
                 SmvGenerator.GeneratePurpose.VERIFICATION);
         assertCompleteModel(model);
-        NusmvExecutor.NusmvResult baseline = executor.execute(model.smvFile());
+        NusmvExecutor.NusmvResult baseline = FormalCheckTestSupport.checkProperties(executor, model);
         assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
         assertEquals(12, baseline.getSpecResults().size());
         assertEquals(1, violationCount(baseline));
@@ -1561,15 +1526,13 @@ class AcceptanceDemoScenarioNusmvTest {
         FixResultDto fixes = allStrategyFixer(generator, executor, 60_000).fix(
                 316L, target, states, rules, devices, environment, specs, model.deviceSmvMap(),
                 USER_ID, AttackScenarioDto.none(), true, List.of("remove"), 20, Map.of());
-        assertVerifiedAttempt(fixes, "remove");
-        assertTrue(fixes.getSuggestions().stream().allMatch(suggestion ->
-                        suggestion.getRemovedRuleIndices().equals(List.of(6))),
-                "Do not remove the required night light to stop the downstream camera");
-        assertEveryListedAlternativeHolds(fixes.getSuggestions(), target, rules, devices,
-                environment, specs, model.deviceSmvMap(), generator, executor);
-        assertTrue(fixes.getSuggestions().stream().allMatch(suggestion -> suggestion.getPreexistingViolations().isEmpty()));
+        assertTriggerPreservationRejected(fixes);
+        var editedRules = new ArrayList<>(rules);
+        editedRules.remove(6);
+        var repairedModel = generator.generateWithEnvironment(USER_ID, devices, environment,
+                editedRules, specs, AttackScenarioDto.none(), true, SmvGenerator.GeneratePurpose.VERIFICATION);
+        assertAllPropertiesPassWithUnreachableResponse(executor, repairedModel, 7);
     }
-
     @Test
     void elderlyCare_initialSafetyAndAbsentCO2EffectsExplainWhyRulesCannotRepairThem() throws Exception {
         String nusmvPath = resolveNusmvPath();
@@ -1614,7 +1577,7 @@ class AcceptanceDemoScenarioNusmvTest {
                 USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), true,
                 SmvGenerator.GeneratePurpose.VERIFICATION);
         assertCompleteModel(model);
-        NusmvExecutor.NusmvResult baseline = executor.execute(model.smvFile());
+        NusmvExecutor.NusmvResult baseline = FormalCheckTestSupport.checkProperties(executor, model);
         assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
         assertEquals(3, violationCount(baseline));
         Map<String, NusmvExecutor.SpecCheckResult> verdicts = verdictsBySpecId(baseline, model);
@@ -1654,7 +1617,7 @@ class AcceptanceDemoScenarioNusmvTest {
                 USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
                 SmvGenerator.GeneratePurpose.VERIFICATION);
         assertCompleteModel(model);
-        NusmvExecutor.NusmvResult baseline = executor.execute(model.smvFile());
+        NusmvExecutor.NusmvResult baseline = FormalCheckTestSupport.checkProperties(executor, model);
         assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
         Map<String, NusmvExecutor.SpecCheckResult> verdicts = verdictsBySpecId(baseline, model);
         assertFalse(verdicts.get(specs.get(0).getId()).isPassed());
@@ -1713,7 +1676,7 @@ class AcceptanceDemoScenarioNusmvTest {
                 USER_ID, devices, environment, rules, specs,
                 AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
         assertCompleteModel(baselineModel);
-        NusmvExecutor.NusmvResult baseline = executor.execute(baselineModel.smvFile());
+        NusmvExecutor.NusmvResult baseline = FormalCheckTestSupport.checkProperties(executor, baselineModel);
         assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
         assertEquals(1, violationCount(baseline));
         List<TraceStateDto> states = new SmvTraceParser().parseCounterexampleStates(
@@ -1769,7 +1732,7 @@ class AcceptanceDemoScenarioNusmvTest {
                 USER_ID, devices, environment, rules, specs,
                 AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
         assertCompleteModel(baselineModel);
-        NusmvExecutor.NusmvResult baseline = executor.execute(baselineModel.smvFile());
+        NusmvExecutor.NusmvResult baseline = FormalCheckTestSupport.checkProperties(executor, baselineModel);
         assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
         assertEquals(1, violationCount(baseline));
         List<TraceStateDto> states = new SmvTraceParser().parseCounterexampleStates(
@@ -1837,7 +1800,7 @@ class AcceptanceDemoScenarioNusmvTest {
         SmvGenerator.GenerateResult baselineModel = generator.generateWithEnvironment(
                 USER_ID, devices, environment, rules, specs,
                 AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
-        NusmvExecutor.NusmvResult baseline = executor.execute(baselineModel.smvFile());
+        NusmvExecutor.NusmvResult baseline = FormalCheckTestSupport.checkProperties(executor, baselineModel);
         assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
         assertEquals(1, violationCount(baseline));
         NusmvExecutor.SpecCheckResult violation = baseline.getSpecResults().stream()
@@ -1873,14 +1836,14 @@ class AcceptanceDemoScenarioNusmvTest {
         SmvGenerator.GenerateResult repairedModel = generator.generateWithEnvironment(
                 USER_ID, devices, environment, repairedRules, specs,
                 AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
-        NusmvExecutor.NusmvResult repaired = executor.execute(repairedModel.smvFile());
+        NusmvExecutor.NusmvResult repaired = FormalCheckTestSupport.checkProperties(executor, repairedModel);
         assertTrue(repaired.isSuccess(), repaired::getErrorMessage);
         assertFalse(repaired.hasAnyViolation(),
                 "The condition suggestion must repair the complete evacuation response chain");
     }
 
     @Test
-    void budgetOneAttack_removeStrategyProducesARepairThatSurvivesTheSameBudget() throws Exception {
+    void budgetOneAttack_rejectsRemovalThatDisablesTheCameraResponse() throws Exception {
         String nusmvPath = resolveNusmvPath();
         Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
                 "NuSMV executable is required for the attacked repair regression");
@@ -1897,7 +1860,7 @@ class AcceptanceDemoScenarioNusmvTest {
         SmvGenerator.GenerateResult attackedModel = generator.generateWithEnvironment(
                 USER_ID, devices, environment, rules, specs,
                 AttackScenarioDto.anyUpToBudget(1), true, SmvGenerator.GeneratePurpose.VERIFICATION);
-        NusmvExecutor.NusmvResult attacked = executor.execute(attackedModel.smvFile());
+        NusmvExecutor.NusmvResult attacked = FormalCheckTestSupport.checkProperties(executor, attackedModel);
         assertTrue(attacked.isSuccess(), attacked::getErrorMessage);
         assertEquals(4, violationCount(attacked));
 
@@ -1923,20 +1886,13 @@ class AcceptanceDemoScenarioNusmvTest {
                 attackedModel.deviceSmvMap(), USER_ID, AttackScenarioDto.anyUpToBudget(1), true,
                 List.of("remove"), 10, Map.of());
 
-        FixSuggestionDto suggestion = fixResult.getSuggestions().stream()
-                .filter(candidate -> "remove".equals(candidate.getStrategy()))
-                .findFirst()
-                .orElseThrow(() -> new AssertionError(fixResult.getStrategyAttempts().toString()));
-        List<RuleDto> repairedRules = FixStrategyApplier.apply(
-                "remove", suggestion, rules, attackedModel.deviceSmvMap());
-
+        assertTriggerPreservationRejected(fixResult);
+        // The same-budget candidate passes its formulas by disabling the only photo source.
+        // That removes the camera response's trigger, so it must not be offered as a repair.
         SmvGenerator.GenerateResult repairedModel = generator.generateWithEnvironment(
-                USER_ID, devices, environment, repairedRules, specs,
+                USER_ID, devices, environment, rules.subList(1, rules.size()), specs,
                 AttackScenarioDto.anyUpToBudget(1), true, SmvGenerator.GeneratePurpose.VERIFICATION);
-        NusmvExecutor.NusmvResult repaired = executor.execute(repairedModel.smvFile());
-        assertTrue(repaired.isSuccess(), repaired::getErrorMessage);
-        assertFalse(repaired.hasAnyViolation(),
-                "The destructive repair must remain verified under the original attack budget");
+        assertAllPropertiesPassWithUnreachableResponse(executor, repairedModel, 1);
     }
 
     @Test
@@ -1970,7 +1926,7 @@ class AcceptanceDemoScenarioNusmvTest {
                     AttackScenarioDto.none(), true, SmvGenerator.GeneratePurpose.VERIFICATION);
             assertEquals(0, baselineModel.disabledRuleCount(), expectation.name());
             assertEquals(0, baselineModel.skippedSpecCount(), expectation.name());
-            NusmvExecutor.NusmvResult baseline = executor.execute(baselineModel.smvFile());
+            NusmvExecutor.NusmvResult baseline = FormalCheckTestSupport.checkProperties(executor, baselineModel);
             assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
             assertEquals(expectation.specCount(), baseline.getSpecResults().size(), expectation.name());
             assertEquals(expectation.baselineViolationCount(), violationCount(baseline), expectation.name());
@@ -1995,7 +1951,7 @@ class AcceptanceDemoScenarioNusmvTest {
                     AttackScenarioDto.anyUpToBudget(1), true, SmvGenerator.GeneratePurpose.VERIFICATION);
             assertEquals(0, attackedModel.disabledRuleCount(), expectation.name());
             assertEquals(0, attackedModel.skippedSpecCount(), expectation.name());
-            NusmvExecutor.NusmvResult attacked = executor.execute(attackedModel.smvFile());
+            NusmvExecutor.NusmvResult attacked = FormalCheckTestSupport.checkProperties(executor, attackedModel);
             assertTrue(attacked.isSuccess(), attacked::getErrorMessage);
             assertEquals(expectation.attackViolationCount(), violationCount(attacked), expectation.name());
 
@@ -2026,7 +1982,7 @@ class AcceptanceDemoScenarioNusmvTest {
                 SmvGenerator.GenerateResult repairedModel = generator.generateWithEnvironment(
                         USER_ID, devices, environment, repairedRules, specs,
                         AttackScenarioDto.none(), true, SmvGenerator.GeneratePurpose.VERIFICATION);
-                NusmvExecutor.NusmvResult repaired = executor.execute(repairedModel.smvFile());
+                NusmvExecutor.NusmvResult repaired = FormalCheckTestSupport.checkProperties(executor, repairedModel);
                 assertTrue(repaired.isSuccess(), repaired::getErrorMessage);
                 assertFalse(repaired.hasAnyViolation(),
                         expectation.name() + " verified removal must satisfy every emitted specification");
@@ -2085,6 +2041,25 @@ class AcceptanceDemoScenarioNusmvTest {
         throw new AssertionError(expectation.name() + " did not produce the expected verified removal");
     }
 
+    private void assertTriggerPreservationRejected(FixResultDto result) {
+        assertFalse(result.isFixable());
+        assertTrue(result.getSuggestions().isEmpty());
+        assertEquals("ALL_CANDIDATES_REJECTED", attemptStatus(result, "remove"));
+        assertTrue(result.getWarnings().stream().anyMatch(w -> w.contains("response triggers unreachable")),
+                result.getWarnings().toString());
+    }
+
+    private void assertAllPropertiesPassWithUnreachableResponse(NusmvExecutor executor,
+            SmvGenerator.GenerateResult model, int responseIndex) throws Exception {
+        var raw = executor.execute(model.smvFile());
+        assertTrue(raw.isSuccess(), raw::getErrorMessage);
+        var aligned = cn.edu.nju.Iot_Verify.component.nusmv.SpecResultAlignment.align(raw.getSpecResults(), model.emittedSpecs());
+        assertEquals(aligned.expectedResultCount(), raw.getSpecResults().size());
+        assertEquals(0, aligned.backFilled());
+        assertTrue(aligned.aligned().stream().allMatch(NusmvExecutor.SpecCheckResult::isPassed));
+        assertEquals(cn.edu.nju.Iot_Verify.dto.verification.AntecedentReachability.UNREACHABLE,
+                aligned.antecedentReachability(responseIndex, model.emittedSpecs().get(responseIndex)));
+    }
     private long violationCount(NusmvExecutor.NusmvResult result) {
         return result.getSpecResults().stream().filter(spec -> !spec.isPassed()).count();
     }
@@ -2188,7 +2163,7 @@ class AcceptanceDemoScenarioNusmvTest {
                 USER_ID, devices, environment, originalRules, specs,
                 AttackScenarioDto.none(), enablePrivacy, SmvGenerator.GeneratePurpose.VERIFICATION);
         assertCompleteModel(originalModel);
-        NusmvExecutor.NusmvResult original = executor.execute(originalModel.smvFile());
+        NusmvExecutor.NusmvResult original = FormalCheckTestSupport.checkProperties(executor, originalModel);
         assertTrue(original.isSuccess(), original::getErrorMessage);
         assertEquals(specs.size(), original.getSpecResults().size());
         Set<String> protectedSpecs = verdictsBySpecId(original, originalModel).entrySet().stream()
@@ -2204,7 +2179,7 @@ class AcceptanceDemoScenarioNusmvTest {
                     USER_ID, devices, environment, repairedRules, specs,
                     AttackScenarioDto.none(), enablePrivacy, SmvGenerator.GeneratePurpose.VERIFICATION);
             assertCompleteModel(repairedModel);
-            NusmvExecutor.NusmvResult repaired = executor.execute(repairedModel.smvFile());
+            NusmvExecutor.NusmvResult repaired = FormalCheckTestSupport.checkProperties(executor, repairedModel);
             assertTrue(repaired.isSuccess(), repaired::getErrorMessage);
             assertEquals(specs.size(), repaired.getSpecResults().size());
             Set<String> violated = new HashSet<>();

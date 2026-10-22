@@ -14,7 +14,7 @@ All paths are relative to the server root. Response representations and authenti
 follow [overview.md](overview.md). SSE streams and successful SMV downloads are direct
 responses rather than JSON envelopes.
 
-Verified against code on 2026-10-09.
+Verified against code on 2026-10-22.
 
 ---
 
@@ -46,10 +46,12 @@ Verified against code on 2026-10-09.
 | POST | `/api/board/environment` | Apply itemized compare-and-set field patches to the board environment pool | [board.md](board.md) |
 | GET | `/api/board/specs` | List specifications | [board.md](board.md) |
 | POST | `/api/board/specs` | Create one specification | [board.md](board.md) |
+| PUT | `/api/board/specs/{specId}` | Edit one unchanged specification in place | [board.md](board.md#targeted-rulespecification-edits) |
 | DELETE | `/api/board/specs/{specId}` | Delete one specification when its confirmed snapshot is still current | [board.md](board.md) |
 | GET | `/api/board/rules` | List automation rules | [board.md](board.md) |
 | POST | `/api/board/rules` | Create one automation rule | [board.md](board.md) |
 | PUT | `/api/board/rules/order` | Atomically replace rule execution order | [board.md](board.md) |
+| PUT | `/api/board/rules/{ruleId}` | Edit one unchanged automation rule in place | [board.md](board.md#targeted-rulespecification-edits) |
 | DELETE | `/api/board/rules/{ruleId}` | Delete one automation rule when its confirmed snapshot is still current | [board.md](board.md) |
 | GET | `/api/board/edits/availability` | Current undo/redo availability from the per-user edit journal | [board.md](board.md) |
 | POST | `/api/board/edits/undo` | Reverse the newest reversible Board edit, including device updates, Environment Pool edits, and automatic fixes | [board.md](board.md) |
@@ -160,7 +162,8 @@ Verified against code on 2026-10-09.
 
 This index should be kept honest by generating it from the controllers rather than
 editing by hand. The endpoint set is defined by the `@RequestMapping` on each
-controller plus the `@GetMapping` / `@PostMapping` / `@DeleteMapping` / `@PatchMapping` on its methods,
+controller plus the `@GetMapping` / `@PostMapping` / `@PutMapping` / `@DeleteMapping` /
+`@PatchMapping` on its methods,
 under:
 
 ```

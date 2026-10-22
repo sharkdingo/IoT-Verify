@@ -46,8 +46,12 @@ public final class SmvGenerationContext {
     }
 
     public void emittedSpec(SpecificationDto spec, String expression) {
+        emittedSpec(spec, expression, null);
+    }
+
+    public void emittedSpec(SpecificationDto spec, String expression, String antecedentExpression) {
         if (warnings != null) {
-            warnings.emittedSpec(spec, expression);
+            warnings.emittedSpec(spec, expression, antecedentExpression);
         }
     }
 
@@ -74,6 +78,10 @@ public final class SmvGenerationContext {
         }
     }
 
-    public record EmittedSpec(SpecificationDto spec, String specId, String expression) {
+    public record EmittedSpec(SpecificationDto spec, String specId, String expression,
+                              String antecedentExpression) {
+        public EmittedSpec(SpecificationDto spec, String specId, String expression) {
+            this(spec, specId, expression, null);
+        }
     }
 }

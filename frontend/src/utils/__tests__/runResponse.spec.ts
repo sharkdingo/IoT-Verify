@@ -93,6 +93,7 @@ const validVerification = () => ({
     specificationLabel: 'Always',
     formulaPreview: 'CTL AG("Hall sensor".state = "active")',
     formulaKind: 'CTL',
+    antecedentReachability: 'NOT_APPLICABLE',
     outcome: 'SATISFIED',
     expression: 'CTLSPEC AG motion'
   }],
@@ -112,6 +113,26 @@ const specificationSnapshot = () => ({
 })
 
 describe('frozen specification interpretation contract', () => {
+  it.each([undefined, null, 'UNKNOWN', 'REACHABLE'])('rejects invalid or inapplicable trigger evidence: %s', evidence => {
+    const result = validVerification()
+    Object.assign(result.specResults[0], { antecedentReachability: evidence })
+    expect(() => validateVerificationResult(result)).toThrow(/antecedentReachability/)
+  })
+
+  it.each(['4', '5', '6'])('requires explicit trigger evidence for response template %s', templateId => {
+    const result = validVerification()
+    Object.assign(result.specResults[0], { templateId, antecedentReachability: 'NOT_APPLICABLE' })
+    expect(() => validateVerificationResult(result)).toThrow(/antecedentReachability/)
+    for (const antecedentReachability of ['REACHABLE', 'UNREACHABLE', 'INCONCLUSIVE']) {
+      Object.assign(result.specResults[0], { antecedentReachability })
+      result.outcome = antecedentReachability === 'INCONCLUSIVE' ? 'INCONCLUSIVE' : 'SATISFIED'
+      result.modelComplete = antecedentReachability !== 'INCONCLUSIVE'
+      expect(validateVerificationResult(result).specResults[0]).toMatchObject({ antecedentReachability })
+      if (antecedentReachability === 'INCONCLUSIVE') {
+        expect(() => validateVerificationResult({ ...result, outcome: 'SATISFIED', modelComplete: true })).toThrow()
+      }
+    }
+  })
   it('retains recorded conditions and accepts explicitly absent evidence in older records', () => {
     const result = validVerification()
     expect(validateVerificationResult(result).specResults[0].specificationSnapshot).toBeUndefined()
@@ -343,6 +364,7 @@ describe('verification and simulation response contracts', () => {
         specificationLabel: 'Always',
         formulaPreview: 'CTL AG("Hall sensor".state = "active")',
         formulaKind: 'CTL',
+        antecedentReachability: 'NOT_APPLICABLE',
         outcome: 'VIOLATED',
         expression: 'CTLSPEC AG motion'
       }]

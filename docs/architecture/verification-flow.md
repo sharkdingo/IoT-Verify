@@ -5,7 +5,7 @@ counterexample, and optional fix attempt. Field-level contracts live in
 [../api/verification.md](../api/verification.md); model construction lives in
 [nusmv-model.md](nusmv-model.md).
 
-Verified against code on 2026-10-09. Source:
+Verified against code on 2026-10-22. Source:
 `VerificationController`, `SimulationController`, `VerificationServiceImpl`,
 `SimulationServiceImpl`, `SmvGenerator`, `NusmvExecutor`, and `SmvTraceParser`.
 
@@ -25,7 +25,7 @@ Strict run-parameter validation
         v
 SmvGenerator
   -> model.smv
-  -> emitted-spec { specId, expression } mapping
+  -> emitted-spec { specId, expression, antecedentExpression } mapping
   -> disabledRuleCount / skippedSpecCount / generationIssues
         |
         v
@@ -45,6 +45,14 @@ VerificationResultDto {
 
 The saved board needs at least one device and one specification. There is no `saveTrace`
 input: parsed counterexamples are persisted automatically.
+
+For response templates, generation also emits an auxiliary reachability query for the
+antecedent. `SpecResultAlignment` pairs both result kinds by expression, reserves diagnostic
+results before any property recovery, and publishes only the user properties as result rows
+and counterexamples. The diagnostics describe the same model and attack space as that run;
+their meaning and incomplete-output behavior are owned by [SpecResultDto](../api/verification.md#specresultdto).
+Negated repair-search queries do not emit these diagnostics; complete candidate and baseline
+forward checks do, as required by the [repair acceptance rule](auto-fix.md#forward-verification-fixstrategyutilsforwardverify).
 
 Known semantic mismatches, such as unknown actions, illegal enum values, non-signal API
 conditions, and invalid template-7 reliability sources, are rejected before execution.

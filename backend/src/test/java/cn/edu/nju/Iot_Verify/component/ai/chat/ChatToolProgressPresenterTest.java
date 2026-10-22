@@ -9,6 +9,23 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class ChatToolProgressPresenterTest {
     @Test
+    void specificationUpdateRefreshesTheListButAnUnchangedDraftDoesNotClaimAnEdit() {
+        String result = """
+                {"operation":"updated","verificationStatus":"NOT_VERIFIED","totalSpecs":1,
+                 "specification":{"specId":"spec-1","templateId":"3","aConditions":[{}],
+                 "ifConditions":[],"thenConditions":[],"formulaPreview":"AF light.state = on"}}
+                """;
+        var receipt = presenter.actionReceipt("manage_spec", result, true).orElseThrow();
+        assertEquals("SPECIFICATIONS_UPDATED", receipt.assistantAction());
+        assertEquals(List.of("spec_list"), receipt.refreshTargets());
+        assertTrue(presenter.toolProgressDetail("manage_spec", result, true).contains("已修改规约"));
+        assertTrue(presenter.toolProgressDetail("manage_spec", result, false).contains("Updated specification"));
+        String unchanged = result.replace("\"updated\"", "\"unchanged\"");
+        assertTrue(presenter.actionReceipt("manage_spec", unchanged, true).isEmpty());
+        assertTrue(presenter.toolProgressDetail("manage_spec", unchanged, true).contains("未改变"));
+    }
+
+    @Test
     void ruleUpdateShowsTheConcreteChangeAndRefreshesRulesWithoutClaimingVerification() {
         String result = """
                 {"operation":"updated","verificationStatus":"NOT_VERIFIED","executionOrder":1,"totalRules":2,

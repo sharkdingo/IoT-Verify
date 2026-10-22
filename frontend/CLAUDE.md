@@ -124,7 +124,7 @@ single owner of the "session gone → login" location.
   response carries, and reads availability from `/board/edits/availability`. Never intercept
   `Ctrl+Z` in an input, textarea, `contenteditable`, or during an IME composition
   (`boardUndoShortcut.ts` owns that scoping). Reversible: device create/update/rename/delete, direct
-  Environment Pool edits, rule/spec create+delete, rule reorder, and automatic-fix apply. Device
+  Environment Pool edits, rule/spec create/update/delete, rule reorder, and automatic-fix apply. Device
   deletion is one compound entry containing its cascades and Environment Pool state; automatic fix
   is one ordered rule-set entry. Confirmed scene replace/clear, template deletion, and default-template
   reset are history boundaries because they can remove or replace manifest semantics used by snapshots.

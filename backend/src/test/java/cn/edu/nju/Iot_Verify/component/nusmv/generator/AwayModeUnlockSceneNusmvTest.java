@@ -72,13 +72,12 @@ class AwayModeUnlockSceneNusmvTest {
      * blamed rules, each strategy's outcome, and the budget-one attack.
      *
      * <p>Two strategies must keep *declining* — parameter tuning for want of a numeric inequality,
-     * condition tightening because no added guard survives re-checking — so removal stays the only
-     * verified repair. And because that removal leaves the door permanently locked, this also pins the
-     * asymmetry the walkthrough explains: the prohibition property is genuinely achieved, while the
-     * Response property becomes vacuously true once its antecedent is unreachable.
+     * condition tightening because no added guard survives re-checking. Removal also declines because
+     * it disables the re-lock response trigger. An explicit manual deletion still satisfies the
+     * prohibition and makes the Response property vacuously true, with a diagnostic that says so.
      */
     @Test
-    void awayModeUnlockScene_violatesUnlockSafetyAndIsRepairedOnlyByRemoval() throws Exception {
+    void awayModeUnlockScene_rejectsRemovalThatDisablesTheResponseTrigger() throws Exception {
         String nusmvPath = resolveNusmvPath();
         Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
                 "NuSMV executable is required for this demo-scene regression test");
@@ -103,7 +102,7 @@ class AwayModeUnlockSceneNusmvTest {
         assertEquals(0, baselineModel.disabledRuleCount(), "demo scene must not disable rules");
         assertEquals(0, baselineModel.skippedSpecCount(), "demo scene must emit all six specs");
 
-        NusmvExecutor.NusmvResult baseline = executor.execute(baselineModel.smvFile());
+        NusmvExecutor.NusmvResult baseline = FormalCheckTestSupport.checkProperties(executor, baselineModel);
         // Also guards a coupling that has nothing to do with this demo, because this scene happens to
         // contain an affect-only shared variable (`Light.illuminance`, `Reads: false`). Label
         // declaration (`SmvDeviceModuleBuilder.appendPropertyVariables`) and label initialisation
@@ -182,7 +181,7 @@ class AwayModeUnlockSceneNusmvTest {
                 901L, specs.get(violatedIndex).getId(), states, rules, devices, environment, specs,
                 baselineModel.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), true,
                 List.of("parameter", "condition", "remove"), 20, Map.of());
-        assertTrue(fixResult.isFixable(), () -> "expected a repairable violation: " + fixResult.getSummary());
+        assertFalse(fixResult.isFixable(), "a repair must preserve the formerly reachable response trigger");
 
         // Localization lists every rule that fired in the trace, so all three are candidates here
         // (the porch-light rule shares the convenience rule's trigger and fires in the same step).
@@ -196,60 +195,32 @@ class AwayModeUnlockSceneNusmvTest {
         // Each strategy's honest outcome. Parameter tuning has no numeric inequality to move, and
         // condition tightening cannot repair this property: occupancy evolves freely, so any guard
         // that permits an unlock while someone is home is still followed by a step where they left
-        // and nothing re-locks the door. Removal is therefore the only verified repair, and the
-        // runbook must not promise a non-destructive one.
+        // and nothing re-locks the door. Removal would erase the response trigger, so it is rejected too.
         Map<String, String> attemptStatus = new java.util.HashMap<>();
         fixResult.getStrategyAttempts().forEach(a -> attemptStatus.put(a.getStrategy(), a.getStatus()));
         assertEquals("SKIPPED_NO_PARAMETERIZABLE_VALUES", attemptStatus.get("parameter"),
                 "this scene is enum-valued, so parameter tuning has nothing to adjust");
         assertEquals("NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE", attemptStatus.get("condition"));
-        assertEquals("VERIFIED", attemptStatus.get("remove"));
+        assertEquals("ALL_CANDIDATES_REJECTED", attemptStatus.get("remove"));
 
-        FixSuggestionDto removeFix = fixResult.getSuggestions().stream()
-                .filter(s -> "remove".equals(s.getStrategy()))
-                .findFirst()
-                .orElseThrow(() -> new AssertionError("no removal suggestion offered"));
-        assertEquals(List.of(1), removeFix.getRemovedRuleIndices(),
-                "removal must target exactly the convenience-unlock rule");
-
-        Map<String, String> deviceRefs = devices.stream().collect(
-                java.util.stream.Collectors.toMap(
-                        DeviceVerificationDto::getVarName, DeviceVerificationDto::getVarName));
-        for (FixSuggestionDto s : fixResult.getSuggestions()) {
-            List<RuleDto> repairedRules = FixStrategyApplier.apply(
-                    s.getStrategy(), s, rules, baselineModel.deviceSmvMap(), deviceRefs);
-            SmvGenerator.GenerateResult repairedModel = generator.generateWithEnvironment(
-                    USER_ID, devices, environment, repairedRules, specs,
-                    AttackScenarioDto.none(), true, SmvGenerator.GeneratePurpose.VERIFICATION);
-            NusmvExecutor.NusmvResult repaired = executor.execute(repairedModel.smvFile());
-            assertTrue(repaired.isSuccess(), repaired::getErrorMessage);
-            assertFalse(repaired.hasAnyViolation(),
-                    () -> "repair from strategy '" + s.getStrategy() + "' left a violation");
-            assertEquals(specs.size(), repaired.getSpecResults().size());
-            // One removal clears both violations, which is the runbook's shared-root-cause claim.
-            assertEquals(rules.size() - 1, repairedRules.size());
-
-            // …but the two properties do not go green the same way, and the walkthrough says so out loud.
-            // Deleting the only rule that ever unlocked the door leaves the door permanently locked, which
-            // *achieves* the prohibition property (index 2) and *empties* the implication property
-            // (index 3): its antecedent can no longer arise, so it holds for the empty reason.
-            //
-            // Pinned because a green forward verification cannot tell these apart, and presenting the
-            // vacuous one as a repair is the most misleading thing this demo could do.
-            Map<String, Boolean> reachable = probeReachability(executor, repairedModel, List.of(
-                    "door_1.LockState = unlocked",
-                    "a_occupancy = absent & door_1.LockState = unlocked"));
-            assertFalse(reachable.get("door_1.LockState = unlocked"),
-                    "the removal must leave the door permanently locked, as the runbook states");
-            assertFalse(reachable.get("a_occupancy = absent & door_1.LockState = unlocked"),
-                    "the Response property's antecedent must be unreachable after the removal, which is "
-                            + "exactly why the walkthrough calls its satisfaction vacuous rather than earned");
-        }
-
+        assertTrue(fixResult.getSuggestions().isEmpty());
+        assertTrue(fixResult.getWarnings().stream().anyMatch(d -> d.contains("response triggers unreachable")));
+        // A user can still edit the model this way; its CTL truth remains true, but the diagnostic
+        // explains why this does not earn an automatic repair recommendation.
+        var repairedModel = generator.generateWithEnvironment(USER_ID, devices, environment,
+                List.of(rules.get(0), rules.get(2)), specs, AttackScenarioDto.none(), true,
+                SmvGenerator.GeneratePurpose.VERIFICATION);
+        var repairedRaw = executor.execute(repairedModel.smvFile());
+        assertTrue(repairedRaw.isSuccess(), repairedRaw::getErrorMessage);
+        var repaired = cn.edu.nju.Iot_Verify.component.nusmv.SpecResultAlignment.align(
+                repairedRaw.getSpecResults(), repairedModel.emittedSpecs());
+        assertTrue(repaired.aligned().stream().allMatch(NusmvExecutor.SpecCheckResult::isPassed));
+        assertEquals(cn.edu.nju.Iot_Verify.dto.verification.AntecedentReachability.UNREACHABLE,
+                repaired.antecedentReachability(3, repairedModel.emittedSpecs().get(3)));
         SmvGenerator.GenerateResult attackedModel = generator.generateWithEnvironment(
                 USER_ID, devices, environment, rules, specs,
                 AttackScenarioDto.anyUpToBudget(1), true, SmvGenerator.GeneratePurpose.VERIFICATION);
-        NusmvExecutor.NusmvResult attacked = executor.execute(attackedModel.smvFile());
+        NusmvExecutor.NusmvResult attacked = FormalCheckTestSupport.checkProperties(executor, attackedModel);
         assertTrue(attacked.isSuccess(), attacked::getErrorMessage);
         assertEquals(specs.size(), attacked.getSpecResults().size());
 
@@ -334,7 +305,7 @@ class AwayModeUnlockSceneNusmvTest {
         assertEquals(0, model.disabledRuleCount(), "the added rule must be modelled, not disabled");
         assertEquals(0, model.skippedSpecCount());
 
-        NusmvExecutor.NusmvResult result = executor.execute(model.smvFile());
+        NusmvExecutor.NusmvResult result = FormalCheckTestSupport.checkProperties(executor, model);
         assertTrue(result.isSuccess(), result::getErrorMessage);
         assertEquals(specs.size(), result.getSpecResults().size());
 

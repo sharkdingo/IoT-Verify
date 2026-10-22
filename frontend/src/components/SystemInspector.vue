@@ -141,8 +141,10 @@ const isInspectorSection = (value?: string): value is InspectorSection =>
 const emit = defineEmits<{
   'delete-device': [deviceId: string]
   'delete-rule': [ruleId: string]
+  'edit-rule': [ruleId: string]
   'move-rule': [ruleId: string, direction: 'up' | 'down']
   'delete-spec': [specId: string]
+  'edit-spec': [specId: string]
   'open-rule-builder': []
   'open-control-section': [section: 'devices' | 'rules' | 'specs']
   'device-click': [deviceId: string]
@@ -1216,6 +1218,13 @@ const syncFullTextTitle = (event: PointerEvent | FocusEvent) => {
               </div>
             </dl>
             <div class="board-inventory-footer board-rule-actions">
+              <HintTooltip :content="mutationTitle(t('app.editRule'))">
+                <button type="button" class="board-panel-icon-action" :data-testid="`edit-rule-${rule.originalId}`"
+                  :disabled="props.readOnly" :aria-label="t('app.editRule')"
+                  @click.stop="ensureWritable() && rule.originalId && emit('edit-rule', rule.originalId)">
+                  <span class="material-symbols-outlined" aria-hidden="true">edit</span>
+                </button>
+              </HintTooltip>
               <div class="board-rule-order-actions" role="group" :aria-label="t('app.ruleExecutionOrder')">
                 <HintTooltip :content="mutationTitle(sectionSearch.rules ? t('app.ruleOrderSearchDisabled') : t('app.moveRuleEarlier'))">
                   <button type="button" class="board-panel-icon-action" :aria-label="t('app.moveRuleEarlier')"
@@ -1305,6 +1314,13 @@ const syncFullTextTitle = (event: PointerEvent | FocusEvent) => {
                 <button type="button" class="board-panel-icon-action board-panel-icon-action--danger" :disabled="props.readOnly"
                   :aria-label="t('app.deleteSpecification')" @click="handleDeleteSpec(spec.id)">
                   <span class="material-symbols-outlined" aria-hidden="true">delete</span>
+                </button>
+              </HintTooltip>
+              <HintTooltip :content="mutationTitle(t('app.editSpecification'))">
+                <button type="button" class="board-panel-icon-action" :data-testid="`edit-spec-${spec.id}`"
+                  :disabled="props.readOnly" :aria-label="t('app.editSpecification')"
+                  @click.stop="ensureWritable() && emit('edit-spec', spec.id)">
+                  <span class="material-symbols-outlined" aria-hidden="true">edit</span>
                 </button>
               </HintTooltip>
             </div>

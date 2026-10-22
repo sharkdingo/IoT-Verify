@@ -2,6 +2,7 @@ package cn.edu.nju.Iot_Verify.component.nusmv;
 
 import cn.edu.nju.Iot_Verify.component.nusmv.executor.NusmvExecutor.SpecCheckResult;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvGenerationContext;
+import cn.edu.nju.Iot_Verify.dto.verification.AntecedentReachability;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -33,7 +34,18 @@ public final class SpecResultAlignment {
      *                   so any positive value means per-specification attribution is not trustworthy
      * @param reordered  whether NuSMV returned results in a different order than emitted
      */
-    public record Alignment(List<SpecCheckResult> aligned, int backFilled, boolean reordered) {
+    public record Alignment(List<SpecCheckResult> aligned, List<SpecCheckResult> antecedents,
+                            int expectedResultCount, int backFilled, boolean reordered) {
+        public AntecedentReachability antecedentReachability(int index,
+                SmvGenerationContext.EmittedSpec emitted) {
+            if (emitted.spec() == null
+                    || !AntecedentReachability.appliesTo(emitted.spec().getTemplateId())) {
+                return AntecedentReachability.NOT_APPLICABLE;
+            }
+            SpecCheckResult result = antecedents.get(index);
+            if (backFilled > 0 || result == null) return AntecedentReachability.INCONCLUSIVE;
+            return result.isPassed() ? AntecedentReachability.UNREACHABLE : AntecedentReachability.REACHABLE;
+        }
     }
 
     public static Alignment align(List<SpecCheckResult> rawSpecResults,
@@ -48,6 +60,8 @@ public final class SpecResultAlignment {
         }
 
         List<SpecCheckResult> aligned = new ArrayList<>(Collections.nCopies(emittedSpecs.size(), null));
+        List<SpecCheckResult> antecedents = new ArrayList<>(Collections.nCopies(emittedSpecs.size(), null));
+        int expectedResultCount = emittedSpecs.size();
         boolean reordered = false;
         for (int i = 0; i < emittedSpecs.size(); i++) {
             SmvGenerationContext.EmittedSpec emittedSpec = emittedSpecs.get(i);
@@ -61,6 +75,20 @@ public final class SpecResultAlignment {
             used.add(matched);
             if (i >= rawSpecResults.size() || rawSpecResults.get(i) != matched) {
                 reordered = true;
+            }
+        }
+
+        // Reserve auxiliary verdicts before considering positional recovery. A failed !EF query is
+        // diagnostic evidence, never a failed user property or a counterexample to that property.
+        for (int i = 0; i < emittedSpecs.size(); i++) {
+            var emitted = emittedSpecs.get(i);
+            if (emitted == null || emitted.antecedentExpression() == null) continue;
+            expectedResultCount++;
+            Deque<SpecCheckResult> matches = byExpression.get(normalizeSpecExpression(emitted.antecedentExpression()));
+            if (matches != null && !matches.isEmpty()) {
+                SpecCheckResult matched = matches.removeFirst();
+                antecedents.set(i, matched);
+                used.add(matched);
             }
         }
 
@@ -82,13 +110,14 @@ public final class SpecResultAlignment {
          * when it reorders them. If it does fire, something changed about that echo.
          */
         int backFilled = 0;
-        for (int i = 0; i < aligned.size() && !unmatchedInOriginalOrder.isEmpty(); i++) {
+        for (int i = 0; expectedResultCount == emittedSpecs.size()
+                && i < aligned.size() && !unmatchedInOriginalOrder.isEmpty(); i++) {
             if (aligned.get(i) == null) {
                 aligned.set(i, unmatchedInOriginalOrder.removeFirst());
                 backFilled++;
             }
         }
-        return new Alignment(aligned, backFilled, reordered);
+        return new Alignment(aligned, antecedents, expectedResultCount, backFilled, reordered);
     }
 
     /*
@@ -102,9 +131,10 @@ public final class SpecResultAlignment {
      *
      * It is nevertheless unreachable, because a collision needs two specs from the same template with identical
      * operands — i.e. a duplicate — and `BoardStorageServiceImpl.validateNoIdenticalSpecifications` rejects that
-     * with a `ConflictException` on both spec-write paths (`saveSpecsInternal` and `saveBoardBatch`). The eight
+     * with a `ConflictException` on both spec-write paths (`saveSpecsInternal` and `saveBoardBatch`). The seven
      * templates in `docs/architecture/spec-templates.md` differ by operator (`AG`/`AF`, `AX`/`AF`, `EX`/`EG`),
-     * which stripping does not touch, so all eight yield distinct keys.
+     * which stripping does not touch, so all seven yield distinct keys. Auxiliary EF queries can share
+     * a trigger across responses, but then describe the same predicate and have the same truth value.
      *
      * The leniency is not gratuitous either: matching by expression is what handles the reordering above. If a
      * future change lets two distinct specs share a normalized key — a new template, or relaxing the duplicate

@@ -36,6 +36,8 @@ public class SpecResultDto {
     /** Explicit per-spec conclusion; missing or unreliable parser output is INCONCLUSIVE. */
     private VerificationOutcome outcome;
 
+    private AntecedentReachability antecedentReachability;
+
     /**
      * NuSMV expression that was checked for this specification.
      */

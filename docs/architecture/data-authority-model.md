@@ -172,8 +172,10 @@ Backend DTO: `BoardEnvironmentVariableDto`. Backend table:
 | `privacy` | User/environment pool editor; template default fallback | Initial privacy for the shared variable | Privacy modeling, specs/traces |
 
 The frontend labels `value` as the **model initial value**, not the current physical value.
-Each verification, simulation, or bounded-exploration path starts from it; later trace states
-do not write back to the pool. The expanded pool also shows the template-owned evolution:
+Verification, simulation, and board-initial bounded exploration start from these values.
+Random-initial exploration samples other legal values instead; its recorded initial state and
+inputs belong to that exploration run, not to the current Board. Later trace states do not
+write back to the pool. The expanded pool also shows the template-owned evolution:
 the required `NaturalChangeRate` for numeric shared values and each WorkingState device effect
 **on that shared value**. The pool groups effects by variable, so it can only show the shared ones;
 a `Dynamics` entry targeting a device-local variable — which is the only kind nine of the fifteen
