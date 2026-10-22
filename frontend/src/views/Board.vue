@@ -5594,7 +5594,7 @@ const applyLoadedBoardLayout = (layout: BoardLayoutDto | null, initialHydration:
   if (isNarrowViewport()) {
     if (!panelStateTouchedBeforeLayout) applyViewportPanelConstraints()
     const visibleNodes = getVisibleDeviceNodes()
-    if (visibleNodes.length > 0) {
+    if (visibleNodes.length > 0 && !canvasStateTouchedBeforeLayout) {
       void nextTick(() => fitNodesToCanvas(visibleNodes))
     }
   } else if (layout) {
@@ -13970,6 +13970,7 @@ const pollAsyncVerification = async (
         if (isPollingAbortedError(error)) throw error
         upsertVerificationTaskSummary({ ...task, progress: 100 })
         await loadVerificationRuns(false)
+        throwIfPollingAborted(expectedPollingEpoch)
         throw completedTaskResultError('verification', error)
       }
       throwIfPollingAborted(expectedPollingEpoch)
@@ -14067,11 +14068,13 @@ const pollAsyncSimulation = async (taskId: number): Promise<SavedSimulationResul
           if (isPollingAbortedError(error)) throw error
           upsertSimulationTaskSummary({ ...task, progress: 100 })
           await loadSimulationRuns(false)
+          throwIfPollingAborted(expectedPollingEpoch)
           throw completedTaskResultError('simulation', error)
         }
         throwIfPollingAborted(expectedPollingEpoch)
         upsertSimulationTaskSummary({ ...task, progress: 100 })
         await loadSimulationRuns()
+        throwIfPollingAborted(expectedPollingEpoch)
         return simulationResultFromTrace(trace)
       }
       upsertSimulationTaskSummary({ ...task, progress: 100 })

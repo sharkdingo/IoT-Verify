@@ -16,6 +16,16 @@ describe('modelRequest', () => {
     expect(normalizeNuSmvDeviceName('CTLSPEC')).toBe('_ctlspec')
   })
 
+  it('matches model identities for supplementary Unicode characters', () => {
+    expect(normalizeNuSmvDeviceName('lamp🌡')).toBe('lamp_')
+    expect(normalizeNuSmvDeviceName('🌡')).toBe('device_0')
+    expect(buildVerificationRequestPayload({ attackScenario: { mode: 'EXACT_POINTS', points: [
+      { kind: 'DEVICE', deviceId: 'lamp🌡' }
+    ] }, enablePrivacy: false }).attackScenario).toEqual({ mode: 'EXACT_POINTS', points: [
+      { kind: 'DEVICE', deviceId: 'lamp_' }
+    ] })
+  })
+
   it('normalizes relation aliases used by board writes and presentation', () => {
     for (const [alias, expected] of Object.entries({ EQ: '=', '==': '=', NEQ: '!=',
       GT: '>', GTE: '>=', LT: '<', LTE: '<=', IN: 'in', NOT_IN: 'not in' })) {

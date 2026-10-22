@@ -1,13 +1,17 @@
 package cn.edu.nju.Iot_Verify.dto.spec;
 
+import cn.edu.nju.Iot_Verify.dto.RequestLimits;
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.Validation;
 import jakarta.validation.Validator;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -148,6 +152,52 @@ class SpecificationDtoValidationTest {
         Set<ConstraintViolation<SpecificationDto>> violations = validator.validate(spec);
 
         assertFalse(hasViolationContaining(violations, "Relation must be one of"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"deviceId", "deviceLabel", "conditionLabel", "formula"})
+    void authoredSpecificationRetainsInputLimitsForFieldsGeneratedInFrozenEvidence(String field) {
+        SpecificationDto spec = validSpec();
+        spec.setAConditions(List.of(validCondition("a")));
+        spec.setDevices(List.of(new SpecificationDto.DeviceRefDto("light", "Light", List.of())));
+        String expectedPath = switch (field) {
+            case "deviceId" -> {
+                spec.getDevices().get(0).setDeviceId("x".repeat(101));
+                yield "devices[0].deviceId";
+            }
+            case "deviceLabel" -> {
+                spec.getDevices().get(0).setDeviceLabel("L".repeat(101));
+                yield "devices[0].deviceLabel";
+            }
+            case "conditionLabel" -> {
+                spec.getAConditions().get(0).setDeviceLabel("L".repeat(201));
+                yield "aConditions[0].deviceLabel";
+            }
+            case "formula" -> {
+                spec.setFormula("F".repeat(4001));
+                yield "formula";
+            }
+            default -> throw new AssertionError(field);
+        };
+
+        assertTrue(validator.validate(spec).stream()
+                .anyMatch(violation -> violation.getPropertyPath().toString().equals(expectedPath)));
+        assertTrue(validator.validate(spec, SpecificationDto.FrozenModel.class).isEmpty());
+    }
+
+    @Test
+    void frozenDeviceReferencesUseModelLimitWhileAuthoringRetainsItsInputLimit() {
+        SpecificationDto spec = validSpec();
+        spec.setDevices(IntStream.range(0, RequestLimits.MAX_DEVICES)
+                .mapToObj(index -> new SpecificationDto.DeviceRefDto("device-" + index, "Device", List.of()))
+                .toList());
+
+        assertTrue(hasViolationContaining(validator.validate(spec), "At most 50 devices"));
+        assertTrue(validator.validate(spec, SpecificationDto.FrozenModel.class).isEmpty());
+
+        spec.setDevices(Collections.nCopies(RequestLimits.MAX_DEVICES + 1, spec.getDevices().get(0)));
+        assertTrue(hasViolationContaining(validator.validate(spec, SpecificationDto.FrozenModel.class),
+                "Frozen specification references exceed the model device limit"));
     }
 
     private SpecificationDto validSpec() {

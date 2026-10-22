@@ -235,7 +235,8 @@ public class OpenAiLlmProvider implements LlmProvider {
                             if (event.failed().isPresent()) {
                                 OpenAiResponsesCodec.parse(event.failed().get().response(), request, includeTools);
                             }
-                            return event.outputTextDelta().map(delta -> delta.delta()).orElse("");
+                            return event.outputTextDelta().map(delta -> delta.delta())
+                                    .or(() -> event.refusalDelta().map(delta -> delta.delta())).orElse("");
                         }, () -> OpenAiResponsesCodec.parse(accumulator.response(), request, includeTools));
             }
             ChatCompletionCreateParams params = toParams(request, includeTools);

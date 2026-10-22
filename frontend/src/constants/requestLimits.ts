@@ -8,6 +8,7 @@ export const REQUEST_LIMITS = Object.freeze({
   deviceVariables: 100,
   devicePrivacies: 100,
   templates: 100,
+  modelIdentifierCharacters: 200,
   chatSessions: 100,
   chatContentCharacters: 10000,
   sceneBytes: 64 * 1024 * 1024,

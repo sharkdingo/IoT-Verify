@@ -18,7 +18,7 @@ The `Result<T>` envelope, auth, and error codes are defined in
 [overview.md](overview.md).
 
 All endpoints are authenticated and scoped to the current user (`@CurrentUser`).
-Verified against code on 2026-10-21. Source:
+Verified against code on 2026-10-22. Source:
 `service/impl/BoardStorageServiceImpl.java`, `service/recommendation/`,
 `controller/BoardStorageController.java`, `dto/device/`, `dto/board/`, `dto/rule/`,
 `dto/spec/`, `dto/recommendation/`, `component/board/PortableSceneDiagnostics.java`,
@@ -1118,6 +1118,11 @@ and transport boundaries.
 Every standalone recommendation request requires an opaque `requestId` in the shared format defined in
 [overview.md](overview.md#client-supplied-requestid). The same rule applies wherever it appears:
 request bodies, query parameters, status paths, and cancellation paths.
+
+Standalone recommendations are locally registered as `WAITING` before distributed ownership
+acquisition. A stop accepted during that wait prevents model execution and releases any late lease.
+Successful completion and local cancellation share one terminal decision: releasing a successfully
+completed lease must not be interpreted as lease loss or turn the result into a cancelled request.
 
 | Method | Path | Query / Body | Notes |
 | :--- | :--- | :--- | :--- |

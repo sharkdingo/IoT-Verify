@@ -23,6 +23,7 @@ import { isRunInitiator, type ModelPlaybackScene } from '@/types/model'
 import { MODEL_TOKEN_SOURCE_SET } from '@/types/modelToken'
 import { normalizeNuSmvDeviceName } from './modelRequest'
 import { validateModelPlaybackScene } from './playbackSceneResponse'
+import { REQUEST_LIMITS } from '@/constants/requestLimits'
 
 export const FUZZ_RESPONSE_INCOMPLETE_CODE = 'FUZZ_RESPONSE_INCOMPLETE'
 const FUZZ_ACTIVE_TASK_LIMIT_REACHED_CODE = 'FUZZ_ACTIVE_TASK_LIMIT_REACHED'
@@ -446,7 +447,8 @@ const validateRun = (
     throw new FuzzResponseContractError(context, 'frozen specifications must match eligible IDs')
   }
   if (Object.keys(sources).length > 100 || Object.keys(sources).length !== run.modelSnapshot.deviceCount
-    || Object.entries(sources).some(([id, source]) => !id.trim() || id.length > 100 || !MODEL_TOKEN_SOURCE_SET.has(String(source)))) {
+    || Object.entries(sources).some(([id, source]) => !id.trim()
+      || id.length > REQUEST_LIMITS.modelIdentifierCharacters || !MODEL_TOKEN_SOURCE_SET.has(String(source)))) {
     throw new FuzzResponseContractError(context, 'frozen model token sources must match the device count')
   }
   const deviceIds = new Set(Object.keys(sources).map(normalizeNuSmvDeviceName))

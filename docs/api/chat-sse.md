@@ -4,7 +4,7 @@ Contract for `/api/chat` — session management plus the streaming completion en
 Session endpoints use the standard `Result<T>` envelope ([overview.md](overview.md));
 the streaming endpoint does **not** — it is an SSE stream.
 
-Verified against code on 2026-10-14. Source: `controller/ChatController.java`,
+Verified against code on 2026-10-22. Source: `controller/ChatController.java`,
 `service/impl/ChatServiceImpl.java`, `dto/chat/`, `frontend/src/api/chat.ts`,
 `frontend/src/App.vue`, and `frontend/src/components/ChatView.vue`.
 
@@ -234,6 +234,9 @@ Structured progress frames expose the verifiable execution state and outcome of 
 step while it runs. Public text streams during tool-aware inference as described under
 [Stream frames](#stream-frames). For every turn, the backend buffers each
 complete sentence before exposing it.
+For Responses providers, refusal text deltas enter the same public-text stream as
+ordinary output text. The final refusal and response-completion events do not replay
+that text, so a refusal remains visible without duplicate content.
 During a tool-aware round, a sentence that needs evidence not yet available is held with
 the following text until the complete tool decision and its executions finish. Ordinary
 explanations continue to stream immediately. Pending claims are then checked against the

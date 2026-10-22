@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import ts from 'typescript'
 import { computed, nextTick, ref } from 'vue'
+import { flushPromises } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 import { errorDetails, technicalErrorLines } from '@/utils/userMessage'
 
@@ -48,6 +49,50 @@ describe('side-panel opening focus', () => {
 })
 
 describe('tracking an existing background task', () => {
+  it.each([
+    ['simulation', 'current', 'success'], ['simulation', 'disposed', 'success'], ['simulation', 'invalidated', 'success'],
+    ['simulation', 'current', 'failure'], ['simulation', 'disposed', 'failure'], ['simulation', 'invalidated', 'failure'],
+    ['verification', 'current', 'failure'], ['verification', 'disposed', 'failure'], ['verification', 'invalidated', 'failure']
+  ] as const)(
+    'keeps a completed %s owned through its final history refresh: %s / %s', async (kind, owner, outcome) => {
+      const history = deferred()
+      const loadHistory = vi.fn(() => history.promise)
+      const result = { traceId: 17 }
+      const resultFailure = new Error('Saved result unavailable')
+      class PollingAbortedError extends Error {}
+      const ports: Record<string, any> = {
+        boardLifecycleDisposed: false, pollingEpoch: 0, ASYNC_TASK_MAX_POLLS: 1, PollingAbortedError,
+        semanticSceneChangeCount: 0,
+        simulationApi: { getTask: vi.fn().mockResolvedValue({
+          id: 7, status: 'COMPLETED', progress: 100, simulationTraceId: 17
+        }), getSimulation: vi.fn().mockResolvedValue(result) },
+        asyncSimulationTask: ref({ taskId: 7, progress: 0, statusKey: '' }),
+        boardApi: { getTask: vi.fn().mockResolvedValue({
+          id: 7, status: 'COMPLETED', progress: 100, outcome: 'VIOLATED'
+        }), getTaskTraces: vi.fn().mockRejectedValue(resultFailure) },
+        asyncVerificationTask: ref({ taskId: 7, progress: 0, statusKey: '' }),
+        normalizeTaskProgress: (value: number) => value, taskProgressStatusKey: () => 'app.taskStatusCompleted',
+        upsertSimulationTaskSummary: vi.fn(), upsertVerificationTaskSummary: vi.fn(),
+        loadCompletedTaskResult: (read: () => Promise<unknown>) => read(),
+        simulationResultFromTrace: (trace: unknown) => trace,
+        loadSimulationRuns: loadHistory, loadVerificationRuns: loadHistory
+      }
+      if (outcome === 'failure') ports.simulationApi.getSimulation.mockRejectedValue(resultFailure)
+      ports.completedTaskResultError = (_kind: string, error: unknown) => error
+      ports.throwIfPollingAborted = bind('throwIfPollingAborted', ports)
+      ports.isPollingAbortedError = bind('isPollingAbortedError', ports)
+      const polling = bind(kind === 'simulation' ? 'pollAsyncSimulation' : 'pollAsyncVerification', ports)(7)
+      await flushPromises()
+      expect(loadHistory).toHaveBeenCalledOnce()
+      if (owner === 'disposed') ports.boardLifecycleDisposed = true
+      if (owner === 'invalidated') ports.pollingEpoch += 1
+      history.resolve(false)
+      if (owner !== 'current') await expect(polling).rejects.toBeInstanceOf(PollingAbortedError)
+      else if (outcome === 'failure') await expect(polling).rejects.toBe(resultFailure)
+      else await expect(polling).resolves.toEqual(result)
+    }
+  )
+
   it.each([
     ['verification', 'Verification', 'boardApi'],
     ['simulation', 'Simulation', 'simulationApi'],

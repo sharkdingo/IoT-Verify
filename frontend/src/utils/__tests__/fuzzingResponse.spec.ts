@@ -355,6 +355,34 @@ describe('fuzzing response contracts', () => {
     expect(validateFuzzingRun(run).outcome).toBe('BUDGET_EXHAUSTED')
   })
 
+  it('accepts a maximum-length board ID after model normalization in details and history', () => {
+    const boardId = '1'.repeat(100)
+    const modelId = `_${boardId}`
+    const result = {
+      ...run,
+      playbackScene: {
+        nodes: [{ ...playbackScene.nodes[0], id: boardId }, playbackScene.nodes[1]],
+        rules: [{ ...playbackScene.rules[0], conditions: [
+          { ...playbackScene.rules[0].conditions[0], deviceName: boardId }
+        ] }]
+      },
+      eligibleSpecifications: { 'spec-1': { ...run.eligibleSpecifications['spec-1'],
+        aConditions: [{ ...run.eligibleSpecifications['spec-1'].aConditions[0], deviceId: modelId }] } },
+      modelTokenSourcesByDeviceId: { [modelId]: 'BUNDLED', alarm_1: 'CUSTOM' }
+    }
+    expect(validateFuzzingRun(result).modelTokenSourcesByDeviceId[modelId]).toBe('BUNDLED')
+    expect(validateFuzzingRunSummaryList([{ ...result, dataAvailable: true }])[0])
+      .toMatchObject({ modelTokenSourcesByDeviceId: { [modelId]: 'BUNDLED' } })
+
+    const oversized = { ...result,
+      modelTokenSourcesByDeviceId: { ['x'.repeat(201)]: 'BUNDLED', alarm_1: 'CUSTOM' },
+      eligibleSpecifications: { 'spec-1': { ...result.eligibleSpecifications['spec-1'],
+        aConditions: [{ ...result.eligibleSpecifications['spec-1'].aConditions[0], deviceId: 'x'.repeat(201) }] } } }
+    expect(() => validateFuzzingRun(oversized)).toThrowError(expect.objectContaining({ code: FUZZ_RESPONSE_INCOMPLETE_CODE }))
+    expect(() => validateFuzzingRunSummaryList([{ ...oversized, dataAvailable: true }]))
+      .toThrowError(expect.objectContaining({ code: FUZZ_RESPONSE_INCOMPLETE_CODE }))
+  })
+
   it('requires complete frozen specification and token provenance for details and history', () => {
     const malformed = [
       { ...run, eligibleSpecifications: undefined },

@@ -2,9 +2,11 @@
 package cn.edu.nju.Iot_Verify.dto.spec;
 
 import cn.edu.nju.Iot_Verify.dto.RequestLimits;
+import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto.FrozenModel;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
+import jakarta.validation.groups.Default;
 import lombok.Data;
 
 /**
@@ -20,28 +22,28 @@ import lombok.Data;
  */
 @Data
 public class SpecConditionDto {
-    @Size(max = RequestLimits.MAX_IDENTIFIER_LENGTH, message = "Condition ID must be at most 200 characters")
+    @Size(max = RequestLimits.MAX_IDENTIFIER_LENGTH, message = "Condition ID must be at most 200 characters", groups = {Default.class, FrozenModel.class})
     private String id;
-    @Pattern(regexp = "^(a|if|then)$", message = "Side must be one of: a, if, then")
+    @Pattern(regexp = "^(a|if|then)$", message = "Side must be one of: a, if, then", groups = {Default.class, FrozenModel.class})
     private String side;        // 'a' | 'if' | 'then'
     /**
      * Device reference. Board storage uses the raw DeviceNode.id; verification/simulation
      * requests use the normalized NuSMV varName. deviceLabel is display-only.
      */
-    @NotBlank(message = "Device ID is required for spec condition")
-    @Size(max = RequestLimits.MAX_IDENTIFIER_LENGTH, message = "Device ID must be at most 200 characters")
+    @NotBlank(message = "Device ID is required for spec condition", groups = {Default.class, FrozenModel.class})
+    @Size(max = RequestLimits.MAX_IDENTIFIER_LENGTH, message = "Device ID must be at most 200 characters", groups = {Default.class, FrozenModel.class})
     private String deviceId;
     @Size(max = RequestLimits.MAX_IDENTIFIER_LENGTH, message = "Device label must be at most 200 characters")
     private String deviceLabel;
     /**
      * 目标类型: state | mode | variable | api | trust | privacy
      */
-    @NotBlank(message = "Target type is required for spec condition")
+    @NotBlank(message = "Target type is required for spec condition", groups = {Default.class, FrozenModel.class})
     @Pattern(regexp = "(?i:state|mode|variable|api|trust|privacy)",
-             message = "targetType must be one of: state, mode, variable, api, trust, privacy")
+             message = "targetType must be one of: state, mode, variable, api, trust, privacy", groups = {Default.class, FrozenModel.class})
     private String targetType;
-    @NotBlank(message = "Key is required for spec condition")
-    @Size(max = RequestLimits.MAX_IDENTIFIER_LENGTH, message = "Condition key must be at most 200 characters")
+    @NotBlank(message = "Key is required for spec condition", groups = {Default.class, FrozenModel.class})
+    @Size(max = RequestLimits.MAX_IDENTIFIER_LENGTH, message = "Condition key must be at most 200 characters", groups = {Default.class, FrozenModel.class})
     private String key;
     /**
      * Required only for trust/privacy. "state" means the label of the currently active
@@ -49,7 +51,7 @@ public class SpecConditionDto {
      * This keeps generated NuSMV names such as Mode_on out of the authored contract.
      */
     @Pattern(regexp = "(?i:state|variable)",
-            message = "propertyScope must be one of: state, variable")
+            message = "propertyScope must be one of: state, variable", groups = {Default.class, FrozenModel.class})
     private String propertyScope;
     /**
      * Which of two different questions a shared-variable condition asks. Required only for
@@ -73,16 +75,17 @@ public class SpecConditionDto {
     // without `\s*` made bean validation reject `" environment "` with this generic message, hiding the
     // actionable one that explains why there is no default.
     @Pattern(regexp = "^\\s*(?i:environment|reported)\\s*$",
-            message = "variableSource must be one of: environment, reported")
+            message = "variableSource must be one of: environment, reported", groups = {Default.class, FrozenModel.class})
     private String variableSource;
-    @NotBlank(message = "Relation is required for spec condition")
+    @NotBlank(message = "Relation is required for spec condition", groups = {Default.class, FrozenModel.class})
     @Pattern(
             regexp = "^\\s*(=|==|!=|>|>=|<|<=|(?i:eq|neq|gt|gte|lt|lte|in|not_in|not in))\\s*$",
-            message = "Relation must be one of =, !=, >, >=, <, <=, in, not_in, not in, or aliases EQ, NEQ, GT, GTE, LT, LTE"
+            message = "Relation must be one of =, !=, >, >=, <, <=, in, not_in, not in, or aliases EQ, NEQ, GT, GTE, LT, LTE",
+            groups = {Default.class, FrozenModel.class}
     )
     private String relation;
-    @NotBlank(message = "Value is required for spec condition")
-    @Size(max = RequestLimits.MAX_VALUE_LENGTH, message = "Condition value must be at most 1000 characters")
+    @NotBlank(message = "Value is required for spec condition", groups = {Default.class, FrozenModel.class})
+    @Size(max = RequestLimits.MAX_VALUE_LENGTH, message = "Condition value must be at most 1000 characters", groups = {Default.class, FrozenModel.class})
     private String value;
 
 }

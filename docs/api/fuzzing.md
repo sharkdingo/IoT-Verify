@@ -5,7 +5,7 @@ module. The endpoint index lives in [rest-endpoints.md](rest-endpoints.md); glob
 authentication, `Result<T>`, and error conventions live in
 [overview.md](overview.md).
 
-Verified against code on 2026-10-19. Source: `controller/FuzzController.java`,
+Verified against code on 2026-10-22. Source: `controller/FuzzController.java`,
 `service/impl/FuzzServiceImpl.java`, and `dto/fuzz/`.
 
 ---
@@ -382,6 +382,14 @@ page when the current page length equals its requested size. Meanwhile,
 | `findingCount` | integer | Number of persisted candidate violations |
 | `maxIterations` / `pathLength` / `populationSize` | integer | Effective search budget |
 | `findings` | array | Lightweight summaries in run lists; full findings in run detail |
+
+Frozen specifications retain semantic validation for their operators, condition groups,
+device references, and collection sizes. Their identifiers use the
+[normalized model identity contract](../architecture/device-identity.md), including
+the possible prefix added to a valid Board ID. Server-derived display caches such as
+device labels and formula previews are not subject to authoring-field limits when
+reading frozen evidence. Authoring requests keep their existing validation limits;
+malformed semantic data still makes the stored result unavailable.
 
 Completed statistics are accepted only when `iterations <= maxIterations` and either both
 `iterations` and `generatedPaths` are zero, or

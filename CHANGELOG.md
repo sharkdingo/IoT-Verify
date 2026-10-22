@@ -15,6 +15,23 @@ history into a technical spec. The spec content itself now lives under
 
 ## [Unreleased]
 
+### 2026-10-22 (asynchronous ownership and frozen evidence)
+
+#### Fixed
+
+- Recommendation requests honor stops during lease acquisition and preserve a successful result
+  when cancellation polling observes its released lease.
+- Verification and simulation callbacks recheck ownership after their final history refresh, so
+  leaving the Board cannot open a late replay or display a stale result-loading failure.
+- Narrow-screen layout hydration preserves canvas pan and zoom changed during initial loading.
+- Browser model identifiers normalize supplementary Unicode characters consistently with the
+  backend, keeping explicit attack selections and replay references aligned with imported device IDs.
+- Exploration history accepts normalized model identifiers and server-generated specification
+  presentation caches without applying raw Board or authoring-only limits to frozen evidence.
+  Semantic validation and authoring limits remain enforced at their respective boundaries.
+- Responses providers stream refusal text through the existing reply channel instead of replacing
+  it with a generic missing-response message; completion frames do not duplicate the text.
+
 ### 2026-10-21 (narrow panel hydration)
 
 #### Fixed

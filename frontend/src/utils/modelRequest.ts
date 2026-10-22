@@ -32,7 +32,8 @@ const NUSMV_RESERVED_WORDS = new Set([
 
 export const normalizeNuSmvDeviceName = (name: string): string => {
   if (!name) return name
-  let normalized = name.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase()
+  // Java's model normalizer replaces Unicode code points, including supplementary characters.
+  let normalized = name.replace(/[^a-zA-Z0-9_]/gu, '_').toLowerCase()
   if (!normalized || /^_+$/.test(normalized)) normalized = 'device_0'
   if (/^\d/.test(normalized)) normalized = `_${normalized}`
   return NUSMV_RESERVED_WORDS.has(normalized) ? `_${normalized}` : normalized

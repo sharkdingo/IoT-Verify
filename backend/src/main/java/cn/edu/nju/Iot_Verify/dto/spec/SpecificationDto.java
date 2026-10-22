@@ -11,6 +11,7 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
+import jakarta.validation.groups.Default;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
@@ -26,13 +27,16 @@ import java.util.List;
                 fieldVisibility = JsonAutoDetect.Visibility.ANY)
 public class SpecificationDto {
 
-    @NotBlank(message = "Specification ID is required")
-    @Size(max = 100, message = "Specification ID must be at most 100 characters")
+    /** Frozen evidence uses normalized model identities and generated display caches. */
+    public interface FrozenModel {}
+
+    @NotBlank(message = "Specification ID is required", groups = {Default.class, FrozenModel.class})
+    @Size(max = 100, message = "Specification ID must be at most 100 characters", groups = {Default.class, FrozenModel.class})
     private String id;
 
-    @NotBlank(message = "Template ID is required")
-    @Pattern(regexp = "^[1-7]$", message = "Template ID must be one of 1, 2, 3, 4, 5, 6, 7")
-    @Size(max = 10, message = "Template ID must be at most 10 characters")
+    @NotBlank(message = "Template ID is required", groups = {Default.class, FrozenModel.class})
+    @Pattern(regexp = "^[1-7]$", message = "Template ID must be one of 1, 2, 3, 4, 5, 6, 7", groups = {Default.class, FrozenModel.class})
+    @Size(max = 10, message = "Template ID must be at most 10 characters", groups = {Default.class, FrozenModel.class})
     private String templateId;
 
     /** Response/display cache rebuilt from templateId; ignored as write authority. */
@@ -40,20 +44,20 @@ public class SpecificationDto {
     private String templateLabel;
 
     @Valid
-    @NotNull(message = "A-conditions cannot be null")
+    @NotNull(message = "A-conditions cannot be null", groups = {Default.class, FrozenModel.class})
     @JsonProperty("aConditions")
-    @Size(max = RequestLimits.MAX_SPEC_CONDITIONS, message = "At most 50 A-conditions are allowed")
-    private List<@Valid @NotNull(message = "A-condition item cannot be null") SpecConditionDto> aConditions = new ArrayList<>();
+    @Size(max = RequestLimits.MAX_SPEC_CONDITIONS, message = "At most 50 A-conditions are allowed", groups = {Default.class, FrozenModel.class})
+    private List<@Valid @NotNull(message = "A-condition item cannot be null", groups = {Default.class, FrozenModel.class}) SpecConditionDto> aConditions = new ArrayList<>();
 
     @Valid
-    @NotNull(message = "If-conditions cannot be null")
-    @Size(max = RequestLimits.MAX_SPEC_CONDITIONS, message = "At most 50 If-conditions are allowed")
-    private List<@Valid @NotNull(message = "If-condition item cannot be null") SpecConditionDto> ifConditions = new ArrayList<>();
+    @NotNull(message = "If-conditions cannot be null", groups = {Default.class, FrozenModel.class})
+    @Size(max = RequestLimits.MAX_SPEC_CONDITIONS, message = "At most 50 If-conditions are allowed", groups = {Default.class, FrozenModel.class})
+    private List<@Valid @NotNull(message = "If-condition item cannot be null", groups = {Default.class, FrozenModel.class}) SpecConditionDto> ifConditions = new ArrayList<>();
 
     @Valid
-    @NotNull(message = "Then-conditions cannot be null")
-    @Size(max = RequestLimits.MAX_SPEC_CONDITIONS, message = "At most 50 Then-conditions are allowed")
-    private List<@Valid @NotNull(message = "Then-condition item cannot be null") SpecConditionDto> thenConditions = new ArrayList<>();
+    @NotNull(message = "Then-conditions cannot be null", groups = {Default.class, FrozenModel.class})
+    @Size(max = RequestLimits.MAX_SPEC_CONDITIONS, message = "At most 50 Then-conditions are allowed", groups = {Default.class, FrozenModel.class})
+    private List<@Valid @NotNull(message = "Then-condition item cannot be null", groups = {Default.class, FrozenModel.class}) SpecConditionDto> thenConditions = new ArrayList<>();
 
     /**
      * User-readable preview rebuilt from structured conditions; never parsed for verification.
@@ -70,15 +74,17 @@ public class SpecificationDto {
     private String formula;
 
     @Size(max = 50, message = "At most 50 devices can be bound to a specification")
+    @Size(max = RequestLimits.MAX_DEVICES, message = "Frozen specification references exceed the model device limit", groups = FrozenModel.class)
     @Valid
-    private List<@Valid @NotNull(message = "Specification device item cannot be null") DeviceRefDto> devices = new ArrayList<>();
+    private List<@Valid @NotNull(message = "Specification device item cannot be null", groups = {Default.class, FrozenModel.class}) DeviceRefDto> devices = new ArrayList<>();
 
     @Data
     @NoArgsConstructor
     @AllArgsConstructor
     public static class DeviceRefDto {
-        @NotBlank(message = "Specification device ID is required")
+        @NotBlank(message = "Specification device ID is required", groups = {Default.class, FrozenModel.class})
         @Size(max = 100, message = "Device ID must be at most 100 characters")
+        @Size(max = RequestLimits.MAX_IDENTIFIER_LENGTH, message = "Model device ID must be at most 200 characters", groups = FrozenModel.class)
         private String deviceId;
 
         @Size(max = 100, message = "Device label must be at most 100 characters")
@@ -91,7 +97,7 @@ public class SpecificationDto {
     }
 
     @JsonIgnore
-    @AssertTrue(message = "Specification condition side must match its containing collection")
+    @AssertTrue(message = "Specification condition side must match its containing collection", groups = {Default.class, FrozenModel.class})
     public boolean isConditionSidesConsistent() {
         return conditionSidesMatch(aConditions, "a")
                 && conditionSidesMatch(ifConditions, "if")

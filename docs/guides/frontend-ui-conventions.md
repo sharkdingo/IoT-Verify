@@ -5,7 +5,7 @@ colour roles, type scale, depth, CSS precedence, and replay. These are **rules, 
 when code and this document disagree, one of them is a bug. Keep them short; they exist to stop the
 same argument being re-litigated per PR, and each carries the measurement that settled it.
 
-Verified against code on 2026-10-21. Source: `frontend/src/styles/`, `frontend/src/composables/`,
+Verified against code on 2026-10-22. Source: `frontend/src/styles/`, `frontend/src/composables/`,
 `frontend/src/utils/feedback.ts`, and the spec files each rule names.
 
 ## 1. What belongs in the URL
@@ -51,6 +51,9 @@ link stays meaningful for anyone with access to that run.
   Synchronous and asynchronous completion use the same adoption path; a background completion
   or one arriving during replay does not change the selected artifact. An unconfirmed save keeps
   a local result and clears any unrelated result address rather than pretending it can be restored.
+  Completion callbacks recheck their Board/polling ownership after history refreshes as well as
+  result reads. Leaving the Board during either wait must not open a replay, change the new page's
+  URL, or present a failure from the retired view.
 - **Every saved verification replay entry names its parent run and selected trace.** The result
   dialog reuses the history trace opener and its ownership and mutation checks. Refresh restores
   that trace's frozen scene; an unsaved counterexample remains playable locally without a saved address.
@@ -1335,6 +1338,8 @@ finishes narrowing and keeps its expanded width during the transition; leaving c
 Both sides use the same panel duration and easing, with motion disabled under reduced motion.
 On narrow screens, a panel opened during initial loading stays open when the saved layout arrives.
 This temporary overlay does not change the saved desktop layout.
+Likewise, manual canvas pan or zoom during loading takes precedence over the initial narrow-screen
+fit; automatic fitting applies only while the user has not moved the viewport.
 
 Section navigation stays outside each panel's scrolling body. Counts sit below section names.
 Both panels keep their four tabs in one row, omit decorative tab icons,

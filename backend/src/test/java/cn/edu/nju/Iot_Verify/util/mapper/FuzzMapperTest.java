@@ -2,7 +2,11 @@ package cn.edu.nju.Iot_Verify.util.mapper;
 
 import cn.edu.nju.Iot_Verify.component.fuzz.FuzzLimitationContract;
 import cn.edu.nju.Iot_Verify.util.ModelFingerprint;
+import cn.edu.nju.Iot_Verify.util.DeviceNameNormalizer;
 import cn.edu.nju.Iot_Verify.component.fuzz.FuzzModelInputSnapshotCodec;
+import cn.edu.nju.Iot_Verify.dto.RequestLimits;
+import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
+import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
@@ -33,6 +37,8 @@ import cn.edu.nju.Iot_Verify.po.FuzzTaskPo;
 import cn.edu.nju.Iot_Verify.repository.projection.FuzzFindingSummaryProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.FuzzTaskSummaryProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.FuzzSpecificationPresentationProjection;
+import cn.edu.nju.Iot_Verify.service.BoardStorageService;
+import cn.edu.nju.Iot_Verify.util.SpecificationFormulaPreview;
 import jakarta.validation.Validation;
 import jakarta.validation.ValidatorFactory;
 import org.junit.jupiter.api.AfterAll;
@@ -40,10 +46,14 @@ import cn.edu.nju.Iot_Verify.util.JsonUtils;
 import cn.edu.nju.Iot_Verify.util.mapper.BoardDataConverter.ModelInputSnapshot;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -1137,6 +1147,128 @@ class FuzzMapperTest {
         when(presentation.getSpecificationsJson()).thenReturn(JsonUtils.toJson(List.of(supportedSpecification("spec-1"))));
         when(presentation.getModelTokenSourcesJson()).thenReturn("{\"device-1\":\"UNKNOWN\"}");
         return presentation;
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void projectedSummaryAcceptsNormalizedMaximumLengthBoardDeviceId(boolean includeDeviceRefs) {
+        String rawId = "1".repeat(100);
+        assertTrue(VALIDATORS.getValidator().validateValue(DeviceNodeDto.class, "id", rawId).isEmpty());
+        String modelId = DeviceNameNormalizer.normalize(rawId);
+        assertEquals("_" + rawId, modelId);
+        assertTrue(VALIDATORS.getValidator()
+                .validateValue(DeviceVerificationDto.class, "varName", modelId).isEmpty());
+
+        FuzzTaskSummaryProjection run = projectedRun(1, 1L, 1, 10);
+        FuzzSpecificationPresentationProjection presentation = projectedPresentation();
+        ModelInputSnapshot frozen = frozenSpecification(rawId, "Device", 1);
+        SpecificationDto specification = frozen.specifications().get(0);
+        assertEquals(modelId, frozen.devices().get(0).getVarName());
+        assertEquals(modelId, specification.getDevices().get(0).getDeviceId());
+        if (!includeDeviceRefs) specification.setDevices(List.of());
+        when(presentation.getSpecificationsJson()).thenReturn(JsonUtils.toJson(List.of(specification)));
+        when(presentation.getModelTokenSourcesJson()).thenReturn(
+                JsonUtils.toJson(Map.of(modelId, ModelTokenSource.BUNDLED)));
+
+        FuzzRunSummaryDto summary = mapper.toRunSummaryDtoFromTaskProjection(run, List.of(), presentation);
+
+        assertEquals(Map.of("_" + rawId, ModelTokenSource.BUNDLED), summary.getModelTokenSourcesByDeviceId());
+        assertEquals("_" + rawId,
+                summary.getEligibleSpecifications().get("spec-1").getAConditions().get(0).getDeviceId());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"101, 1", "201, 1", "255, 1", "100, 50"})
+    void projectedSummaryAcceptsGeneratedSpecificationPresentation(int labelLength, int conditionCount) {
+        String label = "L".repeat(labelLength);
+        assertTrue(VALIDATORS.getValidator().validateValue(DeviceNodeDto.class, "label", label).isEmpty());
+        ModelInputSnapshot frozen = frozenSpecification("device-1", label, conditionCount);
+        SpecificationDto specification = frozen.specifications().get(0);
+        if (conditionCount > 1) assertTrue(specification.getFormula().length() > 4000);
+        FuzzTaskSummaryProjection run = projectedRun(1, 1L, 1, 10);
+        FuzzSpecificationPresentationProjection presentation = projectedPresentation();
+        when(presentation.getSpecificationsJson()).thenReturn(JsonUtils.toJson(frozen.specifications()));
+        when(presentation.getModelTokenSourcesJson()).thenReturn(
+                JsonUtils.toJson(Map.of("device_1", ModelTokenSource.BUNDLED)));
+
+        FuzzRunSummaryDto summary = mapper.toRunSummaryDtoFromTaskProjection(run, List.of(), presentation);
+
+        assertEquals(specification, summary.getEligibleSpecifications().get("spec-1"));
+        assertEquals(label, summary.getEligibleSpecifications().get("spec-1").getDevices().get(0).getDeviceLabel());
+
+        FuzzTaskPo fullRun = completedRun(frozen.specifications(), List.of("spec-1"),
+                FuzzEligibilityDto.builder().eligibleSpecIds(List.of("spec-1"))
+                        .requestedSpecCount(1).eligibleSpecCount(1).build(), FuzzOutcome.BUDGET_EXHAUSTED, 0);
+        fullRun.setModelInputSnapshotJson(FuzzModelInputSnapshotCodec.encode(frozen));
+        fullRun.setModelSnapshotJson(JsonUtils.toJson(fuzzSnapshot(fullRun.getCreatedAt(), frozen)));
+        assertDoesNotThrow(() -> mapper.toRunDto(fullRun, List.of()));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"relation", "conditionReference", "conditionReferenceLength",
+            "deviceReference", "deviceReferenceLength", "conditionSide"})
+    void frozenSpecificationRejectsMalformedSemanticsInBothReadPaths(String defect) {
+        SpecificationDto specification = supportedSpecification("spec-1");
+        specification.setDevices(List.of(new SpecificationDto.DeviceRefDto("device-1", "Device", List.of())));
+        SpecConditionDto condition = specification.getAConditions().get(0);
+        switch (defect) {
+            case "relation" -> condition.setRelation("approximately");
+            case "conditionReference" -> condition.setDeviceId("");
+            case "conditionReferenceLength" -> condition.setDeviceId("x".repeat(RequestLimits.MAX_IDENTIFIER_LENGTH + 1));
+            case "deviceReference" -> specification.getDevices().get(0).setDeviceId("");
+            case "deviceReferenceLength" -> specification.getDevices().get(0)
+                    .setDeviceId("x".repeat(RequestLimits.MAX_IDENTIFIER_LENGTH + 1));
+            case "conditionSide" -> condition.setSide("then");
+            default -> throw new AssertionError(defect);
+        }
+        FuzzTaskSummaryProjection run = projectedRun(1, 1L, 1, 10);
+        FuzzSpecificationPresentationProjection presentation = projectedPresentation();
+        when(presentation.getSpecificationsJson()).thenReturn(JsonUtils.toJson(List.of(specification)));
+
+        assertEquals("specificationPresentation", assertThrows(PersistedDataIntegrityException.class,
+                () -> mapper.toRunSummaryDtoFromTaskProjection(run, List.of(), presentation)).getField());
+
+        FuzzTaskPo fullRun = completedRun(List.of(specification), List.of("spec-1"),
+                FuzzEligibilityDto.builder().eligibleSpecIds(List.of("spec-1"))
+                        .requestedSpecCount(1).eligibleSpecCount(1).build(), FuzzOutcome.BUDGET_EXHAUSTED, 0);
+        assertEquals("modelInputSnapshotJson", assertThrows(PersistedDataIntegrityException.class,
+                () -> mapper.toRunDto(fullRun, List.of())).getField());
+    }
+
+    @Test
+    void projectedSummaryRejectsTokenSourceIdBeyondModelLimit() {
+        String modelId = "x".repeat(RequestLimits.MAX_IDENTIFIER_LENGTH + 1);
+        FuzzTaskSummaryProjection run = projectedRun(1, 1L, 1, 10);
+        FuzzSpecificationPresentationProjection presentation = projectedPresentation();
+        when(presentation.getModelTokenSourcesJson()).thenReturn(
+                JsonUtils.toJson(Map.of(modelId, ModelTokenSource.BUNDLED)));
+
+        assertEquals("modelTokenSourcesByDeviceId", assertThrows(PersistedDataIntegrityException.class,
+                () -> mapper.toRunSummaryDtoFromTaskProjection(run, List.of(), presentation)).getField());
+    }
+
+    private ModelInputSnapshot frozenSpecification(String rawId, String label, int conditionCount) {
+        DeviceNodeDto node = playbackNode(rawId, "Device");
+        node.setLabel(label);
+        node.setState("on");
+        DeviceTemplateDto template = new DeviceTemplateDto();
+        template.setName("Device");
+        template.setDefaultTemplate(true);
+        template.setManifest(DeviceManifest.builder().name("Device").modes(List.of("MachineState"))
+                .workingStates(List.of(DeviceManifest.WorkingState.builder().name("on").build())).build());
+        SpecificationDto stored = supportedSpecification("spec-1");
+        stored.setTemplateLabel("Always");
+        stored.setAConditions(IntStream.range(0, conditionCount).mapToObj(index -> {
+            SpecConditionDto condition = supportedSpecification("condition-" + index).getAConditions().get(0);
+            condition.setDeviceId(rawId);
+            condition.setDeviceLabel(label);
+            return condition;
+        }).toList());
+        stored.setDevices(List.of(new SpecificationDto.DeviceRefDto(rawId, label, List.of())));
+        stored.setFormula(SpecificationFormulaPreview.format(stored,
+                SpecificationFormulaPreview.context(List.of(node), List.of(template))));
+        return new BoardDataConverter(mock(BoardStorageService.class)).toModelInputSnapshot(
+                new BoardSemanticSnapshotDto(List.of(node), List.of(), List.of(), List.of(stored), List.of(template)));
     }
 
     @Test

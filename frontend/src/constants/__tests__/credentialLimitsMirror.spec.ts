@@ -74,6 +74,7 @@ describe('credential limits mirror the backend', () => {
       ['deviceVariables', 'MAX_DEVICE_VARIABLES'],
       ['devicePrivacies', 'MAX_DEVICE_PRIVACIES'],
       ['templates', 'MAX_TEMPLATES'],
+      ['modelIdentifierCharacters', 'MAX_IDENTIFIER_LENGTH'],
       ['chatSessions', 'MAX_CHAT_SESSIONS'],
       ['chatContentCharacters', 'MAX_CHAT_CONTENT_LENGTH']
     ]

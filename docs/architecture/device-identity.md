@@ -3,7 +3,7 @@
 This project is in active development, so device identity is intentionally strict.
 There is no label/template fallback compatibility layer.
 
-Verified against code on 2026-10-09. Source: board storage, node creation,
+Verified against code on 2026-10-22. Source: board storage, node creation,
 scene recommendation/import, model request conversion, traces, and fix apply.
 
 For the full field-level contract across devices, rules, specs, traces, tasks, and
@@ -75,6 +75,10 @@ fix, see [Data authority model](data-authority-model.md).
   are prefixed with `_`. The raw
   board node id remains the persisted identity; the normalized name is the model/trace
   boundary representation.
+  Model and history readers apply the model identifier bound after normalization; the raw Board
+  id bound cannot be reused because the required prefix can increase the identifier length.
+  Non-ASCII Unicode code points each become one underscore on both sides of the API, including
+  supplementary characters, so browser attack selections and replay references match the model.
 
 If old local data was saved with labels as identity, clear the development database or
 recreate the affected board data instead of adding compatibility branches.

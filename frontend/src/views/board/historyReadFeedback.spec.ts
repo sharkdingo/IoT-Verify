@@ -356,6 +356,26 @@ describe('Board authoritative read feedback', () => {
     }
   )
 
+  it.each([false, true])('preserves early narrow canvas navigation when touched=%s', async touched => {
+    const { ports, stop } = layoutState()
+    ports.isNarrowViewport = () => true
+    ports.nextTick = nextTick
+    ports.getVisibleDeviceNodes = () => [{ id: 'lamp' }]
+    ports.fittedViewportForNodes = () => ({ pan: { x: 30, y: 40 }, zoom: 0.4 })
+    ports.fitNodesToCanvas = bind('fitNodesToCanvas', ports)
+    ports.canvasPan.value = { x: 180, y: -90 }
+    ports.canvasZoom.value = 0.9
+    ports.canvasStateTouchedBeforeLayout = touched
+    try {
+      ports.applyLoadedBoardLayout(savedLayout, true)
+      await nextTick()
+      expect(ports.canvasPan.value).toEqual(touched ? { x: 180, y: -90 } : { x: 30, y: 40 })
+      expect(ports.canvasZoom.value).toBe(touched ? 0.9 : 0.4)
+      expect(ports.persistedWideLayout).toEqual(savedLayout)
+      expect(ports.saveBoardLayout).not.toHaveBeenCalled()
+    } finally { stop() }
+  })
+
   it('restores layout after the snapshot is ready without waiting for the task inbox', async () => {
     const ports = state()
     const snapshot = deferred()

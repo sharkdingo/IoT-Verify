@@ -7,10 +7,14 @@ import cn.edu.nju.Iot_Verify.testutil.LogCapture;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.Optional;
@@ -23,6 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -152,6 +157,46 @@ class InteractiveAiExecutionServiceTest {
         assertDoesNotThrow(() -> instance.execute(1L, "request-123", () -> null));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"request", "account"})
+    void pendingOwnershipCanBeCancelledBeforeRecommendationStarts(String stop) throws Exception {
+        DistributedInteractiveExecutionStore store = mock(DistributedInteractiveExecutionStore.class);
+        DistributedInteractiveExecutionStore.Lease lease = mock(DistributedInteractiveExecutionStore.Lease.class);
+        CountDownLatch acquiring = new CountDownLatch(1);
+        CountDownLatch acquired = new CountDownLatch(1);
+        when(store.acquire("recommendation", 1L, "request-123", true)).thenAnswer(invocation -> {
+            acquiring.countDown();
+            assertTrue(acquired.await(2, TimeUnit.SECONDS));
+            return lease;
+        });
+        InteractiveAiExecutionService instance = new InteractiveAiExecutionService(executor, store);
+        AtomicBoolean providerCalled = new AtomicBoolean(false);
+        CompletableFuture<String> request = CompletableFuture.supplyAsync(() ->
+                instance.execute(1L, "request-123", () -> {
+                    providerCalled.set(true);
+                    return "recommendation";
+                }));
+        try {
+            assertTrue(acquiring.await(2, TimeUnit.SECONDS));
+            if ("request".equals(stop)) {
+                assertTrue(instance.cancel(1L, "request-123"));
+            } else {
+                instance.requestUserExecutionStop(1L);
+            }
+            acquired.countDown();
+
+            ExecutionException error = assertThrows(ExecutionException.class,
+                    () -> request.get(2, TimeUnit.SECONDS));
+            assertTrue(error.getCause() instanceof ServiceUnavailableException);
+            assertFalse(providerCalled.get());
+            assertEquals("FINISHED", instance.getStatus(1L, "request-123").getState());
+            verify(store).abandon(lease);
+            assertDoesNotThrow(() -> instance.execute(1L, "request-next", () -> null));
+        } finally {
+            acquired.countDown();
+        }
+    }
+
     @Test
     void successfulRecommendationIsSettledBeforeItsResultIsReturned() {
         DistributedInteractiveExecutionStore store = mock(DistributedInteractiveExecutionStore.class);
@@ -168,6 +213,59 @@ class InteractiveAiExecutionServiceTest {
         assertEquals("recommendation", result);
         verify(store).completeSuccessfully(lease, InteractiveOperationStage.VALIDATING_RESULT);
         verify(store, never()).finish(lease, InteractiveOperationStage.VALIDATING_RESULT);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"poll", "cancel", "account"})
+    void successfulRecommendationCannotBeCancelledAfterItsCompletionFence(String stop) throws Exception {
+        DistributedInteractiveExecutionStore store = mock(DistributedInteractiveExecutionStore.class);
+        DistributedInteractiveExecutionStore.Lease lease =
+                mock(DistributedInteractiveExecutionStore.Lease.class);
+        when(store.acquire("recommendation", 1L, "request-123", true)).thenReturn(lease);
+        // The successful Redis fence removes the owner before its response reaches this worker.
+        when(store.shouldStop(lease)).thenReturn(true);
+        InteractiveAiExecutionService instance = new InteractiveAiExecutionService(executor, store);
+        CountDownLatch published = new CountDownLatch(1);
+        CountDownLatch returnCompletion = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            published.countDown();
+            assertTrue(returnCompletion.await(2, TimeUnit.SECONDS));
+            return null;
+        }).when(store).completeSuccessfully(lease, InteractiveOperationStage.VALIDATING_RESULT);
+
+        CompletableFuture<String> request = CompletableFuture.supplyAsync(() ->
+                instance.execute(1L, "request-123", () -> {
+                    instance.markStage(1L, "request-123", InteractiveOperationStage.VALIDATING_RESULT);
+                    return "validated recommendation";
+                }));
+        FutureTask<Void> latePoll = new FutureTask<>(() -> {
+            switch (stop) {
+                case "poll" -> instance.pollDistributedCancellation();
+                case "cancel" -> assertFalse(instance.cancel(1L, "request-123"));
+                case "account" -> instance.requestUserExecutionStop(1L);
+                default -> throw new AssertionError("Unknown stop path");
+            }
+            return null;
+        });
+        Thread polling = new Thread(latePoll, "recommendation-late-poll");
+        try {
+            assertTrue(published.await(2, TimeUnit.SECONDS));
+            polling.start();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (polling.getState() != Thread.State.BLOCKED && polling.getState() != Thread.State.TERMINATED) {
+                if (System.nanoTime() >= deadline) throw new AssertionError("Poll did not reach the completion fence");
+                Thread.onSpinWait();
+            }
+            returnCompletion.countDown();
+
+            assertEquals("validated recommendation", assertDoesNotThrow(() -> request.get(2, TimeUnit.SECONDS)));
+            latePoll.get(2, TimeUnit.SECONDS);
+            assertEquals(InteractiveOperationStage.VALIDATING_RESULT,
+                    instance.getStatus(1L, "request-123").getStage());
+        } finally {
+            returnCompletion.countDown();
+            polling.join(2_000);
+        }
     }
 
     @Test

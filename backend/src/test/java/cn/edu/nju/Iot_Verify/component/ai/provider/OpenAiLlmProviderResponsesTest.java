@@ -17,6 +17,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -185,6 +186,38 @@ class OpenAiLlmProviderResponsesTest {
                 control.cancel();
                 release.countDown();
             }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void refusalTextIsStreamedOnceForPlanningAndFinalReplies(boolean planning) throws Exception {
+        String refusal = "I cannot help with that request.";
+        String frames = """
+                event: response.refusal.delta
+                data: {"type":"response.refusal.delta","item_id":"msg-1","output_index":0,"content_index":0,"sequence_number":0,"delta":"I cannot "}
+
+                event: response.refusal.delta
+                data: {"type":"response.refusal.delta","item_id":"msg-1","output_index":0,"content_index":0,"sequence_number":1,"delta":"help with that request."}
+
+                event: response.refusal.done
+                data: {"type":"response.refusal.done","item_id":"msg-1","output_index":0,"content_index":0,"sequence_number":2,"refusal":"I cannot help with that request."}
+
+                """ + completed("""
+                {"id":"msg-1","type":"message","role":"assistant","status":"completed",
+                 "content":[{"type":"refusal","refusal":"I cannot help with that request."}]}
+                """).replace("\"sequence_number\":1", "\"sequence_number\":3");
+        try (Gateway gateway = new Gateway(frames)) {
+            List<String> visible = new ArrayList<>();
+            if (planning) {
+                LlmChatResponse response = gateway.provider.chat(request(), new LlmRequestControl(), visible::add);
+                assertEquals(refusal, response.text());
+                assertTrue(response.toolCalls().isEmpty());
+            } else {
+                gateway.provider.streamChat(request(), visible::add, () -> false);
+            }
+            assertEquals(List.of("I cannot ", "help with that request."), visible);
+            assertEquals(1, gateway.requests.size());
         }
     }
 

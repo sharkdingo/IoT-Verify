@@ -63,31 +63,25 @@ public class InteractiveAiExecutionService {
                     "Another AI recommendation is already running for this user. Stop it before starting a new one.");
         }
 
-        DistributedInteractiveExecutionStore.Lease distributedLease;
-        try {
-            distributedLease = distributedStore == null ? null
-                    : distributedStore.acquire("recommendation", userId, id, true);
-        } catch (DistributedInteractiveExecutionStore.BusyException e) {
+        ActiveExecution<T> execution = new ActiveExecution<>(key, operation);
+        if (active.putIfAbsent(key, execution) != null) {
             activeByUser.remove(userId, id);
+            throw new ServiceUnavailableException(
+                    "An AI recommendation with this requestId is already running.");
+        }
+        boolean dispatched = false;
+        try {
+            // A stop must find the waiting request even while Redis confirms its ownership.
+            execution.registerDistributedLease(distributedStore == null ? null
+                    : distributedStore.acquire("recommendation", userId, id, true));
+            executor.execute(execution.task);
+            dispatched = true;
+            return execution.task.get();
+        } catch (DistributedInteractiveExecutionStore.BusyException e) {
             String message = e.getScope() == DistributedInteractiveExecutionStore.BusyScope.USER
                     ? "Another AI recommendation is already running for this user. Stop it before starting a new one."
                     : "An AI recommendation with this requestId is already running.";
             throw new ServiceUnavailableException(message);
-        } catch (RuntimeException | Error e) {
-            activeByUser.remove(userId, id);
-            throw e;
-        }
-
-        ActiveExecution<T> execution = new ActiveExecution<>(key, operation, distributedLease);
-        if (active.putIfAbsent(key, execution) != null) {
-            activeByUser.remove(userId, id);
-            if (distributedStore != null) distributedStore.abandon(distributedLease);
-            throw new ServiceUnavailableException(
-                    "An AI recommendation with this requestId is already running.");
-        }
-        try {
-            executor.execute(execution.task);
-            return execution.task.get();
         } catch (RejectedExecutionException e) {
             execution.cancel();
             throw new ServiceUnavailableException(
@@ -106,6 +100,7 @@ public class InteractiveAiExecutionService {
             if (cause instanceof Error error) throw error;
             throw new InternalServerException("AI recommendation execution failed.", cause);
         } finally {
+            if (!dispatched) execution.finishBeforeStart();
             if (executor.getThreadPoolExecutor() != null) executor.getThreadPoolExecutor().purge();
         }
     }
@@ -135,7 +130,8 @@ public class InteractiveAiExecutionService {
         String id = validateRequestId(requestId);
         RequestKey key = new RequestKey(userId, id);
         ActiveExecution<?> execution = active.get(key);
-        if (execution != null && !execution.usesDistributedLease()) return execution.status();
+        if (execution != null && !execution.usesDistributedLease()
+                && (distributedStore == null || execution.distributedLease != null)) return execution.status();
         if (distributedStore != null) {
             var distributed = distributedStore.getStatus("recommendation", userId, id);
             if (distributed.isPresent()) return distributed.get();
@@ -148,7 +144,8 @@ public class InteractiveAiExecutionService {
 
     public void markStage(Long userId, String requestId, InteractiveOperationStage stage) {
         ActiveExecution<?> execution = active.get(new RequestKey(userId, validateRequestId(requestId)));
-        if (execution != null) {
+        if (execution != null && !execution.task.isCancelled()
+                && execution.state.get() != ExecutionState.FINISHED) {
             InteractiveOperationStage next = Objects.requireNonNull(stage);
             InteractiveOperationStage effective = execution.stage.updateAndGet(current ->
                     current == InteractiveOperationStage.CANCELLING ? current : next);
@@ -161,9 +158,7 @@ public class InteractiveAiExecutionService {
     @Scheduled(fixedDelay = 1000L)
     public void pollDistributedCancellation() {
         if (distributedStore == null) return;
-        active.values().forEach(execution -> {
-            if (distributedStore.shouldStop(execution.distributedLease)) execution.cancel(false);
-        });
+        active.values().forEach(ActiveExecution::pollDistributedCancellation);
     }
 
     private String validateRequestId(String requestId) {
@@ -209,14 +204,12 @@ public class InteractiveAiExecutionService {
         private final AtomicReference<InteractiveOperationStage> stage =
                 new AtomicReference<>(InteractiveOperationStage.QUEUED);
         private final LlmRequestControl requestControl = new LlmRequestControl();
-        private final DistributedInteractiveExecutionStore.Lease distributedLease;
+        private volatile DistributedInteractiveExecutionStore.Lease distributedLease;
         private final long createdAtNanos = System.nanoTime();
         private final FutureTask<T> task;
 
-        private ActiveExecution(RequestKey key, Callable<T> operation,
-                                DistributedInteractiveExecutionStore.Lease distributedLease) {
+        private ActiveExecution(RequestKey key, Callable<T> operation) {
             this.key = key;
-            this.distributedLease = distributedLease;
             this.task = new FutureTask<>(() -> {
                 if (!state.compareAndSet(ExecutionState.WAITING, ExecutionState.RUNNING)) {
                     throw new CancellationException("AI recommendation was cancelled before it started.");
@@ -228,10 +221,7 @@ public class InteractiveAiExecutionService {
                 LlmRequestControlHolder.set(requestControl);
                 try {
                     T result = operation.call();
-                    if (distributedStore != null) {
-                        distributedStore.completeSuccessfully(distributedLease, stage.get());
-                        distributedCompletionPublished.set(true);
-                    }
+                    completeSuccessfully();
                     return result;
                 } finally {
                     LlmRequestControlHolder.clear();
@@ -241,11 +231,44 @@ public class InteractiveAiExecutionService {
             });
         }
 
+        private synchronized void registerDistributedLease(DistributedInteractiveExecutionStore.Lease lease) {
+            if (state.get() == ExecutionState.FINISHED || task.isCancelled()) {
+                if (distributedStore != null) distributedStore.abandon(lease);
+                throw new CancellationException("AI recommendation was cancelled during registration.");
+            }
+            distributedLease = lease;
+        }
+
+        private void finishBeforeStart() {
+            if (state.compareAndSet(ExecutionState.WAITING, ExecutionState.FINISHED)) {
+                task.cancel(false);
+                cleanup();
+            }
+        }
+
+        // A successful completion releases Redis ownership; that release is not a lost lease.
+        private synchronized void completeSuccessfully() {
+            if (task.isCancelled()) {
+                throw new CancellationException("AI recommendation was cancelled before completion.");
+            }
+            if (distributedStore != null) {
+                distributedStore.completeSuccessfully(distributedLease, stage.get());
+                distributedCompletionPublished.set(true);
+            }
+            state.set(ExecutionState.FINISHED);
+        }
+
+        private synchronized void pollDistributedCancellation() {
+            if (state.get() != ExecutionState.FINISHED
+                    && distributedStore.shouldStop(distributedLease)) cancel(false);
+        }
+
         private boolean cancel() {
             return cancel(true);
         }
 
-        private boolean cancel(boolean publishDistributed) {
+        private synchronized boolean cancel(boolean publishDistributed) {
+            if (state.get() == ExecutionState.FINISHED) return false;
             stage.set(InteractiveOperationStage.CANCELLING);
             requestControl.cancel();
             if (publishDistributed && distributedStore != null) {

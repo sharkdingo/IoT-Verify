@@ -6,6 +6,7 @@ import cn.edu.nju.Iot_Verify.component.fuzz.FuzzLimitationContract;
 import cn.edu.nju.Iot_Verify.component.fuzz.FuzzMetadataPolicy;
 import cn.edu.nju.Iot_Verify.util.ModelFingerprint;
 import cn.edu.nju.Iot_Verify.component.fuzz.FuzzModelInputSnapshotCodec;
+import cn.edu.nju.Iot_Verify.dto.RequestLimits;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
 import cn.edu.nju.Iot_Verify.dto.fuzz.FuzzEligibilityDto;
@@ -995,7 +996,7 @@ public class FuzzMapper {
         }
         Map<String, SpecificationDto> byId = new LinkedHashMap<>();
         for (SpecificationDto specification : specifications) {
-            if (specification == null || !validator.validate(specification).isEmpty()
+            if (!validFrozenSpecification(specification)
                     || byId.putIfAbsent(specification.getId(), specification) != null) {
                 throw invalidProjectedRun(task, "specificationPresentation", "frozen specifications are invalid");
             }
@@ -1020,7 +1021,7 @@ public class FuzzMapper {
                 () -> JsonUtils.fromJson(presentation.getModelTokenSourcesJson(), new TypeReference<Map<String, ModelTokenSource>>() {}));
         if (sources.size() > 100 || sources.size() != snapshot.getDeviceCount()
                 || sources.entrySet().stream().anyMatch(entry -> !hasText(entry.getKey())
-                || entry.getKey().length() > 100 || entry.getValue() == null)) {
+                || entry.getKey().length() > RequestLimits.MAX_IDENTIFIER_LENGTH || entry.getValue() == null)) {
             throw invalidProjectedRun(task, "modelTokenSourcesByDeviceId", "frozen token sources are invalid");
         }
         return Map.copyOf(sources);
@@ -1317,11 +1318,10 @@ public class FuzzMapper {
         }
         Map<String, SpecificationDto> specificationsById = new LinkedHashMap<>();
         for (SpecificationDto specification : snapshot.specifications()) {
-            if (specification == null || !hasText(specification.getId())
-                    || specification.getId().length() > 100
+            if (!validFrozenSpecification(specification)
                     || specificationsById.putIfAbsent(specification.getId(), specification) != null) {
                 throw invalidRun(task, "modelInputSnapshotJson",
-                        "frozen specifications have missing or duplicate identities");
+                        "frozen specifications have invalid semantics or duplicate identities");
             }
         }
         if (snapshot.rules().stream().anyMatch(Objects::isNull)) {
@@ -1585,6 +1585,11 @@ public class FuzzMapper {
                 : hasText(specification.getFormula()) ? specification.getFormula() : specification.getId();
         return FuzzMetadataPolicy.boundedSingleLine(
                 raw, specification.getId(), MAX_ELIGIBILITY_LABEL_CHARS);
+    }
+
+    private boolean validFrozenSpecification(SpecificationDto specification) {
+        return specification != null
+                && validator.validate(specification, SpecificationDto.FrozenModel.class).isEmpty();
     }
 
     private boolean isSupportedFiniteSpecification(SpecificationDto specification) {
