@@ -3,6 +3,7 @@ package cn.edu.nju.Iot_Verify.component.ai;
 import cn.edu.nju.Iot_Verify.component.ai.model.LlmChatRequest;
 import cn.edu.nju.Iot_Verify.component.ai.model.LlmChatResponse;
 import cn.edu.nju.Iot_Verify.component.ai.model.LlmMessage;
+import cn.edu.nju.Iot_Verify.component.ai.model.LlmStreamInterruptedException;
 import cn.edu.nju.Iot_Verify.component.ai.provider.LlmProvider;
 import cn.edu.nju.Iot_Verify.configure.LlmConfig;
 import lombok.RequiredArgsConstructor;
@@ -66,7 +67,19 @@ public class PromptCompletionService {
                 .reasoningEffort(reasoningEffort)
                 .build();
 
-        LlmChatResponse response = llmProvider.chat(request, LlmRequestControlHolder.currentOrNew());
+        LlmRequestControl control = LlmRequestControlHolder.currentOrNew();
+        LlmChatResponse response;
+        try {
+            response = llmProvider.chat(request, control);
+        } catch (LlmStreamInterruptedException failure) {
+            if (!"classification".equals(purpose) || Thread.currentThread().isInterrupted()
+                    || control.isCancellationRequested()) {
+                throw failure;
+            }
+            // Classifiers execute no tools; one retry keeps the same cancellation and transport state.
+            log.info("Retrying interrupted read-only classification once");
+            response = llmProvider.chat(request, control);
+        }
         String text = response.text();
         long elapsedMs = (System.nanoTime() - startedAt) / 1_000_000;
         log.info("LLM {} completion finished: promptChars={}, outputChars={}, elapsedMs={}",

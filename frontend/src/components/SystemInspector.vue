@@ -1275,6 +1275,7 @@ const syncFullTextTitle = (event: PointerEvent | FocusEvent) => {
             </button>
           </HintTooltip>
         </div>
+        <p class="board-caption board-text-muted mb-2">{{ t('household.requirementsMeaning') }}</p>
         <label class="board-inventory-search relative block">
           <span class="material-symbols-outlined pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-sm board-text-muted" aria-hidden="true">search</span>
           <input v-model="sectionSearch.specs" data-testid="inspector-search-specs"

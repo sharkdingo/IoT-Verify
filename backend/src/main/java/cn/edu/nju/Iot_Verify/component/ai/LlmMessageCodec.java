@@ -2,6 +2,7 @@ package cn.edu.nju.Iot_Verify.component.ai;
 
 import cn.edu.nju.Iot_Verify.component.ai.model.LlmMessage;
 import cn.edu.nju.Iot_Verify.component.ai.model.LlmToolCall;
+import cn.edu.nju.Iot_Verify.component.aitool.AiToolResultContract;
 import cn.edu.nju.Iot_Verify.exception.InternalServerException;
 import cn.edu.nju.Iot_Verify.exception.PersistedDataIntegrityException;
 import cn.edu.nju.Iot_Verify.po.ChatMessagePo;
@@ -12,6 +13,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -39,13 +41,23 @@ public class LlmMessageCodec {
 
     public List<LlmMessage> toMessages(List<ChatMessagePo> poList) {
         List<LlmMessage> messages = new ArrayList<>(poList.size());
+        Map<String, String> toolNames = new HashMap<>();
         for (ChatMessagePo po : poList) {
-            messages.add(toMessage(po));
+            LlmMessage message = toMessage(po);
+            for (LlmToolCall call : message.toolCalls()) toolNames.put(call.id(), call.name());
+            if ("tool".equalsIgnoreCase(po.getRole())) {
+                message = toMessage(po, toolNames.get(message.toolCallId()));
+            }
+            messages.add(message);
         }
         return messages;
     }
 
     public LlmMessage toMessage(ChatMessagePo po) {
+        return toMessage(po, null);
+    }
+
+    public LlmMessage toMessage(ChatMessagePo po, String sourceTool) {
         if (po == null) {
             throw new PersistedDataIntegrityException("chat message", null, "message", "record is null");
         }
@@ -57,7 +69,7 @@ public class LlmMessageCodec {
 
         if ("tool".equals(roleStr)) {
             ToolResultParts parts = parseToolResult(content, po.getId());
-            return LlmMessage.tool(parts.toolCallId(), projectToolResult(parts.result(), po.getId()));
+            return LlmMessage.tool(parts.toolCallId(), projectToolResult(parts.result(), po.getId(), sourceTool));
         }
 
         if ("assistant".equals(roleStr)) {
@@ -85,28 +97,60 @@ public class LlmMessageCodec {
         return parseToolResult(po.getContent(), po.getId()).result();
     }
 
-    private String projectToolResult(String result, Long messageId) {
+    private String projectToolResult(String result, Long messageId, String sourceTool) {
         JsonNode root;
         try {
             root = objectMapper.readTree(result);
         } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
             return result;
         }
-        if (root == null || !root.path("suggestions").isArray()) return result;
+        if (root == null || !root.isObject()) return result;
         boolean changed = false;
-        int index = 0;
-        for (JsonNode suggestion : root.path("suggestions")) {
-            index++;
-            if (!suggestion.has("suggestionToken")) continue;
-            if (!(suggestion instanceof ObjectNode object) || messageId == null || messageId <= 0) {
-                throw new PersistedDataIntegrityException("chat message", messageId, "content",
-                        "signed repair suggestions require a persisted message identity");
+        if (root.path("suggestions").isArray()) {
+            int index = 0;
+            for (JsonNode suggestion : root.path("suggestions")) {
+                index++;
+                if (!suggestion.has("suggestionToken")) continue;
+                if (!(suggestion instanceof ObjectNode object) || messageId == null || messageId <= 0) {
+                    throw new PersistedDataIntegrityException("chat message", messageId, "content",
+                            "signed repair suggestions require a persisted message identity");
+                }
+                object.remove("suggestionToken");
+                object.put("suggestionId", messageId + ":" + index);
+                changed = true;
             }
-            object.remove("suggestionToken");
-            object.put("suggestionId", messageId + ":" + index);
-            changed = true;
+        }
+        changed |= projectBoardReads(root.path("rules"), messageId, "rule",
+                AiToolResultContract.isCompletedRead(root)
+                        && ("list_rules".equals(sourceTool) || "board_overview".equals(sourceTool)));
+        changed |= projectBoardReads(root.path("specs"), messageId, "spec",
+                AiToolResultContract.isCompletedRead(root)
+                        && ("list_specs".equals(sourceTool) || "board_overview".equals(sourceTool)));
+        for (String field : List.of("rule", "specification", "deletedRule", "deletedSpecification")) {
+            if (root.path(field) instanceof ObjectNode item && item.has("expectedVersion")) {
+                item.remove("expectedVersion");
+                changed = true;
+            }
         }
         return changed ? root.toString() : result;
+    }
+
+    private boolean projectBoardReads(JsonNode rows, Long messageId, String kind, boolean selectable) {
+        if (!rows.isArray()) return false;
+        boolean changed = false;
+        for (int index = 0; index < rows.size(); index++) {
+            if (!(rows.get(index) instanceof ObjectNode item) || !item.has("expectedVersion")) continue;
+            item.remove("expectedVersion");
+            if (selectable) {
+                if (messageId == null || messageId <= 0) {
+                    throw new PersistedDataIntegrityException("chat message", messageId, "content",
+                            "Board reads require a persisted message identity");
+                }
+                item.put("readRef", messageId + ":" + kind + ":" + (index + 1));
+            }
+            changed = true;
+        }
+        return changed;
     }
 
     // ── domain → persisted content ───────────────────────────────────────

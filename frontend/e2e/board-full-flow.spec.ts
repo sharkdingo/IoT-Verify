@@ -2352,7 +2352,7 @@ test.describe('board full-stack NuSMV user flow', () => {
       120_000)
     expect(completedSimulationTask.status).toBe('COMPLETED')
     await expect(page.getByTestId('open-simulation-panel'))
-      .toHaveAttribute('aria-label', 'Open simulation settings', { timeout: 30_000 })
+      .toHaveAttribute('aria-label', 'Open observation settings', { timeout: 30_000 })
     if (await page.getByTestId('simulation-timeline').isVisible().catch(() => false)) {
       await page.getByTestId('simulation-timeline-close').click()
     }

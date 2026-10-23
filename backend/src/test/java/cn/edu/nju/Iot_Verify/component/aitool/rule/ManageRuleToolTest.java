@@ -8,6 +8,8 @@ import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.service.BoardStorageService;
+import cn.edu.nju.Iot_Verify.util.BoardItemVersion;
+import cn.edu.nju.Iot_Verify.testutil.AiToolReadFixture;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -15,6 +17,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -40,13 +44,15 @@ class ManageRuleToolTest {
     private BoardStorageService boardStorageService;
 
     private ManageRuleTool tool;
+    private AiToolReadFixture reads;
     private AiDestructiveActionGuard destructiveActionGuard;
 
     @BeforeEach
     void setUp() {
         ObjectMapper objectMapper = new ObjectMapper();
         destructiveActionGuard = new AiDestructiveActionGuard(objectMapper);
-        tool = new ManageRuleTool(boardStorageService, objectMapper, destructiveActionGuard);
+        reads = new AiToolReadFixture();
+        tool = new ManageRuleTool(boardStorageService, objectMapper, destructiveActionGuard, reads.service);
         UserContextHolder.setUserId(1L);
         UserContextHolder.setChatSessionId("rule-test-session");
     }
@@ -179,6 +185,71 @@ class ManageRuleToolTest {
         assertTrue(result.contains("not been formally verified"));
         verify(boardStorageService).addRule(anyLong(), argThat(rule ->
                 "When motion is detected, turn the light on.".equals(rule.getRuleString())));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"contentDevice", "content"})
+    void addRejectsIncompleteContentBeforeStorage(String field) throws Exception {
+        when(boardStorageService.getNodes(1L)).thenReturn(List.of(node("Light_1", "Light")));
+        DeviceTemplateDto template = lightTemplate();
+        template.getManifest().getApis().get(0).setAcceptsContent(true);
+        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(template));
+        var args = objectMapper().createObjectNode();
+        args.put("action", "add");
+        args.set("conditions", objectMapper().readTree("""
+                [{"deviceId":"Light_1","attribute":"state","targetType":"state","relation":"=","value":"Off"}]
+                """));
+        args.putObject("command").put("deviceId", "Light_1").put("action", "turnOn")
+                .put(field, "contentDevice".equals(field) ? "Light_1" : "image");
+
+        JsonNode response = objectMapper().readTree(tool.execute(args.toString()));
+
+        assertEquals(400, response.path("status").asInt(), response.toString());
+        assertEquals("VALIDATION_ERROR", response.path("errorCode").asText());
+        verify(boardStorageService, never()).addRule(anyLong(), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"contentDevice", "content"})
+    void addRejectsContentOnAnOrdinaryControlActionBeforeRequestingItsPair(String field) throws Exception {
+        when(boardStorageService.getNodes(1L)).thenReturn(List.of(node("Light_1", "Light")));
+        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(lightTemplate()));
+        var args = objectMapper().createObjectNode();
+        args.put("action", "add");
+        args.set("conditions", objectMapper().readTree("""
+                [{"deviceId":"Light_1","attribute":"state","targetType":"state","relation":"=","value":"Off"}]
+                """));
+        args.putObject("command").put("deviceId", "Light_1").put("action", "turnOn")
+                .put(field, "contentDevice".equals(field) ? "Light_1" : "image");
+
+        JsonNode response = objectMapper().readTree(tool.execute(args.toString()));
+
+        assertEquals(400, response.path("status").asInt(), response.toString());
+        assertEquals("VALIDATION_ERROR", response.path("errorCode").asText());
+        assertTrue(response.path("error").asText().contains("does not accept a content-sensitivity input"));
+        verify(boardStorageService, never()).addRule(anyLong(), any());
+    }
+
+    @Test
+    void addKeepsDeclaredContentFlowOnAContentAcceptingApi() throws Exception {
+        when(boardStorageService.getNodes(1L)).thenReturn(List.of(node("Light_1", "Light")));
+        DeviceTemplateDto template = lightTemplate();
+        template.getManifest().getApis().get(0).setAcceptsContent(true);
+        template.getManifest().setContents(List.of(DeviceTemplateDto.DeviceManifest.Content.builder()
+                .name("image").privacy("private").build()));
+        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(template));
+        stubSuccessfulRuleAdd();
+
+        JsonNode response = objectMapper().readTree(tool.execute("""
+                {"action":"add","conditions":[{"deviceId":"Light_1","attribute":"state",
+                "targetType":"state","relation":"=","value":"Off"}],"command":{
+                "deviceId":"Light_1","action":"turnOn","contentDevice":"Light_1","content":"image"}}
+                """));
+
+        assertEquals("created", response.path("operation").asText(), response.toString());
+        verify(boardStorageService).addRule(anyLong(), argThat(rule ->
+                "Light_1".equals(rule.getCommand().getContentDevice())
+                        && "image".equals(rule.getCommand().getContent())));
     }
 
     @Test
@@ -335,7 +406,7 @@ class ManageRuleToolTest {
         when(failingMapper.writeValueAsString(any())).thenThrow(new JsonProcessingException("boom") {
         });
 
-        ManageRuleTool fallbackTool = new ManageRuleTool(boardStorageService, failingMapper, destructiveActionGuard);
+        ManageRuleTool fallbackTool = new ManageRuleTool(boardStorageService, failingMapper, destructiveActionGuard, reads.service);
         UserContextHolder.clear();
 
         String result = fallbackTool.execute("{}");
@@ -354,7 +425,7 @@ class ManageRuleToolTest {
         when(boardStorageService.getNodes(1L)).thenReturn(List.of(node("Light_1", "Light")));
         stubSuccessfulRuleAdd();
 
-        ManageRuleTool fallbackTool = new ManageRuleTool(boardStorageService, failingMapper, destructiveActionGuard);
+        ManageRuleTool fallbackTool = new ManageRuleTool(boardStorageService, failingMapper, destructiveActionGuard, reads.service);
 
         String argsJson = """
                 {
@@ -502,6 +573,25 @@ class ManageRuleToolTest {
     }
 
     @Test
+    void updateUsesTheReadVersionWithoutReconstructingTheExistingRule() throws Exception {
+        BoardSemanticSnapshotDto baseline = numericRuleSnapshot(28, 100);
+        when(boardStorageService.getSemanticSnapshot(1L)).thenReturn(baseline);
+        when(boardStorageService.updateRulesAgainstSnapshot(anyLong(), any())).thenAnswer(invocation -> {
+            java.util.function.Function<BoardSemanticSnapshotDto, List<RuleDto>> update = invocation.getArgument(1);
+            return CollectionMutationResultDto.of("updated", null, update.apply(baseline));
+        });
+        JsonNode read = reads.read(1L, "rule-test-session", "list_rules",
+                new ListRulesTool(boardStorageService, objectMapper()).execute("{}"));
+        var args = (com.fasterxml.jackson.databind.node.ObjectNode) objectMapper().readTree(updateArgs(baseline, "30"));
+        args.put("readRef", read.path("rules").get(0).path("readRef").asText());
+
+        JsonNode result = objectMapper().readTree(tool.execute(args.toString()));
+
+        assertEquals("updated", result.path("operation").asText(), result.toString());
+        assertEquals("Cooling threshold", result.path("rule").path("label").asText());
+    }
+
+    @Test
     void updateChangesOnlyTheRequestedRuleInPlaceAndKeepsItsNameAndOrder() throws Exception {
         BoardSemanticSnapshotDto baseline = numericRuleSnapshot(28, 100);
         when(boardStorageService.getSemanticSnapshot(1L)).thenReturn(baseline);
@@ -541,6 +631,60 @@ class ManageRuleToolTest {
         assertEquals(409, result.path("status").asInt());
         assertFalse(result.has("operation"));
         assertEquals("31", changed.rules().get(0).getConditions().get(0).getValue());
+    }
+
+    @Test
+    void updateRejectsAChangedLabelOrRecreatedRuleEvenWhenBehaviorIsUnchanged() throws Exception {
+        BoardSemanticSnapshotDto baseline = numericRuleSnapshot(28, 100);
+        when(boardStorageService.getSemanticSnapshot(1L)).thenReturn(baseline);
+        for (boolean recreate : List.of(false, true)) {
+            BoardSemanticSnapshotDto changed = numericRuleSnapshot(28, 100);
+            if (recreate) changed.rules().get(0).setCreatedAt(java.time.LocalDateTime.of(2026, 10, 23, 0, 0));
+            else changed.rules().get(0).setRuleString("A newly chosen name");
+            org.mockito.Mockito.doAnswer(invocation -> {
+                java.util.function.Function<BoardSemanticSnapshotDto, List<RuleDto>> update = invocation.getArgument(1);
+                return CollectionMutationResultDto.of("updated", null, update.apply(changed));
+            }).when(boardStorageService).updateRulesAgainstSnapshot(anyLong(), any());
+            JsonNode result = objectMapper().readTree(tool.execute(updateArgs(baseline, "30")));
+            assertEquals(409, result.path("status").asInt(), result.toString());
+            assertFalse(result.has("operation"));
+        }
+    }
+
+    @Test
+    void updateVersionSurvivesDisplayRenameAndUnrelatedRuleEdits() throws Exception {
+        BoardSemanticSnapshotDto baseline = numericRuleSnapshot(28, 100);
+        BoardSemanticSnapshotDto changed = numericRuleSnapshot(28, 100);
+        changed.nodes().get(0).setLabel("Renamed light");
+        changed.rules().get(1).setRuleString("Another unrelated edit");
+        when(boardStorageService.getSemanticSnapshot(1L)).thenReturn(baseline);
+        when(boardStorageService.updateRulesAgainstSnapshot(anyLong(), any())).thenAnswer(invocation -> {
+            java.util.function.Function<BoardSemanticSnapshotDto, List<RuleDto>> update = invocation.getArgument(1);
+            List<RuleDto> next = update.apply(changed);
+            assertEquals(changed.rules().get(1), next.get(1));
+            return CollectionMutationResultDto.of("updated", null, next);
+        });
+        JsonNode result = objectMapper().readTree(tool.execute(updateArgs(baseline, "30")));
+        assertEquals("updated", result.path("operation").asText(), result.toString());
+    }
+
+    @Test
+    void updateRejectsAnotherUsersVersionAndObsoleteOrMalformedBaselines() throws Exception {
+        BoardSemanticSnapshotDto baseline = numericRuleSnapshot(28, 100);
+        var args = (com.fasterxml.jackson.databind.node.ObjectNode) objectMapper().readTree(updateArgs(baseline, "30"));
+        args.put("readRef", reads.read(2L, "another-session", "list_rules",
+                objectMapper().writeValueAsString(java.util.Map.of("rules", List.of(
+                        RuleToolPresenter.present(2L, baseline.rules().get(0), baseline.nodes())))))
+                .path("rules").get(0).path("readRef").asText());
+        assertEquals(400, objectMapper().readTree(tool.execute(args.toString())).path("status").asInt());
+        args.remove("readRef");
+        args.putObject("expectedRule").put("ruleId", 11);
+        assertEquals(400, objectMapper().readTree(tool.execute(args.toString())).path("status").asInt());
+        args.remove("expectedRule");
+        assertEquals(400, objectMapper().readTree(tool.execute(args.toString())).path("status").asInt());
+        args.put("readRef", "latest");
+        assertEquals(400, objectMapper().readTree(tool.execute(args.toString())).path("status").asInt());
+        org.mockito.Mockito.verifyNoInteractions(boardStorageService);
     }
 
     @Test
@@ -588,7 +732,10 @@ class ManageRuleToolTest {
         var args = objectMapper().createObjectNode();
         args.put("action", "update");
         args.put("ruleId", 11);
-        args.set("expectedRule", objectMapper().valueToTree(RuleToolPresenter.present(baseline.rules().get(0), baseline.nodes())));
+        args.put("readRef", reads.read(1L, "rule-test-session", "list_rules",
+                objectMapper().writeValueAsString(java.util.Map.of("rules", List.of(
+                        RuleToolPresenter.present(1L, baseline.rules().get(0), baseline.nodes())))))
+                .path("rules").get(0).path("readRef").asText());
         args.set("conditions", objectMapper().readTree("""
                 [{"deviceId":"Light_1","attribute":"temperature","targetType":"variable","relation":">","value":"30"}]
                 """));

@@ -23,6 +23,10 @@ import java.util.Set;
 @Component
 public class ListVerificationRunsTool extends AbstractAiTool {
 
+    private static final String INTERPRETATION = "These summaries report formula outcomes only and omit response-trigger reachability. "
+            + "SATISFIED does not establish preserved functionality. Use get_verification_run to inspect "
+            + "per-specification outcomes and antecedentReachability.";
+
     private final VerificationService verificationService;
 
     public ListVerificationRunsTool(VerificationService verificationService, ObjectMapper objectMapper) {
@@ -41,7 +45,8 @@ public class ListVerificationRunsTool extends AbstractAiTool {
                 "type", "integer", "minimum", 1, "maximum", 100,
                 "description", "Maximum completed runs, newest first (default 25)."));
         return LlmToolSpec.of(getName(),
-                "List completed formal-verification runs, including satisfied runs with no counterexample. Use get_verification_run for per-spec conclusions; use list_traces only when counterexample evidence is needed.",
+                "List completed formal-verification runs, including satisfied runs with no counterexample. "
+                        + INTERPRETATION + " Use list_traces only when counterexample evidence is needed.",
                 new FunctionParameterSchema("object", properties, List.of()));
     }
 
@@ -77,7 +82,7 @@ public class ListVerificationRunsTool extends AbstractAiTool {
                     "message", runs.isEmpty()
                             ? "No completed formal-verification runs found."
                             : "Found " + runs.size() + " completed formal-verification run(s), newest first.",
-                    "count", runs.size(), "runs", runs),
+                    "count", runs.size(), "runs", runs, "interpretation", INTERPRETATION),
                     "Verification runs loaded.");
         } catch (ArgParseException e) {
             return e.getErrorResponse();

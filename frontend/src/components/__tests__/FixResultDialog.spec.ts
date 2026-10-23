@@ -1701,6 +1701,23 @@ describe('FixResultDialog strategy workflow', () => {
     }
   )
 
+  it.each(['en', 'zh-CN'] as const)('explains loss of a response trigger as a possible rejection in %s', async locale => {
+    const translations = createI18n({ legacy: false, locale, messages: {
+      en: actualI18n.global.getLocaleMessage('en'), 'zh-CN': actualI18n.global.getLocaleMessage('zh-CN')
+    } })
+    const wrapper = mountDialog(translations)
+    await flush()
+    for (const strategy of ['parameter', 'condition', 'remove'] as const) {
+      boardApi.fixTrace.mockResolvedValueOnce({ ...parameterOutcomeResult('ALL_CANDIDATES_REJECTED'),
+        strategyAttempts: [{ strategy, status: 'ALL_CANDIDATES_REJECTED', reason: 'Server diagnostic.' }] })
+      await wrapper.get(`[data-testid="fix-strategy-${strategy}"]`).trigger('click')
+      await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+      await flush()
+      expect(wrapper.get('[data-testid="fix-attempt-outcome"]').text()).toContain(locale === 'en'
+        ? 'make a previously reachable response trigger impossible' : '使原本可发生的响应触发条件消失')
+    }
+  })
+
   // The same request against the same frozen snapshot reproduces the budget outcome exactly.
   it('offers a retry after an exhausted budget only once the search ranges change', async () => {
     boardApi.fixTrace.mockResolvedValueOnce(parameterBudgetExhaustedResult())

@@ -3,12 +3,18 @@ import { describeSpecification, type ModelPresentationContext } from '@/utils/mo
 import { formatModelTokenBySource } from '@/utils/modelTokenDisplay'
 import { verdictVariableSourceKeys } from './verdictVariableSource'
 
+const hasResponseTriggerWarning = (result: SpecResult) =>
+  result.antecedentReachability === 'UNREACHABLE' || result.antecedentReachability === 'INCONCLUSIVE'
+
+export const countResponseTriggerWarnings = (results: readonly SpecResult[]) =>
+  results.filter(hasResponseTriggerWarning).length
+
 export const presentSpecificationResult = (result: SpecResult, t: ModelPresentationContext['t']) => {
   const snapshot = result.specificationSnapshot
   const prefix = `${result.formulaKind} `
   const reachability = result.antecedentReachability
   return {
-    triggerWarning: reachability === 'UNREACHABLE' || reachability === 'INCONCLUSIVE',
+    triggerWarning: hasResponseTriggerWarning(result),
     triggerDetail: reachability === 'UNREACHABLE' ? t('household.triggerUnreachableDetail')
       : reachability === 'INCONCLUSIVE' ? t('household.triggerUnknownDetail')
       : reachability === 'REACHABLE' ? t('household.triggerReachable') : null,

@@ -8,7 +8,7 @@ Responses are wrapped in the standard `Result<T>` envelope (authoritative defini
 [overview.md](overview.md)). The `data` shapes below are what appears under that
 envelope's `data` field.
 
-Verified against code on 2026-10-22. Source:
+Verified against code on 2026-10-23. Source:
 `controller/VerificationController.java`, `controller/SimulationController.java`,
 `service/InteractiveFixExecutionService.java`, and the DTOs under
 `dto/verification/`, `dto/simulation/`, `dto/device/`,
@@ -1330,7 +1330,8 @@ works on the trace's frozen snapshot:
   whose preferred ranges share no value with the template bounds is the vacuous case.
 - `ALL_CANDIDATES_REJECTED`: edits that prevent the pinned counterexample exist, but every one was
   rejected. Forward verification found the target specification still violated or a
-  baseline-satisfied specification broken, or the edit was ineligible (a rule left without a trigger
+  baseline-satisfied specification broken, a previously reachable response trigger made unreachable,
+  or the edit was ineligible (a rule left without a trigger
   condition, a changed attack scenario). Rule removal has no pinned-counterexample step, so a
   complete rule-removal search that listed nothing always ends here.
 

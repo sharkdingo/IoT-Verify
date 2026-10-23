@@ -19,7 +19,7 @@ import cn.edu.nju.Iot_Verify.po.ChatSessionPo;
 import cn.edu.nju.Iot_Verify.repository.ChatMessageRepository;
 import cn.edu.nju.Iot_Verify.repository.ChatSessionRepository;
 import cn.edu.nju.Iot_Verify.service.FixService;
-import cn.edu.nju.Iot_Verify.service.AiFixSuggestionService;
+import cn.edu.nju.Iot_Verify.service.AiToolResultReferenceService;
 import cn.edu.nju.Iot_Verify.service.FixSuggestionTokenService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -65,7 +65,7 @@ class ApplyFixToolTest {
     private ChatExecutionConfig chatExecutionConfig;
     private ApplyFixTool tool;
     private LlmMessageCodec messageCodec;
-    private AiFixSuggestionService suggestionService;
+    private AiToolResultReferenceService suggestionService;
     private long nextMessageId;
 
     @BeforeEach
@@ -78,7 +78,7 @@ class ApplyFixToolTest {
         chatExecutionConfig = new ChatExecutionConfig();
         messageCodec = new LlmMessageCodec(objectMapper);
         nextMessageId = 521L;
-        suggestionService = new AiFixSuggestionService(messageRepository, sessionRepository, objectMapper, messageCodec);
+        suggestionService = new AiToolResultReferenceService(messageRepository, sessionRepository, objectMapper, messageCodec);
         tool = new ApplyFixTool(
                 fixService, tokenService, objectMapper, guard, chatExecutionConfig,
                 suggestionService);

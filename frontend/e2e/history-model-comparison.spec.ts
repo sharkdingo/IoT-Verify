@@ -131,7 +131,7 @@ test('a synchronous simulation preserves the history replay and keeps an unsaved
         await expect(page.getByText(/another trajectory is being replayed/)).toBeVisible()
         await expect(notice).toHaveCount(0)
       } else {
-        await expect(notice).toContainText('Simulation result available')
+        await expect(notice).toContainText('Observation result available')
         await expect(notice).toContainText('no confirmed history save')
         await page.setViewportSize({ width: 375, height: 812 })
         expect(await notice.evaluate(element => {

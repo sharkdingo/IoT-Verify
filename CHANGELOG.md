@@ -15,6 +15,47 @@ history into a technical spec. The spec content itself now lives under
 
 ## [Unreleased]
 
+### 2026-10-23 (reliable AI edits and consistent result interpretation)
+
+#### Fixed
+
+- Assistant rule and requirement edits now bind to a server-provided target version instead
+  of reconstructing an old display object. Chat resolves a short reference to that exact
+  read result, so models do not have to transcribe a long hash. Shared read projections
+  supply the same version and labels; stale edits still fail without writing, and unrelated
+  display changes do not invalidate an edit. Filtered searches no longer describe a
+  nonempty board as empty.
+- Rule tool schemas distinguish ordinary control actions from optional content-sensitivity
+  inputs. Incomplete content source/payload pairs are rejected at admission before storage.
+- Device, rule, requirement and scenario recommendations preserve distinct declared enum
+  values such as `on` and `On`, and reject ambiguous normalized aliases instead of silently
+  changing their meaning.
+- Read-only authorization classification can recover once from a provider-identified stream
+  interruption using the same request and cancellation control. A failed or denied decision
+  still cannot authorize a write, and saved mutations are never retried by this recovery.
+- Background verification completion retains warnings about unreachable or inconclusive
+  response triggers. History summaries and the assistant's history reader distinguish a
+  satisfied formula from evidence that the intended response remains useful.
+- Repair rejection explanations include loss of a formerly reachable response trigger.
+- Assistant evidence guidance identifies the actual failing response transition and keeps
+  repair-preservation claims within the requirements and triggers that were checked.
+- Reply checks no longer mistake references to verified repair previews or warnings that
+  configured/saved requirements do not imply completed verification or safe behavior for
+  new operation claims.
+  Actual completion claims remain checked. Pending-verification guidance describes the
+  actual create/update operation and follows later formal results when available.
+- The landing-page topology illustration stays within narrow viewports instead of forcing
+  horizontal page overflow through its minimum height and aspect ratio.
+
+#### Changed
+
+- Observation controls and history use consistent household-facing terminology for viewing
+  one possible path, while formal checking and bounded risk exploration retain their
+  distinct meanings. Assistant shortcuts reserve violation confirmation for formal checking.
+- Requirement inventories and editors explain that specifications are the household's
+  independent checks, including desired responses and preserved functions, distinct from
+  automation rules.
+
 ### 2026-10-23 (household intent and meaningful repair)
 
 #### Added

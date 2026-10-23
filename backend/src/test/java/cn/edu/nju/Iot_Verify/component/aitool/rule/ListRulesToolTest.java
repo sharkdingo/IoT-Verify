@@ -16,6 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
@@ -52,17 +53,27 @@ class ListRulesToolTest {
         JsonNode response = new ObjectMapper().readTree(
                 new ListRulesTool(storage, new ObjectMapper()).execute("{\"keyword\":\"Living room\"}"));
 
-        verify(storage).getSemanticSnapshot(1L);
-        verifyNoMoreInteractions(storage);
-
         assertEquals(1, response.path("count").asInt());
         JsonNode presented = response.path("rules").get(0);
         assertEquals(17L, presented.path("ruleId").asLong());
+        assertEquals("Hall motion lighting", presented.path("label").asText());
+        assertTrue(presented.path("expectedVersion").asText().matches("v1:[0-9a-f]{64}"));
         assertEquals("node-sensor", presented.path("conditions").get(0).path("deviceId").asText());
         assertEquals("Hall sensor", presented.path("conditions").get(0).path("deviceLabel").asText());
         assertEquals("Living room light", presented.path("command").path("deviceLabel").asText());
         assertTrue(presented.path("conditions").get(0).path("deviceName").isMissingNode());
         assertTrue(presented.path("description").asText().contains("Hall sensor"));
+
+        JsonNode versionSearch = new ObjectMapper().readTree(new ListRulesTool(storage, new ObjectMapper())
+                .execute("{\"keyword\":\"" + presented.path("expectedVersion").asText() + "\"}"));
+        assertEquals(0, versionSearch.path("count").asInt(), "Version tokens are not searchable rule content");
+        JsonNode unmatched = new ObjectMapper().readTree(new ListRulesTool(storage, new ObjectMapper())
+                .execute("{\"keyword\":\"客厅灯\"}"));
+        assertEquals(0, unmatched.path("count").asInt());
+        assertEquals("No rules match this literal keyword. Use an empty keyword to list all rules.",
+                unmatched.path("message").asText());
+        verify(storage, times(3)).getSemanticSnapshot(1L);
+        verifyNoMoreInteractions(storage);
     }
 
     @Test

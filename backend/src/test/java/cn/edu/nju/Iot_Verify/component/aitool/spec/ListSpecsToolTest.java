@@ -18,6 +18,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
@@ -55,18 +56,27 @@ class ListSpecsToolTest {
         JsonNode response = new ObjectMapper().readTree(
                 new ListSpecsTool(storage, new ObjectMapper()).execute("{\"keyword\":\"Front door\"}"));
 
-        verify(storage).getSemanticSnapshot(1L);
-        verifyNoMoreInteractions(storage);
-
         assertEquals(1, response.path("count").asInt());
         JsonNode presented = response.path("specs").get(0);
         assertEquals("spec-internal-1", presented.path("specId").asText());
+        assertTrue(presented.path("expectedVersion").asText().matches("v1:[0-9a-f]{64}"));
         assertEquals("Front door", presented.path("aConditions").get(0).path("deviceLabel").asText());
         assertEquals("CTL AG NOT (\"Front door\".state = \"open\")",
                 presented.path("formulaPreview").asText());
         assertFalse(presented.path("formulaPreview").asText().contains("node-door"));
         assertTrue(presented.path("formula").isMissingNode());
         assertTrue(presented.path("description").asText().contains("Front door"));
+
+        JsonNode versionSearch = new ObjectMapper().readTree(new ListSpecsTool(storage, new ObjectMapper())
+                .execute("{\"keyword\":\"" + presented.path("expectedVersion").asText() + "\"}"));
+        assertEquals(0, versionSearch.path("count").asInt(), "Version tokens are not searchable specification content");
+        JsonNode unmatched = new ObjectMapper().readTree(new ListSpecsTool(storage, new ObjectMapper())
+                .execute("{\"keyword\":\"前门\"}"));
+        assertEquals(0, unmatched.path("count").asInt());
+        assertEquals("No specifications match this literal keyword. Use an empty keyword to list all specifications.",
+                unmatched.path("message").asText());
+        verify(storage, times(3)).getSemanticSnapshot(1L);
+        verifyNoMoreInteractions(storage);
     }
 
     @Test

@@ -42,12 +42,14 @@ public class ListRulesTool extends AbstractAiTool {
         props.put("keyword", Map.of(
                 "type", "string",
                 "maxLength", 100,
-                "description", "Optional keyword to filter rules by device name, attribute, relation, value, or action. Leave empty to return all rules."
+                "description", "Optional literal keyword to filter rules by device name, attribute, relation, value, or action. "
+                        + "Matching ignores case but does not translate. Leave empty to return all rules."
         ));
 
         FunctionParameterSchema schema = new FunctionParameterSchema("object", props, Collections.emptyList());
 
-        return LlmToolSpec.of(getName(), "List automation rules on the current board.", schema);
+        return LlmToolSpec.of(getName(), "List automation rules on the current board. "
+                + "Copy ruleId and readRef exactly into manage_rule update arguments.", schema);
     }
 
     protected String doExecute(Long userId, String argsJson) {
@@ -66,19 +68,21 @@ public class ListRulesTool extends AbstractAiTool {
             List<DeviceNodeDto> nodes = snapshot.nodes();
             if (!keyword.isEmpty()) {
                 rules = rules.stream()
-                        .filter(rule -> RuleToolPresenter.containsKeyword(rule, nodes, keyword))
+                        .filter(rule -> RuleToolPresenter.containsKeyword(userId, rule, nodes, keyword))
                         .toList();
             }
 
             if (rules.isEmpty()) {
+                String message = keyword.isEmpty() ? "No rules found on the board."
+                        : "No rules match this literal keyword. Use an empty keyword to list all rules.";
                 return readOnlySuccessJson(Map.of(
-                        "message", "No rules found on the board.",
+                        "message", message,
                         "count", 0
-                ), "No rules found on the board.");
+                ), message);
             }
 
             List<Map<String, Object>> presentedRules = rules.stream()
-                    .map(rule -> RuleToolPresenter.present(rule, nodes))
+                    .map(rule -> RuleToolPresenter.present(userId, rule, nodes))
                     .toList();
             return readOnlySuccessJson(Map.of(
                     "count", rules.size(),

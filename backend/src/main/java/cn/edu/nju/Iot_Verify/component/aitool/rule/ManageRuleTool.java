@@ -18,7 +18,9 @@ import cn.edu.nju.Iot_Verify.exception.ResourceNotFoundException;
 import cn.edu.nju.Iot_Verify.exception.ConflictException;
 import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
 import cn.edu.nju.Iot_Verify.service.BoardStorageService;
+import cn.edu.nju.Iot_Verify.service.AiToolResultReferenceService;
 import cn.edu.nju.Iot_Verify.util.FunctionParameterSchema;
+import cn.edu.nju.Iot_Verify.util.BoardItemVersion;
 import cn.edu.nju.Iot_Verify.util.RulePreviewText;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -42,13 +44,16 @@ public class ManageRuleTool extends AbstractAiTool {
 
     private final BoardStorageService boardStorageService;
     private final AiDestructiveActionGuard destructiveActionGuard;
+    private final AiToolResultReferenceService referenceService;
 
     public ManageRuleTool(BoardStorageService boardStorageService,
                           ObjectMapper objectMapper,
-                          AiDestructiveActionGuard destructiveActionGuard) {
+                          AiDestructiveActionGuard destructiveActionGuard,
+                          AiToolResultReferenceService referenceService) {
         super(objectMapper);
         this.boardStorageService = boardStorageService;
         this.destructiveActionGuard = destructiveActionGuard;
+        this.referenceService = referenceService;
     }
 
     @Override
@@ -86,14 +91,14 @@ public class ManageRuleTool extends AbstractAiTool {
 
         props.put("command", Map.of(
                 "type", "object",
-                "description", "Required for 'add' and 'update'. The action to execute when conditions are met. deviceId/contentDevice must be canonical board device ids; labels are display-only.",
+                "description", "Required for 'add' and 'update'. Ordinary control actions need only the target deviceId and action (plus optional display labels). contentDevice/content describe a source content for privacy analysis, not an action argument: omit both unless the target API declares AcceptsContent=true and a declared source content is actually carried.",
                 "properties", Map.of(
                         "deviceId", Map.of("type", "string"),
                         "deviceLabel", Map.of("type", "string", "description", "Optional display snapshot; ignored for identity resolution."),
                         "action", Map.of("type", "string"),
-                        "contentDevice", Map.of("type", "string"),
+                        "contentDevice", Map.of("type", "string", "description", "Optional canonical id of the device declaring the selected content. This is not required merely because the command has a target device. Requires content and a target API with AcceptsContent=true; otherwise omit both fields."),
                         "contentDeviceLabel", Map.of("type", "string", "description", "Optional display snapshot; ignored for identity resolution."),
-                        "content", Map.of("type", "string")
+                        "content", Map.of("type", "string", "description", "Optional exact name from the source template's Contents list. Requires contentDevice and a target API with AcceptsContent=true. Never put an action name, parameter value or sensitivity label here.")
                 ),
                 "required", List.of("deviceId", "action"),
                 "additionalProperties", false
@@ -108,9 +113,10 @@ public class ManageRuleTool extends AbstractAiTool {
                 "type", "integer",
                 "description", "Required for 'update' or 'delete'. Copy the existing ruleId from list_rules."
         ));
-        props.put("expectedRule", Map.of(
-                "type", "object",
-                "description", "Required only for update. Copy the complete unchanged rule object from the latest list_rules result, including its display fields. The server rejects a changed baseline. Send the desired conditions/command separately; copy their schema fields without summary/description. Update keeps this rule's ID and execution position, preserves other rules, and supports undo."
+        props.put("readRef", Map.of(
+                "type", "string",
+                "pattern", AiToolResultReferenceService.BOARD_READ_PATTERN,
+                "description", "Required only for update. Copy this rule's short readRef from list_rules or board_overview unchanged; never reconstruct its old fields. A stale read is rejected: read the target again and reconsider the edit. Send desired conditions/command separately using their schema fields without summary/description. Update keeps this rule's ID and execution position, preserves other rules, and supports undo."
         ));
         props.put("confirmed", Map.of(
                 "type", "boolean",
@@ -135,7 +141,7 @@ public class ManageRuleTool extends AbstractAiTool {
                 "object", props, List.of("action")
         );
 
-        return LlmToolSpec.of(getName(), "Add an automation rule, update an existing rule in place, preview/delete one through explicit two-turn confirmation, or reorder all rules. Use list_rules before updating, deleting or reordering. For a requested threshold or condition edit use update; never add a replacement and delete the original. Applying a formal fix_violation proposal, including rule removal, must use apply_fix instead so its verified-proposal guards are retained.", schema);
+        return LlmToolSpec.of(getName(), "Add an automation rule, update an existing rule in place, preview/delete one through explicit two-turn confirmation, or reorder all rules. Use list_rules or board_overview before updating; use list_rules before deleting or reordering. For a requested threshold or condition edit use update; never add a replacement and delete the original. Applying a formal fix_violation proposal, including rule removal, must use apply_fix instead so its verified-proposal guards are retained.", schema);
     }
 
     protected String doExecute(Long userId, String argsJson) {
@@ -148,7 +154,7 @@ public class ManageRuleTool extends AbstractAiTool {
             }
             requireOnlyFields(args, "arguments", Set.of(
                     "action", "conditions", "command", "label", "ruleId", "ruleIds",
-                    "expectedRuleIds", "expectedRule", "confirmed", "impactToken"));
+                    "expectedRuleIds", "readRef", "confirmed", "impactToken"));
             String action = requiredTextField(args, "action", "arguments").toLowerCase(Locale.ROOT);
 
             return switch (action) {
@@ -188,7 +194,7 @@ public class ManageRuleTool extends AbstractAiTool {
         response.put("operation", "created");
         response.put("verificationStatus", "NOT_VERIFIED");
         response.put("executionOrder", mutation.getCurrentCount());
-        response.put("rule", RuleToolPresenter.present(mutation.getAffectedItem(), nodes));
+        response.put("rule", RuleToolPresenter.present(userId, mutation.getAffectedItem(), nodes));
         response.put("totalRules", mutation.getCurrentCount());
         return successJson(response, "Rule created but not formally verified.");
     }
@@ -349,18 +355,11 @@ public class ManageRuleTool extends AbstractAiTool {
 
     private String executeUpdate(Long userId, JsonNode args) throws Exception {
         requireOnlyFields(args, "arguments", Set.of(
-                "action", "ruleId", "expectedRule", "conditions", "command", "label"));
+                "action", "ruleId", "readRef", "conditions", "command", "label"));
         long ruleId = positiveLongArg(args, "ruleId");
-        JsonNode expected = args.get("expectedRule");
-        if (expected == null || !expected.isObject()) {
-            return errorJson("expectedRule must copy the complete rule from list_rules.", "VALIDATION_ERROR", 400);
-        }
-        long expectedId = positiveLongArg(expected, "ruleId");
-        if (expectedId != ruleId) {
-            return errorJson("expectedRule.ruleId must match ruleId.", "VALIDATION_ERROR", 400);
-        }
-        // JSON integer node widths differ after a round trip; the typed id has one canonical width.
-        ((com.fasterxml.jackson.databind.node.ObjectNode) expected).put("ruleId", expectedId);
+        String readRef = requiredTextField(args, "readRef", "arguments");
+        String expectedVersion = referenceService.resolveBoardVersion(
+                userId, UserContextHolder.getChatSessionId(), readRef, "rule", Long.toString(ruleId));
         BoardSemanticSnapshotDto baseline = boardStorageService.getSemanticSnapshot(userId);
         RuleDto proposed = parseRule(userId, args, baseline.nodes(), baseline.deviceTemplates(), baseline.environmentVariables());
         CollectionMutationResultDto<RuleDto> mutation = boardStorageService.updateRulesAgainstSnapshot(userId, current -> {
@@ -371,7 +370,7 @@ public class ManageRuleTool extends AbstractAiTool {
             }
             if (position < 0) throw new ResourceNotFoundException("Rule", ruleId);
             RuleDto existing = next.get(position);
-            if (!expected.equals(objectMapper.valueToTree(RuleToolPresenter.present(existing, current.nodes())))) {
+            if (!expectedVersion.equals(BoardItemVersion.rule(userId, existing))) {
                 throw new ConflictException("This rule changed after it was read. Read list_rules again before updating it.");
             }
             // Template/state drift is checked against the committing snapshot, not the earlier read.
@@ -392,7 +391,7 @@ public class ManageRuleTool extends AbstractAiTool {
         response.put("operation", "updated");
         response.put("verificationStatus", "NOT_VERIFIED");
         response.put("executionOrder", mutation.getCurrentItems().indexOf(saved) + 1);
-        response.put("rule", RuleToolPresenter.present(saved, baseline.nodes()));
+        response.put("rule", RuleToolPresenter.present(userId, saved, baseline.nodes()));
         response.put("totalRules", mutation.getCurrentCount());
         return successJson(response, "Rule updated but not formally verified.");
     }
@@ -408,7 +407,7 @@ public class ManageRuleTool extends AbstractAiTool {
             return errorJson("Rule not found: " + ruleId, "NOT_FOUND", 404);
         }
 
-        Map<String, Object> presentedRule = RuleToolPresenter.present(
+        Map<String, Object> presentedRule = RuleToolPresenter.present(userId,
                 target, safeList(boardStorageService.getNodes(userId)));
         Map<String, Object> bindingSnapshot = Map.of("rule", presentedRule);
         boolean confirmed = booleanArg(args, "confirmed", false);
@@ -451,7 +450,7 @@ public class ManageRuleTool extends AbstractAiTool {
             if (current == null) {
                 return errorJson("Rule not found: " + ruleId, "NOT_FOUND", 404);
             }
-            Map<String, Object> currentPresentation = RuleToolPresenter.present(
+            Map<String, Object> currentPresentation = RuleToolPresenter.present(userId,
                     current, safeList(boardStorageService.getNodes(userId)));
             Map<String, Object> currentBinding = Map.of("rule", currentPresentation);
             String freshToken = destructiveActionGuard.issue(
@@ -468,7 +467,7 @@ public class ManageRuleTool extends AbstractAiTool {
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("message", "Rule deleted successfully.");
         response.put("operation", "deleted");
-        response.put("deletedRule", RuleToolPresenter.present(
+        response.put("deletedRule", RuleToolPresenter.present(userId,
                 mutation.getAffectedItem(), safeList(boardStorageService.getNodes(userId))));
         response.put("totalRules", mutation.getCurrentCount());
         return successJson(response, "Rule deleted successfully.");
@@ -485,7 +484,7 @@ public class ManageRuleTool extends AbstractAiTool {
         List<DeviceNodeDto> nodes = safeList(boardStorageService.getNodes(userId));
         List<Object> presented = new ArrayList<>();
         for (RuleDto rule : safeList(reordered)) {
-            presented.add(RuleToolPresenter.present(rule, nodes));
+            presented.add(RuleToolPresenter.present(userId, rule, nodes));
         }
 
         Map<String, Object> response = new LinkedHashMap<>();

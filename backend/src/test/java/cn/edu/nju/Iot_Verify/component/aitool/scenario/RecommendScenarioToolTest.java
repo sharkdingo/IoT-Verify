@@ -1117,6 +1117,68 @@ class RecommendScenarioToolTest {
         verify(promptCompletionService, never()).complete(anyString(), anyString(), anyDouble(), anyInt());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"device", "environment", "rule", "specification"})
+    void execute_preservesDeclaredEnumCaseAcrossTheScene(String surface) throws Exception {
+        JsonNode result = recommendCaseSensitiveScene(surface, "=", "On");
+        JsonNode scene = result.path("scene");
+        assertTrue(scene.isObject(), result.toString());
+        JsonNode value = switch (surface) {
+            case "device" -> scene.path("devices").get(0).path("variables").get(0).path("value");
+            case "environment" -> scene.path("environmentVariables").get(0).path("value");
+            case "rule" -> scene.path("rules").get(0).path("sources").get(0).path("value");
+            default -> scene.path("specs").get(0).path("aConditions").get(0).path("value");
+        };
+        assertEquals("On", value.asText(), result.toString());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"device", "environment", "rule", "specification"})
+    void execute_reportsAmbiguousEnumValuesInsteadOfGuessingTheirMeaning(String surface) throws Exception {
+        JsonNode result = recommendCaseSensitiveScene(surface, "=", "ON");
+        String expectedReason = switch (surface) {
+            case "device" -> "invalidDeviceRuntime";
+            case "environment" -> "invalidEnvironmentValue";
+            case "rule" -> "invalidRuleSources";
+            default -> "invalidSpecConditions";
+        };
+        assertTrue(result.path("filteredItems").findValuesAsText("reasonCode").contains(expectedReason), result.toString());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"rule", "specification"})
+    void execute_keepsDistinctEnumValuesInSceneSetConditions(String surface) throws Exception {
+        JsonNode result = recommendCaseSensitiveScene(surface, "in", "on,On");
+        JsonNode scene = result.path("scene");
+        assertTrue(scene.isObject(), result.toString());
+        JsonNode value = "rule".equals(surface)
+                ? scene.path("rules").get(0).path("sources").get(0).path("value")
+                : scene.path("specs").get(0).path("aConditions").get(0).path("value");
+        assertEquals("on,On", value.asText(), result.toString());
+    }
+
+    private JsonNode recommendCaseSensitiveScene(String surface, String relation, String value) throws Exception {
+        var template = cn.edu.nju.Iot_Verify.testutil.CaseSensitiveEnumFixture.template();
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of(template));
+        when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
+                .thenReturn("""
+                        {"scenarioName":"Preserve declared enum values","scene":{
+                          "devices":[{"id":"case-sensor","templateName":"CaseSensor","label":"Case sensor",
+                            "variables":[{"name":"level","value":"%s"}]}],
+                          "environmentVariables":[{"name":"reading","value":"%s"}],
+                          "rules":[{"name":"React to the reading","sources":[{"fromId":"case-sensor",
+                            "fromApi":"reading","itemType":"variable","relation":"%s","value":"%s"}],
+                            "toId":"case-sensor","toApi":"activate"}],
+                          "specs":[{"id":"requirement","templateId":"3","aConditions":[{"deviceId":"case-sensor",
+                            "targetType":"variable","key":"reading","variableSource":"environment",
+                            "relation":"%s","value":"%s"}]}]}}
+                        """.formatted("device".equals(surface) ? value : "on",
+                        "environment".equals(surface) ? value : "on",
+                        "rule".equals(surface) ? relation : "=", "rule".equals(surface) ? value : "on",
+                        "specification".equals(surface) ? relation : "=", "specification".equals(surface) ? value : "on"));
+        return objectMapper.readTree(tool.execute(DEFAULT_ARGS));
+    }
+
     private DeviceTemplateDto sensorTemplate() {
         DeviceTemplateDto dto = new DeviceTemplateDto();
         dto.setName("Noise Sensor");

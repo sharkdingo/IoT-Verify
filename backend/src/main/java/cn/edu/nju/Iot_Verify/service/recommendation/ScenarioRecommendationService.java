@@ -29,6 +29,7 @@ import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import cn.edu.nju.Iot_Verify.exception.BaseException;
 import cn.edu.nju.Iot_Verify.service.BoardStorageService;
+import cn.edu.nju.Iot_Verify.util.EnumLiteralResolver;
 import cn.edu.nju.Iot_Verify.util.EnvironmentDomainUtils;
 import cn.edu.nju.Iot_Verify.util.RecommendationInputs;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -75,6 +76,7 @@ public class ScenarioRecommendationService {
     private static final String SYSTEM_PROMPT = ("""
 你是智能家居 IoT 形式化验证场景设计助手。你的任务不是分别推荐设备、规则、规约，而是一次设计一个自包含的全量场景草案。
 草案只需满足结构、引用和设备能力约束；不要声称它安全、完整、已验证或已应用。
+场景中的枚举值必须保留模板声明的大小写；不同大小写可能表示不同值，不得将含糊拼写映射到列表第一项。
 
 场景必须把用户痛点、设备实例、共享环境变量、自动化规则和形式化规约串成闭环：
 - 设备实例必须来自可用模板。
@@ -109,7 +111,7 @@ public class ScenarioRecommendationService {
         "templateName": "必须来自模板列表",
         "label": "用户可读名称",
         "position": {"x": 0, "y": 0},
-        "state": "仅有状态机模板填写；必须是该模板 WorkingStates 中的某个状态（大小写与首尾空格会被规范化）",
+        "state": "仅有状态机模板填写；必须是该模板 WorkingStates 中的某个状态（保留声明的大小写；仅无歧义的拼写差异可被规范化）",
         "currentStateTrust": "可选，trusted|untrusted；表示初始状态触发自动化时的控制来源标签，不是认证、通用完整性或概率",
         "currentStatePrivacy": "可选，public|private；表示初始状态的数据敏感性标签，不是访问控制",
         "variables": [
@@ -1699,13 +1701,7 @@ public class ScenarioRecommendationService {
         if (candidates.isEmpty()) return null;
         List<String> canonical = new ArrayList<>();
         for (String candidate : candidates) {
-            String matched = null;
-            for (String option : allowed) {
-                if (option != null && clean(option).equalsIgnoreCase(clean(candidate))) {
-                    matched = option;
-                    break;
-                }
-            }
+            String matched = EnumLiteralResolver.resolveIgnoringSpaces(allowed, candidate);
             if (matched == null) return null;
             canonical.add(matched);
         }
@@ -1813,12 +1809,7 @@ public class ScenarioRecommendationService {
     }
 
     private String canonicalState(DeviceTemplateDto template, String rawState) {
-        for (String state : workingStates(template)) {
-            if (state.equalsIgnoreCase(rawState == null ? "" : rawState.trim())) {
-                return state;
-            }
-        }
-        return null;
+        return EnumLiteralResolver.resolve(workingStates(template), rawState);
     }
 
     private String defaultState(DeviceTemplateDto template) {
@@ -2078,10 +2069,6 @@ public class ScenarioRecommendationService {
 
     private String defaultPrivacy(String value) {
         return value == null ? "public" : value;
-    }
-
-    private String clean(String value) {
-        return value == null ? "" : value.trim().replace(" ", "");
     }
 
     private static final class CandidateStats {

@@ -16,6 +16,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -436,6 +438,55 @@ class RecommendSpecificationsToolTest {
         assertEquals("Mode", condition.path("key").asText());
         assertEquals("=", condition.path("relation").asText());
         assertEquals("sleep", condition.path("value").asText());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"variable,reading,On", "variable,reading,on"})
+    void execute_preservesExactCaseSensitiveEnumValue(String targetType, String key, String value) throws Exception {
+        JsonNode json = recommendCaseSensitiveEnum(targetType, key, "=", value);
+
+        assertEquals(1, json.path("validatedCount").asInt(), json.toString());
+        assertEquals(value, json.path("recommendations").get(0).path("aConditions").get(0).path("value").asText());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"variable,reading"})
+    void execute_filtersAmbiguousEnumCaseInsteadOfGuessing(String targetType, String key) throws Exception {
+        JsonNode json = recommendCaseSensitiveEnum(targetType, key, "=", "ON");
+
+        assertEquals(0, json.path("validatedCount").asInt(), json.toString());
+        assertEquals(1, json.path("filteredCount").asInt());
+        assertEquals(0, json.path("recommendations").size());
+    }
+
+    @Test
+    void execute_keepsDistinctEnumMembersInSetCondition() throws Exception {
+        JsonNode json = recommendCaseSensitiveEnum("variable", "reading", "in", "on,On");
+
+        assertEquals(1, json.path("validatedCount").asInt(), json.toString());
+        assertEquals("on,On", json.path("recommendations").get(0).path("aConditions").get(0).path("value").asText());
+    }
+
+    private JsonNode recommendCaseSensitiveEnum(String targetType, String key, String relation, String value) throws Exception {
+        var template = cn.edu.nju.Iot_Verify.testutil.CaseSensitiveEnumFixture.template();
+        DeviceNodeDto node = new DeviceNodeDto();
+        node.setId("case-sensor");
+        node.setLabel("Case sensor");
+        node.setTemplateName(template.getName());
+        node.setState("idle");
+        snapshot = new BoardSemanticSnapshotDto(List.of(node),
+                List.of(new cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto("reading", "on", "trusted", "public")),
+                List.of(), List.of(), List.of(template));
+        tool = new RecommendSpecificationsTool(new SpecificationRecommendationService(new DeviceInfoHelper(), boardStorageService,
+                promptCompletionService, objectMapper, new RecommendationResultParser(objectMapper)), objectMapper);
+        when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
+                .thenReturn("""
+                        {"recommendations":[{"rationale":"Keep the declared enum meaning","templateId":"3",
+                          "aConditions":[{"deviceId":"case-sensor","targetType":"%s","key":"%s",%s
+                            "relation":"%s","value":"%s"}],"ifConditions":[],"thenConditions":[]}]}
+                        """.formatted(targetType, key,
+                        "variable".equals(targetType) ? "\"variableSource\":\"reported\"," : "", relation, value));
+        return objectMapper.readTree(tool.execute("{}"));
     }
 
     @Test

@@ -413,8 +413,8 @@ const verificationOutcomeBadge = (run: AvailableVerificationRunSummary) => {
   }
   if (run.outcome === 'SATISFIED' && run.modelComplete) {
     return {
-      label: t('app.verificationPassed'),
-      className: 'board-surface-success board-text-success'
+      label: t('household.historyFormulasSatisfied'),
+      className: 'board-meta-chip'
     }
   }
   if (run.outcome === 'SATISFIED') {
@@ -685,6 +685,8 @@ const resultDate = (item: ResultItem) => formatDate(resultTimestamp(item))
                   :test-id="`${item.kind}-history-model-help-${item.run.id}`" />
               </p>
               <p class="history-card__scope board-text-muted">{{ scopeText(item.run.modelSnapshot, item.kind) }}</p>
+              <p v-if="item.kind === 'verification' && item.run.outcome === 'SATISFIED' && item.run.modelComplete"
+                class="history-card__copy board-text-muted">{{ t('household.historyTriggerReview') }}</p>
               <p v-if="item.kind === 'simulation'" class="history-card__copy board-text-muted">{{ t('app.simulationHistoryCounts', {
                 requested: item.run.requestedSteps, steps: item.run.steps, states: item.run.steps + 1 }) }}</p>
               <p v-if="item.kind === 'fuzzing' && item.run.outcome === 'BUDGET_EXHAUSTED'" class="history-card__copy board-text-muted">{{ t('app.fuzzNoViolationWithinBudget') }}</p>

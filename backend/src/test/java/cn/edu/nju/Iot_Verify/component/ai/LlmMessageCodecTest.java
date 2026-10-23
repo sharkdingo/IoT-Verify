@@ -185,4 +185,40 @@ class LlmMessageCodecTest {
 
         assertThrows(PersistedDataIntegrityException.class, () -> codec.toMessage(po));
     }
+
+    @Test
+    void boardReadsExposeShortReferencesAndKeepExactVersionsOnTheServer() throws Exception {
+        String version = "v1:393a733fcfe684899822a5c6d85b169b5ef1306d262a2c877845799ccac2bc28";
+        String result = objectMapper.writeValueAsString(Map.of(
+                "resultStatus", "SUCCESS", "resultAvailable", true,
+                "rules", List.of(Map.of("ruleId", 15765, "expectedVersion", version, "label", "Porch rule")),
+                "specs", List.of(Map.of("specId", "safety-1", "expectedVersion", version))));
+        ChatMessagePo po = new ChatMessagePo();
+        po.setId(521L);
+        po.setRole("tool");
+        po.setContent(codec.serializeToolResult("read-call", result));
+
+        var projected = objectMapper.readTree(codec.toMessage(po, "board_overview").content());
+
+        assertEquals("521:rule:1", projected.path("rules").get(0).path("readRef").asText());
+        assertEquals("521:spec:1", projected.path("specs").get(0).path("readRef").asText());
+        assertEquals("Porch rule", projected.path("rules").get(0).path("label").asText());
+        assertFalse(projected.toString().contains("expectedVersion"));
+        assertFalse(projected.toString().contains(version));
+        assertEquals(result, codec.toolResultContent(po));
+        ChatMessagePo request = new ChatMessagePo();
+        request.setRole("assistant");
+        request.setContent(codec.serializeToolCalls(List.of(new LlmToolCall("read-call", "board_overview", "{}"))));
+        assertEquals(projected, objectMapper.readTree(codec.toMessages(List.of(request, po)).get(1).content()));
+    }
+
+    @Test
+    void boardReadWithoutPersistedIdentityCannotBecomeSelectable() {
+        ChatMessagePo po = new ChatMessagePo();
+        po.setRole("tool");
+        po.setContent(codec.serializeToolResult("read-call",
+                "{\"resultStatus\":\"SUCCESS\",\"resultAvailable\":true,\"rules\":[{\"ruleId\":1,\"expectedVersion\":\"v1:" + "a".repeat(64) + "\"}]}"));
+
+        assertThrows(PersistedDataIntegrityException.class, () -> codec.toMessage(po, "list_rules"));
+    }
 }

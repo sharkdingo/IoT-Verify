@@ -643,7 +643,7 @@ import {
   notifyInfo,
   notifySuccess
 } from '@/utils/feedback'
-import { getVerificationOutcome, presentSpecificationResult } from './board/verificationResult'
+import { countResponseTriggerWarnings, getVerificationOutcome, presentSpecificationResult } from './board/verificationResult'
 import {
   applyBoardRunTarget,
   hasUnusableBoardRunParams,
@@ -1939,9 +1939,13 @@ const getVerificationFailureMessage = (result: VerificationResult | null): strin
     : t('app.verificationFailedNoSpecResults')
 }
 
-const notifyVerificationOutcome = (result: any, options?: { presenting?: boolean }) => {
+const notifyVerificationOutcome = (result: VerificationResult | null, options?: { presenting?: boolean }) => {
   // Suppress the toast when the dialog is already presenting the verdict
   if (options && options.presenting) {
+    return
+  }
+  if (!result) {
+    notifyBlocked(t('household.resultUnavailable'))
     return
   }
 
@@ -1971,7 +1975,9 @@ const notifyVerificationOutcome = (result: any, options?: { presenting?: boolean
   }
 
   if (verificationOutcome === 'SATISFIED') {
-    notifySuccess(t('app.verificationSatisfiedComplete'))
+    const triggerWarnings = countResponseTriggerWarnings(result.specResults)
+    if (triggerWarnings > 0) notifyBlocked(t('household.coverageDetail', { count: triggerWarnings }))
+    else notifySuccess(t('app.verificationSatisfiedComplete'))
   } else if (verificationOutcome === 'INCONCLUSIVE') {
     notifyBlocked(t('app.verificationInconclusiveSummary'))
   } else {
@@ -14619,7 +14625,7 @@ const verificationSpecResultSummary = computed(() => {
     satisfied,
     violated,
     inconclusive,
-    triggerWarnings: results.filter(result => result.triggerWarning).length
+    triggerWarnings: countResponseTriggerWarnings(results)
   }
 })
 /**

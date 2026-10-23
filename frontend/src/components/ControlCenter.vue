@@ -3590,6 +3590,7 @@ watch(() => props.readOnly, readOnly => {
 
         <div class="px-3 pb-4 board-bg-muted pt-2 space-y-3">
           <!-- Specification Creation -->
+          <p class="board-caption board-text-muted">{{ t('household.requirementsMeaning') }}</p>
           <fieldset
             data-testid="spec-editor-fieldset"
             :disabled="props.readOnly || creatingSpecification"

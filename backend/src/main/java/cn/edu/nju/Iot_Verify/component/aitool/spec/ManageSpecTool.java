@@ -17,7 +17,9 @@ import cn.edu.nju.Iot_Verify.exception.BaseException;
 import cn.edu.nju.Iot_Verify.exception.ConflictException;
 import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
 import cn.edu.nju.Iot_Verify.service.BoardStorageService;
+import cn.edu.nju.Iot_Verify.service.AiToolResultReferenceService;
 import cn.edu.nju.Iot_Verify.util.FunctionParameterSchema;
+import cn.edu.nju.Iot_Verify.util.BoardItemVersion;
 import cn.edu.nju.Iot_Verify.util.SpecificationFormulaPreview;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -43,13 +45,16 @@ public class ManageSpecTool extends AbstractAiTool {
 
     private final BoardStorageService boardStorageService;
     private final AiDestructiveActionGuard destructiveActionGuard;
+    private final AiToolResultReferenceService referenceService;
 
     public ManageSpecTool(BoardStorageService boardStorageService,
                           ObjectMapper objectMapper,
-                          AiDestructiveActionGuard destructiveActionGuard) {
+                          AiDestructiveActionGuard destructiveActionGuard,
+                          AiToolResultReferenceService referenceService) {
         super(objectMapper);
         this.boardStorageService = boardStorageService;
         this.destructiveActionGuard = destructiveActionGuard;
+        this.referenceService = referenceService;
     }
 
     @Override
@@ -107,9 +112,10 @@ public class ManageSpecTool extends AbstractAiTool {
                 "type", "string",
                 "description", "Required for update/delete. The existing specification ID from list_specs."
         ));
-        props.put("expectedSpec", Map.of(
-                "type", "object",
-                "description", "Required only for update. Copy the complete specification object from list_specs unchanged, including specId, condition groups and previews. A stale or incomplete snapshot is rejected; read list_specs again before retrying."
+        props.put("readRef", Map.of(
+                "type", "string",
+                "pattern", AiToolResultReferenceService.BOARD_READ_PATTERN,
+                "description", "Required only for update. Copy this specification's short readRef from list_specs or board_overview unchanged; never reconstruct its old fields. A stale read is rejected: read the target again and reconsider the edit. Send the complete desired template and condition groups separately."
         ));
         props.put("confirmed", Map.of(
                 "type", "boolean",
@@ -122,7 +128,7 @@ public class ManageSpecTool extends AbstractAiTool {
 
         FunctionParameterSchema schema = new FunctionParameterSchema("object", props, List.of("action"));
 
-        return LlmToolSpec.of(getName(), "Add or update a structured requirement, or preview/delete one through explicit two-turn confirmation. Read list_specs before updating or deleting. An edit is not formal verification.", schema);
+        return LlmToolSpec.of(getName(), "Add or update a structured requirement, or preview/delete one through explicit two-turn confirmation. Read list_specs or board_overview before updating; read list_specs before deleting. An edit is not formal verification.", schema);
     }
 
     protected String doExecute(Long userId, String argsJson) {
@@ -135,7 +141,7 @@ public class ManageSpecTool extends AbstractAiTool {
             }
             requireOnlyFields(args, "arguments", Set.of(
                     "action", "templateId", "aConditions", "ifConditions", "thenConditions",
-                    "specId", "expectedSpec", "confirmed", "impactToken"));
+                    "specId", "readRef", "confirmed", "impactToken"));
             String action = requiredTextField(args, "action", "arguments").toLowerCase(Locale.ROOT);
 
             return switch (action) {
@@ -165,24 +171,21 @@ public class ManageSpecTool extends AbstractAiTool {
 
     private String executeWrite(Long userId, JsonNode args, boolean update) throws Exception {
         requireOnlyFields(args, "arguments", update
-                ? Set.of("action", "specId", "expectedSpec", "templateId", "aConditions", "ifConditions", "thenConditions")
+                ? Set.of("action", "specId", "readRef", "templateId", "aConditions", "ifConditions", "thenConditions")
                 : Set.of("action", "templateId", "aConditions", "ifConditions", "thenConditions"));
         SpecificationDto before = null;
         DeviceLookup deviceLookup = null;
         if (update) {
             String specId = requiredTextField(args, "specId", "arguments");
-            JsonNode expected = args.get("expectedSpec");
-            if (expected == null || !expected.isObject() || !specId.equals(expected.path("specId").asText())) {
-                return errorJson("expectedSpec must copy the complete specification from list_specs with the same specId.",
-                        "VALIDATION_ERROR", 400);
-            }
+            String readRef = requiredTextField(args, "readRef", "arguments");
+            String expectedVersion = referenceService.resolveBoardVersion(
+                    userId, UserContextHolder.getChatSessionId(), readRef, "spec", specId);
             BoardSemanticSnapshotDto snapshot = boardStorageService.getSemanticSnapshot(userId);
             deviceLookup = buildDeviceLookup(snapshot.nodes(), snapshot.deviceTemplates(), snapshot.environmentVariables());
             before = snapshot.specifications().stream().filter(spec -> specId.equals(spec.getId()))
                     .findFirst().orElse(null);
             if (before == null) return errorJson("Specification not found: " + specId, "NOT_FOUND", 404);
-            if (!expected.equals(objectMapper.valueToTree(
-                    SpecificationToolPresenter.present(before, deviceLookup.presentationContext())))) {
+            if (!expectedVersion.equals(BoardItemVersion.specification(userId, before))) {
                 throw new ConflictException(
                         "This specification changed after it was read. Read list_specs again before updating it.");
             }
@@ -238,7 +241,7 @@ public class ManageSpecTool extends AbstractAiTool {
         response.put("message", message);
         response.put("operation", mutation.getOperation());
         response.put("verificationStatus", "NOT_VERIFIED");
-        response.put("specification", SpecificationToolPresenter.present(
+        response.put("specification", SpecificationToolPresenter.present(userId,
                 mutation.getAffectedItem(), deviceLookup.presentationContext()));
         response.put("totalSpecs", mutation.getCurrentCount());
         return unchanged ? readOnlySuccessJson(response, message) : successJson(response, message);
@@ -256,7 +259,7 @@ public class ManageSpecTool extends AbstractAiTool {
             return errorJson("Specification not found: " + specId, "NOT_FOUND", 404);
         }
 
-        Map<String, Object> presentedSpecification = SpecificationToolPresenter.present(
+        Map<String, Object> presentedSpecification = SpecificationToolPresenter.present(userId,
                 target, currentPresentationContext(userId));
         Map<String, Object> bindingSnapshot = Map.of(
                 "specification", presentedSpecification);
@@ -300,7 +303,7 @@ public class ManageSpecTool extends AbstractAiTool {
             if (current == null) {
                 return errorJson("Specification not found: " + specId, "NOT_FOUND", 404);
             }
-            Map<String, Object> currentPresentation = SpecificationToolPresenter.present(
+            Map<String, Object> currentPresentation = SpecificationToolPresenter.present(userId,
                     current, currentPresentationContext(userId));
             Map<String, Object> currentBinding = Map.of("specification", currentPresentation);
             String freshToken = destructiveActionGuard.issue(
@@ -317,7 +320,7 @@ public class ManageSpecTool extends AbstractAiTool {
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("message", "Specification deleted successfully.");
         response.put("operation", "deleted");
-        response.put("deletedSpecification", SpecificationToolPresenter.present(
+        response.put("deletedSpecification", SpecificationToolPresenter.present(userId,
                 mutation.getAffectedItem(),
                 currentPresentationContext(userId)));
         response.put("totalSpecs", mutation.getCurrentCount());

@@ -121,6 +121,13 @@ class AiCapabilityClosureToolsTest {
 
         assertEquals("SATISFIED", listed.path("runs").get(0).path("outcome").asText());
         assertEquals(0, listed.path("runs").get(0).path("counterexampleCount").asInt());
+        String interpretation = listed.path("interpretation").asText();
+        assertTrue(interpretation.contains("formula outcomes only"));
+        assertTrue(interpretation.contains("omit response-trigger reachability"));
+        assertTrue(interpretation.contains("SATISFIED does not establish preserved functionality"));
+        assertTrue(interpretation.contains("get_verification_run"));
+        assertTrue(new ListVerificationRunsTool(verificationService, objectMapper)
+                .getDefinition().description().contains("omit response-trigger reachability"));
         assertEquals(1, loaded.path("checkLogCount").asInt());
         assertTrue(loaded.path("specResults").isArray());
         assertFalse(loaded.path("specResults").get(0).has("specId"));

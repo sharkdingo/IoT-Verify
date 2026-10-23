@@ -131,7 +131,9 @@ class ChatServiceImplToolLoopControlTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"我已完成当前规则的静态分析，没有运行验证。",
-            "这些检查要求目前只是已配置的 specifications，本次没有读取到正式验证结果，因此不能称为已经验证通过。"})
+            "这些检查要求目前只是已配置的 specifications，本次没有读取到正式验证结果，因此不能称为已经验证通过。",
+            "配置了检查要求不等于已经运行验证；本轮没有请求或执行验证。",
+            "当前规则中存在灯亮后开门的路径，因此不能仅因为检查要求已经保存，就宣称行为已经安全。"})
     void readOnlyAnalysisRemainsVisibleAndSavedWithoutAnOperationWarning(String statement) throws Exception {
         when(messageRepo.findTop80BySessionIdOrderByIdDesc("s1")).thenReturn(List.of());
         when(aiToolManager.getAllToolDefinitions()).thenReturn(List.of(toolSpec("board_overview")));
@@ -164,7 +166,8 @@ class ChatServiceImplToolLoopControlTest {
     @ValueSource(strings = {"本次没有读取到正式验证结果，因此不能称为已经验证通过。",
             "本轮没有验证记录，所以无法声称已经验证通过。",
             "正式验证不能称为已经完成。", "验证还不应宣称已经运行。",
-            "不能声称已经完成验证。", "我已完成当前规则的静态分析，并不能声称已经完成验证。"})
+            "不能声称已经完成验证。", "我已完成当前规则的静态分析，并不能声称已经完成验证。",
+            "配置了检查要求不等于已经运行验证；本轮没有请求或执行验证。"})
     void negatedVerificationClaimsDoNotExcuseAdjacentCompletedOperations(String statement) {
         assertFalse(ChatServiceImpl.containsUnsupportedPlatformClaim(statement));
         assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim(
@@ -179,9 +182,70 @@ class ChatServiceImplToolLoopControlTest {
     @ValueSource(strings = {"当前验证不能称为已经完成，但已经运行。",
             "当前验证无法声称已经完成，但已经启动。",
             "当前验证已经运行，但不能称为已经完成。",
-            "不能声称已经完成验证，但已经运行。", "不能声称已经验证通过，但已经运行。"})
+            "不能声称已经完成验证，但已经运行。", "不能声称已经验证通过，但已经运行。",
+            "配置了检查要求不等于已经运行验证，但已经运行。",
+            "当前验证不能仅因为检查要求已经保存，就宣称行为安全，但已经运行。"})
     void negatedCompletionDoesNotHideAnOperationSharingItsSubject(String statement) {
         assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim(statement));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"我现在申请该已验证修复的应用预览，不会修改规约。",
+            "请确认这项已验证的修复建议是否应用，尚未修改规则。",
+            "上述已经验证的修复方案等待确认，不会修改规约。"})
+    void referencedVerifiedRepairDoesNotClaimACompletedOperation(String statement) {
+        assertFalse(ChatServiceImpl.containsUnsupportedPlatformClaim(statement));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"我已应用该已验证修复的规则。",
+            "该已验证修复的规则已经修改。",
+            "我现在申请该已验证修复的应用预览，但我已修改规约。",
+            "我已修改规约，并申请该已验证修复的应用预览。",
+            "我已经验证该已验证修复的规则。",
+            "该已验证修复的验证已经完成。"})
+    void referencedVerifiedRepairDoesNotExcuseAnActualCompletedOperation(String statement) {
+        assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim(statement));
+    }
+
+    @Test
+    void verifiedRepairPreviewNarrationRemainsVisibleAndSavedWhileAwaitingConfirmation() throws Exception {
+        String statement = "你选择的是仅删除“Unsafe convenience: a lit porch unlocks the door”，"
+                + "保留访客亮灯和主人请求开门规则；我现在申请该已验证修复的应用预览，不会修改规约。";
+        String arguments = "{\"suggestionId\":\"2584:3\",\"confirmed\":false}";
+        when(messageRepo.findTop80BySessionIdOrderByIdDesc("s1")).thenReturn(List.of());
+        when(aiToolManager.getAllToolDefinitions()).thenReturn(List.of(toolSpec("apply_fix")));
+        when(llmChatService.chatWithTools(anyList(), anyList(), any())).thenAnswer(invocation -> {
+            Consumer<String> onDelta = invocation.getArgument(2);
+            onDelta.accept(statement);
+            return new LlmChatResponse(statement, List.of(new LlmToolCall("preview", "apply_fix", arguments)));
+        });
+        when(aiToolManager.execute("apply_fix", arguments))
+                .thenReturn("{\"operation\":\"preview\",\"requiresUserConfirmation\":true}");
+        doAnswer(invocation -> {
+            Consumer<String> onDelta = invocation.getArgument(1);
+            onDelta.accept("请确认是否应用。 ");
+            return null;
+        }).when(llmChatService).streamReply(anyList(), any(), any());
+
+        SseEmitter emitter = mock(SseEmitter.class);
+        var frames = captureSseFrames(emitter);
+        String executionId = service.beginStreamRequest(1L, "s1", "turn-preview", "预览所选修复，不要修改规则。");
+        service.processStreamChat(1L, "s1", executionId, "turn-preview", "预览所选修复，不要修改规则。", emitter);
+
+        String body = frames.stream().map(StreamResponseDto::getContent).filter(Objects::nonNull)
+                .reduce("", String::concat);
+        assertTrue(body.contains(statement));
+        assertFalse(body.contains("尚未核实"));
+        assertTrue(frames.stream().map(StreamResponseDto::getProgress).filter(Objects::nonNull)
+                .noneMatch(progress -> "CLAIM_REVIEW".equals(progress.getStage())));
+        assertTrue(frames.stream().map(StreamResponseDto::getProgress).filter(Objects::nonNull)
+                .anyMatch(progress -> "apply_fix".equals(progress.getToolName())
+                        && "CONFIRMATION_REQUIRED".equals(progress.getOutcome())));
+        verify(messageRepo).saveAndFlush(org.mockito.ArgumentMatchers.argThat(message ->
+                "assistant".equals(message.getRole()) && body.equals(message.getContent())
+                        && message.getExecutionStatus() == ChatExecutionStatus.AWAITING_CONFIRMATION));
+        assertSingleFinalTerminal(frames, "turn-preview", ChatExecutionStatus.AWAITING_CONFIRMATION);
     }
 
     @ParameterizedTest
@@ -4017,6 +4081,24 @@ class ChatServiceImplToolLoopControlTest {
         assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim("我已保存正式验证结果。"));
         assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim("我已经保存了新的验证记录。"));
         assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim("已保存的正式验证有反例，本轮我已修改当前画布。"));
+        assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim("我已保存规则。"));
+        assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim("我已保存规约。"));
+        assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim("规则已经保存。"));
+        assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim("规约已经保存。"));
+        assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim("不能仅因为我已保存规约，就认定运行安全。"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "当前规则中存在灯亮后开门的路径，因此不能仅因为检查要求已经保存，就宣称行为已经安全。",
+            "不能只因为这些规约已保存，就认定自动化已经安全。",
+            "不能仅由于当前规则已经保存，就认为家里一定安全。"})
+    void savedConfigurationPremisesDoNotClaimANewMutation(String statement) {
+        assertFalse(ChatServiceImpl.containsUnsupportedPlatformClaim(statement));
+        assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim("我已保存规则。" + statement));
+        assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim(statement + "但我已保存规约。"));
+        assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim(statement + "但当前验证已经运行。"));
+        assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim(statement + "但规约已经修改。"));
     }
 
     @Test

@@ -11,6 +11,7 @@ import cn.edu.nju.Iot_Verify.service.BoardStorageService;
 import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
 import cn.edu.nju.Iot_Verify.dto.recommendation.RecommendationResponseDto;
 import cn.edu.nju.Iot_Verify.dto.recommendation.DeviceRecommendationDto;
+import cn.edu.nju.Iot_Verify.util.EnumLiteralResolver;
 import cn.edu.nju.Iot_Verify.util.RecommendationInputs;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -84,6 +85,7 @@ public class DeviceRecommendationService {
 - 不要推荐与现有设备完全相同建议部署区域/用途的重复实例
 - intendedUse 和 suggestedPlacement 只解释推荐上下文；应用时只保存模板、suggestedLabel 和有效初始运行值，不要暗示它们会成为设备字段或形式模型输入
 - initialVariables/initialPrivacies 只能使用模板中 IsInside=true 的本地变量；共享环境变量不要放进设备实例
+- 枚举初值必须保留模板声明的大小写；不同大小写可能表示不同值，不能把含糊拼写解释为列表中的第一项
 - currentStateTrust/currentStatePrivacy 和变量 trust/privacy 仅表示实例级高级覆盖；采用模板默认标签时必须省略。
 - trust 是 MEDIC 控制来源标签：多条件规则只要至少一个实际触发来源可信，目标仍可信；只有全部来源不可信时目标才不可信。它不是认证或通用数据完整性。privacy 是数据敏感性标签，不代表现实访问控制或加密
 - 基于现有设备的功能缺口进行推荐
@@ -531,12 +533,8 @@ public class DeviceRecommendationService {
         if (candidate == null || candidate.isBlank()) {
             return null;
         }
-        for (DeviceTemplateDto.DeviceManifest.WorkingState state : states) {
-            if (state.getName() != null && state.getName().equalsIgnoreCase(candidate)) {
-                return state.getName();
-            }
-        }
-        return null;
+        return EnumLiteralResolver.resolve(states.stream()
+                .map(DeviceTemplateDto.DeviceManifest.WorkingState::getName).toList(), candidate);
     }
 
     private List<Map<String, Object>> normalizeInitialVariables(
@@ -649,12 +647,7 @@ public class DeviceRecommendationService {
             return null;
         }
         if (variable.getValues() != null && !variable.getValues().isEmpty()) {
-            for (String allowed : variable.getValues()) {
-                if (allowed != null && allowed.equalsIgnoreCase(value)) {
-                    return allowed;
-                }
-            }
-            return null;
+            return EnumLiteralResolver.resolve(variable.getValues(), value);
         }
         // A numeric domain is a complete interval: `device-template-schema.json` admits an enum or both
         // bounds, never one. The old `||` gate half-validated a shape that cannot be stored, and

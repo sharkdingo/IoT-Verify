@@ -2,6 +2,7 @@ package cn.edu.nju.Iot_Verify.component.aitool.rule;
 
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
+import cn.edu.nju.Iot_Verify.util.BoardItemVersion;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -9,16 +10,17 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-final class RuleToolPresenter {
+public final class RuleToolPresenter {
 
     private RuleToolPresenter() {
     }
 
-    static Map<String, Object> present(RuleDto rule, List<DeviceNodeDto> nodes) {
+    public static Map<String, Object> present(Long userId, RuleDto rule, List<DeviceNodeDto> nodes) {
         Map<String, String> labelsById = labelsById(nodes);
         Map<String, Object> result = new LinkedHashMap<>();
         if (rule.getId() != null) {
             result.put("ruleId", rule.getId());
+            result.put("expectedVersion", BoardItemVersion.rule(userId, rule));
         }
         putIfText(result, "label", rule.getRuleString());
 
@@ -37,12 +39,14 @@ final class RuleToolPresenter {
         return result;
     }
 
-    static boolean containsKeyword(RuleDto rule, List<DeviceNodeDto> nodes, String keyword) {
+    static boolean containsKeyword(Long userId, RuleDto rule, List<DeviceNodeDto> nodes, String keyword) {
         if (rule == null || keyword == null || keyword.isBlank()) {
             return rule != null;
         }
         String normalized = keyword.toLowerCase(Locale.ROOT);
-        String serialized = present(rule, nodes).values().toString().toLowerCase(Locale.ROOT);
+        Map<String, Object> searchable = present(userId, rule, nodes);
+        searchable.remove("expectedVersion");
+        String serialized = searchable.values().toString().toLowerCase(Locale.ROOT);
         return serialized.contains(normalized);
     }
 

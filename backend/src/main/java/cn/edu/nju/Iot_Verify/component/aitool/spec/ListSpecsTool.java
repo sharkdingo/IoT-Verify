@@ -44,12 +44,14 @@ public class ListSpecsTool extends AbstractAiTool {
         props.put("keyword", Map.of(
                 "type", "string",
                 "maxLength", 100,
-                "description", "Optional keyword to filter specifications by ID, template label, device, key, relation, or value. Leave empty to return all."
+                "description", "Optional literal keyword to filter specifications by ID, template label, device, key, relation, or value. "
+                        + "Matching ignores case but does not translate. Leave empty to return all."
         ));
 
         FunctionParameterSchema schema = new FunctionParameterSchema("object", props, Collections.emptyList());
 
-        return LlmToolSpec.of(getName(), "List formal specifications on the current board.", schema);
+        return LlmToolSpec.of(getName(), "List formal specifications on the current board. "
+                + "Copy specId and readRef exactly into manage_spec update arguments.", schema);
     }
 
     protected String doExecute(Long userId, String argsJson) {
@@ -72,19 +74,21 @@ public class ListSpecsTool extends AbstractAiTool {
             if (!keyword.isEmpty()) {
                 specs = specs.stream()
                         .filter(spec -> SpecificationToolPresenter.containsKeyword(
-                                spec, presentationContext, keyword))
+                                userId, spec, presentationContext, keyword))
                         .toList();
             }
 
             if (specs.isEmpty()) {
+                String message = keyword.isEmpty() ? "No specifications found on the board."
+                        : "No specifications match this literal keyword. Use an empty keyword to list all specifications.";
                 return readOnlySuccessJson(Map.of(
-                        "message", "No specifications found on the board.",
+                        "message", message,
                         "count", 0
-                ), "No specifications found on the board.");
+                ), message);
             }
 
             List<Map<String, Object>> presentedSpecs = specs.stream()
-                    .map(spec -> SpecificationToolPresenter.present(spec, presentationContext))
+                    .map(spec -> SpecificationToolPresenter.present(userId, spec, presentationContext))
                     .toList();
             return readOnlySuccessJson(Map.of(
                     "count", specs.size(),

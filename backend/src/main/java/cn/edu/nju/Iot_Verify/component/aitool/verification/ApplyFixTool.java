@@ -14,7 +14,7 @@ import cn.edu.nju.Iot_Verify.exception.FixApplyPreflightUnavailableException;
 import cn.edu.nju.Iot_Verify.exception.ResourceNotFoundException;
 import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
 import cn.edu.nju.Iot_Verify.security.UserContextHolder;
-import cn.edu.nju.Iot_Verify.service.AiFixSuggestionService;
+import cn.edu.nju.Iot_Verify.service.AiToolResultReferenceService;
 import cn.edu.nju.Iot_Verify.service.FixService;
 import cn.edu.nju.Iot_Verify.service.FixSuggestionTokenService;
 import cn.edu.nju.Iot_Verify.util.FunctionParameterSchema;
@@ -42,14 +42,14 @@ public class ApplyFixTool extends AbstractAiTool {
     private final FixSuggestionTokenService suggestionTokenService;
     private final AiDestructiveActionGuard destructiveActionGuard;
     private final ChatExecutionConfig chatExecutionConfig;
-    private final AiFixSuggestionService suggestionService;
+    private final AiToolResultReferenceService suggestionService;
 
     public ApplyFixTool(FixService fixService,
                         FixSuggestionTokenService suggestionTokenService,
                         ObjectMapper objectMapper,
                         AiDestructiveActionGuard destructiveActionGuard,
                         ChatExecutionConfig chatExecutionConfig,
-                        AiFixSuggestionService suggestionService) {
+                        AiToolResultReferenceService suggestionService) {
         super(objectMapper);
         this.fixService = fixService;
         this.suggestionTokenService = suggestionTokenService;
@@ -138,7 +138,7 @@ public class ApplyFixTool extends AbstractAiTool {
         } catch (NumberFormatException e) {
             throw validation("arguments.suggestionId is outside the supported range.");
         }
-        AiFixSuggestionService.ResolvedSuggestion selected = suggestionService.resolve(
+        AiToolResultReferenceService.ResolvedSuggestion selected = suggestionService.resolveRepair(
                 userId, UserContextHolder.getChatSessionId(), traceId, messageId, suggestionIndex);
         JsonNode suggestionNode = selected.suggestion();
         FixSuggestionDto suggestion = objectMapper.treeToValue(suggestionNode, FixSuggestionDto.class);

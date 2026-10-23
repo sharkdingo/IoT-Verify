@@ -14,6 +14,7 @@ import cn.edu.nju.Iot_Verify.service.BoardStorageService;
 import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
 import cn.edu.nju.Iot_Verify.dto.recommendation.RecommendationResponseDto;
 import cn.edu.nju.Iot_Verify.dto.recommendation.RuleRecommendationDto;
+import cn.edu.nju.Iot_Verify.util.EnumLiteralResolver;
 import cn.edu.nju.Iot_Verify.util.RecommendationInputs;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -111,7 +112,7 @@ Environment Pool，其中的 value/trust/privacy 是用户当前覆盖后的共�
 - 按与用户目标和设备能力的匹配程度从高到低排列；name 是应用后实际保存的规则名称，不要输出不存在于规则模型中的 priority
 - reason 必须用用户要求的语言说明推荐依据，并引用实际设备能力或用户需求，不能只重复 name，且不超过 1000 个字符
 - value 永远是字符串，不是数组；relation 为 in / not in 时把多个取值写成一个英文逗号分隔的字符串（例："cool,heat"）
-- 数值变量的 value 必须是该变量 range 区间内的整数（不带单位、不带小数）；枚举变量的 value 必须是其 values 列表中的某一项（大小写与首尾空格会被规范化）
+- 数值变量的 value 必须是该变量 range 区间内的整数（不带单位、不带小数）；枚举变量的 value 必须是其 values 列表中的某一项（必须保留声明的大小写；仅无歧义的拼写差异可被规范化，不得在不同枚举值之间猜测）
 - NaturalChangeRate 是对 v' - v 的约束，不是候选清单：区间内每个整数都可能发生，区间外的都不可能。0 表示没有独立自然变化；区间不含 0 时该变量每步都会变化（再与设备效应合并并裁剪到声明域）
 - 条件组不仅要在定义域内相容，还必须能从设备当前状态与变量值出发，经 capabilities 的 Transitions 与已声明 API 到达。只有"设备本地（deviceLocal=true）、当前值已知、且 NaturalChangeRate 为 0"的变量才会被判不可达；会自然变化的变量与共享环境变量都不受此限制；共享环境变量的任何已声明取值在第一步都可达，不要因当前 Environment Pool 的读数而回避（例如烟雾当前读数为 clear 时，仍应推荐"检测到烟雾就报警"）。命令 API 的 StartState 同样必须可达
 - 只输出上述 JSON 骨架中的字段。自行发明的字段（如 priority、severity）会导致整条推荐被丢弃；不要为了"补全"而添加骨架里没有的键。省略某个骨架字段本身不会被判错——按各字段的规则决定填或不填即可
@@ -998,7 +999,7 @@ Environment Pool，其中的 value/trust/privacy 是用户当前覆盖后的共�
                 return null;
             }
             for (String candidate : candidates) {
-                String value = canonicalEnumValue(variable.values(), candidate);
+                String value = EnumLiteralResolver.resolveIgnoringSpaces(variable.values(), candidate);
                 if (value == null) {
                     return null;
                 }
@@ -1032,7 +1033,7 @@ Environment Pool，其中的 value/trust/privacy 是用户当前覆盖后的共�
         }
         List<String> canonical = new ArrayList<>();
         for (String candidate : candidates) {
-            String value = canonicalEnumValue(mode.values(), candidate);
+            String value = EnumLiteralResolver.resolveIgnoringSpaces(mode.values(), candidate);
             if (value == null) {
                 return null;
             }
@@ -1069,7 +1070,7 @@ Environment Pool，其中的 value/trust/privacy 是用户当前覆盖后的共�
         if (trimmed.isEmpty()) {
             return null;
         }
-        String workingState = canonicalEnumValue(device.workingStates(), trimmed);
+        String workingState = EnumLiteralResolver.resolveIgnoringSpaces(device.workingStates(), trimmed);
         if (workingState != null) {
             return workingState;
         }
@@ -1095,7 +1096,7 @@ Environment Pool，其中的 value/trust/privacy 是用户当前覆盖后的共�
                 canonicalParts.add("");
                 continue;
             }
-            String value = canonicalEnumValue(device.modes().get(i).values(), part);
+            String value = EnumLiteralResolver.resolveIgnoringSpaces(device.modes().get(i).values(), part);
             if (value == null) {
                 return null;
             }
@@ -1112,7 +1113,7 @@ Environment Pool，其中的 value/trust/privacy 是用户当前覆盖后的共�
         String match = null;
         int matches = 0;
         for (DeviceInfoHelper.ModeInfo mode : device.modes()) {
-            String candidate = canonicalEnumValue(mode.values(), rawValue);
+            String candidate = EnumLiteralResolver.resolveIgnoringSpaces(mode.values(), rawValue);
             if (candidate != null) {
                 matches++;
                 if (matches > 1) {
@@ -1122,23 +1123,6 @@ Environment Pool，其中的 value/trust/privacy 是用户当前覆盖后的共�
             }
         }
         return match;
-    }
-
-    private String canonicalEnumValue(List<String> allowedValues, String rawValue) {
-        if (allowedValues == null || rawValue == null) {
-            return null;
-        }
-        String normalized = cleanEnumLiteral(rawValue);
-        for (String allowed : allowedValues) {
-            if (allowed != null && cleanEnumLiteral(allowed).equalsIgnoreCase(normalized)) {
-                return allowed;
-            }
-        }
-        return null;
-    }
-
-    private String cleanEnumLiteral(String value) {
-        return value == null ? "" : value.trim().replace(" ", "");
     }
 
     private List<String> splitValueCandidates(String rawValue, String relation, boolean preserveSemicolon) {

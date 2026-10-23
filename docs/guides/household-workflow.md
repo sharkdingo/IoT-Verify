@@ -28,6 +28,8 @@ sentence and its formal translation mean the same thing: review that mapping exp
 Requirements should come from the household's needs, not simply restate the rules being
 checked. Otherwise a flawed rule and a flawed requirement can agree. Unspecified wishes
 and unsupported concepts must remain explicit questions, not invented sensor capabilities.
+The inventory and editor explain these independent checks as **requirements (specifications)**. Their shared
+explanation distinguishes requirements that must hold from rules that determine device actions.
 Short result summaries must retain the requirement's preconditions and temporal scope: a
 check that an already locked door stays locked does not prove that a visitor request locks
 an unlocked door. Proposed edits must also correspond to supported operations; rules have no
@@ -55,8 +57,9 @@ authentication. See [data authority](../architecture/data-authority-model.md) fo
 | Observe | What could one sequence of actions look like? | Random simulation shows one possible path. It does not check requirements or prove safety. |
 | Explore | Can a bounded search find a candidate failure? | An optional finite search on supported semantics. No finding is not a proof; random-initial mode has different initial/input assumptions. |
 
-There is one simulation engine; "simulation" and "emulation" are not separate product
-stages. Attack selection is a model assumption applied to an analysis, not a fourth
+There is one simulation engine, presented as **Observe** in settings, task controls,
+results, and history; "simulation" and "emulation" are not separate product stages.
+Attack selection is a model assumption applied to an analysis, not a fourth
 analysis engine. See the owning [verification](../architecture/verification-flow.md) and
 [exploration](../architecture/fuzzing-flow.md) contracts for supported semantics.
 
@@ -71,6 +74,10 @@ have a replayable counterexample explaining which actions caused the failure. A 
 response whose trigger is unreachable is shown as a warning: the implication is true,
 but it did not establish that the desired function can occur. A reachable trigger alone
 does not establish the response; both pieces of evidence matter.
+
+The result dialog and background completion notice retain these trigger warnings.
+History summaries do not include per-requirement trigger evidence: a neutral formula-pass
+label directs you to open the result before judging whether the functions are preserved.
 
 Edit a rule or requirement from the inspector. Editing retains identity and order, checks
 that the record has not changed in another tab, and creates one undoable edit. A stale

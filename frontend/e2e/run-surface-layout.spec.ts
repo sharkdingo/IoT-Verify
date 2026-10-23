@@ -252,7 +252,7 @@ for (const variant of [
     await expectInsetIcon(page.getByTestId('simulation-steps-decrease'))
     const range = page.getByTestId('simulation-steps-range')
     await expect(range).toHaveCSS('height', '44px')
-    await expect(range).toHaveAccessibleName(variant.locale === 'en' ? 'Simulation Steps' : '仿真步数')
+    await expect(range).toHaveAccessibleName(variant.locale === 'en' ? 'Observation steps' : '观察步数')
     await range.focus()
     await range.press('ArrowRight')
     await expect(steps).toHaveValue('2')

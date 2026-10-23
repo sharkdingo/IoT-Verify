@@ -147,14 +147,15 @@ public final class BoardSemanticValidator {
             return "Command references unknown API '" + command.getAction() + "'.";
         }
 
-        if (hasText(command.getContent()) && !hasText(command.getContentDevice())) {
-            return "contentDevice is required when command content is provided.";
+        if ((hasText(command.getContentDevice()) || hasText(command.getContent()))
+                && actionApi != null && !Boolean.TRUE.equals(actionApi.getAcceptsContent())) {
+            return "Action '" + actionApi.getName()
+                    + "' does not accept a content-sensitivity input. Omit command.contentDevice and command.content.";
+        }
+        if (!command.isContentPayloadShapeValid()) {
+            return "contentDevice and content must be provided together for a content-accepting action.";
         }
         if (hasText(command.getContentDevice()) && hasText(command.getContent())) {
-            if (actionApi != null && !Boolean.TRUE.equals(actionApi.getAcceptsContent())) {
-                return "Action '" + actionApi.getName()
-                        + "' does not accept a content-sensitivity input.";
-            }
             DeviceTemplateDto contentTemplate = templateForDevice(context, command.getContentDevice());
             if (contentTemplate != null && contentTemplate.getManifest() != null
                     && !hasContent(contentTemplate.getManifest(), command.getContent())) {

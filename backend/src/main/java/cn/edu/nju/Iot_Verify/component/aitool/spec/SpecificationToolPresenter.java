@@ -4,6 +4,7 @@ import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
+import cn.edu.nju.Iot_Verify.util.BoardItemVersion;
 import cn.edu.nju.Iot_Verify.util.SpecificationFormulaPreview;
 
 import java.util.ArrayList;
@@ -22,10 +23,13 @@ public final class SpecificationToolPresenter {
         return SpecificationFormulaPreview.context(nodes, templates);
     }
 
-    public static Map<String, Object> present(SpecificationDto spec,
+    public static Map<String, Object> present(Long userId, SpecificationDto spec,
                                               SpecificationFormulaPreview.Context context) {
         Map<String, Object> result = new LinkedHashMap<>();
         putIfText(result, "specId", spec.getId());
+        if (text(spec.getId()) != null) {
+            result.put("expectedVersion", BoardItemVersion.specification(userId, spec));
+        }
         putIfText(result, "templateId", spec.getTemplateId());
         putIfText(result, "templateLabel", SpecificationFormulaPreview.templateLabel(spec.getTemplateId()));
         result.put("aConditions", presentConditions(spec.getAConditions(), context));
@@ -36,13 +40,15 @@ public final class SpecificationToolPresenter {
         return result;
     }
 
-    static boolean containsKeyword(SpecificationDto spec,
+    static boolean containsKeyword(Long userId, SpecificationDto spec,
                                    SpecificationFormulaPreview.Context context,
                                    String keyword) {
         if (spec == null || keyword == null || keyword.isBlank()) {
             return spec != null;
         }
-        return present(spec, context).values().toString()
+        Map<String, Object> searchable = present(userId, spec, context);
+        searchable.remove("expectedVersion");
+        return searchable.values().toString()
                 .toLowerCase(Locale.ROOT)
                 .contains(keyword.toLowerCase(Locale.ROOT));
     }

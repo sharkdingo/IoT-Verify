@@ -1,5 +1,7 @@
 package cn.edu.nju.Iot_Verify.component.aitool.board;
 
+import cn.edu.nju.Iot_Verify.component.aitool.rule.ListRulesTool;
+import cn.edu.nju.Iot_Verify.component.aitool.spec.ListSpecsTool;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
 import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
@@ -27,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
@@ -166,7 +169,7 @@ class BoardOverviewToolTest {
         RuleDto cameraRule = RuleDto.builder().id(3L).conditions(List.of(
                 RuleDto.Condition.builder().deviceName("lamp").targetType("api").attribute("on").build()))
                 .command(RuleDto.Command.builder().deviceName("camera").action("take photo").build()).build();
-        RuleDto photoRule = RuleDto.builder().id(4L).conditions(List.of(
+        RuleDto photoRule = RuleDto.builder().id(4L).ruleString("Send the camera photo").conditions(List.of(
                 RuleDto.Condition.builder().deviceName("camera").targetType("api").attribute("take photo").build()))
                 .command(RuleDto.Command.builder().deviceName("hub").action("send photo")
                         .contentDevice("phone").content("photo").build()).build();
@@ -185,7 +188,11 @@ class BoardOverviewToolTest {
         assertEquals(4, result.path("ruleCount").asInt());
         assertEquals(6, result.path("edgeCount").asInt());
         assertEquals(8, result.path("unavailableBehaviorDeviceIds").size(), "Unavailable behavior must stay explicit");
-        verify(boardStorageService).getSemanticSnapshot(1L);
+        JsonNode listed = objectMapper.readTree(new ListRulesTool(boardStorageService, objectMapper).execute("{}"));
+        assertEquals("Send the camera photo", result.path("rules").get(3).path("label").asText());
+        assertEquals("phone", result.path("rules").get(3).path("command").path("contentDevice").asText());
+        assertEquals(listed.path("rules"), result.path("rules"));
+        verify(boardStorageService, times(2)).getSemanticSnapshot(1L);
         verifyNoMoreInteractions(boardStorageService);
     }
 
@@ -248,7 +255,11 @@ class BoardOverviewToolTest {
         String result = tool.execute("{}");
         JsonNode json = objectMapper.readTree(result);
 
-        verify(boardStorageService).getSemanticSnapshot(1L);
+        JsonNode listedSpecs = objectMapper.readTree(new ListSpecsTool(boardStorageService, objectMapper).execute("{}"));
+        assertEquals(listedSpecs.path("specs"), json.path("specs"));
+        assertTrue(json.path("rules").get(0).path("expectedVersion").asText().matches("v1:[0-9a-f]{64}"));
+        assertTrue(json.path("specs").get(0).path("expectedVersion").asText().matches("v1:[0-9a-f]{64}"));
+        verify(boardStorageService, times(2)).getSemanticSnapshot(1L);
         verifyNoMoreInteractions(boardStorageService);
 
         assertEquals(2, json.path("deviceCount").asInt());

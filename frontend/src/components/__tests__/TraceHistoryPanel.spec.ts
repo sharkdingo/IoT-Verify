@@ -18,6 +18,7 @@ const i18n = createI18n({
   locale: 'en',
   messages: {
     en: {
+      household: actualI18n.global.getLocaleMessage('en').household,
       app: {
         ...actualI18n.global.getLocaleMessage('en').app,
         runHistory: 'Run History',
@@ -154,6 +155,22 @@ const baseProps = {
 }
 
 describe('TraceHistoryPanel two-layer semantics', () => {
+  it.each(['en', 'zh-CN'] as const)('keeps a passing summary neutral until trigger evidence is opened in %s', locale => {
+    const translations = createI18n({ legacy: false, locale, messages: {
+      en: actualI18n.global.getLocaleMessage('en'), 'zh-CN': actualI18n.global.getLocaleMessage('zh-CN')
+    } })
+    const wrapper = mount(TraceHistoryPanel, {
+      props: { ...baseProps, activeLayer: 'results', verificationRuns: [runWithSnapshot(31, snapshot(1))] },
+      global: { plugins: [translations] }
+    })
+    try {
+      const row = wrapper.get('[data-testid="history-result-verification-31"]')
+      expect(row.text()).toContain(locale === 'en' ? 'Checked formulas satisfied' : '已检查公式成立')
+      expect(row.text()).toContain(locale === 'en' ? 'Open the result to review response triggers' : '打开结果核对响应触发条件')
+      expect(row.find('.board-surface-success').exists()).toBe(false)
+    } finally { wrapper.unmount() }
+  })
+
   it('keeps existing run details mounted while refreshing their summaries', async () => {
     const wrapper = mount(TraceHistoryPanel, {
       props: { ...baseProps, activeLayer: 'results', verificationRuns: [runWithSnapshot(31, snapshot(1))] },

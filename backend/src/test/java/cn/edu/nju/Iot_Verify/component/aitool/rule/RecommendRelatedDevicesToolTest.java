@@ -14,6 +14,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -511,6 +513,33 @@ class RecommendRelatedDevicesToolTest {
                         .build()))
                 .build());
         return dto;
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"on", "On"})
+    void execute_preservesExactCaseOfADeclaredInitialVariable(String value) throws Exception {
+        JsonNode result = recommendCaseSensitiveInitialValue(value);
+        assertEquals(1, result.path("validatedCount").asInt(), result.toString());
+        assertEquals(value, result.path("recommendations").get(0).path("initialVariables").get(0).path("value").asText());
+    }
+
+    @Test
+    void execute_filtersAnAmbiguousInitialVariableInsteadOfChangingItsMeaning() throws Exception {
+        JsonNode result = recommendCaseSensitiveInitialValue("ON");
+        assertEquals(0, result.path("validatedCount").asInt(), result.toString());
+        assertEquals(1, result.path("filteredCount").asInt());
+    }
+
+    private JsonNode recommendCaseSensitiveInitialValue(String value) throws Exception {
+        var template = cn.edu.nju.Iot_Verify.testutil.CaseSensitiveEnumFixture.template();
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of(template));
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of());
+        when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
+                .thenReturn("""
+                        {"recommendations":[{"templateName":"CaseSensor","suggestedLabel":"Case sensor",
+                          "initialVariables":[{"name":"level","value":"%s"}]}]}
+                        """.formatted(value));
+        return objectMapper.readTree(tool.execute("{}"));
     }
 
     private DeviceTemplateDto runtimeTemplate(String name) {

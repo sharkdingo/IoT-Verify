@@ -185,8 +185,14 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                     + "(?:static\\s+)?(?:analysis|review|inspection|explanation|audit)\\s+(?:of|for)\\s+"
                     + "(?:(?:the|current|these|all|your)\\s+)*(?:devices?|rules?|specs?|specifications?|board|scene|model)\\b");
     private static final Pattern NEGATED_COMPLETION_CLAIM = Pattern.compile(
-            "(?:不能|无法|不应)(?:声称|宣称|称为|说成)(已经|已)(?:成功)?(?:被)?"
+            "(?:(?:不能|无法|不应)(?:声称|宣称|称为|说成)|不等于)(已经|已)(?:成功)?(?:被)?"
                     + "(?:运行|启动|停止|取消|验证|模拟|完成)");
+    private static final Pattern REFERENCED_VERIFIED_REPAIR = Pattern.compile(
+            "(?:该|这项|这个|上述|所选的?)(已经|已)验证(?:的)?修复(?:建议|候选|方案)?");
+    private static final Pattern SAVED_CONFIGURATION_PREMISE = Pattern.compile(
+            "(?:不能|无法|不应)(?:仅|只)(?:因为|由于)(?:当前|这些|已有|所有|该)?"
+                    + "(?:检查要求|规约|规则)(已经|已)(?:成功)?(?:被)?保存"
+                    + "(?=\\s*[,，]?\\s*就(?:声称|宣称|认定|认为))");
     private static final Pattern UNSUPPORTED_PLATFORM_READ_CLAIM = Pattern.compile(
             "(?is)(?:\\b(?:your(?:\\s+current)?|the\\s+current|current)\\s+"
                     + "(?:board|scene)\\s+(?:currently\\s+)?(?:contains?|has|includes?|shows?|lists?)\\b"
@@ -1534,8 +1540,9 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
         """;
 
     private static final String ASSISTANT_IDENTITY_LINE =
-            "You are the intelligent expert assistant for the IoT-Verify platform. "
-                    + "This is a smart home simulation and formal verification platform based on NuSMV.";
+            "You are the IoT-Verify assistant, helping households describe automation needs and risks, "
+                    + "check their saved model, understand failures, revise and recheck. "
+                    + "Formal checking uses NuSMV; observation and bounded exploration provide other kinds of evidence.";
 
     private static final String CURRENT_EVIDENCE_REPLY_RULES = """
         Before continuing the analysis, check it against the latest tool results, including after a
@@ -1545,6 +1552,10 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
         When two observed values first change at the same stateIndex, they are observed together;
         do not say one preceded the other. A trigger condition in an earlier state is not evidence that
         its resulting action occurred before another change at the action's stateIndex.
+        For an immediate-response counterexample, identify the state where the complete IF holds and
+        its successor where THEN fails. A preceding satisfied transition is not the violating edge.
+        Compare repairs by their reported edits and checked scope. Preserving configured requirements
+        and reachable response triggers does not establish preservation of every behavior or optimality.
         Keep full-audit inventories and chronological evidence in the requested compact tables;
         place each cause beside its indexed evidence instead of retelling those chains in prose.
         """;
@@ -1716,13 +1727,17 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
         - Help household users state desired behavior, forbidden situations, and functions that must remain usable.
           Keep these three distinct. Map each stated requirement to proposed automation and an independent
           specification using actual device capabilities. Mark unstated requirements as unknown, not inferred consent.
+          In Chinese, call specifications "检查要求（规约）", not device "规格". They include desired responses and
+          preserved functions, not only safety prohibitions.
         - Do not derive every requirement from the rules being checked: a rule and its restatement can agree while
           both violate the user's goal. When a requested behavior cannot be expressed by the current templates,
           state the gap and ask for the missing decision instead of inventing a sensor, authentication, room or timer.
           Propose only operations the platform exposes. Rules support in-place updates and confirmed deletion;
           there is no enable/disable toggle, so do not offer "disable this rule" as an available operation.
-        - For edits to an existing specification, read list_specs and use manage_spec action=update with its specId,
-          exact expectedSpec, and the complete desired condition groups. Preserve its identity and unrelated fields.
+        - For edits to an existing specification, read list_specs or board_overview and use manage_spec action=update
+          with its specId, copied readRef, and the complete desired condition groups. Do not reconstruct an
+          old specification object. Preserve its identity and unrelated fields. On a conflict, reread and review the
+          current requirement before proposing another edit.
           Changed rules and specifications remain unverified until a fresh verification run checks the saved model.
         - Explain formal outcomes together with antecedentReachability. SATISFIED with UNREACHABLE means a response
           passed without its trigger ever occurring; INCONCLUSIVE reachability does not establish useful behavior.
@@ -1736,8 +1751,10 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
         Rule Recommendation Guidelines:
         - Use recommend_rules when the user asks for suggestions or has not supplied enough rule logic. When the user
           supplies a complete rule and asks to save it, validate it and use manage_rule directly.
-          For edits to an existing rule, read list_rules and use manage_rule action=update with the exact
-          expectedRule and its ruleId. Preserve every condition, command field and label the user did not
+          For edits to an existing rule, read list_rules or board_overview and use manage_rule action=update with
+          its copied readRef and ruleId. Do not reconstruct an old rule object. A keyword search with no
+          matches does not mean the board is empty; inspect the unfiltered list to resolve the intended rule.
+          On a conflict, reread and review the current rule. Preserve every condition, command field and label the user did not
           ask to change. Never add a replacement and delete the original to implement an edit: that changes
           identity/order and can leave both rules active. A formal repair suggestion still uses apply_fix.
         - Analyze device capabilities (APIs, variables, modes, states) from authoritative tool results as needed.
@@ -2094,7 +2111,9 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
         - If a tool result has requiresUserConfirmation=true, state that no change was made, explain the exact reason and any proposed alternative or collateral impact, and ask the user to choose or confirm it.
         - If a tool result contains error/errorCode or operation=notCreated, never describe that step as completed. Explain the user-facing reason and preserve any suggested next choice.
         - If a tool result has resultAvailable=false or resultStatus=RESULT_UNAVAILABLE, state that the outcome is unconfirmed. If mutationMayHaveCommitted=true, explain that current state must be checked before retrying.
-        - If a mutation result has verificationStatus=NOT_VERIFIED, say that the item was created but has not been formally verified.
+        - If a mutation result has verificationStatus=NOT_VERIFIED, describe its actual operation: a creation,
+          update or unchanged save is not yet formally verified at that stage. If a later formal run checks
+          the saved model, report that newer evidence. Never describe an update as a creation.
         - For recommendation results, preserve the distinction between validated, filtered, truncated, and adjusted
           candidates. Match the level of detail to the user's request; do not force raw counters into a concise answer.
           Explain material filtering or adjustment reasons, never invent reasons for uninspected truncated candidates,
@@ -2492,7 +2511,7 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                     failedToolCalls++;
                 }
 
-                messages.add(saveToolExecutionResult(userId, sessionId, executionId, toolCallId, toolResult));
+                messages.add(saveToolExecutionResult(userId, sessionId, executionId, toolCallId, toolResult, functionName));
                 awaitingAsyncTasks &= isAwaitingAsyncTask(functionName, toolResult, executionOutcome);
                 roundFingerprint.append(functionName).append('\u001f')
                         .append(argsJson).append('\u001f')
@@ -2652,7 +2671,7 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                 continue;
             }
             String toolCallId = safeString(skippedCall.id());
-            messages.add(saveToolExecutionResult(userId, sessionId, executionId, toolCallId, skippedResult));
+            messages.add(saveToolExecutionResult(userId, sessionId, executionId, toolCallId, skippedResult, null));
         }
     }
 
@@ -3064,11 +3083,14 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
         String checkableReply = reply;
         if (allowNonOperationalContent) {
             char[] checkable = reply.toCharArray();
-            Matcher negated = NEGATED_COMPLETION_CLAIM.matcher(reply);
-            while (negated.find()) {
-                // Mask only the denied completion marker, preserving offsets and nouns that
-                // an adjacent affirmative predicate may share without repeating "verification".
-                Arrays.fill(checkable, negated.start(1), negated.end(1), ' ');
+            for (Pattern nonAssertive : List.of(
+                    NEGATED_COMPLETION_CLAIM, REFERENCED_VERIFIED_REPAIR, SAVED_CONFIGURATION_PREMISE)) {
+                Matcher marker = nonAssertive.matcher(reply);
+                while (marker.find()) {
+                    // Denied completion, a repair reference and a saved-state premise are not new actions.
+                    // Keep their nouns and offsets so adjacent actual operations remain checkable.
+                    Arrays.fill(checkable, marker.start(1), marker.end(1), ' ');
+                }
             }
             checkableReply = new String(checkable);
         }
@@ -3659,13 +3681,13 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
     }
 
     private LlmMessage saveToolExecutionResult(Long userId, String sid, String executionId,
-                                              String toolCallId, String result) {
+                                              String toolCallId, String result, String functionName) {
         ChatMessagePo po = new ChatMessagePo();
         po.setSessionId(sid);
         po.setRole("tool");
         po.setContent(messageCodec.serializeToolResult(toolCallId, result));
         executeOwnedSessionWrite(userId, sid, executionId, () -> messageRepo.saveAndFlush(po));
-        return messageCodec.toMessage(po);
+        return messageCodec.toMessage(po, functionName);
     }
 
     private void executeOwnedSessionWrite(Long userId,

@@ -1,9 +1,21 @@
 import { describe, expect, it } from 'vitest'
-import { getVerificationOutcome, presentSpecificationResult } from './verificationResult'
+import { countResponseTriggerWarnings, getVerificationOutcome, presentSpecificationResult } from './verificationResult'
 import { i18n } from '@/assets/i18n'
 import type { SpecResult } from '@/types/verify'
 
 describe('verification result semantics', () => {
+  it('counts only unreachable or unconfirmed response triggers, independently of formula truth', () => {
+    const results = ['REACHABLE', 'UNREACHABLE', 'INCONCLUSIVE', 'NOT_APPLICABLE'].map((antecedentReachability, index) => ({
+      specId: `spec-${index}`, templateId: '4', specificationLabel: 'Response', formulaKind: 'CTL',
+      formulaPreview: 'AG(x -> AX y)', expression: 'AG(x -> AX y)',
+      outcome: 'SATISFIED', antecedentReachability
+    })) as SpecResult[]
+    expect(countResponseTriggerWarnings(results)).toBe(2)
+    results[1]!.outcome = 'VIOLATED'
+    expect(countResponseTriggerWarnings(results)).toBe(2)
+    expect(countResponseTriggerWarnings([])).toBe(0)
+  })
+
   it.each([
     ['REACHABLE', false, 'possible'],
     ['UNREACHABLE', true, 'unreachable'],

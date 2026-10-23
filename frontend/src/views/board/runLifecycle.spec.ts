@@ -5,6 +5,7 @@ import { computed, nextTick, ref } from 'vue'
 import { flushPromises } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 import { errorDetails, technicalErrorLines } from '@/utils/userMessage'
+import { countResponseTriggerWarnings, getVerificationOutcome } from './verificationResult'
 
 const board = readFileSync(join(process.cwd(), 'src/views/Board.vue'), 'utf8')
 const setupStart = board.indexOf('<script setup')
@@ -715,6 +716,38 @@ describe('simulation completion during another replay', () => {
 })
 
 describe('verification completion', () => {
+  it('reports a missing result without inventing a formal outcome', () => {
+    const ports = { notifyBlocked: vi.fn(), notifySuccess: vi.fn(), t: (key: string) => key }
+    bind('notifyVerificationOutcome', ports)(null)
+    expect(ports.notifyBlocked).toHaveBeenCalledWith('household.resultUnavailable')
+    expect(ports.notifySuccess).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['UNREACHABLE', true], ['INCONCLUSIVE', true], ['REACHABLE', false], ['NOT_APPLICABLE', false]
+  ] as const)(
+    'announces a background formula pass according to its %s trigger evidence', (antecedentReachability, warning) => {
+      const ports = {
+        getGenerationWarningCounts: () => ({ total: 0 }),
+        getVerificationOutcome, countResponseTriggerWarnings,
+        isVerificationModelComplete: (result: { modelComplete: boolean }) => result.modelComplete,
+        notifyBlocked: vi.fn(), notifySuccess: vi.fn(),
+        t: (key: string, values?: { count: number }) => `${key}:${values?.count ?? ''}`
+      }
+      const result = { outcome: 'SATISFIED', modelComplete: true,
+        specResults: [{ antecedentReachability }] }
+      bind('notifyVerificationOutcome', ports)(result)
+      if (warning) {
+        expect(ports.notifyBlocked).toHaveBeenCalledWith('household.coverageDetail:1')
+        expect(ports.notifySuccess).not.toHaveBeenCalled()
+      } else {
+        expect(ports.notifySuccess).toHaveBeenCalledWith('app.verificationSatisfiedComplete:')
+        expect(ports.notifyBlocked).not.toHaveBeenCalled()
+      }
+      expect(result.outcome).toBe('SATISFIED')
+    }
+  )
+
   const context = (status = 'FAILED', isAsync = false) => {
     const flag = () => ({ value: false })
     const result = { historyPersistence: { status, ...(status === 'SAVED' ? { runId: 17 } : {}) },

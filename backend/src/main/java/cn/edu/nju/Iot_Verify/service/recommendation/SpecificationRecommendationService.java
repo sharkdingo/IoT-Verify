@@ -15,6 +15,7 @@ import cn.edu.nju.Iot_Verify.service.BoardStorageService;
 import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
 import cn.edu.nju.Iot_Verify.dto.recommendation.RecommendationResponseDto;
 import cn.edu.nju.Iot_Verify.dto.recommendation.SpecificationRecommendationDto;
+import cn.edu.nju.Iot_Verify.util.EnumLiteralResolver;
 import cn.edu.nju.Iot_Verify.util.RecommendationInputs;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -146,13 +147,13 @@ value/trust/privacy 是用户当前覆盖后的共享值。
 - 只有模板 1、3、4 能被有界反例探索检查；模板 2、5、6 需要活性推理，模板 7 需要信任标签传播，探索接口会把它们报为不适用。它们仍可由 NuSMV 正式验证，不要因此回避，但也不要声称探索能覆盖它们
 - 模板形状必须严格匹配：1/2/3/7 只使用 aConditions；4/5/6 只使用 ifConditions + thenConditions
 - 模板 7 会为 A 条件自动关联 MEDIC 控制来源标签：不得在 A 中直接写 trust/privacy；state/mode 必须使用 =；api 必须使用 = TRUE。它检查受保护事件是否带有不可信控制来源标签，不是认证或通用完整性检查。模板 7 的 api 条件只能引用 capabilities 中 EndState 非空的 signal API，且该设备必须声明 Modes/WorkingStates，否则该规约无法解析控制来源标签而被跳过（不会进入 NuSMV）。隐私泄露应使用模板 3，把“公开动作/状态发生”和对应 privacy=private 一起放入 aConditions
-- aConditions、ifConditions、thenConditions 中的 targetType、key/value 必须引用该设备实际存在的 states、modes、variables 或 APIs（key 与枚举值按大小写不敏感匹配并去除首尾空格，不必纠结大小写）
+- aConditions、ifConditions、thenConditions 中的 targetType、key/value 必须引用该设备实际存在的 states、modes、variables 或 APIs；按声明的拼写填写，枚举值区分大小写，不同大小写可能表示不同值
 - 同一个 A、IF 或 THEN 数组内的全部条件是合取关系，必须在模板声明的合法状态和变量定义域中存在共同满足值
 - state、mode、api、trust、privacy 以及枚举变量只能使用 =、!=、in、not in；数值变量可使用 =、!=、in、not in，并额外支持 >、<、>=、<=
 - 禁止使用 "currentState" 作为 key，它不是有效的属性名
 - 条件对象中禁止出现 side 字段；归属由所在的 aConditions/ifConditions/thenConditions 数组决定
 - value 永远是字符串，不是数组；relation 为 in / not in 时把多个取值写成一个英文逗号分隔的字符串（例："cool,heat"）
-- 数值变量的 value 必须是该变量 range 区间内的整数（不带单位、不带小数）；枚举变量的 value 必须是其 values 列表中的某一项（大小写与首尾空格会被规范化）
+- 数值变量的 value 必须是该变量 range 区间内的整数（不带单位、不带小数）；枚举变量的 value 必须是其 values 列表中的某一项，只有唯一匹配的拼写差异才能规范化，歧义值会被拒绝
 - NaturalChangeRate 是对 v' - v 的约束，不是候选清单：区间内每个整数都可能发生，区间外的都不可能。0 表示没有独立自然变化；区间不含 0 时该变量每步都会变化（再与设备效应合并并裁剪到声明域）
 - 条件组不仅要在定义域内相容，还必须能从设备当前状态与变量值出发，经 capabilities 的 Transitions 与已声明 API 到达。只有"设备本地（deviceLocal=true）、当前值已知、且 NaturalChangeRate 为 0"的变量才会被判不可达；会自然变化的变量与共享环境变量都不受此限制；共享环境变量的任何已声明取值在第一步都可达，不要因当前 Environment Pool 的读数而回避（例如烟雾当前读数为 clear 时，仍应推荐"检测到烟雾就报警"）
 - 只输出上述 JSON 骨架中的字段。自行发明的字段（如 priority、severity）会导致整条推荐被丢弃；不要为了"补全"而添加骨架里没有的键。按模板形状省略不适用的条件数组是正确做法，不是缺字段
@@ -1035,7 +1036,7 @@ value/trust/privacy 是用户当前覆盖后的共享值。
                 return null;
             }
             for (String candidate : candidates) {
-                String value = canonicalEnumValue(variable.values(), candidate);
+                String value = EnumLiteralResolver.resolveIgnoringSpaces(variable.values(), candidate);
                 if (value == null) {
                     return null;
                 }
@@ -1069,7 +1070,7 @@ value/trust/privacy 是用户当前覆盖后的共享值。
         }
         List<String> canonical = new ArrayList<>();
         for (String candidate : candidates) {
-            String value = canonicalEnumValue(mode.values(), candidate);
+            String value = EnumLiteralResolver.resolveIgnoringSpaces(mode.values(), candidate);
             if (value == null) {
                 return null;
             }
@@ -1106,7 +1107,7 @@ value/trust/privacy 是用户当前覆盖后的共享值。
         if (trimmed.isEmpty()) {
             return null;
         }
-        String workingState = canonicalEnumValue(device.workingStates(), trimmed);
+        String workingState = EnumLiteralResolver.resolveIgnoringSpaces(device.workingStates(), trimmed);
         if (workingState != null) {
             return workingState;
         }
@@ -1132,7 +1133,7 @@ value/trust/privacy 是用户当前覆盖后的共享值。
                 canonicalParts.add("");
                 continue;
             }
-            String value = canonicalEnumValue(device.modes().get(i).values(), part);
+            String value = EnumLiteralResolver.resolveIgnoringSpaces(device.modes().get(i).values(), part);
             if (value == null) {
                 return null;
             }
@@ -1149,7 +1150,7 @@ value/trust/privacy 是用户当前覆盖后的共享值。
         String match = null;
         int matches = 0;
         for (DeviceInfoHelper.ModeInfo mode : device.modes()) {
-            String candidate = canonicalEnumValue(mode.values(), rawValue);
+            String candidate = EnumLiteralResolver.resolveIgnoringSpaces(mode.values(), rawValue);
             if (candidate != null) {
                 matches++;
                 if (matches > 1) {
@@ -1218,23 +1219,6 @@ value/trust/privacy 是用户当前覆盖后的共享值。
             canonical.add(normalized);
         }
         return joinCanonicalValues(canonical, relation);
-    }
-
-    private String canonicalEnumValue(List<String> allowedValues, String rawValue) {
-        if (allowedValues == null || rawValue == null) {
-            return null;
-        }
-        String normalized = cleanEnumLiteral(rawValue);
-        for (String allowed : allowedValues) {
-            if (allowed != null && cleanEnumLiteral(allowed).equalsIgnoreCase(normalized)) {
-                return allowed;
-            }
-        }
-        return null;
-    }
-
-    private String cleanEnumLiteral(String value) {
-        return value == null ? "" : value.trim().replace(" ", "");
     }
 
     private List<String> splitValueCandidates(String rawValue, String relation, boolean preserveSemicolon) {

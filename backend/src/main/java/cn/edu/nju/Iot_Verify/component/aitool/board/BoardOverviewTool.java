@@ -2,6 +2,7 @@ package cn.edu.nju.Iot_Verify.component.aitool.board;
 
 import cn.edu.nju.Iot_Verify.component.ai.model.LlmToolSpec;
 import cn.edu.nju.Iot_Verify.component.aitool.AbstractAiTool;
+import cn.edu.nju.Iot_Verify.component.aitool.rule.RuleToolPresenter;
 import cn.edu.nju.Iot_Verify.component.aitool.spec.SpecificationToolPresenter;
 import cn.edu.nju.Iot_Verify.component.aitool.template.TemplateToolPresenter;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
@@ -57,7 +58,8 @@ public class BoardOverviewTool extends AbstractAiTool {
                 + "directRuleTargets indexes directed condition-to-command dependencies; shared inputs do not connect their targets. "
                 + "Includes full active-template manifests by default in templates, so analyze API effects, transitions and reading labels from this same snapshot. "
                 + "Use detail=false for counts or configured links only; list_templates can read other templates. "
-                + "Copy ruleId and specId exactly; rule order is command priority, and templateId is not a specification id.", schema);
+                + "Copy ruleId or specId and its readRef exactly for updates; rule order is command priority, "
+                + "and templateId is not a specification id.", schema);
     }
 
     @Override
@@ -147,27 +149,12 @@ public class BoardOverviewTool extends AbstractAiTool {
 
             List<Map<String, Object>> ruleSummaries = rules.stream()
                     .filter(Objects::nonNull)
-                    .map(r -> {
-                Map<String, Object> rs = new LinkedHashMap<>();
-                rs.put("ruleId", r.getId());
-                List<RuleDto.Condition> conditions = r.getConditions() == null ? List.of() : r.getConditions();
-                List<Map<String, Object>> conditionRows = conditions.stream()
-                        .filter(Objects::nonNull)
-                        .map(condition -> ruleConditionSummary(condition, nodeRefs))
-                        .toList();
-                rs.put("conditions", conditionRows);
-
-                RuleDto.Command command = r.getCommand();
-                Map<String, Object> commandRow = ruleCommandSummary(command, nodeRefs);
-                rs.put("command", commandRow);
-                rs.put("description", buildRuleDescription(conditionRows, commandRow));
-                return rs;
-            }).toList();
+                    .map(rule -> RuleToolPresenter.present(userId, rule, nodes)).toList();
             overview.put("rules", ruleSummaries);
 
             List<Map<String, Object>> specSummaries = specs.stream()
                     .filter(Objects::nonNull)
-                    .map(s -> SpecificationToolPresenter.present(s, presentationContext)).toList();
+                    .map(s -> SpecificationToolPresenter.present(userId, s, presentationContext)).toList();
             overview.put("specs", specSummaries);
             overview.put("message", "Runtime values alone are not complete device behavior. "
                     + (detail ? "templates contains full manifests for active devices from this same snapshot, with only UI icons omitted. "
@@ -237,63 +224,6 @@ public class BoardOverviewTool extends AbstractAiTool {
         }
 
         return summaries;
-    }
-
-    private Map<String, Object> ruleConditionSummary(RuleDto.Condition condition,
-                                                     Map<String, BoardNodeRef> nodeRefs) {
-        BoardNodeRef device = resolveNodeRef(condition.getDeviceName(), nodeRefs);
-        Map<String, Object> row = new LinkedHashMap<>();
-        row.put("deviceId", device.id());
-        row.put("deviceLabel", device.label());
-        row.put("targetType", condition.getTargetType());
-        row.put("attribute", condition.getAttribute());
-        row.put("relation", condition.getRelation());
-        row.put("value", condition.getValue());
-        row.put("summary", conditionText(device.label(), condition.getTargetType(),
-                condition.getAttribute(), condition.getRelation(), condition.getValue()));
-        return row;
-    }
-
-    private Map<String, Object> ruleCommandSummary(RuleDto.Command command,
-                                                   Map<String, BoardNodeRef> nodeRefs) {
-        Map<String, Object> row = new LinkedHashMap<>();
-        if (command == null) {
-            row.put("summary", "No command");
-            return row;
-        }
-        BoardNodeRef target = resolveNodeRef(command.getDeviceName(), nodeRefs);
-        row.put("deviceId", target.id());
-        row.put("deviceLabel", target.label());
-        row.put("action", command.getAction());
-        String summary = target.label() + "." + safe(command.getAction());
-        if (hasText(command.getContentDevice())) {
-            BoardNodeRef contentSource = resolveNodeRef(command.getContentDevice(), nodeRefs);
-            row.put("contentDeviceId", contentSource.id());
-            row.put("contentDeviceLabel", contentSource.label());
-            row.put("content", command.getContent());
-            summary += " using " + contentSource.label() + "." + safe(command.getContent());
-        }
-        row.put("summary", summary);
-        return row;
-    }
-
-    private String conditionText(String deviceLabel, String targetType, String attribute,
-                                 String relation, String value) {
-        String subject = (hasText(deviceLabel) ? deviceLabel : "Unknown device") + "." + safe(attribute);
-        if ("api".equalsIgnoreCase(targetType) && !hasText(relation) && !hasText(value)) {
-            return subject + " occurs";
-        }
-        return subject + (hasText(relation) ? " " + relation : "")
-                + (hasText(value) ? " " + value : "");
-    }
-
-    private String buildRuleDescription(List<Map<String, Object>> conditions, Map<String, Object> command) {
-        String conditionText = conditions.stream()
-                .map(row -> safe((String) row.get("summary")))
-                .filter(this::hasText)
-                .reduce((left, right) -> left + " AND " + right)
-                .orElse("No trigger");
-        return "IF " + conditionText + " THEN " + safe((String) command.get("summary"));
     }
 
     private Map<String, BoardNodeRef> indexNodeRefs(List<DeviceNodeDto> nodes) {

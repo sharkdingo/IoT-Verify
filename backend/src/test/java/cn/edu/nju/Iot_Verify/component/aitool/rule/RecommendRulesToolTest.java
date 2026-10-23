@@ -15,6 +15,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -658,6 +660,42 @@ class RecommendRulesToolTest {
         assertEquals(0, json.path("count").asInt());
         assertEquals("contradictoryConditionGroup",
                 json.path("filteredItems").get(0).path("reasonCode").asText());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"=,On", "=,on", "in,'on,On'"})
+    void execute_preservesDistinctDeclaredEnumValues(String relation, String value) throws Exception {
+        JsonNode result = recommendCaseSensitiveReading(relation, value);
+        assertEquals(1, result.path("validatedCount").asInt(), result.toString());
+        assertEquals(value, result.path("recommendations").get(0).path("conditions").get(0).path("value").asText());
+    }
+
+    @Test
+    void execute_rejectsAmbiguousEnumReadingInsteadOfSelectingTheFirstLiteral() throws Exception {
+        JsonNode result = recommendCaseSensitiveReading("=", "ON");
+        assertEquals(0, result.path("validatedCount").asInt(), result.toString());
+        assertEquals(1, result.path("filteredCount").asInt());
+    }
+
+    private JsonNode recommendCaseSensitiveReading(String relation, String value) throws Exception {
+        var template = cn.edu.nju.Iot_Verify.testutil.CaseSensitiveEnumFixture.template();
+        var node = new DeviceNodeDto();
+        node.setId("case-sensor");
+        node.setLabel("Case sensor");
+        node.setTemplateName(template.getName());
+        node.setState("idle");
+        snapshot = new BoardSemanticSnapshotDto(List.of(node),
+                List.of(new cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto("reading", "on", "trusted", "public")),
+                List.of(), List.of(), List.of(template));
+        tool = new RecommendRulesTool(new RuleRecommendationService(new DeviceInfoHelper(), boardStorageService,
+                promptCompletionService, objectMapper, new RecommendationResultParser(objectMapper)), objectMapper);
+        when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
+                .thenReturn("""
+                        {"recommendations":[{"name":"Preserve the reading",
+                          "conditions":[{"deviceId":"case-sensor","attribute":"reading","targetType":"variable",
+                            "relation":"%s","value":"%s"}],"command":{"deviceId":"case-sensor","action":"activate"}}]}
+                        """.formatted(relation, value));
+        return objectMapper.readTree(tool.execute("{}"));
     }
 
     private DeviceInfoHelper.DeviceInfo lightDevice() {

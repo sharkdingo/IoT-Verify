@@ -331,6 +331,7 @@ onUnmounted(() => {
   --showcase-pitch: 0deg;
   --showcase-yaw: 0deg;
   position: relative;
+  width: 100%;
   aspect-ratio: 1.6;
   min-height: 22rem;
   margin-top: var(--iot-space-md);

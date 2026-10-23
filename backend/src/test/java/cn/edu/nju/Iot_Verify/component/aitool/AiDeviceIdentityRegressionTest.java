@@ -157,7 +157,7 @@ class AiDeviceIdentityRegressionTest {
                     id.replace("lamp_a", targetId));
             path = "arguments.command." + ("command".equals(field) ? "deviceId" : "contentDevice");
         }
-        assertValidation(new ManageRuleTool(board, mapper, guard).execute(args.toString()), path);
+        assertValidation(new ManageRuleTool(board, mapper, guard, new cn.edu.nju.Iot_Verify.testutil.AiToolReadFixture().service).execute(args.toString()), path);
         verify(board, never()).addRule(any(), any());
     }
 
@@ -169,7 +169,7 @@ class AiDeviceIdentityRegressionTest {
             RuleDto rule = invocation.getArgument(1);
             return CollectionMutationResultDto.of("created", rule, List.of(rule));
         });
-        assertEquals("created", mapper.readTree(new ManageRuleTool(board, mapper, guard)
+        assertEquals("created", mapper.readTree(new ManageRuleTool(board, mapper, guard, new cn.edu.nju.Iot_Verify.testutil.AiToolReadFixture().service)
                 .execute(ruleArgs(id).toString())).path("operation").asText());
         ArgumentCaptor<RuleDto> captured = ArgumentCaptor.forClass(RuleDto.class);
         verify(board).addRule(eq(1L), captured.capture());
@@ -184,7 +184,7 @@ class AiDeviceIdentityRegressionTest {
         fixture("lamp_a");
         ObjectNode args = specArgs("lamp_a", side);
         ((ObjectNode) args.path(side + "Conditions").get(0)).put("deviceId", id);
-        assertValidation(new ManageSpecTool(board, mapper, guard).execute(args.toString()),
+        assertValidation(new ManageSpecTool(board, mapper, guard, new cn.edu.nju.Iot_Verify.testutil.AiToolReadFixture().service).execute(args.toString()),
                 "arguments." + side + "Conditions[0].deviceId");
         verify(board, never()).addSpec(any(), any());
     }
@@ -197,7 +197,7 @@ class AiDeviceIdentityRegressionTest {
             SpecificationDto spec = invocation.getArgument(1);
             return CollectionMutationResultDto.of("created", spec, List.of(spec));
         });
-        assertEquals("created", mapper.readTree(new ManageSpecTool(board, mapper, guard)
+        assertEquals("created", mapper.readTree(new ManageSpecTool(board, mapper, guard, new cn.edu.nju.Iot_Verify.testutil.AiToolReadFixture().service)
                 .execute(specArgs(id, side).toString())).path("operation").asText());
         ArgumentCaptor<SpecificationDto> captured = ArgumentCaptor.forClass(SpecificationDto.class);
         verify(board).addSpec(eq(1L), captured.capture());

@@ -283,7 +283,7 @@ for (const kind of ['verification', 'simulation'] as const) {
         const run = page.getByTestId(`run-${kind}`)
         const panel = page.getByTestId(`${kind}-panel`)
         const cancel = panel.getByRole('button', {
-          name: locale === 'en' ? `Cancel ${kind} task` : kind === 'verification' ? '取消验证任务' : '取消仿真任务', exact: true
+          name: locale === 'en' ? `Cancel ${kind === 'verification' ? 'verification' : 'observation'} task` : kind === 'verification' ? '取消验证任务' : '取消观察任务', exact: true
         })
         await run.click()
         await cancel.click()

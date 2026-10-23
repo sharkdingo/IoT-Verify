@@ -11,6 +11,8 @@ import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
 import cn.edu.nju.Iot_Verify.exception.ConflictException;
 import cn.edu.nju.Iot_Verify.security.UserContextHolder;
 import cn.edu.nju.Iot_Verify.service.BoardStorageService;
+import cn.edu.nju.Iot_Verify.util.BoardItemVersion;
+import cn.edu.nju.Iot_Verify.testutil.AiToolReadFixture;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -46,13 +48,15 @@ class ManageSpecToolTest {
     private BoardStorageService boardStorageService;
 
     private ManageSpecTool tool;
+    private AiToolReadFixture reads;
     private AiDestructiveActionGuard destructiveActionGuard;
 
     @BeforeEach
     void setUp() {
         ObjectMapper objectMapper = new ObjectMapper();
         destructiveActionGuard = new AiDestructiveActionGuard(objectMapper);
-        tool = new ManageSpecTool(boardStorageService, objectMapper, destructiveActionGuard);
+        reads = new AiToolReadFixture();
+        tool = new ManageSpecTool(boardStorageService, objectMapper, destructiveActionGuard, reads.service);
         UserContextHolder.setUserId(1L);
         UserContextHolder.setChatSessionId("spec-test-session");
     }
@@ -60,6 +64,26 @@ class ManageSpecToolTest {
     @AfterEach
     void tearDown() {
         UserContextHolder.clear();
+    }
+
+    @Test
+    void updateUsesTheReadVersionWithoutReconstructingTheExistingSpecification() throws Exception {
+        SpecificationDto before = prepareSpecificationUpdate();
+        when(boardStorageService.updateSpecIfUnchanged(eq(1L), eq("spec-1"), eq(before), any()))
+                .thenAnswer(invocation -> {
+                    SpecificationDto desired = invocation.getArgument(3);
+                    return CollectionMutationResultDto.of("updated", desired, List.of(desired));
+                });
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode read = reads.read(1L, "spec-test-session", "list_specs",
+                new ListSpecsTool(boardStorageService, mapper).execute("{}"));
+        var args = (com.fasterxml.jackson.databind.node.ObjectNode) mapper.readTree(specificationUpdateArgs(before));
+        args.put("readRef", read.path("specs").get(0).path("readRef").asText());
+
+        JsonNode result = mapper.readTree(tool.execute(args.toString()));
+
+        assertEquals("updated", result.path("operation").asText(), result.toString());
+        assertEquals("spec-1", result.path("specification").path("specId").asText());
     }
 
     @Test
@@ -120,20 +144,64 @@ class ManageSpecToolTest {
     }
 
     @Test
-    void updateRequiresACompleteExpectedSpecification() throws Exception {
+    void updateRequiresAReadReference() throws Exception {
         JsonNode result = new ObjectMapper().readTree(tool.execute(
                 "{\"action\":\"update\",\"specId\":\"spec-1\",\"templateId\":\"3\"}"));
         assertEquals(400, result.path("status").asInt());
         verify(boardStorageService, never()).updateSpecIfUnchanged(anyLong(), anyString(), any(), any());
     }
 
+    @Test
+    void updateRejectsAnotherUsersVersionAndObsoleteOrMalformedBaselines() throws Exception {
+        SpecificationDto before = specificationUpdateSnapshot().specifications().get(0);
+        ObjectMapper mapper = new ObjectMapper();
+        var args = (com.fasterxml.jackson.databind.node.ObjectNode) mapper.readTree(specificationUpdateArgs(before));
+        args.put("readRef", reads.read(2L, "another-session", "list_specs",
+                mapper.writeValueAsString(java.util.Map.of("specs", List.of(java.util.Map.of(
+                        "specId", before.getId(), "expectedVersion", BoardItemVersion.specification(2L, before))))))
+                .path("specs").get(0).path("readRef").asText());
+        assertEquals(400, mapper.readTree(tool.execute(args.toString())).path("status").asInt());
+        args.remove("readRef");
+        args.putObject("expectedSpec").put("specId", "spec-1");
+        assertEquals(400, mapper.readTree(tool.execute(args.toString())).path("status").asInt());
+        args.remove("expectedSpec");
+        args.put("readRef", "latest");
+        assertEquals(400, mapper.readTree(tool.execute(args.toString())).path("status").asInt());
+        org.mockito.Mockito.verifyNoInteractions(boardStorageService);
+    }
+
+    @Test
+    void updateIgnoresChangedDisplayCachesAndPassesTheSameReadSnapshotToTheFinalCas() throws Exception {
+        SpecificationDto before = prepareSpecificationUpdate();
+        String args = specificationUpdateArgs(before);
+        before.setTemplateLabel("Renamed template");
+        before.setFormula("Rebuilt preview");
+        before.getAConditions().get(0).setDeviceLabel("Renamed device");
+        when(boardStorageService.updateSpecIfUnchanged(eq(1L), eq("spec-1"), org.mockito.ArgumentMatchers.same(before), any()))
+                .thenAnswer(invocation -> {
+                    SpecificationDto desired = invocation.getArgument(3);
+                    return CollectionMutationResultDto.of("updated", desired, List.of(desired));
+                });
+
+        JsonNode result = new ObjectMapper().readTree(tool.execute(args));
+
+        assertEquals("updated", result.path("operation").asText(), result.toString());
+        verify(boardStorageService).getSemanticSnapshot(1L);
+        verify(boardStorageService, never()).getSpecs(anyLong());
+    }
+
     private SpecificationDto prepareSpecificationUpdate() {
+        BoardSemanticSnapshotDto snapshot = specificationUpdateSnapshot();
+        when(boardStorageService.getSemanticSnapshot(1L)).thenReturn(snapshot);
+        return snapshot.specifications().get(0);
+    }
+
+    private BoardSemanticSnapshotDto specificationUpdateSnapshot() {
         DeviceNodeDto node = new DeviceNodeDto();
         node.setId("sensor_1");
         node.setLabel("Sensor");
         node.setTemplateName("Sensor");
         node.setState("on");
-        when(boardStorageService.getNodes(1L)).thenReturn(List.of(node));
         SpecConditionDto condition = new SpecConditionDto();
         condition.setDeviceId("sensor_1");
         condition.setTargetType("state");
@@ -145,9 +213,8 @@ class ManageSpecToolTest {
         before.setId("spec-1");
         before.setTemplateId("1");
         before.setAConditions(List.of(condition));
-        when(boardStorageService.getSemanticSnapshot(1L)).thenReturn(new BoardSemanticSnapshotDto(
-                List.of(node), List.of(), List.of(), List.of(before), List.of(sensorTemplate())));
-        return before;
+        return new BoardSemanticSnapshotDto(
+                List.of(node), List.of(), List.of(), List.of(before), List.of(sensorTemplate()));
     }
 
     private String specificationUpdateArgs(SpecificationDto before) throws Exception {
@@ -156,8 +223,10 @@ class ManageSpecToolTest {
         args.put("action", "update");
         args.put("specId", before.getId());
         args.put("templateId", "3");
-        args.set("expectedSpec", mapper.valueToTree(SpecificationToolPresenter.present(before,
-                SpecificationToolPresenter.context(boardStorageService.getNodes(1L), List.of(sensorTemplate())))));
+        args.put("readRef", reads.read(1L, "spec-test-session", "list_specs",
+                mapper.writeValueAsString(java.util.Map.of("specs", List.of(java.util.Map.of(
+                        "specId", before.getId(), "expectedVersion", BoardItemVersion.specification(1L, before))))))
+                .path("specs").get(0).path("readRef").asText());
         args.set("aConditions", mapper.readTree("""
                 [{"deviceId":"sensor_1","targetType":"state","key":"state","relation":"=","value":"on"}]
                 """));
@@ -727,7 +796,7 @@ class ManageSpecToolTest {
         when(failingMapper.writeValueAsString(any())).thenThrow(new JsonProcessingException("boom") {
         });
 
-        ManageSpecTool fallbackTool = new ManageSpecTool(boardStorageService, failingMapper, destructiveActionGuard);
+        ManageSpecTool fallbackTool = new ManageSpecTool(boardStorageService, failingMapper, destructiveActionGuard, reads.service);
         UserContextHolder.clear();
 
         String result = fallbackTool.execute("{}");
@@ -743,7 +812,7 @@ class ManageSpecToolTest {
         ObjectMapper failingMapper = spy(new ObjectMapper());
         doThrow(new RuntimeException("boom")).when(failingMapper).writeValueAsString(any());
 
-        ManageSpecTool fallbackTool = new ManageSpecTool(boardStorageService, failingMapper, destructiveActionGuard);
+        ManageSpecTool fallbackTool = new ManageSpecTool(boardStorageService, failingMapper, destructiveActionGuard, reads.service);
 
         DeviceNodeDto node = new DeviceNodeDto();
         node.setId("ac_1");

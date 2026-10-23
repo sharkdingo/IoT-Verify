@@ -72,6 +72,14 @@ public final class AiToolResultContract {
                 && !root.path("resultAvailable").booleanValue()));
     }
 
+    public static boolean isCompletedRead(JsonNode root) {
+        return hasValidControlFields(root) && !isStructuredError(root)
+                && "SUCCESS".equals(root.path("resultStatus").textValue())
+                && root.path("resultAvailable").isBoolean() && root.path("resultAvailable").booleanValue()
+                && !root.path("requiresUserConfirmation").asBoolean(false)
+                && !root.path("mutationMayHaveCommitted").asBoolean(false);
+    }
+
     /**
      * Checks the smallest authoritative marker that proves a known mutation-capable tool reached
      * its result boundary. A free-form message is deliberately insufficient evidence.
