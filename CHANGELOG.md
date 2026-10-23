@@ -19,8 +19,9 @@ history into a technical spec. The spec content itself now lives under
 
 #### Fixed
 
-- Reply checks distinguish saved, created or imported objects governed by read verbs from
-  new writes. Explicit completed operations joined to a read, including deletion without
+- Reply checks distinguish saved, created or imported read objects and inventory headings
+  from new writes; inventory facts still require a usable Board read. Explicit completed
+  operations joined to a read, including deletion without
   a repeated completion marker, still require receipts and retain the actual claim location.
 
 ### 2026-10-23 (reliable AI edits and consistent result interpretation)

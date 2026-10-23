@@ -4,7 +4,7 @@ Contract for `/api/chat` — session management plus the streaming completion en
 Session endpoints use the standard `Result<T>` envelope ([overview.md](overview.md));
 the streaming endpoint does **not** — it is an SSE stream.
 
-Verified against code on 2026-10-23. Source: `controller/ChatController.java`,
+Verified against code on 2026-10-24. Source: `controller/ChatController.java`,
 `service/impl/ChatServiceImpl.java`, `dto/chat/`, `frontend/src/api/chat.ts`,
 `frontend/src/App.vue`, and `frontend/src/components/ChatView.vue`.
 
@@ -525,6 +525,9 @@ not an application claim. A reference
 such as "that verified repair's application preview" does not claim that the repair was applied.
 Reading saved, created, or imported objects, directly or alongside the current board,
 describes read objects rather than a new write.
+Line-start inventory counts and list headings likewise describe stored objects, including
+Markdown headings and emphasis. They still require a usable Board snapshot; the same
+heading grammar identifies the read claim and its local completion modifier.
 Only the local completion marker is exempt; first-person
 save claims and adjacent operations still require receipts. These exclusions apply only to the
 covered phrase: mixed sentences still check actual operations before or after it independently.

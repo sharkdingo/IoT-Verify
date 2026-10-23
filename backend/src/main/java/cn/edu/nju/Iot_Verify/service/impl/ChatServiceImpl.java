@@ -204,6 +204,11 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
     private static final Pattern READ_OBJECT_COMPLETION_MODIFIER = Pattern.compile(
             "(?:读取|查看|核对)(?:当前|这些)?(?:(?:画布|场景)(?:及|以及|和|与))?"
                     + "(已经|已)(?:保存|创建|导入)(?:的)?(?:设备|规则|规约|画布|场景|轨迹|模板|环境变量)");
+    private static final Pattern STORED_OBJECT_HEADER = Pattern.compile(
+            "(?m)^[\\t ]*(?:(?:[-+*]|\\d+[.)]|#{1,6})[\\t ]+)?(?:\\*\\*|__)?"
+                    + "(已经|已)(?:保存|创建|导入)(?:的)?(?:设备|规则|规约|场景|模板|环境变量)"
+                    + "(?:数量(?:\\*\\*|__)?[\\t ]*[:：][\\t ]*\\d+(?=$|[\\t *_，,；;。！？])"
+                    + "|(?:列表|清单)(?:\\*\\*|__)?[\\t ]*[:：])");
     private static final Pattern UNSUPPORTED_PLATFORM_READ_CLAIM = Pattern.compile(
             "(?is)(?:\\b(?:your(?:\\s+current)?|the\\s+current|current)\\s+"
                     + "(?:board|scene)\\s+(?:currently\\s+)?(?:contains?|has|includes?|shows?|lists?)\\b"
@@ -222,7 +227,8 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                     + "(?:board|scene)\\b"
                     + "|(?:当前|你的|您的)(?:画布|场景)(?:中)?(?:有|包含|共有|显示)"
                     + "|(?:我|我们|本助手)(?:已经|已)?(?:查看|检查|读取|核对)(?:了)?"
-                    + "(?:当前|你的|您的)(?:画布|场景|设备|规则|规约|模型))");
+                    + "(?:当前|你的|您的)(?:画布|场景|设备|规则|规约|模型)"
+                    + "|" + STORED_OBJECT_HEADER.pattern() + ")");
     private static final Pattern NON_ASSERTIVE_CLAIM_CONTEXT = Pattern.compile(
             "(?is)(?:\\b(?:whether|hypothetically)\\b|\\bif\\s+(?:the|your|this|that)\\b"
                     + "|(?:是否|假设|如果))");
@@ -3100,7 +3106,7 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
             char[] checkable = reply.toCharArray();
             for (Pattern nonAssertive : List.of(
                     NEGATED_COMPLETION_CLAIM, REFERENCED_VERIFIED_REPAIR, SAVED_CONFIGURATION_PREMISE,
-                    READ_OBJECT_COMPLETION_MODIFIER, COMPLETED_ANALYSIS_CLAIM)) {
+                    READ_OBJECT_COMPLETION_MODIFIER, STORED_OBJECT_HEADER, COMPLETED_ANALYSIS_CLAIM)) {
                 Matcher marker = nonAssertive.matcher(reply);
                 while (marker.find()) {
                     if (nonAssertive == COMPLETED_ANALYSIS_CLAIM

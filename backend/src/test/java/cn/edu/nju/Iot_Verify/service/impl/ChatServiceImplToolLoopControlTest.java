@@ -137,7 +137,9 @@ class ChatServiceImplToolLoopControlTest {
             " **当前检查要求尚未证明已运行成功**  \n   画布中已有3条检查要求，但本轮没有形式化验证结果。",
             "修复分析已完成：共有 **3 个经模型验证可行的候选方案**，均保留现有 3 项检查要求且不修改规约。",
             "上述‘通过’表示在本次正式验证模型及原有检查要求范围内通过，不等于证明保留了所有未配置的家庭行为，也不代表某个方案已经应用。",
-            "我先读取当前画布及已保存规则，依据实际设备能力区分可表达的联动与尚缺的信息；本轮只做检查，不修改画布。"})
+            "我先读取当前画布及已保存规则，依据实际设备能力区分可表达的联动与尚缺的信息；本轮只做检查，不修改画布。",
+            "- **当前设备数量：4**\n- **已保存规则数量：3**\n\n| 规则 | 条件 | 动作 |\n|---|---|---|\n"
+                    + "| Guest light | occupancy = absent | Light on |\n\n这些条件和动作均对应当前设备能力。"})
     void readOnlyAnalysisRemainsVisibleAndSavedWithoutAnOperationWarning(String statement) throws Exception {
         when(messageRepo.findTop80BySessionIdOrderByIdDesc("s1")).thenReturn(List.of());
         when(aiToolManager.getAllToolDefinitions()).thenReturn(List.of(toolSpec("board_overview")));
@@ -259,6 +261,42 @@ class ChatServiceImplToolLoopControlTest {
         assertNotNull(review);
         assertEquals(StreamResponseDto.ClaimReviewReason.MISSING_OPERATION_RECEIPT, review.getReasonCode());
         assertTrue(review.getMatchedText().contains("删除"));
+        assertTrue(statement.contains(review.getMatchedText()));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"- **已保存规则数量：3**", "### **已创建设备数量: 0**",
+            "1. __已经导入模板列表：__", "已保存规约清单：", "**已保存规则数量**：3"})
+    void inventoryHeadersRequireAUsableBoardRead(String statement) throws Exception {
+        Method method = ChatServiceImpl.class.getDeclaredMethod("unsupportedPlatformClaim", String.class, List.class, Set.class);
+        method.setAccessible(true);
+        for (List<StreamResponseDto.ProgressDto> evidence : List.of(
+                List.<StreamResponseDto.ProgressDto>of(),
+                List.of(progressFrame("TOOL_RESULT", "board_overview", 1, "FAILED")))) {
+            var review = (StreamResponseDto.ClaimReviewDto) method.invoke(service, statement, evidence, Set.of());
+            assertNotNull(review);
+            assertEquals(StreamResponseDto.ClaimReviewReason.MISSING_BOARD_SNAPSHOT, review.getReasonCode());
+            assertTrue(statement.contains(review.getMatchedText()));
+        }
+        var evidence = List.of(progressFrame("TOOL_RESULT", "board_overview", 1, "USABLE"));
+        assertNull(method.invoke(service, statement, evidence, Set.of()));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "'- **已保存规则数量：3**，并删除了所有设备。',并删除了所有设备",
+            "'已保存规则数量：3。我已保存规约。',我已保存规约",
+            "'已保存规约清单：并已更新当前画布。',已更新",
+            "'已保存规则。',已保存规则",
+            "'我已保存规则数量：3。',我已保存规则"})
+    void inventoryHeadersDoNotAuthorizeActualWrites(String statement, String completedOperation) throws Exception {
+        Method method = ChatServiceImpl.class.getDeclaredMethod("unsupportedPlatformClaim", String.class, List.class, Set.class);
+        method.setAccessible(true);
+        var evidence = List.of(progressFrame("TOOL_RESULT", "board_overview", 1, "USABLE"));
+        var review = (StreamResponseDto.ClaimReviewDto) method.invoke(service, statement, evidence, Set.of());
+        assertNotNull(review);
+        assertEquals(StreamResponseDto.ClaimReviewReason.MISSING_OPERATION_RECEIPT, review.getReasonCode());
+        assertTrue(review.getMatchedText().contains(completedOperation));
         assertTrue(statement.contains(review.getMatchedText()));
     }
 
