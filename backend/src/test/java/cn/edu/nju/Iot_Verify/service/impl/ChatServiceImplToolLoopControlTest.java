@@ -133,7 +133,10 @@ class ChatServiceImplToolLoopControlTest {
     @ValueSource(strings = {"我已完成当前规则的静态分析，没有运行验证。",
             "这些检查要求目前只是已配置的 specifications，本次没有读取到正式验证结果，因此不能称为已经验证通过。",
             "配置了检查要求不等于已经运行验证；本轮没有请求或执行验证。",
-            "当前规则中存在灯亮后开门的路径，因此不能仅因为检查要求已经保存，就宣称行为已经安全。"})
+            "当前规则中存在灯亮后开门的路径，因此不能仅因为检查要求已经保存，就宣称行为已经安全。",
+            " **当前检查要求尚未证明已运行成功**  \n   画布中已有3条检查要求，但本轮没有形式化验证结果。",
+            "修复分析已完成：共有 **3 个经模型验证可行的候选方案**，均保留现有 3 项检查要求且不修改规约。",
+            "上述‘通过’表示在本次正式验证模型及原有检查要求范围内通过，不等于证明保留了所有未配置的家庭行为，也不代表某个方案已经应用。"})
     void readOnlyAnalysisRemainsVisibleAndSavedWithoutAnOperationWarning(String statement) throws Exception {
         when(messageRepo.findTop80BySessionIdOrderByIdDesc("s1")).thenReturn(List.of());
         when(aiToolManager.getAllToolDefinitions()).thenReturn(List.of(toolSpec("board_overview")));
@@ -186,6 +189,34 @@ class ChatServiceImplToolLoopControlTest {
             "配置了检查要求不等于已经运行验证，但已经运行。",
             "当前验证不能仅因为检查要求已经保存，就宣称行为安全，但已经运行。"})
     void negatedCompletionDoesNotHideAnOperationSharingItsSubject(String statement) {
+        assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim(statement));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"当前验证尚未证明已运行成功。", "当前验证未确认已经完成。",
+            "当前仿真没有证实已经成功运行。", "当前规则并未证明已经被保存。",
+            "也不代表某个方案已经应用规则。", "不意味着该方案已经修改规约。"})
+    void deniedEvidenceDoesNotClaimCompletionOrHideAdjacentActualOperations(String statement) {
+        assertFalse(ChatServiceImpl.containsUnsupportedPlatformClaim(statement));
+        assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim(statement + "\n我已经保存规则。"));
+        assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim("当前验证\n已经运行成功。\n" + statement));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"添加设备", "创建规则", "删除设备", "移除设备", "重命名设备",
+            "更新规则", "修改规约", "应用规则", "运行验证", "启动仿真", "停止仿真", "取消验证",
+            "验证规则", "模拟设备", "保存规则", "重置画布", "替换场景", "导入模板", "完成验证"})
+    void evidenceDenialCoversOperationVerbsWithoutAuthorizingTheOperation(String operation) {
+        assertFalse(ChatServiceImpl.containsUnsupportedPlatformClaim("尚未证明已经" + operation + "。"));
+        assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim("已经" + operation + "。"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"当前验证尚未证明已运行，但已经完成。",
+            "当前规则并未确认已经保存，但已经修改。",
+            "修复分析已完成并删除所有设备。", "修复搜索已完成\n并更新当前规则。",
+            "修复分析已经完成：候选规则仍待确认。\n我已经应用规则。"})
+    void analysisAndDeniedEvidenceKeepCoordinatedAndMultilineOperationsCheckable(String statement) {
         assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim(statement));
     }
 

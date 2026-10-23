@@ -185,14 +185,20 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                     + "(?:static\\s+)?(?:analysis|review|inspection|explanation|audit)\\s+(?:of|for)\\s+"
                     + "(?:(?:the|current|these|all|your)\\s+)*(?:devices?|rules?|specs?|specifications?|board|scene|model)\\b");
     private static final Pattern NEGATED_COMPLETION_CLAIM = Pattern.compile(
-            "(?:(?:不能|无法|不应)(?:声称|宣称|称为|说成)|不等于)(已经|已)(?:成功)?(?:被)?"
-                    + "(?:运行|启动|停止|取消|验证|模拟|完成)");
+            "(?:(?:不能|无法|不应)(?:声称|宣称|称为|说成)|不等于"
+                    + "|(?:尚未|并未|未|没有)(?:证明|确认|证实)"
+                    + "|(?:不代表|不意味着)(?:(?:某个|该|这个|所选)?(?:修复)?(?:方案|建议))?)"
+                    + "(已经|已)(?:成功)?(?:被)?"
+                    + "(?:添加|创建|删除|移除|重命名|更新|修改|应用|运行|启动|停止|取消|验证|模拟|保存|重置|"
+                    + "替换|导入|完成)");
     private static final Pattern REFERENCED_VERIFIED_REPAIR = Pattern.compile(
             "(?:该|这项|这个|上述|所选的?)(已经|已)验证(?:的)?修复(?:建议|候选|方案)?");
     private static final Pattern SAVED_CONFIGURATION_PREMISE = Pattern.compile(
             "(?:不能|无法|不应)(?:仅|只)(?:因为|由于)(?:当前|这些|已有|所有|该)?"
                     + "(?:检查要求|规约|规则)(已经|已)(?:成功)?(?:被)?保存"
                     + "(?=\\s*[,，]?\\s*就(?:声称|宣称|认定|认为))");
+    private static final Pattern COMPLETED_ANALYSIS_CLAIM = Pattern.compile(
+            "(?:静态|修复)?(?:分析|审查|搜索)(已经|已)(?:成功)?完成");
     private static final Pattern UNSUPPORTED_PLATFORM_READ_CLAIM = Pattern.compile(
             "(?is)(?:\\b(?:your(?:\\s+current)?|the\\s+current|current)\\s+"
                     + "(?:board|scene)\\s+(?:currently\\s+)?(?:contains?|has|includes?|shows?|lists?)\\b"
@@ -1549,11 +1555,15 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
         stream interruption. Earlier assistant prose is not evidence and must not override those results.
         Under applicable/configured specifications, list only actual specifications returned by tools;
         label related automation rules separately, and mark suggested properties as not yet configured.
+        Explain formal initial states from that run's frozen saved model and trace: saved instance states
+        take precedence over template InitState defaults; do not invent a second formal initial state.
         When two observed values first change at the same stateIndex, they are observed together;
         do not say one preceded the other. A trigger condition in an earlier state is not evidence that
         its resulting action occurred before another change at the action's stateIndex.
         For an immediate-response counterexample, identify the state where the complete IF holds and
         its successor where THEN fails. A preceding satisfied transition is not the violating edge.
+        AG(IF -> AX THEN) checks every reachable state, not only the initial state: while IF stays true,
+        each state repeats the next-state obligation. It alone adds no history-based obligation after IF ceases.
         Compare repairs by their reported edits and checked scope. Preserving configured requirements
         and reachable response triggers does not establish preservation of every behavior or optimality.
         Keep full-audit inventories and chronological evidence in the requested compact tables;
@@ -3084,10 +3094,13 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
         if (allowNonOperationalContent) {
             char[] checkable = reply.toCharArray();
             for (Pattern nonAssertive : List.of(
-                    NEGATED_COMPLETION_CLAIM, REFERENCED_VERIFIED_REPAIR, SAVED_CONFIGURATION_PREMISE)) {
+                    NEGATED_COMPLETION_CLAIM, REFERENCED_VERIFIED_REPAIR, SAVED_CONFIGURATION_PREMISE,
+                    COMPLETED_ANALYSIS_CLAIM)) {
                 Matcher marker = nonAssertive.matcher(reply);
                 while (marker.find()) {
-                    // Denied completion, a repair reference and a saved-state premise are not new actions.
+                    if (nonAssertive == COMPLETED_ANALYSIS_CLAIM
+                            && hasCoordinatedOperationAfter(new String(checkable), marker.end(), pattern)) continue;
+                    // Evidence denial, references, premises and completed analysis are not new actions.
                     // Keep their nouns and offsets so adjacent actual operations remain checkable.
                     Arrays.fill(checkable, marker.start(1), marker.end(1), ' ');
                 }
@@ -3116,9 +3129,7 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                     if (noun.start() < matcher.end() && noun.end() >= matcher.end()) {
                         // "Completed analysis and deleted devices" shares its completed subject.
                         // Check that continuation with the same operation pattern before exempting the analysis.
-                        Matcher coordinated = COORDINATED_CLAIM_SUFFIX.matcher(checkableReply.substring(noun.end()));
-                        if (coordinated.find() && (hasUnsupportedClaim("我已经" + coordinated.group(1), pattern, false, false)
-                                || hasUnsupportedClaim("I " + coordinated.group(1), pattern, false, false))) continue;
+                        if (hasCoordinatedOperationAfter(checkableReply, noun.end(), pattern)) continue;
                         nounModifier = true;
                         break;
                     }
@@ -3128,6 +3139,13 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
             return matcher.toMatchResult();
         }
         return null;
+    }
+
+    private static boolean hasCoordinatedOperationAfter(String reply, int end, Pattern pattern) {
+        Matcher coordinated = COORDINATED_CLAIM_SUFFIX.matcher(reply.substring(end));
+        return coordinated.find()
+                && (hasUnsupportedClaim("我已经" + coordinated.group(1), pattern, false, false)
+                    || hasUnsupportedClaim("I " + coordinated.group(1), pattern, false, false));
     }
 
     private static boolean hasLeadingHistoricalClaimContext(String reply, int claimStart) {

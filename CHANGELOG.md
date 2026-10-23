@@ -19,6 +19,12 @@ history into a technical spec. The spec content itself now lives under
 
 #### Fixed
 
+- Assistant evidence guidance distinguishes saved instance initial states from template
+  defaults, and keeps negated or analysis-completion statements separate from actual
+  platform actions even in Markdown replies. Adjacent affirmative operations still
+  require execution evidence.
+- Repair-analysis results explicitly distinguish candidate order and strategy limits
+  from a ranking of behavioral impact or proof of optimality across strategies.
 - Assistant rule and requirement edits now bind to a server-provided target version instead
   of reconstructing an old display object. Chat resolves a short reference to that exact
   read result, so models do not have to transcribe a long hash. Shared read projections

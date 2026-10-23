@@ -246,6 +246,8 @@ public class FixViolationTool extends AbstractAiTool {
             String message = result.isFixable()
                     ? "Fix analysis found one or more forward-verified suggestions; no Board change was applied."
                     : "Fix analysis found no forward-verified suggestion; no Board change was applied.";
+            message += " Use per-candidate verification results and strategy limits as evidence; candidate order is not "
+                    + "a ranking of total behavioral impact or proof of optimality across strategies.";
             summary.put("message", message);
             return readOnlySuccessJson(summary, message);
 

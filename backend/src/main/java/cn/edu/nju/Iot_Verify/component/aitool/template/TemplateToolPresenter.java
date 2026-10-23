@@ -17,6 +17,9 @@ public final class TemplateToolPresenter {
             + "FalsifiableWhenCompromised reading may separate its report from the environment. Distinguish those specification "
             + "subjects without inventing independent physical values. Shared declaration Trust/Privacy are defaults: current shared "
             + "labels come from the Board Environment Pool, with an untrusted per-device exception only under that compromise. "
+            + "For standard Board formal checks, a saved device instance state overrides the template InitState; "
+            + "InitState is only a default when that instance state is absent, not a separate formal initial state. "
+            + "Interpret historical runs from their frozen modelSnapshot and actual trace, not the live Board. "
             + "These are model semantics, not observations of physical devices or proof that an action occurred.";
 
     private TemplateToolPresenter() { }

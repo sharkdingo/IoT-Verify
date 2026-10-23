@@ -4,8 +4,9 @@ This document is the project authority for board data contracts. The project is
 in active development: invalid legacy shapes should be fixed at the source or by
 clearing development data, not by adding fallback branches.
 
-Verified against code on 2026-10-08. Source: board/fuzz DTOs and services,
-`BoardDataConverter`, `modelRequest.ts`, scene import/export, fuzzing, and NuSMV generation.
+Verified against code on 2026-10-23. Source: board/fuzz DTOs and services,
+`BoardDataConverter`, `modelRequest.ts`, scene import/export, fuzzing, and NuSMV generation
+(including `SmvDeviceModuleBuilder.appendInitialValues`).
 
 ## Principles
 
@@ -76,12 +77,20 @@ Backend DTO: `DeviceNodeDto`. Frontend type: `DeviceNode`.
 | `templateName` | Template `manifest.Name` | Selects device semantics | Template lookup, NuSMV manifest load |
 | `label` | User | Display name only | UI text, trace readability; never identity |
 | `position.x/y` | Canvas UI | Finite board coordinates in `-1000000..1000000` | Canvas, minimap, derived edge geometry |
-| `state` | User/template init for templates with `Modes`; canvas placeholder for no-mode devices | Current full state value only for modeled state machines | Model request initial state for mode-based devices; omitted for no-mode sensors/devices |
+| `state` | User/template init for templates with `Modes`; canvas placeholder for no-mode devices | Saved initial full state for modeled state machines | Model request initial state for mode-based devices; omitted for no-mode sensors/devices |
 | `width` / `height` | Canvas UI | Integer node geometry; width `80..2000`, height `60..2000` | Canvas hit testing, edge geometry, minimap bounds |
 | `currentStateTrust` | Optional user/runtime override | Overrides trust for the current state; omitted means use `WorkingStates.Trust` | NuSMV trust modeling |
 | `currentStatePrivacy` | Optional user/runtime override | Overrides sensitivity for the current state; omitted means use `WorkingStates.Privacy` | NuSMV privacy modeling when enabled |
 | `variables[].name/value/trust` | User/runtime override, **except a value the device's state determines** (see below) | Device-local variable values and trust (`InternalVariables[].IsInside=true`) | NuSMV local variable init/trust, fix fingerprint |
 | `privacies[].name/privacy` | User/runtime override | Device-local variable sensitivity keyed by literal template variable name | Privacy modeling and fix fingerprint |
+
+For standard Board formal checks, the saved instance state takes precedence over template
+`InitState`. The generator uses the template default only for a mode without a supplied
+instance value. A saved lamp in `off` therefore starts the check in `off` even when its
+template default is `on`; the two are not separate canvas and formal initial states.
+Interpret a completed run from its frozen `modelSnapshot` and actual trace, rather than
+substituting the current Board or the template default. Random-initial exploration has
+its own [initial-state contract](fuzzing-flow.md).
 
 The public update boundary follows those ownership columns. Canvas geometry and modeled
 device-local values have separate complete update commands in the

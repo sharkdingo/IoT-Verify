@@ -516,14 +516,19 @@ Progress stages and outcomes:
 Absent completed/saved run records, including empty history-query results, and explicit completion of analysis, review, or
 explanation are descriptions of evidence or assistant work, not claims of a new platform
 operation. The Chinese reply check also recognizes explicit phrases declining to claim
-verification completion, warnings that configuring requirements does not mean verification
+verification completion or stating that completion has not been proved, confirmed, or substantiated,
+warnings that configuring requirements does not mean verification
 has run, causal warnings that saved requirements alone do not establish safe behavior,
-and references to a previously verified repair candidate. A reference
+references to a previously verified repair candidate, and explicit statements that a repair
+analysis or search has finished. Denying that evidence implies a candidate was applied is
+not an application claim. A reference
 such as "that verified repair's application preview" does not claim that the repair was applied.
-Only the completion marker inside a saved-configuration premise is exempt; first-person
+Only the local completion marker is exempt; first-person
 save claims and adjacent operations still require receipts. These exclusions apply only to the
 covered phrase: mixed sentences still check actual operations before or after it independently.
 Saying that an analysis is complete does not authorize or prove a rule edit or formal verification.
+Coordinated operations sharing that completed subject and actual operations after Markdown
+line breaks still require their own receipts.
 Visible replacement notices state the specific missing-evidence reason before listing any
 confirmed results. The execution details retain the original for inspection.
 

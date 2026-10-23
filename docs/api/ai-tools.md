@@ -312,6 +312,8 @@ keeps counts and configured links lightweight and intentionally omits manifest f
 For definitions outside the snapshot, use `list_templates(detail=true)` with exact
 device ids or template names. An indirect chain requires a rule/API-effect path,
 not merely shared conditions; model data does not prove physical execution.
+Shared manifest guidance also explains [saved initial-state authority](../architecture/data-authority-model.md#device-node):
+the assistant must not invent a second formal initial state from a template default.
 
 `directRuleTargets` is a compact directed index derived from the same rule edges:
 each condition-source device maps to its distinct command targets. It does not connect
@@ -1062,6 +1064,10 @@ The response also includes `strategyAttempts`, `parameterTargets`, the exact nor
 requested strategy gets an explicit attempted/skipped status. A trace from an incomplete generated model, or one without explicit completeness
 metadata, yields no certified suggestion and all strategies are marked
 `SKIPPED_INCOMPLETE_SOURCE_MODEL`.
+The result message directs the assistant to per-candidate verification and these strategy
+limits. Candidate order does not rank total behavioral impact or prove optimality across
+strategies; a deletion must not be called behaviorally smaller merely because it removes
+one rule.
 Omitting `strategies` selects the documented default order. Supplying it has exact
 semantics: it must be a non-empty, duplicate-free array containing only `parameter`,
 `condition`, and/or `remove`. A wrong scalar, empty array, blank/unknown item, or duplicate
