@@ -15,6 +15,14 @@ history into a technical spec. The spec content itself now lives under
 
 ## [Unreleased]
 
+### 2026-10-24 (assistant claim accuracy)
+
+#### Fixed
+
+- Reply checks distinguish saved, created or imported objects governed by read verbs from
+  new writes. Explicit completed operations joined to a read, including deletion without
+  a repeated completion marker, still require receipts and retain the actual claim location.
+
 ### 2026-10-23 (reliable AI edits and consistent result interpretation)
 
 #### Fixed

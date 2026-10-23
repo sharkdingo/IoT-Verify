@@ -121,6 +121,8 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                     + "|(?:工具|函数|接口)(?:调用|执行)?(?:结果|响应|输出)"
                     + "(?:显示|表明|证明|返回|确认|成功|完成)"
                     + "|(?:工具|函数|接口)(?:调用|执行)?(?:已返回|返回了|已报告))");
+    private static final String PLATFORM_ACTION_VERBS =
+            "(?:添加|创建|删除|移除|重命名|更新|修改|应用|运行|启动|停止|取消|验证|模拟|保存|重置|替换|导入)";
     private static final Pattern UNSUPPORTED_PLATFORM_MUTATION_CLAIM = Pattern.compile(
             "(?is)(?:\\b(?:I|we)(?:'ve|\\s+have)?\\s+(?:already\\s+|successfully\\s+)*"
                     + "(?:added|created|deleted|removed|renamed|updated|modified|changed|applied|ran|started|"
@@ -151,8 +153,9 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                     + "(?:simulation|verification|model)\\b[^.!?。！？]{0,40}\\b"
                     + "(?:is|was|has\\s+been)\\s+(?:now\\s+)?(?:complete|completed|successful|finished)\\b"
                     + "|(?:(?:我|本助手|我们)(?:已经|已)?(?:成功)?|(?:已经|已)(?:成功)?)"
-                    + "(?:添加|创建|删除|移除|重命名|更新|修改|应用|运行|启动|停止|取消|验证|模拟|保存|重置|"
-                    + "替换|导入|完成)(?!的)(?:了)?[^.!?。！？]{0,160}?"
+                    + "(?:" + PLATFORM_ACTION_VERBS + "|完成)(?!的)(?:了)?[^.!?。！？]{0,160}?"
+                    + "(?:设备|规则|规约|画布|场景|仿真|模拟|验证|轨迹|模板|环境变量)"
+                    + "|(?:并且|而且|同时|并|且)" + PLATFORM_ACTION_VERBS + "了[^.!?。！？]{0,160}?"
                     + "(?:设备|规则|规约|画布|场景|仿真|模拟|验证|轨迹|模板|环境变量)"
                     + "|(?:全部|所有|你的|您的|当前|这些|该)?"
                     + "(?:设备|规则|规约|画布|场景|仿真|模拟|验证|轨迹|模板|环境变量)"
@@ -189,8 +192,7 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                     + "|(?:尚未|并未|未|没有)(?:证明|确认|证实)"
                     + "|(?:不代表|不意味着)(?:(?:某个|该|这个|所选)?(?:修复)?(?:方案|建议))?)"
                     + "(已经|已)(?:成功)?(?:被)?"
-                    + "(?:添加|创建|删除|移除|重命名|更新|修改|应用|运行|启动|停止|取消|验证|模拟|保存|重置|"
-                    + "替换|导入|完成)");
+                    + "(?:" + PLATFORM_ACTION_VERBS + "|完成)");
     private static final Pattern REFERENCED_VERIFIED_REPAIR = Pattern.compile(
             "(?:该|这项|这个|上述|所选的?)(已经|已)验证(?:的)?修复(?:建议|候选|方案)?");
     private static final Pattern SAVED_CONFIGURATION_PREMISE = Pattern.compile(
@@ -199,6 +201,9 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                     + "(?=\\s*[,，]?\\s*就(?:声称|宣称|认定|认为))");
     private static final Pattern COMPLETED_ANALYSIS_CLAIM = Pattern.compile(
             "(?:静态|修复)?(?:分析|审查|搜索)(已经|已)(?:成功)?完成");
+    private static final Pattern READ_OBJECT_COMPLETION_MODIFIER = Pattern.compile(
+            "(?:读取|查看|核对)(?:当前|这些)?(?:(?:画布|场景)(?:及|以及|和|与))?"
+                    + "(已经|已)(?:保存|创建|导入)(?:的)?(?:设备|规则|规约|画布|场景|轨迹|模板|环境变量)");
     private static final Pattern UNSUPPORTED_PLATFORM_READ_CLAIM = Pattern.compile(
             "(?is)(?:\\b(?:your(?:\\s+current)?|the\\s+current|current)\\s+"
                     + "(?:board|scene)\\s+(?:currently\\s+)?(?:contains?|has|includes?|shows?|lists?)\\b"
@@ -3095,12 +3100,12 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
             char[] checkable = reply.toCharArray();
             for (Pattern nonAssertive : List.of(
                     NEGATED_COMPLETION_CLAIM, REFERENCED_VERIFIED_REPAIR, SAVED_CONFIGURATION_PREMISE,
-                    COMPLETED_ANALYSIS_CLAIM)) {
+                    READ_OBJECT_COMPLETION_MODIFIER, COMPLETED_ANALYSIS_CLAIM)) {
                 Matcher marker = nonAssertive.matcher(reply);
                 while (marker.find()) {
                     if (nonAssertive == COMPLETED_ANALYSIS_CLAIM
                             && hasCoordinatedOperationAfter(new String(checkable), marker.end(), pattern)) continue;
-                    // Evidence denial, references, premises and completed analysis are not new actions.
+                    // These local modifiers describe evidence or assistant work, not new actions.
                     // Keep their nouns and offsets so adjacent actual operations remain checkable.
                     Arrays.fill(checkable, marker.start(1), marker.end(1), ' ');
                 }

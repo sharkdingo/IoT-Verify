@@ -523,6 +523,8 @@ references to a previously verified repair candidate, and explicit statements th
 analysis or search has finished. Denying that evidence implies a candidate was applied is
 not an application claim. A reference
 such as "that verified repair's application preview" does not claim that the repair was applied.
+Reading saved, created, or imported objects, directly or alongside the current board,
+describes read objects rather than a new write.
 Only the local completion marker is exempt; first-person
 save claims and adjacent operations still require receipts. These exclusions apply only to the
 covered phrase: mixed sentences still check actual operations before or after it independently.

@@ -136,7 +136,8 @@ class ChatServiceImplToolLoopControlTest {
             "当前规则中存在灯亮后开门的路径，因此不能仅因为检查要求已经保存，就宣称行为已经安全。",
             " **当前检查要求尚未证明已运行成功**  \n   画布中已有3条检查要求，但本轮没有形式化验证结果。",
             "修复分析已完成：共有 **3 个经模型验证可行的候选方案**，均保留现有 3 项检查要求且不修改规约。",
-            "上述‘通过’表示在本次正式验证模型及原有检查要求范围内通过，不等于证明保留了所有未配置的家庭行为，也不代表某个方案已经应用。"})
+            "上述‘通过’表示在本次正式验证模型及原有检查要求范围内通过，不等于证明保留了所有未配置的家庭行为，也不代表某个方案已经应用。",
+            "我先读取当前画布及已保存规则，依据实际设备能力区分可表达的联动与尚缺的信息；本轮只做检查，不修改画布。"})
     void readOnlyAnalysisRemainsVisibleAndSavedWithoutAnOperationWarning(String statement) throws Exception {
         when(messageRepo.findTop80BySessionIdOrderByIdDesc("s1")).thenReturn(List.of());
         when(aiToolManager.getAllToolDefinitions()).thenReturn(List.of(toolSpec("board_overview")));
@@ -218,6 +219,47 @@ class ChatServiceImplToolLoopControlTest {
             "修复分析已经完成：候选规则仍待确认。\n我已经应用规则。"})
     void analysisAndDeniedEvidenceKeepCoordinatedAndMultilineOperationsCheckable(String statement) {
         assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim(statement));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"读取已保存规则。", "读取当前画布及已保存规则。",
+            "查看当前场景以及已经创建规则。", "核对当前场景与已导入模板。",
+            "读取这些画布和已保存的规约。", "查看已经创建的设备。"})
+    void completedReadObjectsDoNotClaimAMutationOrHideAnActualWrite(String statement) {
+        assertFalse(ChatServiceImpl.containsUnsupportedPlatformClaim(statement));
+        assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim(statement + "\n我已保存规则。"));
+        assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim("我已保存规约，" + statement));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"读取当前画布及已保存规则，并已保存规约。",
+            "查看已经创建的规则，并已更新画布。", "核对已导入模板，并已运行验证。",
+            "我先读取已保存规则。\n当前验证\n已经完成。"})
+    void readingSavedObjectsDoesNotAuthorizeFollowingCompletedOperations(String statement) {
+        assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim(statement));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "我已经读取当前画布及已保存规则，并删除了所有设备。,true",
+            "读取当前画布及已保存规则，并删除了所有设备。,true",
+            "我先读取当前画布及已保存规则，并删除设备。,false",
+            "读取当前画布及已保存规则，并删除设备。,false",
+            "读取已保存规则，并完成了当前规则的静态分析。,false",
+            "读取已保存规则，并删除了所有设备？,false"})
+    void readEvidenceDoesNotAuthorizeACoordinatedCompletedWrite(String statement, boolean completed) throws Exception {
+        Method method = ChatServiceImpl.class.getDeclaredMethod("unsupportedPlatformClaim", String.class, List.class, Set.class);
+        method.setAccessible(true);
+        var evidence = List.of(progressFrame("TOOL_RESULT", "board_overview", 1, "USABLE"));
+        var review = (StreamResponseDto.ClaimReviewDto) method.invoke(service, statement, evidence, Set.of());
+        if (!completed) {
+            assertNull(review);
+            return;
+        }
+        assertNotNull(review);
+        assertEquals(StreamResponseDto.ClaimReviewReason.MISSING_OPERATION_RECEIPT, review.getReasonCode());
+        assertTrue(review.getMatchedText().contains("删除"));
+        assertTrue(statement.contains(review.getMatchedText()));
     }
 
     @ParameterizedTest
