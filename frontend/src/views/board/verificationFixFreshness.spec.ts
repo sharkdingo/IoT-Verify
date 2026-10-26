@@ -25,7 +25,8 @@ const createAdmission = new Function('computed', 'verificationResultStale', 'ver
     compilerOptions: { target: ScriptTarget.ES2022 }
   }).outputText)
 
-const trace = { id: 4, verificationTaskId: 3, violatedSpecId: 'never_on', dataAvailable: true }
+const trace = { id: 4, verificationTaskId: 3, violatedSpecId: 'never_on',
+  violatedSpec: { name: 'Keep the light off' }, dataAvailable: true }
 const currentModels = { verification: 'a'.repeat(64), simulation: 'b'.repeat(64) }
 const createState = () => {
   const comparison = ref<RunBoardComparison>('UNCHANGED')
@@ -68,7 +69,7 @@ describe('verification Fix requires current-model evidence', () => {
     expect(state.blockedReason.value).toBeNull()
     expect(state.canFix(trace)).toBe(true)
     state.openResult(trace)
-    expect(state.open).toHaveBeenCalledExactlyOnceWith(trace.id, trace.violatedSpecId)
+    expect(state.open).toHaveBeenCalledExactlyOnceWith(trace.id, trace.violatedSpecId, trace.violatedSpec.name)
     state.stale.value = true
     expect(state.canFix(trace)).toBe(false)
     state.stale.value = false
@@ -80,7 +81,7 @@ describe('verification Fix requires current-model evidence', () => {
     const state = createState()
     state.openHistory(trace)
     expect(state.closeHistory).toHaveBeenCalledOnce()
-    expect(state.open).toHaveBeenCalledExactlyOnceWith(trace.id, trace.violatedSpecId)
+    expect(state.open).toHaveBeenCalledExactlyOnceWith(trace.id, trace.violatedSpecId, trace.violatedSpec.name)
     state.open.mockClear()
     state.fingerprints.value = null
     state.openHistory(trace)

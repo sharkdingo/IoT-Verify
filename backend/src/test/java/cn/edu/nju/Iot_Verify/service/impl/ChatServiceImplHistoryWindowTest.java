@@ -110,6 +110,7 @@ class ChatServiceImplHistoryWindowTest {
                 destructiveActionGuard,
                 scenarioDraftStore,
                 taskContinuationStore,
+                org.mockito.Mockito.mock(cn.edu.nju.Iot_Verify.service.AiTaskMemoryService.class),
                 new ObjectMapper(),
                 new ChatToolProgressPresenter(new ObjectMapper()),
                 chatMapper,

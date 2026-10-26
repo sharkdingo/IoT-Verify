@@ -117,9 +117,11 @@ class FixAlternativesTest {
     private static FixContext context() {
         SpecificationDto target = new SpecificationDto();
         target.setId("target");
+        target.setName("Safety requirement");
         target.setTemplateId("1");
         SpecificationDto other = new SpecificationDto();
         other.setId("other");
+        other.setName("Safety requirement");
         other.setTemplateId("1");
         return FixContext.builder().devices(List.of()).specs(List.of(target, other)).build();
     }

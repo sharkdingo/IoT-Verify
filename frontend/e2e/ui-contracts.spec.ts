@@ -1,3 +1,5 @@
+import { expandCreation } from './support/controlCenter'
+import { openRecommendation, collapseRecommendation } from './support/recommendations'
 import { type APIRequestContext, type Locator, type Page, type Route } from '@playwright/test'
 import { createAuthenticatedUser, expect, test, type AuthUser } from './support/auth'
 import { clickUnderTooltip, dismissHintTooltips } from './support/tooltips'
@@ -41,6 +43,27 @@ const openLayoutTestBoard = async (page: Page, request: APIRequestContext) => {
   await expect(page.getByTestId('control-center')).toHaveClass(/is-expanded/)
   await expect(page.getByTestId('system-inspector')).toHaveClass(/is-expanded/)
 }
+
+test('starts control tools closed and reveals the requested editor from inspector Add', async ({ page, request }) => {
+  await openLayoutTestBoard(page, request)
+  for (const section of ['templates', 'devices', 'rules', 'specs']) {
+    await page.getByTestId(`control-tab-${section}`).click()
+    for (const disclosure of await page.getByTestId(`control-section-${section}`).locator(':scope > details').all()) {
+      await expect(disclosure).not.toHaveAttribute('open', '')
+    }
+  }
+  for (const [section, kind] of [['devices', 'device'], ['rules', 'rule'], ['specs', 'spec']]) {
+    await page.getByTestId(`inspector-tab-${section}`).click()
+    await page.getByTestId(`inspector-add-${kind}`).click()
+    const creation = page.getByTestId(`${kind}-creation-card`)
+    await expect(creation).toHaveAttribute('open', '')
+    await expect(creation.locator(':scope > summary')).toBeFocused()
+    await creation.locator(':scope > summary').click()
+    await expect(creation).not.toHaveAttribute('open', '')
+    await page.getByTestId(`inspector-add-${kind}`).click()
+    await expect(creation).toHaveAttribute('open', '')
+  }
+})
 
 for (const { width, theme } of [{ width: 1440, theme: 'light' }, { width: 375, theme: 'dark' }, { width: 320, theme: 'light' }]) {
   test(`keeps auxiliary controls readable and reachable at ${width}px in ${theme}`, async ({ page, sharedReadOnlyAccount: auth }) => {
@@ -146,6 +169,7 @@ test('uses consistent Chinese creation wording on a narrow control center', asyn
   const expand = control.getByRole('button', { name: '展开控制中心', exact: true })
   if (await expand.isVisible()) await expand.click()
   await page.getByTestId('control-tab-templates').click()
+  await expandCreation(page, 'templates')
   const format = page.getByTestId('control-template-create').getByRole('button', { name: '下载格式定义', exact: true })
   const formatHelp = page.getByTestId('template-format-help')
   await format.scrollIntoViewIfNeeded()
@@ -171,6 +195,7 @@ test('updates the selected field label when its option text changes without chan
   const expand = control.getByRole('button', { name: 'Expand Control Center', exact: true })
   if (await expand.isVisible()) await expand.click()
   await page.getByTestId('control-tab-devices').click()
+  await expandCreation(page, 'devices')
   const template = page.getByTestId('single-device-template')
   await expect(template).toBeEnabled()
   await template.selectOption('Light')
@@ -273,6 +298,7 @@ for (const { theme, palette, width } of [
     for (const section of ['templates', 'devices', 'rules', 'specs'] as const) {
       await page.getByTestId(`control-tab-${section}`).click()
       const panel = page.getByTestId(`control-section-${section}`)
+      await expandCreation(page, section)
       await expect(panel).toBeVisible()
       await expect(panel.locator('.board-section-title').first()).toHaveCSS('font-size', '14px')
       await expect(panel.locator('.board-section-title').first()).toHaveText({
@@ -326,28 +352,20 @@ for (const { theme, palette, width } of [
     expect(await fuzzing.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
     await clickUnderTooltip(page, page.getByTestId('close-fuzzing-panel'))
 
-    for (const kind of ['scenario', 'rule', 'device', 'spec']) {
-      await clickUnderTooltip(page, page.getByTestId(`open-${kind}-recommendations`))
+    for (const kind of ['rule', 'device', 'spec'] as const) {
+      await openRecommendation(page, kind)
       const panel = page.getByTestId(`${kind}-recommendation-panel`)
       await expect(panel).toBeVisible()
-      await expect(panel.getByRole('heading', { level: 3 })).toHaveCSS('font-size', '16px')
-      await expectField(panel.locator('input[type="number"]').first())
+      await expect(page.getByTestId(`open-${kind}-recommendations`).locator('.board-section-title')).toHaveCSS('font-size', '14px')
+      await expect(panel.getByRole('spinbutton')).toHaveCount(0)
+      await expectField(panel.locator('textarea'))
       await expect(panel.locator('label').first()).toHaveCSS('font-size', '13px')
-      const generateId = kind === 'scenario' ? 'generate-scenario-recommendation' : `generate-${kind}-recommendations`
+      const generateId = `generate-${kind}-recommendations`
       await expectAction(panel.getByTestId(generateId))
       expect(await panel.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
-      await dismissHintTooltips(page)
-      await panel.getByTestId(`${kind}-recommendation-help`).focus()
-      const explanation = page.locator('.iot-info-tooltip-popper:not([aria-hidden="true"])')
-      await expect(explanation).toHaveCount(1)
-      await expect(explanation).toBeVisible()
-      expect(await explanation.evaluate(element => {
-        const rect = element.getBoundingClientRect()
-        return element.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2))
-      })).toBe(true)
-      await panel.getByTestId(`${kind}-recommendation-help`).press('Tab')
+      await panel.locator('textarea').focus()
       await expect(panel.locator('textarea')).toBeFocused()
-      await clickUnderTooltip(page, page.getByTestId(`close-${kind}-recommendations`))
+      await collapseRecommendation(page, kind)
     }
 
     await clickUnderTooltip(page, page.locator('.ai-assistant-btn'))
@@ -618,6 +636,7 @@ test.describe('board accessibility contracts', () => {
 
     await page.getByTestId('control-tab-rules').click()
     await expect(page.getByTestId('control-section-rules')).toBeVisible()
+    await expandCreation(page, 'rules')
     const editor = page.getByTestId('control-section-rules').getByTestId('rule-builder')
     await expect(editor).toBeVisible()
     await editor.getByTestId('rule-conditions-help').focus()

@@ -500,6 +500,7 @@ class RuleFixerTest {
         RuleFixer fixer = new RuleFixer(faultLocalizer, List.of(strategy), fixConfig());
         when(faultLocalizer.localize(any(), any(), any())).thenReturn(List.of());
         SpecificationDto spec = lampSpec();
+        spec.setName("Safety requirement");
         spec.setTemplateId(templateId);
         RuleDto rule = RuleDto.builder()
                 .command(RuleDto.Command.builder().deviceName("lamp").action("on").build()).build();
@@ -524,6 +525,7 @@ class RuleFixerTest {
         RuleFixer fixer = new RuleFixer(faultLocalizer, List.of(strategy), fixConfig());
         when(faultLocalizer.localize(any(), any(), any())).thenReturn(List.of());
         SpecificationDto spec = lampSpec();
+        spec.setName("Safety requirement");
         spec.setTemplateId("2");
         TraceStateDto state = TraceStateDto.builder().loopStart(true).build();
         RuleDto rule = RuleDto.builder()

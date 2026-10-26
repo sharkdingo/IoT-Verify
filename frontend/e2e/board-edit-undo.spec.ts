@@ -1,3 +1,4 @@
+import { expandCreation } from './support/controlCenter'
 import path from 'node:path'
 import { type APIRequestContext, type Page } from '@playwright/test'
 import { apiBaseURL, createAuthenticatedUser, expect, test, type AuthUser } from './support/auth'
@@ -406,6 +407,7 @@ test.describe('undo boundaries', () => {
 
     // Typing in a board input and pressing Ctrl+Z must undo the typing, not the rule deletion.
     await page.getByTestId('control-tab-devices').click()
+    await expandCreation(page, 'devices')
     const nameField = page.getByTestId('single-device-name')
     await nameField.click()
     await nameField.fill('undo-scope-probe')

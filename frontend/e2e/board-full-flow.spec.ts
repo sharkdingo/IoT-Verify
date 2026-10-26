@@ -1,3 +1,5 @@
+import { expandCreation } from './support/controlCenter'
+import { openRecommendation, collapseRecommendation } from './support/recommendations'
 import { type APIRequestContext, type Page, type Route } from '@playwright/test'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -185,7 +187,7 @@ const configureRedundantUnsafeHeatingScene = (scene: any) => {
     toId: 'ac_1',
     toApi: 'off'
   }]
-  scene.specs = [{
+  scene.specs = [{ name: 'Safety requirement',
     templateId: '3',
     aConditions: [{
       deviceId: 'occupancy_1', targetType: 'variable', variableSource: 'reported', key: 'occupied', relation: '=', value: 'absent'
@@ -214,6 +216,7 @@ const openControlSection = async (page: Page, section: 'devices' | 'templates' |
     await tab.click()
     try {
       await expect(panel).toBeVisible({ timeout: 2_000 })
+      await expandCreation(page, section)
       return
     } catch {
       await page.waitForTimeout(300)
@@ -221,6 +224,7 @@ const openControlSection = async (page: Page, section: 'devices' | 'templates' |
   }
 
   await expect(panel).toBeVisible({ timeout: 5_000 })
+  await expandCreation(page, section)
 }
 
 const addDeviceViaLeftPanel = async (
@@ -409,7 +413,7 @@ test.describe('board full-stack NuSMV user flow', () => {
           toId: 'ac_1',
           toApi: 'off'
         }]
-        scene.specs = [{
+        scene.specs = [{ name: 'Safety requirement',
           templateId: '4',
           aConditions: [],
           ifConditions: [{
@@ -418,7 +422,7 @@ test.describe('board full-stack NuSMV user flow', () => {
           thenConditions: [{
             deviceId: 'ac_1', targetType: 'mode', key: 'HvacMode', relation: '=', value: 'off'
           }]
-        }, {
+        }, { name: 'Safety requirement',
           templateId: '4',
           aConditions: [],
           ifConditions: [{
@@ -454,7 +458,7 @@ test.describe('board full-stack NuSMV user flow', () => {
           toId: 'ac_1',
           toApi: 'heat'
         }]
-        scene.specs = [{
+        scene.specs = [{ name: 'Safety requirement',
           templateId: '3',
           aConditions: [{
             deviceId: 'occupancy_1', targetType: 'variable', variableSource: 'reported', key: 'occupied', relation: '=', value: 'absent'
@@ -965,7 +969,7 @@ test.describe('board full-stack NuSMV user flow', () => {
       toId: 'ac_1',
       toApi: 'heat'
     }]
-    scene.specs = [{
+    scene.specs = [{ name: 'Safety requirement',
       templateId: '3',
       aConditions: [{
         deviceId: 'occupancy_1', targetType: 'variable', variableSource: 'reported', key: 'occupied', relation: '=', value: 'absent'
@@ -976,7 +980,7 @@ test.describe('board full-stack NuSMV user flow', () => {
       }],
       ifConditions: [],
       thenConditions: []
-    }, {
+    }, { name: 'Safety requirement',
       templateId: '4',
       aConditions: [],
       ifConditions: [{
@@ -987,7 +991,7 @@ test.describe('board full-stack NuSMV user flow', () => {
       thenConditions: [{
         deviceId: 'ac_1', targetType: 'mode', key: 'HvacMode', relation: '=', value: 'off'
       }]
-    }, {
+    }, { name: 'Safety requirement',
       templateId: '4',
       aConditions: [],
       ifConditions: [{
@@ -1301,18 +1305,15 @@ test.describe('board full-stack NuSMV user flow', () => {
 
     await expect(page.getByTestId('canvas-empty-state')).toBeVisible()
     await expect(page.getByTestId('empty-state-add-device')).toBeVisible()
-    await expect(page.getByTestId('empty-state-generate-scenario')).toBeVisible()
+    await expect(page.getByTestId('empty-state-open-assistant')).toBeVisible()
     await expect(page.getByTestId('empty-state-import-scene')).toBeVisible()
 
-    await page.getByTestId('open-scenario-recommendations').click()
-    await expect(page.getByTestId('scenario-recommendation-panel').locator('textarea'))
-      .toHaveAttribute('maxlength', '2000')
-    await page.getByTestId('close-scenario-recommendations').click()
 
-    await page.getByTestId('open-device-recommendations').click()
+    await openRecommendation(page, 'device')
     await expect(page.getByTestId('device-recommendation-panel').locator('textarea'))
       .toHaveAttribute('maxlength', '2000')
-    await page.getByTestId('close-device-recommendations').click()
+    await expect(page.getByTestId('device-recommendation-panel').getByRole('spinbutton')).toHaveCount(0)
+    await collapseRecommendation(page, 'device')
 
     const recommendationRequests: string[] = []
     page.on('request', req => {
@@ -1325,8 +1326,8 @@ test.describe('board full-stack NuSMV user flow', () => {
     await page.getByTestId('open-history-panel').click()
     await expect(page.getByTestId('trace-history-panel')).toBeVisible({ timeout: 10_000 })
 
-    await page.getByTestId('open-rule-recommendations').click()
-    await expect(page.getByTestId('trace-history-panel')).toBeHidden({ timeout: 5_000 })
+    await openRecommendation(page, 'rule')
+    await page.getByTestId('close-history-panel').click()
     const rulePanel = page.getByTestId('rule-recommendation-panel')
     await expect(rulePanel).toBeVisible()
     await expect(rulePanel.getByTestId('generate-rule-recommendations')).toBeVisible()
@@ -1341,7 +1342,7 @@ test.describe('board full-stack NuSMV user flow', () => {
     // A rule category was a model-authored label with no verification meaning, so the panel
     // offers no category control and the request must not carry one.
     await expect(rulePanel.locator('select')).toHaveCount(0)
-    await rulePanel.locator('input[type="number"]').fill('3')
+    await expect(rulePanel.getByRole('spinbutton')).toHaveCount(0)
     await rulePanel.locator('textarea').fill(detailedRuleRequirement)
     const ruleResponsePromise = page.waitForResponse(response => {
       const url = new URL(response.url())
@@ -1349,7 +1350,7 @@ test.describe('board full-stack NuSMV user flow', () => {
         || url.pathname !== '/api/board/rules/recommend') return false
       const body = response.request().postDataJSON() as Record<string, unknown> | null
       return body !== null
-        && body.maxRecommendations === 3
+        && body.maxRecommendations === 5
         && !('category' in body)
         && body.userRequirement === detailedRuleRequirement
     })
@@ -1358,7 +1359,7 @@ test.describe('board full-stack NuSMV user flow', () => {
     expect(ruleResponse.ok(), await ruleResponse.text()).toBeTruthy()
     await expect(rulePanel).toContainText(/No devices found|Add more devices|先添加设备|暂无推荐/i)
 
-    await page.getByTestId('open-spec-recommendations').click()
+    await openRecommendation(page, 'spec')
     await expect(page.getByTestId('rule-recommendation-panel')).toBeHidden({ timeout: 5_000 })
     const specPanel = page.getByTestId('spec-recommendation-panel')
     await expect(specPanel).toBeVisible()
@@ -1369,7 +1370,7 @@ test.describe('board full-stack NuSMV user flow', () => {
     expect(recommendationRequests.filter(url => new URL(url).pathname === '/api/board/specs/recommend')).toHaveLength(0)
 
     await expect(specPanel.locator('select')).toHaveCount(0)
-    await specPanel.locator('input[type="number"]').fill('2')
+    await expect(specPanel.getByRole('spinbutton')).toHaveCount(0)
     await specPanel.locator('textarea').fill('privacy guard when motion is detected at night')
     const specResponsePromise = page.waitForResponse(response => {
       const url = new URL(response.url())
@@ -1377,7 +1378,7 @@ test.describe('board full-stack NuSMV user flow', () => {
         || url.pathname !== '/api/board/specs/recommend') return false
       const body = response.request().postDataJSON() as Record<string, unknown> | null
       return body !== null
-        && body.maxRecommendations === 2
+        && body.maxRecommendations === 5
         && !('category' in body)
         && body.userRequirement === 'privacy guard when motion is detected at night'
     })
@@ -1386,12 +1387,12 @@ test.describe('board full-stack NuSMV user flow', () => {
     expect(specResponse.ok(), await specResponse.text()).toBeTruthy()
     await expect(specPanel).toContainText(/No devices found|Add more devices|先添加设备|暂无推荐/i)
 
-    await page.getByTestId('close-spec-recommendations').click()
+    await collapseRecommendation(page, 'spec')
     const camera = await addDeviceViaLeftPanel(
       page, request, auth, 'Camera', 'recommendation_hall_camera')
     const alarm = await addDeviceViaLeftPanel(
       page, request, auth, 'Alarm', 'recommendation_hall_alarm')
-    await page.getByTestId('open-rule-recommendations').click()
+    await openRecommendation(page, 'rule')
     await expect(rulePanel).toBeVisible()
 
     const normalizedRuleRoute = async (route: Route) => {
@@ -1404,7 +1405,7 @@ test.describe('board full-stack NuSMV user flow', () => {
           data: {
             message: 'Found one validated rule recommendation.',
             count: 1,
-            requestedCount: 3,
+            requestedCount: 5,
             validatedCount: 1,
             filteredCount: 0,
             filteredItems: [],
@@ -1483,7 +1484,7 @@ test.describe('board full-stack NuSMV user flow', () => {
           data: {
             message: 'Found one validated rule recommendation.',
             count: 1,
-            requestedCount: 3,
+            requestedCount: 5,
             validatedCount: 1,
             filteredCount: 0,
             filteredItems: [],
@@ -1553,7 +1554,7 @@ test.describe('board full-stack NuSMV user flow', () => {
     await page.route('**/api/board/rules', unknownRuleCreateRoute)
     await rulePanel.getByRole('button', { name: /Add This Rule/i }).click()
     await backendPersisted
-    await page.getByTestId('close-rule-recommendations').click()
+    await collapseRecommendation(page, 'rule')
     releaseUnknownResponse()
     await expect(rulePanel).toBeHidden()
 
@@ -1569,149 +1570,6 @@ test.describe('board full-stack NuSMV user flow', () => {
     await page.unroute('**/api/board/rules', unknownRuleCreateRoute)
     await page.unroute('**/api/board/rules/check-similarity', distinctSimilarityRoute)
     await page.unroute('**/api/board/rules/recommend**', reconciledRuleRoute)
-  })
-
-  test('applies a reviewed scenario recommendation through atomic board replacement', async ({ page, request }, testInfo) => {
-    const auth = await createAuthenticatedUser(request)
-    await saveEmptyBoard(request, auth)
-    await openWorkspace(page, auth)
-
-    const scenePath = path.resolve(
-      process.cwd(), '..', 'docs', 'examples', 'default-rfid-access-scene.json')
-    const scene = JSON.parse(fs.readFileSync(scenePath, 'utf8'))
-    const finalCount = scene.devices.length
-      + scene.environmentVariables.length
-      + scene.rules.length
-      + scene.specs.length
-    let scenarioPostCount = 0
-    const scenarioRoute = async (route: Route) => {
-      scenarioPostCount += 1
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          code: 200,
-          message: 'Success',
-          data: {
-            message: 'Generated a validated RFID access scene draft.',
-            count: finalCount,
-            requestedCount: 10,
-            validatedCount: finalCount,
-            filteredCount: 0,
-            filteredItems: [],
-            adjustedCount: 0,
-            adjustedItems: [],
-            rawCandidateCount: finalCount,
-            inspectedCount: finalCount,
-            truncatedCount: 0,
-            scenarioName: 'RFID access control',
-            rationale: 'The final canonical draft contains retained devices, rules, and specifications.',
-            objectiveTargets: { minDevices: 3, minRules: 2, minSpecs: 5 },
-            objectiveStatus: 'COMPLETE',
-            objectiveIssues: [],
-            verificationReady: true,
-            readinessIssues: [],
-            semanticWarnings: [],
-            scene
-          }
-        })
-      })
-    }
-    await page.route('**/api/board/scenario/recommend**', scenarioRoute)
-
-    await page.getByTestId('open-scenario-recommendations').click()
-    const persistedEndpoints = ['/api/board/snapshot', '/api/board/edits/clear-preview', '/api/verify/runs']
-    const beforeInvalidCriteria = await Promise.all(persistedEndpoints.map(endpoint =>
-      request.get(`${apiBaseURL}${endpoint}`, { headers: authHeaders(auth) }).then(unwrap)))
-    await page.getByTestId('scenario-min-devices').fill('7')
-    const failure = page.getByTestId('scenario-count-error')
-    await expect(failure).toBeVisible()
-    await expect(failure).toContainText(/minimum.*must not exceed.*maximum/i)
-    await expect(page.getByTestId('generate-scenario-recommendation')).toBeDisabled()
-    await expect(page.getByTestId('scenario-min-devices')).toHaveAttribute('aria-invalid', 'true')
-    await expect(page.getByTestId('scenario-max-devices')).toHaveAttribute('aria-describedby', 'scenario-count-error')
-    await expect(page.getByTestId('scenario-min-rules')).not.toHaveAttribute('aria-invalid', 'true')
-    await expect(page.getByTestId('scenario-recommendation-error')).toHaveCount(0)
-    await page.waitForTimeout(200)
-    expect(scenarioPostCount).toBe(0)
-    const afterInvalidCriteria = await Promise.all(persistedEndpoints.map(endpoint =>
-      request.get(`${apiBaseURL}${endpoint}`, { headers: authHeaders(auth) }).then(unwrap)))
-    expect(afterInvalidCriteria).toEqual(beforeInvalidCriteria)
-    await testInfo.attach('scenario-invalid-criteria-persistent-diagnostic', {
-      contentType: 'application/json', body: Buffer.from(JSON.stringify({
-        cause: await failure.textContent(), scenarioPostCount,
-        snapshotAndHistoryAndRunsUnchanged: true
-      }))
-    })
-
-    await page.getByTestId('scenario-min-devices').fill('3')
-    await page.getByTestId('scenario-min-rules').fill('2')
-    await page.getByTestId('scenario-min-specs').fill('5')
-    await page.getByTestId('scenario-max-devices').fill('4')
-    await page.getByTestId('scenario-max-rules').fill('3')
-    await page.getByTestId('scenario-max-specs').fill('6')
-    await expect(failure).not.toBeVisible()
-    await expect(page.getByTestId('generate-scenario-recommendation')).toBeEnabled()
-    const recommendationRequest = page.waitForRequest(req => {
-      if (req.method() !== 'POST'
-        || new URL(req.url()).pathname !== '/api/board/scenario/recommend') return false
-      const body = req.postDataJSON() as Record<string, unknown> | null
-      return body?.minDevices === 3
-        && body?.minRules === 2
-        && body?.minSpecs === 5
-        && body?.maxDevices === 4
-        && body?.maxRules === 3
-        && body?.maxSpecs === 6
-    })
-    await page.getByTestId('generate-scenario-recommendation').click()
-    await recommendationRequest
-    await expect(failure).not.toBeVisible()
-    await expect(page.getByTestId('apply-recommended-scenario')).toBeVisible()
-    expect(scenarioPostCount).toBe(1)
-
-    await page.getByTestId('scenario-min-devices').fill('2')
-    await expect(page.getByTestId('apply-recommended-scenario')).toHaveCount(0)
-    await page.getByTestId('scenario-min-devices').fill('3')
-    const refreshedRecommendationRequest = page.waitForRequest(req => {
-      if (req.method() !== 'POST'
-        || new URL(req.url()).pathname !== '/api/board/scenario/recommend') return false
-      const body = req.postDataJSON() as Record<string, unknown> | null
-      return body?.minDevices === 3
-        && body?.minRules === 2
-        && body?.minSpecs === 5
-        && body?.maxDevices === 4
-        && body?.maxRules === 3
-        && body?.maxSpecs === 6
-    })
-    await page.getByTestId('generate-scenario-recommendation').click()
-    await refreshedRecommendationRequest
-    await expect(page.getByTestId('apply-recommended-scenario')).toBeVisible()
-    expect(scenarioPostCount).toBe(2)
-    await expect(page.getByTestId('scenario-recommendations-unverified')).toBeVisible()
-    await expect(page.getByTestId('scenario-recommendation-panel')
-      .getByText('Not formally verified. Run verification after applying.', { exact: true })).toHaveCount(1)
-    await page.unroute('**/api/board/scenario/recommend**', scenarioRoute)
-
-    await page.getByTestId('apply-recommended-scenario').click()
-    const confirmation = page.getByRole('dialog', { name: 'Replace the current scene?' })
-    await expect(confirmation).toBeVisible()
-    const batchResponsePromise = page.waitForResponse(response =>
-      response.request().method() === 'POST'
-        && new URL(response.url()).pathname === '/api/board/scene')
-    await confirmation.getByRole('button', { name: 'Replace scene' }).click()
-    const batchResponse = await batchResponsePromise
-    expect(batchResponse.ok(), await batchResponse.text()).toBeTruthy()
-
-    const devices = await waitForApi<any[]>(request, auth, '/api/board/nodes',
-      rows => rows.length === scene.devices.length)
-    const rules = await waitForApi<any[]>(request, auth, '/api/board/rules',
-      rows => rows.length === scene.rules.length)
-    const specs = await waitForApi<any[]>(request, auth, '/api/board/specs',
-      rows => rows.length === scene.specs.length)
-    expect(devices.map(device => device.label)).toContain('Front-door Badge Reader')
-    expect(rules.map(rule => rule.ruleString)).toContain(
-      'When the badge is authorized, unlock the front door')
-    expect(specs).toHaveLength(scene.specs.length)
   })
 
   test('exports scene JSON that imports and exports byte-identically', async ({ page, request }, testInfo) => {
@@ -1745,6 +1603,7 @@ test.describe('board full-stack NuSMV user flow', () => {
     ])
 
     await openControlSection(page, 'specs')
+    await page.getByTestId('spec-name').fill('Safety requirement')
     await page.getByTestId('spec-template-select').selectOption('5')
     await page.getByTestId('spec-add-condition-if').click()
     await fillSpecCondition(page, motion.id, 'variable', 'motion', '=', 'active', 'environment')
@@ -1752,6 +1611,8 @@ test.describe('board full-stack NuSMV user flow', () => {
     await fillSpecCondition(page, alarm.id, 'privacy', JSON.stringify(['state', 'AlertState']), '=', 'private')
     await page.getByTestId('spec-create').click()
     await waitForApi<any[]>(request, auth, '/api/board/specs', value => value.length === 1)
+
+    await page.getByTestId('spec-name').fill('Safety requirement')
 
     await page.getByTestId('spec-template-select').selectOption('1')
     await page.getByTestId('spec-add-condition-a').click()
@@ -1767,7 +1628,7 @@ test.describe('board full-stack NuSMV user flow', () => {
     expect(firstPath).toBeTruthy()
     const firstJson = fs.readFileSync(firstPath!, 'utf8')
     const firstScene = JSON.parse(firstJson)
-    expect(firstScene).toMatchObject({ schema: 'iot-verify.board-scene', version: 5 })
+    expect(firstScene).toMatchObject({ schema: 'iot-verify.board-scene', version: 6 })
     expect(firstScene).not.toHaveProperty('exportedAt')
     expect(firstScene.devices).toHaveLength(2)
     const exportedMotion = firstScene.devices.find((device: any) => device.templateName === 'Motion Detector')
@@ -1840,13 +1701,11 @@ test.describe('board full-stack NuSMV user flow', () => {
       await expect(dialog).not.toBeVisible()
     }
 
-    // 6, one past the current format: at 5 this file is VALID and would import successfully, inverting
-    // the rejection this block asserts.
-    const futureScene = { ...firstScene, version: 6 }
+    const futureScene = { ...firstScene, version: firstScene.version + 1 }
     const futurePath = testInfo.outputPath('scene-future-version.json')
     fs.writeFileSync(futurePath, JSON.stringify(futureScene, null, 2), 'utf8')
     await page.getByTestId('scene-import-file').setInputFiles(futurePath)
-    await acknowledgeImportFailure(/version 6|版本 6/i)
+    await acknowledgeImportFailure(new RegExp(`version ${futureScene.version}|版本 ${futureScene.version}`, 'i'))
     await waitForApi<any[]>(request, auth, '/api/board/nodes', value => value.length === 0)
 
     const internalFieldScene = JSON.parse(firstJson)
@@ -2262,6 +2121,7 @@ test.describe('board full-stack NuSMV user flow', () => {
     expect(alarmRules[1].command.deviceName).toBe(alarm.id)
 
     await openControlSection(page, 'specs')
+    await page.getByTestId('spec-name').fill('Safety requirement')
     await page.getByTestId('spec-template-select').selectOption('3')
     await page.getByTestId('spec-add-condition-a').click()
     await fillSpecCondition(page, camera.id, 'state', null, '=', 'taking photo')
@@ -2275,6 +2135,8 @@ test.describe('board full-stack NuSMV user flow', () => {
     await page.screenshot({ path: testInfo.outputPath('specification-draft.png') })
     await page.getByTestId('spec-create').click()
     await waitForApi<any[]>(request, auth, '/api/board/specs', specs => specs.length === 1)
+
+    await page.getByTestId('spec-name').fill('Safety requirement')
 
     await page.getByTestId('spec-template-select').selectOption('5')
     await page.getByTestId('spec-add-condition-if').click()

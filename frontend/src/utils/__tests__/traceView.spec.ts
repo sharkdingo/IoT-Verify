@@ -49,7 +49,7 @@ describe('canOpenTracePlayback', () => {
       value: 'closed,locked'
     }
 
-    expect(formatTraceSpec(JSON.stringify({
+    expect(formatTraceSpec(JSON.stringify({ name: 'Safety requirement',
       templateId: '1',
       templateLabel: 'Always',
       aConditions: [condition]
@@ -60,7 +60,7 @@ describe('canOpenTracePlayback', () => {
     // `Front Door.LockState = "private"` — impossible, since LockState's values are locked/unlocked.
     // `utils/spec.ts` already wrapped these correctly; this renderer did not, so the two disagreed and
     // the user had no way to tell which described their property.
-    expect(formatTraceSpec(JSON.stringify({
+    expect(formatTraceSpec(JSON.stringify({ name: 'Safety requirement',
       templateId: '1',
       templateLabel: 'Always',
       aConditions: [{
@@ -69,7 +69,7 @@ describe('canOpenTracePlayback', () => {
       }]
     }))).toBe('Must always hold: sensitivity(Front Door.LockState) = "private"')
 
-    expect(formatTraceSpec(JSON.stringify({
+    expect(formatTraceSpec(JSON.stringify({ name: 'Safety requirement',
       templateId: '1',
       templateLabel: 'Always',
       aConditions: [{
@@ -78,7 +78,7 @@ describe('canOpenTracePlayback', () => {
       }]
     }))).toBe('Must always hold: controlSource(Front Door.LockState) = "untrusted"')
 
-    expect(formatTraceSpec(JSON.stringify({
+    expect(formatTraceSpec(JSON.stringify({ name: 'Safety requirement',
       templateId: '5',
       templateLabel: 'Response',
       ifConditions: [{ ...condition, relation: 'EQ', value: 'open' }],
@@ -86,7 +86,7 @@ describe('canOpenTracePlayback', () => {
     }))).toBe('Response: IF environment contact = "open", '
       + 'THEN eventually environment alarm >= "1"')
 
-    expect(formatTraceSpec(JSON.stringify({
+    expect(formatTraceSpec(JSON.stringify({ name: 'Safety requirement',
       templateId: '7',
       templateLabel: 'Safety',
       aConditions: [condition]
@@ -97,7 +97,7 @@ describe('canOpenTracePlayback', () => {
   it('distinguishes the two variable questions a counterexample can be about', () => {
     // A verdict is unreadable without knowing which value it answered: the two diverge exactly when
     // the device is falsifying its readings, which is what most counterexamples are about.
-    const spec = (variableSource?: string) => formatTraceSpec(JSON.stringify({
+    const spec = (variableSource?: string) => formatTraceSpec(JSON.stringify({ name: 'Safety requirement',
       templateId: '1',
       templateLabel: 'Always',
       aConditions: [{
@@ -131,7 +131,7 @@ describe('canOpenTracePlayback', () => {
       return (messages[key] || key).replace(/\{(\w+)\}/g, (_match, name) => String(params[name] ?? ''))
     }
 
-    expect(formatTraceSpec({
+    expect(formatTraceSpec({ name: 'Safety requirement',
       templateId: '3',
       aConditions: [{
         deviceLabel: '玄关相机',
@@ -143,7 +143,7 @@ describe('canOpenTracePlayback', () => {
   })
 
   it('localizes only recorded bundled tokens and matches normalized device references', () => {
-    const spec = { templateId: '3', aConditions: [{
+    const spec = { name: 'Safety requirement', templateId: '3', aConditions: [{
       deviceId: 'Air-Conditioner', deviceLabel: '空调', targetType: 'mode',
       key: 'HvacMode', relation: '=', value: 'heat'
     }] }

@@ -70,6 +70,7 @@ class RuleInfluenceScopeTest {
         value.setVariableSource("environment");
         value.setKey("carbonDioxide");
         SpecificationDto spec = new SpecificationDto();
+        spec.setName("Safety requirement");
         spec.setTemplateId("5");
         spec.setIfConditions(List.of(value));
         spec.setThenConditions(List.of(value));
@@ -85,6 +86,7 @@ class RuleInfluenceScopeTest {
         assertEquals(Optional.of(Set.of(0, 1)), RuleInfluenceScope.relevantRuleIndices(spec, rules, devices),
                 "Reported-value dependencies still include the monitor's domains");
         value.setVariableSource("environment");
+        spec.setName("Safety requirement");
         spec.setTemplateId("7");
         assertEquals(Optional.of(Set.of(0, 1)), RuleInfluenceScope.relevantRuleIndices(spec, rules, devices),
                 "Template 7 observes both the pool value and the device's propagated trust label");

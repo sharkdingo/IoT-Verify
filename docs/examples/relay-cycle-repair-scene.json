@@ -1,6 +1,6 @@
 {
   "schema": "iot-verify.board-scene",
-  "version": 5,
+  "version": 6,
   "templates": [
     {
       "name": "Dynamic Light",
@@ -145,6 +145,7 @@
   ],
   "specs": [
     {
+      "name": "Never heat and cool together",
       "templateId": "3",
       "aConditions": [
         {
@@ -166,6 +167,7 @@
       "thenConditions": []
     },
     {
+      "name": "Heating remains reachable",
       "templateId": "2",
       "aConditions": [
         {
@@ -180,6 +182,7 @@
       "thenConditions": []
     },
     {
+      "name": "Cooling remains reachable",
       "templateId": "2",
       "aConditions": [
         {
@@ -194,6 +197,7 @@
       "thenConditions": []
     },
     {
+      "name": "Eventually stop heating while cooling",
       "templateId": "5",
       "aConditions": [],
       "ifConditions": [

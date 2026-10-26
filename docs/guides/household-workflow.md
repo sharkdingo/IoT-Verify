@@ -5,12 +5,14 @@ requirements under an explicit device model. Its main task is **describe the int
 behavior, check the saved configuration, understand a failure, revise, and check again**.
 It does not control a real home or certify real hardware.
 
-Verified against code on 2026-10-23. Sources: `HouseholdGoalComposer.vue`, `ChatView.vue`,
+Verified against code on 2026-10-24. Sources: `HouseholdGoalComposer.vue`, `ChatWelcome.vue`, `ChatView.vue`,
 `Board.vue`, `ChatServiceImpl`, and the domain implementations linked below.
 
 ## Start with three questions
 
-Open the Board assistant and start a conversation. The household form separates:
+Open the Board assistant and describe a need in the message composer, or choose a contextual
+task to prepare a draft. For more guidance, expand **Describe your needs step by step**.
+The household form separates:
 
 | Question | Entrance example | Why it matters |
 | :--- | :--- | :--- |
@@ -94,38 +96,44 @@ owns citations, adopted semantics and departures from the papers.
 
 ## Run the entrance demo
 
-Import [household-entry-scene.json](../examples/household-entry-scene.json) through the
+Import [household-entry-scene.json](../examples/household-entry-scene.json), or its
+[Chinese display version](../examples/household-entry-scene-zh.json), through the
 Board's scene import and confirm the replacement preview. Its exact model and expected
 outcomes belong in [household entry](default-template-scenarios.md#household-entry).
 The custom input classifies requests as none, visitor or externally authenticated owner;
 it assumes that classification and does not verify an authentication implementation.
 
-1. Open the assistant. Enter the three entrance wishes from the first table, prepare the
-   draft, and review it before sending. Ask for the mapping without changing the scene.
+1. Open the assistant and expand **Describe your needs step by step**. Enter the three entrance
+   wishes from the first table, prepare the draft, and review it before sending. Ask for the
+   mapping without changing the scene.
    The assistant should connect each wish to the actual devices, rules and requirements.
 2. Open **Check**, use synchronous mode, and turn off attack and privacy modeling for this
    example. Inspect the locked-door failure and replay its counterexample. The unsafe
    convenience rule treats a lit porch as permission to unlock; visitor lighting makes
    that assumption false. Also inspect the two useful response requirements and their
    reachable triggers.
-3. In the rules inspector, edit **Unsafe convenience: a lit porch unlocks the door**.
-   Retain its light condition and add the request sensor's
-   `entryRequest = authorized_owner` condition. Save the edit. This changes one rule in
-   place; it does not change the requirements or the other automations.
+3. Ask the assistant for automatic removal suggestions for that formal counterexample,
+   without applying anything. It must call `fix_violation`. Review the verified candidate
+   that removes only **Unsafe convenience: a lit porch unlocks the door**. Request its
+   application preview through `apply_fix`, review the named rule, and explicitly confirm
+   with the confirmation control. The board stays unchanged through search and preview;
+   confirmation removes that one rule, keeping both useful automations and all requirements.
 4. Check again under the same assumptions. The locked-door requirement now holds alongside
    visitor lighting and owner access, with all three triggers reachable. The conclusion
    applies to this model, including the external authentication assumption.
 5. Undo and check again to reproduce the failure. Redo and recheck to restore the repaired
    result. This provides a causal comparison rather than a single green screenshot.
 
-Alternatively, ask the assistant to apply that exact condition and verify the unchanged
-requirements. For an automatic repair demonstration, request removal suggestions and review
-the signed preview for the unsafe convenience rule only. Removing that rule can preserve
-both useful functions because separate rules implement them. Removing the owner-access or
-visitor-lighting rule must fail the preserved-function checks.
+The landing illustration uses the same removal example, explicitly labeled as a preset.
+The input is named **Door access request / 开门请求**, supplied by an external authentication
+system; it is not a physical sensor or a built-in Door authentication feature. The example's
+template and domain belong in [household entry](default-template-scenarios.md#household-entry).
+Alternatively, a user may explicitly edit the unsafe rule to add an authenticated-owner
+condition. That uses `manage_rule`, not automatic Fix, and must be described accordingly.
 
 `HouseholdEntrySceneNusmvTest` exercises those positive and negative cases using NuSMV.
 The browser regressions in `household-demo.spec.ts` exercise the real page and API, including
-the unchanged requirement identities, undo/redo and the configured external AI endpoint
-when live-AI tests are enabled. `household-spec-edit.spec.ts` separately exercises in-place
+the unchanged requirement identities, undo/redo and explicit AI rule editing. The formal
+suggestion/confirmation/reverification flow is exercised by `live-ai-no-mock.spec.ts` when
+live-AI tests are enabled. `household-spec-edit.spec.ts` separately exercises in-place
 requirement editing and undo/redo.

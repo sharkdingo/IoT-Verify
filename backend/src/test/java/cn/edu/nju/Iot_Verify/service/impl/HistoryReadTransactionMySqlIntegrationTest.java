@@ -142,7 +142,7 @@ class HistoryReadTransactionMySqlIntegrationTest {
                     .status(VerificationTaskPo.TaskStatus.COMPLETED).createdAt(timestamp)
                     .completedAt(timestamp).smvModelContent("MODULE main").build());
             traces.saveAndFlush(TracePo.builder().userId(7L).verificationTaskId(run.getId())
-                    .violatedSpecId("spec-1").violatedSpecJson("{\"id\":\"spec-1\",\"templateId\":\"1\"}")
+                    .violatedSpecId("spec-1").violatedSpecJson("{\"id\":\"spec-1\",\"name\": \"Safety requirement\", \"templateId\":\"1\"}")
                     .statesJson("[{\"devices\":[{\"deviceId\":\"light\",\"modelTokenSource\":\"BUNDLED\"}]}]")
                     .stateCount(1).createdAt(timestamp).build());
             return run;

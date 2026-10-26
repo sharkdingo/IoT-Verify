@@ -108,9 +108,16 @@ public class ListAsyncTasksTool extends AbstractAiTool {
                 }
             }
             if (Set.of("all", "counterexample_search").contains(kind)) {
-                for (FuzzTaskSummaryDto task : safeList(
-                        fuzzService.getTasks(userId, List.of(), 0, 100))) {
-                    if (task != null) tasks.add(fuzzSummary(task));
+                int matchingFuzzTasks = 0;
+                for (int page = 0; ; page++) {
+                    List<FuzzTaskSummaryDto> batch = safeList(fuzzService.getTasks(userId, List.of(), page, 100));
+                    for (FuzzTaskSummaryDto task : batch) {
+                        if (task == null) continue;
+                        Map<String, Object> summary = fuzzSummary(task);
+                        tasks.add(summary);
+                        if (matchesFilter(summary, status, initiator)) matchingFuzzTasks++;
+                    }
+                    if (batch.size() < 100 || matchingFuzzTasks >= limit) break;
                 }
             }
 
@@ -192,5 +199,11 @@ public class ListAsyncTasksTool extends AbstractAiTool {
 
     private void putIfNotNull(Map<String, Object> target, String key, Object value) {
         if (value != null) target.put(key, value);
+    }
+
+    private boolean matchesFilter(Map<String, Object> task, String status, String initiator) {
+        return ("ALL".equals(status) || status.equals(String.valueOf(task.get("status")).toUpperCase(Locale.ROOT)))
+                && ("ALL".equals(initiator)
+                || initiator.equals(String.valueOf(task.get("initiator")).toUpperCase(Locale.ROOT)));
     }
 }

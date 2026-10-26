@@ -61,6 +61,7 @@ test('household entrance: explain a real failure, edit in place, retain owner ac
   expect(before.specifications).toHaveLength(3)
 
   await page.getByTestId('open-ai-assistant').click()
+  await page.getByTestId('chat-guided-goals').locator('summary').click()
   await page.getByTestId('household-want').fill('离家后，访客到门口可以亮灯。')
   await page.getByTestId('household-avoid').fill('访客不能通过灯光联动打开原本锁着的门。')
   await page.getByTestId('household-preserve').fill('已经通过外部认证的主人请求开门时，门仍可打开。')
@@ -144,6 +145,7 @@ test('live AI household: review intent, apply only the requested guard, then ver
   }
   await page.getByTestId('open-ai-assistant').click()
   try {
+    await page.getByTestId('chat-guided-goals').locator('summary').click()
     await page.getByTestId('household-want').fill('离家时访客到门口可以亮灯。')
     await page.getByTestId('household-avoid').fill('访客不能通过灯的联动打开原本锁闭的门。')
     await page.getByTestId('household-preserve').fill('外部认证已通过的主人请求开门时，门仍须正常打开；不要求你实现身份认证。')
@@ -153,7 +155,7 @@ test('live AI household: review intent, apply only the requested guard, then ver
     expect(plan.content).toMatch(/访客/)
     expect(plan.content).toMatch(/主人/)
     await page.screenshot({ path: testInfo.outputPath('05-live-ai-requirement-review.png') })
-    const applied = await send('确认这个具体修改：仅编辑“灯亮就开门”的规则，在保留原条件和开门动作的基础上，追加入口请求 entryRequest = authorized_owner 的条件。保持其他规则、设备和全部检查要求不变。保存后立即正式验证当前画布，不启用攻击和隐私模型，说明风险是否消除、访客亮灯和主人开门是否仍然保留，以及这些触发条件能否发生。')
+    const applied = await send('确认这个具体修改：仅编辑“灯亮就开门”的规则，在保留原条件和开门动作的基础上，追加开门请求 entryRequest = authorized_owner 的条件。保持其他规则、设备和全部检查要求不变。保存后立即正式验证当前画布，不启用攻击和隐私模型，说明风险是否消除、访客亮灯和主人开门是否仍然保留，以及这些触发条件能否发生。')
     expect(applied.executionTrace.some((step: any) => step.stage === 'TOOL_RESULT'
       && step.toolName === 'manage_rule' && step.outcome === 'USABLE')).toBe(true)
     expect(applied.executionTrace.some((step: any) => step.stage === 'TOOL_RESULT'

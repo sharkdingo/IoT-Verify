@@ -4,7 +4,7 @@ Contract for `/api/chat` — session management plus the streaming completion en
 Session endpoints use the standard `Result<T>` envelope ([overview.md](overview.md));
 the streaming endpoint does **not** — it is an SSE stream.
 
-Verified against code on 2026-10-24. Source: `controller/ChatController.java`,
+Verified against code on 2026-10-26. Source: `controller/ChatController.java`,
 `service/impl/ChatServiceImpl.java`, `dto/chat/`, `frontend/src/api/chat.ts`,
 `frontend/src/App.vue`, and `frontend/src/components/ChatView.vue`.
 
@@ -17,6 +17,7 @@ Verified against code on 2026-10-24. Source: `controller/ChatController.java`,
 | GET | `/api/chat/sessions` | → `ChatSessionResponseDto[]` | List the user's sessions |
 | POST | `/api/chat/sessions` | → `ChatSessionResponseDto` | Create a session (no body) |
 | GET | `/api/chat/sessions/{sessionId}/messages?beforeId=&limit=50` | → `ChatHistoryPageDto` | Bounded message history, newest page first |
+| GET | `/api/chat/sessions/{sessionId}/memory` | → `ChatTaskMemoryDto` | Read the owned conversation's current task notes; no model call or mutation |
 | POST | `/api/chat/sessions/{sessionId}/seen` | `{ terminalMessageId: Long }` → `null` | Advance the session's seen cursor to the exact terminal assistant message rendered by the client |
 | GET | `/api/chat/sessions/{sessionId}/activity` | → `ChatSessionActivityDto { sessionId, active }` | Authoritative cross-instance check for whether a request is still active for the session |
 | GET | `/api/chat/sessions/{sessionId}/confirmation` | → `ChatPendingConfirmationDto { sessionId, actions }` | Server-authoritative protected actions waiting for an explicit UI decision |
@@ -355,6 +356,62 @@ request, blank or reused Chat Completions correlation ids are replaced with uniq
 ids before persistence or tool execution, and the same repaired ids are used for assistant
 calls and their results. Responses rejects missing, whitespace-padded, or reused call ids
 before dispatch: rewriting them would break the original opaque continuation items.
+
+### Task memory and original requirements
+
+Before planning, `AiTaskMemoryService` incrementally extracts durable objectives,
+constraints, decisions and unresolved questions from new **user** messages. Each note
+contains an exact contiguous quote and its source message id. Updates preserve existing
+notes unless a new user quote explicitly retracts, resolves or replaces one. Assistant
+prose, tool results, permissions and claims of completed work are not memory sources.
+
+`ChatTaskMemoryDto` contains `status` (`CURRENT`, `PARTIAL`, or `UNAVAILABLE`),
+`throughMessageId`, `sceneChanged`, and `items`. Each item has `id`, `kind`
+(`GOAL`, `CONSTRAINT`, `DECISION`, `QUESTION`), `scope` (`SESSION`, `SCENE`),
+`sourceMessageId`, and `quote`. `CURRENT` means all stored user messages were processed;
+it is not a guarantee that model extraction captured every intention. `PARTIAL` means
+some messages or prompt notes were not covered. Corrupt persisted memory is `UNAVAILABLE`,
+never an empty successful task. The collapsed Current task panel loads this view on demand,
+offers the complete original message, and accepts corrections through normal conversation.
+Conversation changes discard pending reads. Local scene replacement locks and scoped
+cross-tab Board invalidations withdraw stale displayed notes and refresh an open panel.
+
+The session stores versioned memory JSON with its user-message watermark and scene identity.
+It retains at most 24 notes / 6,000 quote characters, with at most 600 characters per quote.
+Catch-up is limited to three batches per turn, each reading at most 30 user messages and
+12,000 source characters. Extraction errors, invalid quotes/patches and capacity overflow
+leave the last valid memory and original messages intact and report partial coverage.
+A syntactically invalid JSON reply receives at most one format-correction attempt with
+the same originals. Memory and confirmation classification share the complete JSON-fence
+decoder; duplicate keys, trailing content and invalid source quotes remain rejected.
+Persistence requires the current execution lease and an unchanged prior memory value.
+Deleting the conversation deletes its memory; this is conversation memory, not an
+account-wide preference store or the separate expiring confirmation continuation.
+
+Scene identity changes only when full-scene replacement/clear commits, including replacing
+with identical content. Ordinary device/rule/specification/layout edits retain it. A new
+scene withdraws `SCENE` notes but retains general `SESSION` intent. Delayed extraction of
+older messages cannot rebind their scene-specific requests to today's scene; their original
+text remains retrievable. Scene identity is checked again after extraction so a concurrent
+replacement cannot expose old scene notes as current.
+
+The planner can inspect exact wording, corrections and messages outside recent context with
+[`read_user_messages`](ai-tools.md#original-user-messages). A missing search result or a
+partial memory must not be interpreted as absence of a constraint. Current Board reads,
+saved operation receipts and structured confirmation remain their separate authorities.
+
+The configured history character target is shared between task memory and recent coherent
+conversation blocks; memory receives at most half. When notes do not fit, whole notes are
+omitted from the prompt only, their source ids are listed, and prompt coverage is `PARTIAL`.
+During a long tool loop, older large results may be replaced **in model context only** by
+bounded canonical evidence summaries and retrieval guidance. Tool-call/result ids remain
+paired, user text and the newest tool block are preserved, and raw persisted history is
+never overwritten. The target is soft when a complete newest block must be retained;
+compacted history cannot restore read references or confirmation authority. Configuration
+defaults belong to [configuration.md](../getting-started/configuration.md).
+
+### Historical operation evidence
+
 The planner explicitly treats the supplied conversation as a bounded recent window.
 Absence from that window does not mean an earlier recommendation, preview, or edit
 never happened. For conversation-wide operation audits it uses the paged
@@ -376,6 +433,8 @@ Scene-replacement confirmation replies also include a server-generated summary o
 the environment inputs' declared control-source and privacy labels from the exact
 pending preview. This summary remains present when model prose omits those choices;
 it describes modeling assumptions, not a verified security conclusion.
+
+### Pending confirmations
 
 Pending destructive confirmation data is not recovered from that bounded history. On an
 explicit confirmation turn, the backend injects compact server-authoritative context for
@@ -534,6 +593,9 @@ covered phrase: mixed sentences still check actual operations before or after it
 Saying that an analysis is complete does not authorize or prove a rule edit or formal verification.
 Coordinated operations sharing that completed subject and actual operations after Markdown
 line breaks still require their own receipts.
+Completion matching does not pair an action verb with a platform object across an English
+or Chinese semicolon. An operation in either clause is still checked independently; a later
+plan to read the Board cannot supply the object for an earlier repair-status statement.
 Visible replacement notices state the specific missing-evidence reason before listing any
 confirmed results. The execution details retain the original for inspection.
 
@@ -586,6 +648,8 @@ Frames are emitted with `MediaType.APPLICATION_JSON`. Notes on framing:
   request to regenerate it. Confirmation boundaries, runaway guards, unavailable results and a model
   returning no text can still require a separate tool-free summary. That summary requires a normal `stop`
   finish marker or completed Responses event; EOF alone, filtering, truncation, or unexpected tool calls are not completion.
+  Missing usage/detail counters remain unknown diagnostic metrics and do not invalidate
+  an otherwise complete response; completion status, output and call identity checks still apply.
   Responses calls use stateless requests. The original completed reasoning, message, and function-call
   items travel together with their matching tool results inside the current turn. Opaque encrypted
   reasoning is excluded from API serialization, diagnostic strings, and persisted chat history.

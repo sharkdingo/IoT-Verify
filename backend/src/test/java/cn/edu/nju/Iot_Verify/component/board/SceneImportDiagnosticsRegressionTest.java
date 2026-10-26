@@ -66,8 +66,8 @@ class SceneImportDiagnosticsRegressionTest {
     void missingSecondSpecificationSideNamesItsCollectionPosition() throws Exception {
         ObjectNode body = body();
         body.withObject("scene").set("specs", mapper.readTree("""
-                [{"templateId":"1","aConditions":[],"ifConditions":[],"thenConditions":[]},
-                 {"templateId":"1","aConditions":[],"ifConditions":[]}]
+                [{"name": "Safety requirement", "templateId":"1","aConditions":[],"ifConditions":[],"thenConditions":[]},
+                 {"name": "Safety requirement", "templateId":"1","aConditions":[],"ifConditions":[]}]
                 """));
         BadRequestException error = assertThrows(BadRequestException.class, () -> parser.parse(body));
         assertThat(badRequest(error).path("data").path("errors").has("specs[1].thenConditions")).isTrue();
@@ -181,7 +181,7 @@ class SceneImportDiagnosticsRegressionTest {
 
     private ObjectNode body() throws Exception {
         return (ObjectNode) mapper.readTree("""
-                {"impactToken":"reviewed","scene":{"schema":"iot-verify.board-scene","version":5,
+                {"impactToken":"reviewed","scene":{"schema":"iot-verify.board-scene","version":6,
                  "templates":[],"devices":[],"environmentVariables":[],"rules":[],"specs":[]}}
                 """
         );

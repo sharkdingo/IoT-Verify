@@ -15,7 +15,7 @@ afterEach(() => { wrappers.splice(0).forEach(wrapper => wrapper.unmount()) })
 const nodes = [{ id: 'lamp', label: 'Hall light', templateName: 'Light', state: 'off', position: { x: 0, y: 0 }, width: 176, height: 128 }]
 const templates = [{ name: 'Light', manifest: { Name: 'Light', Modes: ['power'], WorkingStates: [{ Name: 'off' }, { Name: 'on' }], APIs: [{ Name: 'turn_on', Signal: true }], InternalVariables: [] } }]
 const rule = (): RuleForm => ({ id: '7', name: 'Original rule', sources: [{ fromId: 'lamp', fromApi: 'state', itemType: 'state', relation: '=', value: 'off' }], toId: 'lamp', toApi: 'turn_on' })
-const spec = (id = 'spec-7'): Specification => ({ id, templateId: '1', templateLabel: 'Always', aConditions: [{ id: 'condition-1', side: 'a', deviceId: 'lamp', deviceLabel: 'Hall light', targetType: 'state', key: 'state', relation: '=', value: 'off' }], ifConditions: [], thenConditions: [] })
+const spec = (id = 'spec-7'): Specification => ({ name: 'Safety requirement', id, templateId: '1', templateLabel: 'Always', aConditions: [{ id: 'condition-1', side: 'a', deviceId: 'lamp', deviceLabel: 'Hall light', targetType: 'state', key: 'state', relation: '=', value: 'off' }], ifConditions: [], thenConditions: [] })
 const keep = <T extends VueWrapper>(wrapper: T): T => { wrappers.push(wrapper); return wrapper }
 
 describe('revising existing automation without changing identity', () => {
@@ -92,11 +92,13 @@ describe('revising existing automation without changing identity', () => {
     const wrapper = keep(mount(ControlCenter, { props: { nodes, deviceTemplates: templates, activeSection: 'specs', editSpecification: original }, global: { plugins: [i18n] } }))
     const vm = wrapper.vm as any
     expect(vm.specForm.templateId).toBe('1')
+    await wrapper.get('[data-testid="spec-name"]').setValue('  Prevent an unexpected unlock  ')
     vm.specForm.aConditions[0].value = 'on'
     await wrapper.vm.$nextTick()
     await wrapper.get('[data-testid="spec-create"]').trigger('click')
     const request = wrapper.emitted('add-spec')?.[0]?.[0] as any
     expect(request.expected).toEqual(original)
+    expect(request.name).toBe('Prevent an unexpected unlock')
     expect(request.aConditions[0].value).toBe('on')
     await wrapper.setProps({ editSpecification: spec('spec-8') })
     request.complete(true)

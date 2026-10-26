@@ -32,7 +32,7 @@ const seedBoard = async (request: APIRequestContext, auth: AuthUser) => {
       command: { deviceName: 'history_light', action: 'on' }, ruleString: 'Turn on when off' }
   }))
   await unwrap(await request.post(`${apiBaseURL}/api/board/specs`, {
-    headers: headers(auth), data: { id: 'history_never', templateId: '3', templateLabel: 'Never',
+    headers: headers(auth), data: { name: 'Safety requirement', id: 'history_never', templateId: '3', templateLabel: 'Never',
       aConditions: [{ id: 'never_on', side: 'a', deviceId: 'history_light',
         deviceLabel: 'Hallway light with a complete readable historical name', targetType: 'mode',
         key: 'SwitchState', relation: '=', value: 'on' }], ifConditions: [], thenConditions: [] }
@@ -43,6 +43,47 @@ const currentModels = async (request: APIRequestContext, auth: AuthUser) =>
   unwrap<BoardModelFingerprints>(await request.get(`${apiBaseURL}/api/board/model-fingerprints`, {
     headers: headers(auth)
   }))
+
+test('a requirement rename preserves the checked model and the name frozen in history', async ({ page, request }) => {
+  test.setTimeout(120_000)
+  const auth = await createAuthenticatedUser(request)
+  await seedBoard(request, auth)
+  const baseline = await currentModels(request, auth)
+  const result = validateVerificationResult(await unwrap<VerificationResult>(await request.post(`${apiBaseURL}/api/verify`, {
+    headers: headers(auth), data: settings
+  })))
+  expect(result.historyPersistence.status).toBe('SAVED')
+  if (result.historyPersistence.status !== 'SAVED') throw new Error('Verification history was not saved')
+  const runId = result.historyPersistence.runId
+  expect(result.specResults[0]?.specificationSnapshot?.name).toBe('Safety requirement')
+  await seedCompletionSession(page, auth)
+  await page.goto('/#/board')
+  await expect(page.getByTestId('board-root')).toBeVisible({ timeout: 30_000 })
+  await page.getByTestId('inspector-tab-specs').click()
+  await page.getByTestId('edit-spec-history_never').click()
+  const name = page.getByTestId('spec-name')
+  await expect(name).toHaveValue('Safety requirement')
+  await name.fill('   ')
+  await expect(page.getByTestId('spec-create')).toBeDisabled()
+  await name.fill('  Keep the hallway light off  ')
+  const saved = page.waitForResponse(response => response.request().method() === 'PUT'
+    && new URL(response.url()).pathname === '/api/board/specs/history_never')
+  await clickUnderTooltip(page, page.getByTestId('spec-create'))
+  expect((await saved).ok()).toBe(true)
+  await expect(page.locator('[data-spec-id="history_never"] h4')).toHaveText('Keep the hallway light off')
+  expect(await currentModels(request, auth)).toEqual(baseline)
+  await page.getByTestId('board-undo').click()
+  await expect(page.locator('[data-spec-id="history_never"] h4')).toHaveText('Safety requirement')
+  await page.getByTestId('board-redo').click()
+  await expect(page.locator('[data-spec-id="history_never"] h4')).toHaveText('Keep the hallway light off')
+  expect(await currentModels(request, auth)).toEqual(baseline)
+  await page.goto(`/#/board?run=verification:${runId}`)
+  const dialog = page.getByTestId('verification-result-dialog')
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByTestId('spec-result-name')).toHaveText('Safety requirement')
+  await expect(dialog).not.toContainText('Keep the hallway light off')
+  await expect(page.getByTestId('verification-result-stale-banner')).toBeHidden()
+})
 
 const openHistory = async (page: Page) => {
   await expect(page.locator('[data-testid="open-history-panel"]:visible, [data-testid="restore-action-dock"]:visible').first()).toBeVisible()
@@ -484,7 +525,7 @@ test('accepted verification task stores its model identity before completion and
   )))
   expect(completed.modelSnapshot.modelFingerprint).toBe(model.verification)
   expect(completed.outcome).toBe('VIOLATED')
-  expect(completed.specResults[0]!.specificationSnapshot).toMatchObject({
+  expect(completed.specResults[0]!.specificationSnapshot).toMatchObject({ name: 'Safety requirement',
     id: 'history_never', templateId: '3',
     aConditions: [{ deviceId: 'history_light', targetType: 'mode', value: 'on' }],
     devices: { history_light: { label: 'Hallway light with a complete readable historical name', modelTokenSource: 'BUNDLED', modeCount: 1 } }

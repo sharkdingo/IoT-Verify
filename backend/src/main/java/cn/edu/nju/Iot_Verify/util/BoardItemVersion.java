@@ -27,7 +27,7 @@ public final class BoardItemVersion {
     public static String specification(Long userId, SpecificationDto specification) {
         return version(new VersionInput(Objects.requireNonNull(userId), "specification",
                 Objects.requireNonNull(specification.getId(), "A saved specification is required"),
-                SpecificationSemanticSignature.from(specification)));
+                new SpecificationState(specification.getName().trim(), SpecificationSemanticSignature.from(specification))));
     }
 
     private static String version(VersionInput input) {
@@ -39,6 +39,8 @@ public final class BoardItemVersion {
             throw new IllegalStateException("SHA-256 is required by the Java runtime", exception);
         }
     }
+
+    private record SpecificationState(String name, SpecificationSemanticSignature.Signature logic) {}
 
     private record VersionInput(Long userId, String kind, String id, Object state) {
     }

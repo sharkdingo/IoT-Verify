@@ -23,7 +23,7 @@ const seedBoard = async (request: APIRequestContext, auth: AuthUser) => {
       ruleString: 'Keep the light off' }
   }))
   await unwrap(await request.post(`${apiBaseURL}/api/board/specs`, {
-    headers: headers(auth), data: { id: 'never_on', templateId: '3', templateLabel: 'Never',
+    headers: headers(auth), data: { name: 'Safety requirement', id: 'never_on', templateId: '3', templateLabel: 'Never',
       aConditions: [{ id: 'never_on_a', side: 'a', deviceId: 'task_light', targetType: 'mode',
         key: 'SwitchState', relation: '=', value: 'on' }], ifConditions: [], thenConditions: [] }
   }))

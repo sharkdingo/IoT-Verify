@@ -1,6 +1,6 @@
 {
 	"schema": "iot-verify.board-scene",
-	"version": 5,
+	"version": 6,
 	"templates": [
 		{
 			"name": "Door",
@@ -146,14 +146,14 @@
 			}
 		},
 		{
-			"name": "Entrance Request Sensor",
+			"name": "Door Access Request",
 			"manifest": {
-				"Name": "Entrance Request Sensor",
-				"Description": "External request classification supplied by a trusted authentication system; identity verification is outside this model",
+				"Name": "Door Access Request",
+				"Description": "Door access requests supplied by an external authentication system: no request, visitor, or authenticated owner. This input does not perform identity verification.",
 				"InternalVariables": [
 					{
 						"Name": "entryRequest",
-						"Description": "Current classified entry request",
+						"Description": "Door access request type supplied by the external authentication system",
 						"IsInside": false,
 						"Reads": true,
 						"FalsifiableWhenCompromised": false,
@@ -189,8 +189,8 @@
 		},
 		{
 			"id": "entry_1",
-			"templateName": "Entrance Request Sensor",
-			"label": "Entry Request",
+			"templateName": "Door Access Request",
+			"label": "Door Access Request",
 			"position": {
 				"x": 60,
 				"y": 270
@@ -300,6 +300,7 @@
 	],
 	"specs": [
 		{
+			"name": "Keep the door locked for visitors while away",
 			"templateId": "4",
 			"aConditions": [],
 			"ifConditions": [
@@ -338,6 +339,7 @@
 			]
 		},
 		{
+			"name": "Light the entrance for visitors while away",
 			"templateId": "4",
 			"aConditions": [],
 			"ifConditions": [
@@ -369,6 +371,7 @@
 			]
 		},
 		{
+			"name": "Unlock for an authorized owner",
 			"templateId": "4",
 			"aConditions": [],
 			"ifConditions": [

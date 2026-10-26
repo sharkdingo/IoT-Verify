@@ -1,6 +1,6 @@
 {
 	"schema": "iot-verify.board-scene",
-	"version": 5,
+	"version": 6,
 	"templates": [
 		{
 			"name": "Alarm",
@@ -334,6 +334,7 @@
 	],
 	"specs": [
 		{
+			"name": "Sound the alarm when smoke is detected",
 			"templateId": "4",
 			"aConditions": [],
 			"ifConditions": [
@@ -357,6 +358,7 @@
 			]
 		},
 		{
+			"name": "Light the evacuation route when the siren sounds",
 			"templateId": "4",
 			"aConditions": [],
 			"ifConditions": [
@@ -379,6 +381,7 @@
 			]
 		},
 		{
+			"name": "Keep the door locked",
 			"templateId": "3",
 			"aConditions": [
 				{
@@ -393,6 +396,7 @@
 			"thenConditions": []
 		},
 		{
+			"name": "Require trusted alarm control",
 			"templateId": "7",
 			"aConditions": [
 				{
@@ -407,6 +411,7 @@
 			"thenConditions": []
 		},
 		{
+			"name": "Keep alarm status public",
 			"templateId": "1",
 			"aConditions": [
 				{

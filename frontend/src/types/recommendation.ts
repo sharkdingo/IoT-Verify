@@ -81,6 +81,7 @@ export interface DeviceRecommendation {
 
 /** One LLM-proposed specification, carrying the structured conditions that get persisted. */
 export interface SpecificationRecommendation {
+  name: string;
   /** Advisory explanation; applying persists only templateId and structured conditions. */
   rationale: string
   templateId: string

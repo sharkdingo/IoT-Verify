@@ -30,7 +30,7 @@ class PortableSceneBatchMapperTest {
         return objectMapper.readTree("""
                 {
                   "schema": "iot-verify.board-scene",
-                  "version": 5,
+                  "version": 6,
                   "templates": [],
                   "devices": [{
                     "id":"device_1","templateName":"Light","label":"Hall Light",
@@ -46,7 +46,7 @@ class PortableSceneBatchMapperTest {
                     "toId":"device_1","toApi":"on"
                   }],
                   "specs": [{
-                    "templateId":"1",
+                    "name": "Safety requirement", "templateId":"1",
                     "aConditions":[%s],
                     "ifConditions":[],"thenConditions":[]
                   }]

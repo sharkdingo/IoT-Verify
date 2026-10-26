@@ -1,7 +1,7 @@
 export const householdMessages = {
   'zh-CN': {
-    title: '先说说你希望家里怎样联动',
-    introduction: '把想要的便利、担心的风险和必须保留的功能分开说。助手会先核对设备能力并整理方案，由你确认。',
+    title: '梳理你的需求',
+    introduction: '分别写下想要的联动、需要避免的情况和必须保留的功能。',
     want: '希望发生什么',
     wantPlaceholder: '例如：离家后，有访客到门口就亮灯',
     avoid: '哪些事情不能发生（选填）',
@@ -35,8 +35,8 @@ export const householdMessages = {
     customizeBoundary: '你可以修改设备初始状态、环境初值、联动规则和检查要求。可用状态、指令和变化范围由设备模板定义。',
   },
   en: {
-    title: 'Describe how you want your home to respond',
-    introduction: 'Separate the convenience you want, the risks to avoid, and the functions to keep. The assistant will check device capabilities and propose a plan for you to review.',
+    title: 'Clarify your needs',
+    introduction: 'Separate the automation you want, the risks to avoid, and the functions to keep.',
     want: 'What should happen',
     wantPlaceholder: 'For example: turn on the entrance light when a visitor arrives while I am away',
     avoid: 'What must not happen (optional)',

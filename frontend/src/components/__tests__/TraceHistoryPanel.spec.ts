@@ -553,7 +553,7 @@ describe('TraceHistoryPanel two-layer semantics', () => {
   })
 
   it('renders frozen conditions and token provenance in both exploration and formal history', () => {
-    const spec: Specification = { id: 'spec-1', templateId: '3', templateLabel: 'Never',
+    const spec: Specification = { name: 'Safety requirement', id: 'spec-1', templateId: '3', templateLabel: 'Never',
       aConditions: [{ id: 'c1', side: 'a', deviceId: 'ac_1', deviceLabel: '历史空调',
         targetType: 'mode', key: 'HvacMode', relation: '=', value: 'heat' }],
       ifConditions: [], thenConditions: [] }

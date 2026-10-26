@@ -150,6 +150,7 @@ public class BoardDataConverter {
     private SpecificationDto normalizeSpecForModel(SpecificationDto source) {
         SpecificationDto target = new SpecificationDto();
         target.setId(source.getId());
+        target.setName(source.getName());
         target.setTemplateId(source.getTemplateId());
         target.setTemplateLabel(source.getTemplateLabel());
         target.setAConditions(normalizeConditions(source.getAConditions()));

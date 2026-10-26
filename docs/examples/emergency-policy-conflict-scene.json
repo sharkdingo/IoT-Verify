@@ -1,6 +1,6 @@
 {
   "schema": "iot-verify.board-scene",
-  "version": 5,
+  "version": 6,
   "templates": [
     {
       "name": "Dynamic Home Sensor",
@@ -283,6 +283,7 @@
   ],
   "specs": [
     {
+      "name": "Unlock for a kitchen alarm",
       "templateId": "4",
       "aConditions": [],
       "ifConditions": [
@@ -305,6 +306,7 @@
       ]
     },
     {
+      "name": "Lock the door when away",
       "templateId": "4",
       "aConditions": [],
       "ifConditions": [
@@ -328,6 +330,7 @@
       ]
     },
     {
+      "name": "Sound the kitchen alarm for smoke",
       "templateId": "4",
       "aConditions": [],
       "ifConditions": [
@@ -351,6 +354,7 @@
       ]
     },
     {
+      "name": "Clear the kitchen alarm when smoke clears",
       "templateId": "4",
       "aConditions": [],
       "ifConditions": [

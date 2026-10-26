@@ -68,7 +68,7 @@ test('all five targeted commands preserve special identities, other objects, and
         expect(await snapshot()).toEqual(afterRuleCreate)
       }
       const specMutation = await unwrap(await request.post(`${apiBaseURL}/api/board/specs`, {
-        headers, data: {
+        headers, data: { name: 'Safety requirement',
           id: `target_spec_${index}`, templateId: '3',
           aConditions: [{ deviceId: nodeId, targetType: 'mode', key: 'SwitchState', relation: '=', value: 'on' }],
           ifConditions: [], thenConditions: []
@@ -167,7 +167,7 @@ test('all five targeted commands preserve special identities, other objects, and
       }
     }))
     await unwrap(await request.post(`${apiBaseURL}/api/board/specs`, {
-      headers, data: {
+      headers, data: { name: 'Safety requirement',
         id: `comma_spec_${index}`, templateId: '3',
         aConditions: [{ deviceId: nodeId, targetType: 'mode', key: 'SwitchState', relation: '=', value: 'on' }],
         ifConditions: [], thenConditions: []
@@ -221,7 +221,7 @@ test('portable scene import and export retain a URI-special node identity used b
     process.cwd(), '..', 'backend', 'src', 'main', 'resources', 'deviceTemplate', 'Light.json'
   ), 'utf8'))
   const scene = {
-    schema: 'iot-verify.board-scene', version: 5, templates: [{ name: 'Light', manifest }],
+    schema: 'iot-verify.board-scene', version: 6, templates: [{ name: 'Light', manifest }],
     devices: [{ id: nodeId, templateName: 'Light', label: 'URI special light', state: 'off',
       position: { x: 200, y: 200 }, width: 176, height: 128 }],
     environmentVariables: [{ name: 'illuminance', value: '10', trust: 'untrusted', privacy: 'public' }],

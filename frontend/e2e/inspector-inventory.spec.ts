@@ -1,3 +1,4 @@
+import { expandCreation } from './support/controlCenter'
 import { type Locator } from '@playwright/test'
 import { apiBaseURL, createAuthenticatedUser, expect, test } from './support/auth'
 
@@ -35,7 +36,7 @@ for (const theme of ['light', 'dark'] as const) {
           command: { deviceName: 'inventory_light', action: index ? 'off' : 'on' }
         })
       }
-      await write('specs', { id: 'inventory_spec', templateId: '1',
+      await write('specs', { name: 'Safety requirement', id: 'inventory_spec', templateId: '1',
         aConditions: [{ deviceId: 'inventory_sensor', targetType: 'variable', variableSource: 'environment',
           key: 'temperature', relation: '<=', value: '100' }], ifConditions: [], thenConditions: [] })
       if (panelWidth === 240) {
@@ -152,6 +153,7 @@ for (const theme of ['light', 'dark'] as const) {
           expect(await label.evaluate(element => element.clientHeight <= parseFloat(getComputedStyle(element).lineHeight) + 1),
             'default panel labels fit without breaking words').toBe(true)
         }
+        await expandCreation(page, 'templates')
         const repository = page.getByTestId('control-center').getByTestId('control-template-repository')
         const format = page.getByTestId('control-template-create').getByRole('button', { name: 'Download format definition', exact: true })
         await format.scrollIntoViewIfNeeded()

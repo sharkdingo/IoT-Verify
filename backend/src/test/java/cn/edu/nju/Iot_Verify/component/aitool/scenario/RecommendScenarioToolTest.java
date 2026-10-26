@@ -369,7 +369,7 @@ class RecommendScenarioToolTest {
                             "specs": [
                               {
                                 "id":"spec_1",
-                                "templateId":"4",
+                                "name": "Safety requirement", "templateId":"4",
                                 "templateLabel":"Immediate response",
                                 "ifConditions":[{"deviceId":"sensor_1","targetType":"variable","variableSource":"environment","key":"a_noise","relation":"=","value":"high"}],
                                 "thenConditions":[{"deviceId":"light_1","targetType":"state","key":"state","relation":"=","value":"on"}]
@@ -396,10 +396,8 @@ class RecommendScenarioToolTest {
         JsonNode scene = json.path("scene");
 
         assertTrue(json.path("error").isMissingNode(), "unexpected error envelope: " + result);
-        // 5 since `variableSource` became required on a variable spec condition: the frontend importer
-        // rejects a version-4 file because it cannot supply the field, so a scene this tool emits must
-        // declare 5 or every AI-generated scene would be refused at import.
-        assertEquals(5, scene.path("version").asInt());
+        // Named specifications require version 6; the frontend importer rejects older scene formats.
+        assertEquals(6, scene.path("version").asInt());
         assertEquals(2, scene.path("devices").size());
         assertFalse(scene.path("devices").get(0).has("state"));
         assertEquals(1, scene.path("rules").size());
@@ -541,7 +539,7 @@ class RecommendScenarioToolTest {
                               }
                             ],
                             "specs": [
-                              {"id":"spec_bad","templateId":"99","templateLabel":"Unknown spec"}
+                              {"id":"spec_bad","name": "Safety requirement", "templateId":"99","templateLabel":"Unknown spec"}
                             ]
                           }
                         }
@@ -594,7 +592,7 @@ class RecommendScenarioToolTest {
                             "specs": [
                               {
                                 "id":"spec_partial",
-                                "templateId":"1",
+                                "name": "Safety requirement", "templateId":"1",
                                 "templateLabel":"Always",
                                 "aConditions":[
                                   {"deviceId":"sensor_1","targetType":"variable","variableSource":"environment","key":"a_noise","relation":"=","value":"high"},
@@ -631,7 +629,7 @@ class RecommendScenarioToolTest {
         snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of(sensorTemplate()));
         var response = (com.fasterxml.jackson.databind.node.ObjectNode) objectMapper.readTree("""
                 {"scene":{"devices":[{"id":"sensor_1","templateName":"Noise Sensor","label":"声音传感器"}],
-                  "rules":[],"specs":[{"templateId":"1","aConditions":[{"deviceId":"sensor_1",
+                  "rules":[],"specs":[{"name": "Safety requirement", "templateId":"1","aConditions":[{"deviceId":"sensor_1",
                     "targetType":"variable","key":"a_noise","variableSource":"reported","relation":"=","value":"high"}]}]}}
                 """);
         var condition = (com.fasterxml.jackson.databind.node.ObjectNode) response.path("scene").path("specs")
@@ -676,10 +674,10 @@ class RecommendScenarioToolTest {
                             {"fromId":"sensor_1","fromApi":"a_noise","itemType":"variable","relation":"=","value":"high"},
                             {"fromId":"light_1","fromApi":"SwitchState","itemType":"mode","relation":"=","value":"off"}],
                             "toId":"light_1","toApi":"turnOn"}],
-                          "specs":[{"templateId":"3","aConditions":[
+                          "specs":[{"name": "Safety requirement", "templateId":"3","aConditions":[
                             {"deviceId":"sensor_1","targetType":"variable","key":"a_noise","variableSource":"reported","relation":"=","value":"high"},
                             {"deviceId":"sensor_1","targetType":"privacy","key":"a_noise","propertyScope":"variable","relation":"=","value":"public"}]},
-                            {"templateId":"3","aConditions":[
+                            {"name": "Safety requirement", "templateId":"3","aConditions":[
                             {"deviceId":"sensor_1","targetType":"trust","key":"a_noise","propertyScope":"variable","relation":"=","value":"trusted"},
                             {"deviceId":"sensor_1","targetType":"privacy","key":"a_noise","propertyScope":"variable","relation":"=","value":"public"}]}]}}
                         """);
@@ -841,7 +839,7 @@ class RecommendScenarioToolTest {
                             ],
                             "rules": [],
                             "specs": [{
-                              "templateId":"1",
+                              "name": "Safety requirement", "templateId":"1",
                               "templateLabel":"Current state sensitivity",
                               "aConditions":[{
                                 "deviceId":"light_1",
@@ -931,7 +929,7 @@ class RecommendScenarioToolTest {
                               "toApi":"turnOn"
                             }],
                             "specs": [{
-                              "templateId":"1",
+                              "name": "Safety requirement", "templateId":"1",
                               "aConditions":[{"deviceId":"Hall Light #1","targetType":"state","key":"state","relation":"=","value":"on"}],
                               "ifConditions":[],
                               "thenConditions":[]
@@ -1040,7 +1038,7 @@ class RecommendScenarioToolTest {
                             }],
                             "rules": [],
                             "specs": [{
-                              "templateId":"7",
+                              "name": "Safety requirement", "templateId":"7",
                               "aConditions":[{
                                 "deviceId":"Notifier response alias",
                                 "targetType":"api",
@@ -1169,7 +1167,7 @@ class RecommendScenarioToolTest {
                           "rules":[{"name":"React to the reading","sources":[{"fromId":"case-sensor",
                             "fromApi":"reading","itemType":"variable","relation":"%s","value":"%s"}],
                             "toId":"case-sensor","toApi":"activate"}],
-                          "specs":[{"id":"requirement","templateId":"3","aConditions":[{"deviceId":"case-sensor",
+                          "specs":[{"id":"requirement","name": "Safety requirement", "templateId":"3","aConditions":[{"deviceId":"case-sensor",
                             "targetType":"variable","key":"reading","variableSource":"environment",
                             "relation":"%s","value":"%s"}]}]}}
                         """.formatted("device".equals(surface) ? value : "on",

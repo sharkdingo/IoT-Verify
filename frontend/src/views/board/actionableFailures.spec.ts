@@ -1,17 +1,14 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import ts from 'typescript'
-import { computed, h, reactive, ref } from 'vue'
+import { computed, h, ref } from 'vue'
 import { mount } from '@vue/test-utils'
 import { baseParse, type ElementNode } from '@vue/compiler-dom'
 import { describe, expect, it, vi } from 'vitest'
 import FailureDetails from '@/components/FailureDetails.vue'
-import ScenarioObjectiveIssues from '@/components/ScenarioObjectiveIssues.vue'
 import { errorDetails, technicalErrorLines, localizedErrorMessage } from '@/utils/userMessage'
 import { diagnoseJsonParseError } from '@/utils/jsonParseDiagnostics'
 import i18n from '@/assets/i18n'
-import { buildScenarioRecommendationTargetRequest } from '../Board.vue'
-import { createSceneCodec } from './portableScene'
 
 const board = readFileSync(join(process.cwd(), 'src/views/Board.vue'), 'utf8')
 const setupStart = board.indexOf('<script setup')
@@ -62,7 +59,8 @@ describe('scene rejection diagnostics', () => {
     expect(shown.message).toContain('第 2 行')
     expect(shown.details[0]).toMatch(/JSON/)
     expect(shown.cause).toBe(shown.details[0])
-    expect(shown.suggestion).toContain('引号、逗号和括号')
+    expect(shown.suggestion).toContain('重新导出')
+    expect(shown.suggestion).toContain('文件提供者')
     expect(importScene).not.toHaveBeenCalled()
     expect(input.value).toBe('')
   })
@@ -80,7 +78,8 @@ describe('scene rejection diagnostics', () => {
     })({ target: input })
     expect(acknowledgeFailure).toHaveBeenCalledOnce()
     expect(acknowledgeFailure.mock.calls[0]![0].message).toContain('rules[1].toId')
-    expect(acknowledgeFailure.mock.calls[0]![0].suggestion).toContain('设备引用')
+    expect(acknowledgeFailure.mock.calls[0]![0].suggestion).toContain('重新导出')
+    expect(acknowledgeFailure.mock.calls[0]![0].suggestion).toContain('文件提供者')
     expect(importScene).not.toHaveBeenCalled()
   })
 })
@@ -221,7 +220,6 @@ describe('persistent failure presentation', () => {
   })
   it.each([
     ['rule', 'Rules', 'rule'], ['device', 'Devices', 'device'], ['spec', 'Specs', 'spec'],
-    ['scenario', 'Scenario', 'scenario']
   ])('distinguishes a %s request failure from an empty successful response', (kind, suffix, prefix) => {
     const failures: Record<string, unknown> = {}
     bind('reportRecommendationFailure', { recommendationFailures: failures, errorDetails, t,
@@ -232,7 +230,7 @@ describe('persistent failure presentation', () => {
       [`${prefix}Recommendations`]: [], recommendedScenarioScene: null, scenarioRecommendationResult: null }
     const failure = find(`<div v-if="recommendationFailures.${kind}"`).loc.source
     const empty = find(`<div v-if="!isRecommending${suffix} && ${prefix}RecommendationRequested`).loc.source
-    const wrapper = mount({ template: `${failure}${empty}`, components: { FailureDetails, ScenarioObjectiveIssues }, setup: () => state })
+    const wrapper = mount({ template: `${failure}${empty}`, components: { FailureDetails }, setup: () => state })
     expect(wrapper.find(`[data-testid="${kind}-recommendation-error"]`).text()).toContain('获取推荐失败')
     expect(wrapper.text()).toContain('AI endpoint unavailable')
     expect(wrapper.text()).toContain(t('app.recommendationFailureNextStep'))
@@ -249,57 +247,6 @@ describe('persistent failure presentation', () => {
     expect(failure.message).toContain(t('app.recommendationResponseLostRecovering'))
     expect(failure.suggestion).toContain('等待确认')
     expect(failure.details).toContain('network disconnected')
-  })
-
-  it('explains invalid counts beside their inputs before submission, and clears on correction', async () => {
-    const filters = reactive({ minDevices: 7, maxDevices: 6, minRules: 1, maxRules: 3,
-      minSpecs: 1, maxSpecs: 5, userRequirement: '' })
-    const input = bind('scenarioRecommendationInput', { computed, scenarioRecommendationFilters: filters,
-      t, locale: ref('zh-CN'), buildScenarioRecommendationTargetRequest,
-      requireIntegerInRange: createSceneCodec(t).requireIntegerInRange })
-    const submit = vi.fn()
-    const counts = find('<div class="board-card grid grid-cols-1 gap-2').loc.source
-    const error = find('<p v-if="scenarioRecommendationInput.error"').loc.source
-    const button = find('<button\n          type="button"\n          data-testid="generate-scenario-recommendation"').loc.source
-    const wrapper = mount({ template: `${counts}${error}${button}`, setup: () => ({ t,
-      scenarioRecommendationInput: input, scenarioRecommendationFilters: filters,
-      isRecommendingScenario: false, isSceneReplacementInProgress: false,
-      isRecommendationRunningForAnother: () => false, fetchScenarioRecommendation: submit }) })
-    const generate = wrapper.get('[data-testid="generate-scenario-recommendation"]')
-    expect(wrapper.get('[data-testid="scenario-count-error"]').text()).toContain(t('app.devicesTool'))
-    expect(wrapper.text()).not.toContain('AI 服务')
-    expect(generate.attributes('disabled')).toBeDefined()
-    expect(wrapper.get('[data-testid="scenario-min-devices"]').attributes('aria-invalid')).toBe('true')
-    expect(wrapper.get('[data-testid="scenario-max-devices"]').attributes('aria-describedby')).toBe('scenario-count-error')
-    expect(wrapper.get('[data-testid="scenario-min-rules"]').attributes('aria-invalid')).toBeUndefined()
-    await generate.trigger('click')
-    expect(submit).not.toHaveBeenCalled()
-    await wrapper.get('[data-testid="scenario-min-devices"]').setValue('3')
-    expect(wrapper.find('[data-testid="scenario-count-error"]').exists()).toBe(false)
-    expect(generate.attributes('disabled')).toBeUndefined()
-    expect(wrapper.get('[data-testid="scenario-min-devices"]').attributes('aria-invalid')).toBeUndefined()
-    await generate.trigger('click')
-    expect(submit).toHaveBeenCalledOnce()
-    await wrapper.get('[data-testid="scenario-max-specs"]').setValue('1.5')
-    expect(wrapper.get('[data-testid="scenario-count-error"]').text()).toContain(t('app.maxSpecsField'))
-    expect(wrapper.get('[data-testid="scenario-max-specs"]').attributes('aria-invalid')).toBe('true')
-    expect(generate.attributes('disabled')).toBeDefined()
-    expect(input.value.request).toBeNull()
-    wrapper.unmount()
-  })
-
-  it('rejects invalid criteria before taking request ownership even if submission is invoked directly', async () => {
-    const captureOwner = vi.fn()
-    const recommend = vi.fn()
-    await bind('fetchScenarioRecommendation', {
-      isRecommendationRequestActive: () => false, isRecommendingScenario: ref(false),
-      scenarioRecommendationRequestId: ref(null), isSceneReplacementInProgress: ref(false),
-      ensureBoardDataReady: () => true, showScenarioRecommendationPanel: ref(true),
-      canOpenRecommendationPanel: () => true, scenarioRecommendationInput: ref({ request: null }),
-      captureRecommendationRequestOwner: captureOwner, boardApi: { recommendScenario: recommend }
-    })()
-    expect(captureOwner).not.toHaveBeenCalled()
-    expect(recommend).not.toHaveBeenCalled()
   })
 
   it.each([true, false])('updates an uncertain card only for its current request owner (%s)', current => {
@@ -328,15 +275,16 @@ describe('persistent failure presentation', () => {
     const ports: Record<string, any> = {
       isRecommendationRequestActive: () => false, isRecommendingRules: ref(false),
       ruleRecommendationRequestId: ref(null), isSceneReplacementInProgress: ref(false),
-      ensureBoardDataReady: () => true, showRecommendationPanel: ref(true), canOpenRecommendationPanel: () => true,
+      ensureBoardDataReady: () => true, canGenerateRecommendations: () => true,
+      resetRuleRecommendationResults: vi.fn(),
       captureRecommendationRequestOwner: () => ({ userId: 1, authToken: 'test-owner' }),
       ruleRecommendationRequested: ref(false), ruleRecommendations: ref([]), ruleRecommendationRequestEpoch: 0,
       recommendationSceneGeneration: 0, appliedRuleRecommendations: ref(new Set()), applyingRuleRecommendations: ref(new Set()),
       ruleRecommendationAbortController: ref(null), recommendationRequestOwners: new Map(),
       recommendationProgressRequestId: ref(null), recommendationFailures: {},
       recommendationApplyFailures: { rule: {}, device: {}, spec: {} },
-      crypto: { randomUUID: () => 'request-1' }, validateRecommendationCount: () => 1,
-      ruleRecommendationFilters: { maxRecommendations: 1, userRequirement: '' }, locale: ref('zh-CN'),
+      crypto: { randomUUID: () => 'request-1' },
+      ruleRecommendationFilters: { userRequirement: '' }, locale: ref('zh-CN'),
       rulesApi: { recommendRules: () => post }, isRecommendationPostOutcomeUnknown: () => true,
       ruleRecommendationPanel: { kind: 'rule' }, beginUnknownRecommendationRecovery: beginRecovery,
       settleRecommendationPost: vi.fn()

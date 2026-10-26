@@ -24,6 +24,7 @@ class SpecificationRecommendationDtoJsonTest {
         condition.setValue("taking photo");
 
         SpecificationRecommendationDto recommendation = new SpecificationRecommendationDto();
+        recommendation.setName("Safety requirement");
         recommendation.setTemplateId("3");
         recommendation.setAConditions(List.of(condition));
         recommendation.setIfConditions(List.of());

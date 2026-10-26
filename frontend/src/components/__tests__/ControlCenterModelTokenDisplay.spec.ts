@@ -46,6 +46,10 @@ const i18n = createI18n({
         templates: 'Templates',
         defaultTemplates: 'Default templates',
         customTemplates: 'Custom templates',
+        templateScopeAll: 'All templates',
+        templateScopeScene: 'Used in this scene',
+        templateLibrarySummary: 'Library {total} · Used {used} · Custom used {usedCustom}',
+        templateUsageDevices: 'Used by {count} devices',
         templateDetails: 'Template details',
         viewTemplateDetails: 'View template details',
         initState: 'Initial state',
@@ -124,6 +128,30 @@ beforeEach(() => {
 })
 
 describe('ControlCenter model token display', () => {
+  it('keeps reusable templates but distinguishes usage when devices change or the scene is empty', async () => {
+    const wrapper = mount(ControlCenter, {
+      props: { activeSection: 'templates', nodes: [
+        { id: 'one', templateName: 'customswitch' }, { id: 'two', templateName: 'CustomSwitch' }
+      ], deviceTemplates: [
+        { id: 1, name: 'Switch', defaultTemplate: true, manifest },
+        { id: 2, name: 'CustomSwitch', defaultTemplate: false, manifest: { ...manifest, Name: 'CustomSwitch' } },
+        { id: 3, name: 'Unused', defaultTemplate: false, manifest: { ...manifest, Name: 'Unused' } }
+      ] },
+      global: { plugins: [i18n] }
+    })
+    expect(wrapper.get('[data-testid="template-library-summary"]').text()).toBe('Library 3 · Used 1 · Custom used 1')
+    await wrapper.get('[data-testid="template-scope-scene"]').trigger('click')
+    expect(wrapper.findAll('.template-card')).toHaveLength(1)
+    expect(wrapper.get('.template-card').text()).toContain('CustomSwitch')
+    expect(wrapper.get('.template-card').text()).toContain('Used by 2 devices')
+    await wrapper.setProps({ nodes: [] })
+    expect(wrapper.get('[data-testid="template-library-summary"]').text()).toBe('Library 3 · Used 0 · Custom used 0')
+    expect(wrapper.findAll('.template-card')).toHaveLength(0)
+    await wrapper.get('[data-testid="template-scope-all"]').trigger('click')
+    expect(wrapper.findAll('.template-card')).toHaveLength(3)
+    wrapper.unmount()
+  })
+
   it('localizes only bundled template previews and preserves custom collisions', async () => {
     const wrapper = mount(ControlCenter, {
       attachTo: document.body,

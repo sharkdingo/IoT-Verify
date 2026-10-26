@@ -36,7 +36,7 @@ for (const locale of ['zh-CN', 'en']) {
       await post('board/rules', { conditions: [{ deviceName: 'replay_light', targetType: 'mode',
         attribute: 'SwitchState', relation: '=', value: 'off' }], command: { deviceName: 'replay_light', action: 'on' },
         ruleString: 'Turn on when off' })
-      await post('board/specs', { id: 'never_on', templateId: '3', templateLabel: 'Never',
+      await post('board/specs', { name: 'Safety requirement', id: 'never_on', templateId: '3', templateLabel: 'Never',
         aConditions: [{ id: 'never_a', side: 'a', deviceId: 'replay_light', targetType: 'mode',
           key: 'SwitchState', relation: '=', value: 'on' }], ifConditions: [], thenConditions: [] })
       const settings = { attackScenario: { mode: 'NONE' }, enablePrivacy: false }
@@ -157,8 +157,10 @@ for (const locale of ['zh-CN', 'en']) {
       await page.getByTestId('trace-timeline-close').press('Enter')
       await expect(toolbar).toBeHidden()
       await expect(historyEntry).toBeFocused()
+      await page.keyboard.press('Shift+Tab')
+      await expect(page.getByTestId('open-verification-panel')).toBeFocused()
       await page.keyboard.press('Tab')
-      expect(await page.evaluate(() => document.activeElement?.tagName)).not.toBe('BODY')
+      await expect(historyEntry).toBeFocused()
     })
   }
 }

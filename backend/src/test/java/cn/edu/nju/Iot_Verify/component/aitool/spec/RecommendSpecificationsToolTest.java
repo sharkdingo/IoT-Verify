@@ -89,7 +89,7 @@ class RecommendSpecificationsToolTest {
                     assertTrue(invocation.<String>getArgument(1).contains("thermostat"));
                     snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of());
                     return """
-                            {"recommendations":[{"rationale":"Limit temperature","templateId":"3",
+                            {"recommendations":[{"rationale":"Limit temperature","name": "Safety requirement", "templateId":"3",
                               "aConditions":[{"deviceId":"thermostat","targetType":"variable",
                                 "key":"temperature","variableSource":"reported","relation":">","value":"25"}],
                               "ifConditions":[],"thenConditions":[]}]}
@@ -137,7 +137,7 @@ class RecommendSpecificationsToolTest {
                             "private-spec-value-never-log",
                             {
                               "rationale": "private-spec-value-never-log",
-                              "templateId": "invalid",
+                              "name": "Safety requirement", "templateId": "invalid",
                               "aConditions": [],
                               "ifConditions": [],
                               "thenConditions": []
@@ -180,7 +180,7 @@ class RecommendSpecificationsToolTest {
                           "recommendations": [
                             {
                               "rationale": "温度过高时必须保持安全状态",
-                              "templateId": "1",
+                              "name": "Safety requirement", "templateId": "1",
                               "templateLabel": "always",
                               "aConditions": [
                                 {"deviceId":"node-thermostat","deviceLabel":"Thermostat","targetType":"variable","variableSource":"reported","key":"temperature","relation":">","value":"30"}
@@ -220,7 +220,7 @@ class RecommendSpecificationsToolTest {
                             {
                               "category": "safety",
                               "rationale": "Sleep mode should never be active",
-                              "templateId": "3",
+                              "name": "Safety requirement", "templateId": "3",
                               "aConditions": [
                                 {"deviceId":"node-home-mode","deviceLabel":"Home Mode","targetType":"mode","key":"Mode","relation":"=","value":"sleep"}
                               ],
@@ -250,7 +250,7 @@ class RecommendSpecificationsToolTest {
                           "recommendations": [
                             {
                               "rationale": "Sleep mode should never be active",
-                              "templateId": "3",
+                              "name": "Safety requirement", "templateId": "3",
                               "templateLabel": "never",
                               "aConditions": [
                                 {"deviceId":"node-home-mode","deviceLabel":"Home Mode","targetType":"mode","key":"Mode","relation":"=","value":"sleep"}
@@ -282,7 +282,7 @@ class RecommendSpecificationsToolTest {
                         {
                           "recommendations": [{
                             "rationale": "Current home mode state must not carry private data",
-                            "templateId": "3",
+                            "name": "Safety requirement", "templateId": "3",
                             "aConditions": [{
                               "deviceId":"node-home-mode",
                               "targetType":"privacy",
@@ -317,7 +317,7 @@ class RecommendSpecificationsToolTest {
                           "recommendations": [
                             {
                               "rationale": "Home mode should avoid away-only behavior",
-                              "templateId": "3",
+                              "name": "Safety requirement", "templateId": "3",
                               "templateLabel": "never",
                               "aConditions": [
                                 {"deviceId":"node-home-mode","deviceLabel":"Home Mode","targetType":"mode","key":"Mode","relation":"not_in","value":"away"}
@@ -349,7 +349,7 @@ class RecommendSpecificationsToolTest {
                           "recommendations": [
                             {
                               "rationale": "Occupied idle modes should be explicitly checked",
-                              "templateId": "3",
+                              "name": "Safety requirement", "templateId": "3",
                               "templateLabel": "never",
                               "aConditions": [
                                 {"deviceId":"node-home-mode","deviceLabel":"Home Mode","targetType":"state","key":"state","relation":"IN","value":"home;idle,sleep;idle"}
@@ -383,7 +383,7 @@ class RecommendSpecificationsToolTest {
                           "recommendations": [
                             {
                               "rationale": "Snapshot signal should be observable",
-                              "templateId": "1",
+                              "name": "Safety requirement", "templateId": "1",
                               "templateLabel": "always",
                               "aConditions": [
                                 {"deviceId":"node-camera","deviceLabel":"Camera","targetType":"api","key":"take photo"}
@@ -416,7 +416,7 @@ class RecommendSpecificationsToolTest {
                           "recommendations": [
                             {
                               "rationale": "Lowercase AI fields should still apply",
-                              "templateId": "3",
+                              "name": "Safety requirement", "templateId": "3",
                               "templateLabel": "never",
                               "aConditions": [
                                 {"deviceId":"node-home-mode","deviceLabel":"Home Mode","targetType":"mode","key":"mode","relation":"EQ","value":"SLEEP"}
@@ -481,7 +481,7 @@ class RecommendSpecificationsToolTest {
                 promptCompletionService, objectMapper, new RecommendationResultParser(objectMapper)), objectMapper);
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
-                        {"recommendations":[{"rationale":"Keep the declared enum meaning","templateId":"3",
+                        {"recommendations":[{"rationale":"Keep the declared enum meaning","name": "Safety requirement", "templateId":"3",
                           "aConditions":[{"deviceId":"case-sensor","targetType":"%s","key":"%s",%s
                             "relation":"%s","value":"%s"}],"ifConditions":[],"thenConditions":[]}]}
                         """.formatted(targetType, key,
@@ -498,7 +498,7 @@ class RecommendSpecificationsToolTest {
                           "recommendations": [
                             {
                               "rationale": "High temperature should immediately enter safe state",
-                              "templateId": "4",
+                              "name": "Safety requirement", "templateId": "4",
                               "templateLabel": "immediate",
                               "aConditions": [],
                               "ifConditions": [
@@ -531,7 +531,7 @@ class RecommendSpecificationsToolTest {
                           "recommendations": [
                             {
                               "rationale": "Hidden same-step implication",
-                              "templateId": "1",
+                              "name": "Safety requirement", "templateId": "1",
                               "templateLabel": "always",
                               "aConditions": [],
                               "ifConditions": [
@@ -602,7 +602,7 @@ class RecommendSpecificationsToolTest {
                         {
                           "recommendations": [{
                             "rationale": "Untrusted notification must not be emitted",
-                            "templateId": "7",
+                            "name": "Safety requirement", "templateId": "7",
                             "templateLabel": "Untrusted-source safety",
                             "aConditions": [{
                               "deviceId":"node-service",
@@ -634,7 +634,7 @@ class RecommendSpecificationsToolTest {
                 .thenReturn("""
                         {"recommendations":[{
                           "rationale":"Temperature stays safe",
-                          "templateId":"1",
+                          "name": "Safety requirement", "templateId":"1",
                           "aConditions":[{"deviceId":"node-thermostat","targetType":"state",
                             "key":"state","relation":"=","value":"safe"}],
                           "ifConditions":[],"thenConditions":[],
@@ -656,7 +656,7 @@ class RecommendSpecificationsToolTest {
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {"recommendations":[{
-                          "templateId":"1",
+                          "name": "Safety requirement", "templateId":"1",
                           "aConditions":[{"deviceId":"node-thermostat","targetType":"state",
                             "key":"state","relation":"=","value":"safe"}],
                           "ifConditions":[],"thenConditions":[]
@@ -683,7 +683,7 @@ class RecommendSpecificationsToolTest {
                 .thenReturn("""
                         {"recommendations":[{
                           "rationale":"Keep the room from overheating",
-                          "templateId":"1",
+                          "name": "Safety requirement", "templateId":"1",
                           "aConditions":[{"deviceId":"node-thermostat","targetType":"variable",
                             "key":"temperature","relation":">","value":"30"}],
                           "ifConditions":[],"thenConditions":[]

@@ -38,6 +38,7 @@ class SmvSpecificationBuilderNegationTest {
                                         List<SpecConditionDto> thenConditions) {
         SpecificationDto spec = new SpecificationDto();
         spec.setId("test-spec");
+        spec.setName("Safety requirement");
         spec.setTemplateId(templateId);
         spec.setAConditions(aConditions);
         spec.setIfConditions(ifConditions);

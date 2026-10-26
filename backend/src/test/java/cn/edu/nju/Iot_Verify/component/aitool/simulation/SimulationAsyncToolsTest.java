@@ -28,10 +28,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
@@ -341,9 +340,8 @@ class SimulationAsyncToolsTest {
 
     @Test
     void cancelSimulateTask_whenResponseSerializationFails_shouldReturnAmbiguousMutationResult() throws Exception {
-        ObjectMapper failingMapper = mock(ObjectMapper.class);
-        when(failingMapper.readTree(anyString())).thenReturn(new ObjectMapper().readTree("{\"taskId\":7}"));
-        when(failingMapper.writeValueAsString(any())).thenThrow(new RuntimeException("boom"));
+        ObjectMapper failingMapper = spy(new ObjectMapper());
+        doThrow(new RuntimeException("boom")).when(failingMapper).writeValueAsString(any());
         when(simulationService.cancelTask(1L, 7L)).thenReturn(
                 cn.edu.nju.Iot_Verify.dto.model.TaskCancellationResultDto.builder()
                         .taskId(7L)
@@ -357,6 +355,7 @@ class SimulationAsyncToolsTest {
         String result = fallbackTool.execute("{\"taskId\":7}");
         JsonNode json = objectMapper.readTree(result);
 
+        verify(simulationService).cancelTask(1L, 7L);
         assertEquals("RESULT_UNAVAILABLE", json.path("resultStatus").asText());
         assertEquals(false, json.path("resultAvailable").asBoolean());
         assertTrue(json.path("mutationMayHaveCommitted").asBoolean());

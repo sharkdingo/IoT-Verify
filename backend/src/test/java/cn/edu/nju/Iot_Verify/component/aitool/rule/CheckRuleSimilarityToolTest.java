@@ -64,7 +64,9 @@ class CheckRuleSimilarityToolTest {
                          "mostSimilarWith":"candidate-1","reason":"overlapping trigger"}
                         """);
 
-        var result = service.checkSimilarity(7L, existingCameraRule());
+        RuleDto newRule = existingCameraRule();
+        newRule.setId(null);
+        var result = service.checkSimilarity(7L, newRule);
 
         assertFalse(result.isSimilar());
         assertFalse(result.isDuplicate());
@@ -77,6 +79,7 @@ class CheckRuleSimilarityToolTest {
     @Test
     void typedSimilarityCanonicalizesAliasesAndCaseWithoutChangingCaller() {
         RuleDto candidate = existingCameraRule();
+        candidate.setId(10L);
         candidate.getConditions().get(0).setDeviceName(" Door Sensor ");
         candidate.getConditions().get(0).setAttribute(" open ");
         candidate.getConditions().get(0).setTargetType(" VARIABLE ");
@@ -110,7 +113,34 @@ class CheckRuleSimilarityToolTest {
         assertEquals(" VARIABLE ", candidate.getConditions().get(0).getTargetType());
         assertEquals(" EQ ", candidate.getConditions().get(0).getRelation());
         assertEquals(" capture ", candidate.getCommand().getAction());
-        assertEquals(9L, candidate.getId());
+        assertEquals(10L, candidate.getId());
+    }
+
+    @Test
+    void editingTheOnlyRuleDoesNotCompareItWithItself() {
+        when(boardStorageService.getRules(7L)).thenReturn(List.of(existingCameraRule()));
+        var result = service.checkSimilarity(7L, existingCameraRule());
+        assertFalse(result.isDuplicate());
+        assertFalse(result.isRequiresReview());
+        assertEquals("NO_EXISTING_RULES", result.getReasonCode());
+        verifyNoInteractions(promptCompletionService);
+    }
+
+    @Test
+    void editingARuleComparesOnlyOtherSavedRules() {
+        RuleDto other = existingCameraRule();
+        other.setId(10L);
+        other.getCommand().setAction("send");
+        when(boardStorageService.getRules(7L)).thenReturn(List.of(existingCameraRule(), other));
+        when(promptCompletionService.complete(anyString(), anyString(), anyDouble(), anyInt()))
+                .thenAnswer(invocation -> {
+                    String prompt = invocation.getArgument(1);
+                    String comparisons = prompt.substring(prompt.indexOf("## 现有规则列表"));
+                    assertTrue(comparisons.contains("send"));
+                    assertFalse(comparisons.contains("capture"));
+                    return "{\"isSimilar\":false,\"isDuplicate\":false,\"similarity\":0.1,\"reason\":\"different action\"}";
+                });
+        assertFalse(service.checkSimilarity(7L, existingCameraRule()).isRequiresReview());
     }
 
     @Test

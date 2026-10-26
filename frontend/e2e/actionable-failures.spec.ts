@@ -1,3 +1,5 @@
+import { expandCreation } from './support/controlCenter'
+import { openRecommendation, collapseRecommendation } from './support/recommendations'
 import type { APIRequestContext, APIResponse, Locator, Page } from '@playwright/test'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -26,14 +28,14 @@ const prepareBoard = async (request: APIRequestContext, auth: AuthUser) => {
     process.cwd(), '..', 'backend', 'src', 'main', 'resources', 'deviceTemplate', 'Light.json'
   ), 'utf8'))
   const scene = {
-    schema: 'iot-verify.board-scene', version: 5,
+    schema: 'iot-verify.board-scene', version: 6,
     templates: [{ name: 'Light', manifest }],
     devices: [{ id: 'actionable_light', templateName: 'Light', label: '提示测试灯', state: 'off',
       position: { x: 220, y: 210 }, width: 176, height: 128 }],
     environmentVariables: [{ name: 'illuminance', value: '10', trust: 'untrusted', privacy: 'public' }],
     rules: [{ name: '开灯规则', sources: [{ fromId: 'actionable_light', fromApi: 'SwitchState',
       itemType: 'mode', relation: '=', value: 'off' }], toId: 'actionable_light', toApi: 'on' }],
-    specs: [{ templateId: '3', aConditions: [{ deviceId: 'actionable_light', targetType: 'mode',
+    specs: [{ name: 'Safety requirement', templateId: '3', aConditions: [{ deviceId: 'actionable_light', targetType: 'mode',
       key: 'SwitchState', relation: '=', value: 'on' }], ifConditions: [], thenConditions: [] }]
   }
   const preview = await unwrap(await request.get(`${apiBaseURL}/api/board/replacement-preview`, {
@@ -139,6 +141,7 @@ test('Chinese template import keeps parser location and real definition rejectio
   const { manifest } = await prepareBoard(request, auth)
   await openChineseBoard(page, auth)
   await page.getByTestId('control-tab-templates').click()
+  await expandCreation(page, 'templates')
   const input = page.getByTestId('control-section-templates').locator('input[type="file"][accept=".json"]')
   const picker = page.getByTestId('template-import-open')
   await expect(picker).toBeInViewport({ ratio: 1 })
@@ -208,6 +211,7 @@ test('confirmed template import distinguishes a failed catalog refresh from a re
   const { manifest } = await prepareBoard(request, auth)
   await openChineseBoard(page, auth)
   await page.getByTestId('control-tab-templates').click()
+  await expandCreation(page, 'templates')
   const input = page.getByTestId('control-section-templates').locator('input[type="file"][accept=".json"]')
   const before = await persistedState(request, auth)
   const reason = 'Injected catalog read failure after a confirmed template import'
@@ -281,6 +285,7 @@ test('confirmed template import distinguishes a failed catalog refresh from a re
     await expect(page.getByTestId('board-data-load-error')).not.toBeVisible()
     await expect(page.getByTestId('template-import-feedback')).not.toBeVisible()
     await page.getByTestId('control-tab-templates').click()
+    await expandCreation(page, 'templates')
     await expect(page.getByTestId('control-template-repository')).toContainText('ActionableConfirmed')
     expect(await persistedState(request, auth)).toEqual(after)
     expect(postCount).toBe(1)
@@ -295,6 +300,7 @@ test('template management exports its imported definition, blocks referenced del
   const { manifest } = await prepareBoard(request, auth)
   await openChineseBoard(page, auth)
   await page.getByTestId('control-tab-templates').click()
+  await expandCreation(page, 'templates')
   const custom = { ...manifest, Name: 'WorkflowCustom' }
   await page.getByTestId('template-import-file').setInputFiles({ name: 'workflow-template.json',
     mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(custom)) })
@@ -335,6 +341,7 @@ test('template management exports its imported definition, blocks referenced del
   await page.reload()
   await expect(page.getByTestId('scene-import')).toBeEnabled({ timeout: 30_000 })
   await page.getByTestId('control-tab-templates').click()
+  await expandCreation(page, 'templates')
   await page.getByTestId('reset-default-templates').click()
   const reset = page.getByRole('dialog', { name: '重置默认模板？' })
   await expect(reset.locator('.iot-dialog__consequence')).toContainText('1 条撤销/重做记录')
@@ -358,6 +365,7 @@ test('device JSON diagnostics preserve pasted and file inputs while allowing cor
   await prepareBoard(request, auth)
   await openChineseBoard(page, auth)
   await page.getByTestId('control-tab-devices').click()
+  await expandCreation(page, 'devices')
   await page.getByTestId('device-create-mode-import').click()
   const before = await persistedState(request, auth)
   const source = '\n\n [\n {"template" "Alarm"}\n ]'
@@ -426,7 +434,7 @@ test('injected terminal recommendation and verification failures retain Chinese 
   const reason = 'Injected terminal dependency failure: diagnostic retained'
   const faults: Record<string, string> = {
     '/api/board/rules/recommend': 'rule', '/api/board/devices/recommend': 'device',
-    '/api/board/specs/recommend': 'spec', '/api/board/scenario/recommend': 'scenario', '/api/verify': 'verification'
+    '/api/board/specs/recommend': 'spec', '/api/verify': 'verification'
   }
   await page.route('**/api/**', async route => {
     const endpoint = new URL(route.request().url()).pathname
@@ -438,10 +446,10 @@ test('injected terminal recommendation and verification failures retain Chinese 
     }) })
   })
   try {
-    for (const kind of ['rule', 'device', 'spec', 'scenario'] as const) {
-      await page.getByTestId(`open-${kind}-recommendations`).click()
+    for (const kind of ['rule', 'device', 'spec'] as const) {
+      await openRecommendation(page, kind)
       const panel = page.getByTestId(`${kind}-recommendation-panel`)
-      await panel.getByTestId(kind === 'scenario' ? 'generate-scenario-recommendation' : `generate-${kind}-recommendations`).click()
+      await panel.getByTestId(`generate-${kind}-recommendations`).click()
       const failure = panel.getByTestId(`${kind}-recommendation-error`)
       await expect(failure).toBeVisible()
       await expect(failure.getByTestId('failure-cause')).toBeVisible()
@@ -451,7 +459,7 @@ test('injected terminal recommendation and verification failures retain Chinese 
       await expect(panel.getByText('暂无推荐', { exact: true })).not.toBeVisible()
       expect(await persistedState(request, auth)).toEqual(before)
       await expect(failure).toBeVisible()
-      await panel.getByTestId(`close-${kind}-recommendations`).click()
+      await collapseRecommendation(page, kind)
     }
     await page.getByTestId('open-verification-panel').click()
     await page.getByTestId('verification-mode-sync').click()
@@ -470,7 +478,7 @@ test('injected terminal recommendation and verification failures retain Chinese 
       .toHaveText('request.context: Injected field diagnostic')
     await expect(details.locator('li').filter({ hasText: 'HTTP 503' })).toBeVisible()
     expect(await persistedState(request, auth)).toEqual(before)
-    expect(intercepted).toHaveLength(5)
+    expect(intercepted).toEqual(Object.keys(faults))
     await testInfo.attach('injected-terminal-failure-diagnostics', { contentType: 'application/json',
       body: Buffer.from(JSON.stringify({ faultSource: 'Playwright route injection; no external AI or NuSMV call',
         intercepted, snapshotAndHistoryAndRunsUnchanged: true })) })
@@ -479,63 +487,32 @@ test('injected terminal recommendation and verification failures retain Chinese 
   }
 })
 
-test('recommendation review uses the available viewport with one scrolling body', async ({ page, request }, testInfo) => {
+test('recommendation review stays readable in the control center at short and wide sizes', async ({ page, request }, testInfo) => {
   const auth = await createAuthenticatedUser(request, { usernamePrefix: 'recommendReview' })
   await prepareBoard(request, auth)
   await openChineseBoard(page, auth)
-  // Deliberately injected diagnostics make every panel long without depending on model output.
   await page.route('**/api/board/**/recommend**', route => route.fulfill({
-    status: 503, contentType: 'application/json', body: JSON.stringify({
-      code: 503, message: 'Injected recommendation review failure',
-      data: { errors: Object.fromEntries(Array.from({ length: 12 }, (_, index) =>
-        [`candidate[${index}].condition`, 'Injected condition diagnostic retained for review.'])) }
+    status: 503, contentType: 'application/json', body: JSON.stringify({ code: 503,
+      message: 'Injected recommendation review failure', data: { errors: Object.fromEntries(
+        Array.from({ length: 12 }, (_, index) => [`candidate[${index}].condition`, 'Retained condition diagnostic for review.'])) }
     })
   }))
-  const switchLanguage = async (name: string) => {
-    const menu = page.locator('.scene-actions-menu')
-    await menu.locator('summary').click()
-    await menu.getByRole('button', { name, exact: true }).click()
-    await menu.locator('summary').click()
-  }
-  for (const kind of ['rule', 'device', 'spec', 'scenario'] as const) {
+  for (const kind of ['rule', 'device', 'spec'] as const) {
     await page.setViewportSize({ width: 1920, height: 1080 })
-    await page.getByTestId(`open-${kind}-recommendations`).click()
+    await openRecommendation(page, kind)
     const panel = page.getByTestId(`${kind}-recommendation-panel`)
-    await panel.getByTestId(kind === 'scenario' ? 'generate-scenario-recommendation' : `generate-${kind}-recommendations`).click()
+    await panel.getByTestId(`generate-${kind}-recommendations`).click()
     await expect(panel.getByTestId(`${kind}-recommendation-error`)).toBeVisible()
-    const measure = () => panel.evaluate(element => {
-      const body = element.children[1] as HTMLElement
-      return { panelHeight: element.clientHeight, panelScroll: element.scrollHeight,
-        bodyHeight: body.clientHeight, bodyScroll: body.scrollHeight }
-    })
-    const wide = await measure()
-    expect(wide.bodyHeight).toBeGreaterThan(560)
-    expect(wide.panelScroll).toBeLessThanOrEqual(wide.panelHeight + 1)
-    for (const language of ['zh-CN', 'en'] as const) {
-      if (language === 'en') await switchLanguage('Switch to English')
-      await page.setViewportSize({ width: 375, height: 480 })
-      const short = await measure()
-      expect(short.panelScroll).toBeLessThanOrEqual(short.panelHeight + 1)
-      expect(short.bodyScroll).toBeGreaterThan(short.bodyHeight)
-      await expect(panel.getByRole('heading', { level: 3 })).toBeInViewport({ ratio: 1 })
-      const help = panel.getByTestId(`${kind}-recommendation-help`)
-      await help.focus()
-      const tooltip = page.locator('.iot-info-tooltip-popper:not(.iot-hint-tooltip-popper):visible')
-      await expect(tooltip).toBeVisible()
-      const bounds = await tooltip.boundingBox()
-      expect(bounds!.x).toBeGreaterThanOrEqual(0)
-      expect(bounds!.y).toBeGreaterThanOrEqual(0)
-      expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(375)
-      expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(480)
-      await help.press('Escape')
-      await expect(tooltip).not.toBeVisible()
-      await expect(panel).toBeVisible()
-      await panel.getByTestId('failure-fields').locator('dd').last().scrollIntoViewIfNeeded()
-      await expect(panel.getByTestId('failure-fields').locator('dd').last()).toBeInViewport({ ratio: 1 })
-      await expect(panel.getByTestId(`close-${kind}-recommendations`)).toBeInViewport({ ratio: 1 })
-      if (language === 'en') await switchLanguage('切换到中文')
+    for (const size of [{ width: 1920, height: 1080 }, { width: 375, height: 480 }]) {
+      await page.setViewportSize(size)
+      await openRecommendation(page, kind)
+      expect(await panel.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
+      expect(await panel.evaluate(element => getComputedStyle(element).overflowY)).toBe('visible')
+      const lastError = panel.getByTestId('failure-fields').locator('dd').last()
+      await lastError.scrollIntoViewIfNeeded()
+      await expect(lastError).toBeInViewport({ ratio: 1 })
     }
     await testInfo.attach(`${kind}-short-review`, { contentType: 'image/png', body: await page.screenshot() })
-    await panel.getByTestId(`close-${kind}-recommendations`).click()
+    await collapseRecommendation(page, kind)
   }
 })

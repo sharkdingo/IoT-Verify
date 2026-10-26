@@ -1240,6 +1240,7 @@ class SmvGeneratorFixesTest {
 
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec_1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1"); // AG(A)
         spec.setAConditions(List.of(cond));
         spec.setIfConditions(List.of());
@@ -1276,6 +1277,7 @@ class SmvGeneratorFixesTest {
 
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec_7");
+        spec.setName("Safety requirement");
         spec.setTemplateId("7");
         spec.setAConditions(List.of(cond));
         spec.setIfConditions(List.of());
@@ -2668,6 +2670,7 @@ class SmvGeneratorFixesTest {
 
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec_state_tuple");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setAConditions(List.of(cond));
         spec.setIfConditions(List.of());
@@ -2704,6 +2707,7 @@ class SmvGeneratorFixesTest {
 
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec_state_tuple_in");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setAConditions(List.of(cond));
         spec.setIfConditions(List.of());
@@ -2741,6 +2745,7 @@ class SmvGeneratorFixesTest {
 
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec_mode");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setAConditions(List.of(cond));
         spec.setIfConditions(List.of());
@@ -2777,6 +2782,7 @@ class SmvGeneratorFixesTest {
 
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec_safe_mode");
+        spec.setName("Safety requirement");
         spec.setTemplateId("7");
         spec.setAConditions(List.of(cond));
         spec.setIfConditions(List.of());
@@ -2819,6 +2825,7 @@ class SmvGeneratorFixesTest {
 
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec_ambiguous_device");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setAConditions(List.of(a));
 
@@ -2859,6 +2866,7 @@ class SmvGeneratorFixesTest {
 
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec_no_source");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setAConditions(List.of(cond));
 
@@ -2898,6 +2906,7 @@ class SmvGeneratorFixesTest {
 
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec_local_env");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setAConditions(List.of(cond));
 
@@ -2936,6 +2945,7 @@ class SmvGeneratorFixesTest {
 
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec_state_ambiguous");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setAConditions(List.of(cond));
         spec.setIfConditions(List.of());
@@ -2981,6 +2991,7 @@ class SmvGeneratorFixesTest {
 
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec_env_var");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setAConditions(List.of(cond));
         spec.setIfConditions(List.of());
@@ -3018,6 +3029,7 @@ class SmvGeneratorFixesTest {
 
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec_bad_trust");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setAConditions(List.of(cond));
         spec.setIfConditions(List.of());
@@ -3059,6 +3071,7 @@ class SmvGeneratorFixesTest {
 
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec_current_state_trust");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setAConditions(List.of(cond));
         spec.setIfConditions(List.of());
@@ -3099,6 +3112,7 @@ class SmvGeneratorFixesTest {
 
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec_env_var_rel_spaces");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setAConditions(List.of(cond));
         spec.setIfConditions(List.of());
@@ -3137,6 +3151,7 @@ class SmvGeneratorFixesTest {
 
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec_bad_relation");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setAConditions(List.of(cond));
         spec.setIfConditions(List.of());
@@ -3182,6 +3197,7 @@ class SmvGeneratorFixesTest {
 
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec_safe_env_var");
+        spec.setName("Safety requirement");
         spec.setTemplateId("7");
         spec.setAConditions(List.of(cond));
         spec.setIfConditions(List.of());

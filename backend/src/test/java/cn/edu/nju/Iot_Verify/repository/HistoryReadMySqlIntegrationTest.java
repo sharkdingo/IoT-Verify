@@ -61,6 +61,39 @@ class HistoryReadMySqlIntegrationTest {
     @Autowired private BoardEditJournalRepository journalRepository;
     @Autowired private FuzzTaskRepository fuzzTasks;
     @Autowired private EntityManager entityManager;
+    @Autowired private ChatMessageRepository chatMessages;
+    @Autowired private ChatSessionRepository chatSessions;
+
+    @Test
+    void userOriginalSearchIsLiteralPagedAndNeverReturnsAssistantOrOtherSessionText() {
+        var session = new cn.edu.nju.Iot_Verify.po.ChatSessionPo();
+        session.setId("memory-originals"); session.setUserId(7L);
+        session.setTaskMemoryJson("{\"schemaVersion\":1}");
+        chatSessions.saveAndFlush(session);
+        var first = chatOriginal("memory-originals", "user", "保留 Lock，阈值 20%_。");
+        var second = chatOriginal("memory-originals", "user", "改为只保留玄关 lock。");
+        chatOriginal("memory-originals", "assistant", "Lock 必须删除");
+        var another = new cn.edu.nju.Iot_Verify.po.ChatSessionPo();
+        another.setId("another-memory"); another.setUserId(8L);
+        chatSessions.saveAndFlush(another);
+        chatOriginal("another-memory", "user", "其他用户 Lock");
+        entityManager.clear();
+
+        assertEquals(List.of(second.getId()), chatMessages.findUserOriginals("memory-originals", null, null,
+                "LOCK", PageRequest.of(0, 1)).stream().map(cn.edu.nju.Iot_Verify.po.ChatMessagePo::getId).toList());
+        assertEquals(first.getContent(), chatMessages.findUserOriginals("memory-originals", second.getId(), null,
+                "lock", PageRequest.of(0, 10)).get(0).getContent());
+        assertEquals(1, chatMessages.findUserOriginals("memory-originals", null, null,
+                "%_", PageRequest.of(0, 10)).size());
+        assertTrue(chatMessages.findUserOriginals("another-memory", null, first.getId(), null, PageRequest.of(0, 1)).isEmpty());
+        assertEquals("{\"schemaVersion\":1}", chatSessions.findByIdAndUserId("memory-originals", 7L).orElseThrow().getTaskMemoryJson());
+    }
+
+    private cn.edu.nju.Iot_Verify.po.ChatMessagePo chatOriginal(String session, String role, String text) {
+        var row = new cn.edu.nju.Iot_Verify.po.ChatMessagePo();
+        row.setSessionId(session); row.setRole(role); row.setContent(text);
+        return chatMessages.saveAndFlush(row);
+    }
 
     @Test
     void traceSummariesAndFrozenSourcesShareOneScopedPayloadFreeQuery() {
@@ -285,7 +318,7 @@ class HistoryReadMySqlIntegrationTest {
 
     private TracePo trace(Long userId, Long runId, String states, LocalDateTime created) {
         return TracePo.builder().userId(userId).verificationTaskId(runId).violatedSpecId("spec-1")
-                .violatedSpecJson("{\"id\":\"spec-1\",\"templateId\":\"1\",\"templateLabel\":\"Always\"}")
+                .violatedSpecJson("{\"id\":\"spec-1\",\"name\": \"Safety requirement\", \"templateId\":\"1\",\"templateLabel\":\"Always\"}")
                 .statesJson(states).stateCount(200).createdAt(created).build();
     }
 

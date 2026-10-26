@@ -203,7 +203,7 @@ describe('recommendation materialization', () => {
   })
 
   it('rejects a kept specification candidate before it can be displayed as applicable', () => {
-    expect(() => validateSpecificationRecommendationCandidate({
+    expect(() => validateSpecificationRecommendationCandidate({ name: 'Safety requirement',
       rationale: 'Check the door',
       templateId: 3,
       aConditions: [],

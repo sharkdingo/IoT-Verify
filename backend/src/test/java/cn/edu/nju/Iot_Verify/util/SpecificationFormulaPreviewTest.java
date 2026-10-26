@@ -40,6 +40,7 @@ class SpecificationFormulaPreviewTest {
 
     private static SpecificationDto spec(String templateId, SpecConditionDto condition) {
         SpecificationDto spec = new SpecificationDto();
+        spec.setName("Safety requirement");
         spec.setTemplateId(templateId);
         spec.setAConditions(List.of(condition));
         spec.setIfConditions(List.of());

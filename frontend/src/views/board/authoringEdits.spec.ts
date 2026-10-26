@@ -1,3 +1,4 @@
+import { isSameSpecification } from '@/utils/spec'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { transpileModule, ScriptTarget } from 'typescript'
@@ -11,6 +12,7 @@ const body = start < 0 || end < 0 ? '' : source.slice(start, end)
 const setup = (enqueue?: (work: () => Promise<unknown>) => Promise<unknown>) => {
   const ownership = { active: true, token: 'owner' }
   const dependencies = {
+    isSameSpecification,
     getToken: () => ownership.token, boardAuthScopeEpoch: 0,
     isCurrentSessionToken: (token: string) => token === ownership.token,
     isCurrentBoardAuthScope: () => ownership.active,
@@ -39,7 +41,7 @@ describe('Board edit ownership and reconciliation', () => {
     const state = setup()
     const api = kind === 'rule' ? state.dependencies.boardApi.updateRule : state.dependencies.boardApi.updateSpec
     api.mockResolvedValue(state.mutation)
-    const request = { expected: state.options.expected, rule: state.options.desired, templateId: '1', aConditions: [], ifConditions: [], thenConditions: [], complete: state.options.complete }
+    const request = { name: 'Safety requirement', expected: state.options.expected, rule: state.options.desired, templateId: '1', aConditions: [], ifConditions: [], thenConditions: [], complete: state.options.complete }
     if (kind === 'rule') await state.handlers.handleSaveRule(request)
     else await state.handlers.handleSaveSpecification(request)
     expect(api).toHaveBeenCalledWith(state.options.expected, expect.objectContaining({ id: '7' }))

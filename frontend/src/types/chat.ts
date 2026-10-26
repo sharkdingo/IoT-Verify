@@ -1,6 +1,19 @@
 // src/types/chat.ts
 
 // Matches backend ChatSessionResponseDto.
+export interface ChatTaskMemory {
+    status: 'CURRENT' | 'PARTIAL' | 'UNAVAILABLE'
+    throughMessageId: number
+    sceneChanged: boolean
+    items: Array<{
+        id: string
+        kind: 'GOAL' | 'CONSTRAINT' | 'DECISION' | 'QUESTION'
+        scope: 'SESSION' | 'SCENE'
+        sourceMessageId: number
+        quote: string
+    }>
+}
+
 export interface ChatSession {
     id: string
     userId: number

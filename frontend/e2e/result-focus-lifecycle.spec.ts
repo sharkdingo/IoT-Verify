@@ -1,3 +1,4 @@
+import { expandCreation } from './support/controlCenter'
 import type { Page } from '@playwright/test'
 import { apiBaseURL, createAuthenticatedUser, expect, test } from './support/auth'
 
@@ -21,7 +22,7 @@ for (const locale of ['zh-CN', 'en']) {
         position: { x: 80, y: 150 }, width: 176, height: 128, state: 'off', variables: [], privacies: [] }], environmentVariablePatches: [] })
       await post('rules', { conditions: [{ deviceName: 'focus_light', targetType: 'mode', attribute: 'SwitchState', relation: '=', value: 'off' }],
         command: { deviceName: 'focus_light', action: 'on' }, ruleString: 'Turn on the test light' })
-      await post('specs', { id: 'never_on', templateId: '3', templateLabel: 'Never', aConditions: [{ id: 'never_on_a', side: 'a',
+      await post('specs', { name: 'Safety requirement', id: 'never_on', templateId: '3', templateLabel: 'Never', aConditions: [{ id: 'never_on_a', side: 'a',
         deviceId: 'focus_light', targetType: 'mode', key: 'SwitchState', relation: '=', value: 'on' }], ifConditions: [], thenConditions: [] })
       await page.setViewportSize({ width, height: width === 320 ? 500 : 1080 })
       await page.addInitScript(({ auth, locale }) => {
@@ -45,6 +46,7 @@ for (const locale of ['zh-CN', 'en']) {
       }
       await control.getByRole('button', { name: expand, exact: true }).click()
       await page.getByTestId('control-tab-templates').click()
+      await expandCreation(page, 'templates')
       let lastTemplate
       for (const template of ['Air Conditioner', 'Light']) {
         lastTemplate = control.getByRole('button', { name: `${locale === 'en' ? 'View template details' : '查看模板详情'}: ${template}`, exact: true })
@@ -84,6 +86,8 @@ for (const locale of ['zh-CN', 'en']) {
       await expect(page.getByTestId('control-tab-rules')).toBeFocused()
       await page.keyboard.press('End')
       await expect(page.getByTestId('control-tab-specs')).toBeFocused()
+      await expandCreation(page, 'specs')
+      await page.getByTestId('spec-name').fill('Safety requirement')
       await page.getByTestId('spec-template-select').selectOption('3')
       const addCondition = page.getByTestId('spec-add-condition-a')
       await addCondition.click()

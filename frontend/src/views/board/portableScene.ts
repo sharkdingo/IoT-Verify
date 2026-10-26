@@ -1,4 +1,5 @@
 import { REQUEST_LIMITS } from '@/constants/requestLimits'
+import { normalizeTemplateLookupName } from '@/utils/templateUsage'
 import { buildSpecDeviceRefsFromConditions, buildSpecFormula } from '@/utils/spec'
 import { normalizeModelRelation, normalizeNuSmvDeviceName } from '@/utils/modelRequest'
 import { MANIFEST_VALIDATION_MESSAGE_KEYS, validateManifest } from '@/utils/device'
@@ -22,10 +23,8 @@ import type {
 
 /** Identifies an exported board scene file and the shape its readers must expect. */
 export const SCENE_FILE_SCHEMA = 'iot-verify.board-scene'
-// 5: a `variable` specification condition must carry `variableSource`. A version-4 file cannot
-// supply it, and guessing one would silently change what its specifications assert, so those files
-// are rejected by the version check rather than half-read.
-export const SCENE_FILE_VERSION = 5
+// 6: specifications require their own names; template labels cannot replace user intent.
+export const SCENE_FILE_VERSION = 6
 
 /** The board-side scene model: domain objects, before serialization to a portable file. */
 export type BoardSceneModel = {
@@ -56,10 +55,6 @@ export type NormalizedSceneDevice = Omit<DeviceNode, 'currentStateTrust' | 'curr
  * Vue/i18n runtime state (the convention `utils/deviceRuntime.ts` follows with its `t` param).
  */
 export type Translate = (key: string, params?: Record<string, unknown>) => string
-
-/** Lowercased template name used for case-insensitive template lookups. */
-export const normalizeTemplateLookupName = (value: unknown): string =>
-  String(value ?? '').trim().toLowerCase()
 
 const deepClone = <T,>(value: T): T => JSON.parse(JSON.stringify(value))
 
@@ -107,11 +102,6 @@ export const createSceneCodec = (t: Translate) => {
     return value
   }
 
-  const optionalIntegerInRange = (value: unknown, field: string, fallback: number, min: number, max: number): number => {
-    if (value === undefined || value === null) return fallback
-    return requireIntegerInRange(value, field, min, max)
-  }
-
   const normalizeSceneNumber = (
     value: unknown,
     fallback: number,
@@ -127,6 +117,13 @@ export const createSceneCodec = (t: Translate) => {
       throw new Error(t('app.numberBetween', { field, min, max }))
     }
     return value
+  }
+
+  const normalizeSpecificationName = (value: unknown, field: string): string => {
+    const name = normalizeSceneString(value, field)
+    if (!name) throw new Error(t('app.sceneImportMissingField', { field }))
+    if (name.length > 100) throw new Error(t('app.specificationNameInvalid'))
+    return name
   }
 
   const normalizeSceneTrust = (value: unknown, field: string): 'trusted' | 'untrusted' | null => {
@@ -204,7 +201,7 @@ export const createSceneCodec = (t: Translate) => {
     return privacies.length > 0 ? privacies : undefined
   }
 
-  const normalizeSceneDevice = (value: unknown, index: number): NormalizedSceneDevice => {
+  const normalizeSceneDevice = (value: unknown, index: number, templates: DeviceTemplate[]): NormalizedSceneDevice => {
     const row = value as any
     if (!row || typeof row !== 'object' || Array.isArray(row)) {
       throw new Error(t('app.sceneImportObjectRequired', { field: `devices[${index}]` }))
@@ -238,7 +235,7 @@ export const createSceneCodec = (t: Translate) => {
 
     return {
       id,
-      templateName,
+      templateName: sceneTemplateForDevice({ templateName }, templates)?.name.trim() ?? templateName,
       label,
       position: {
         x: normalizeSceneNumber(
@@ -466,6 +463,14 @@ export const createSceneCodec = (t: Translate) => {
     return normalized
   }
 
+  const canonicalSceneLabelValue = (targetType: string, relation: string, value: string): string => {
+    if (targetType !== 'trust' && targetType !== 'privacy') return value
+    const normalized = value.toLowerCase()
+    return relation === 'in' || relation === 'not in'
+      ? normalized.split(/[,;|]/).map(part => part.trim()).filter(Boolean).join(', ')
+      : normalized
+  }
+
   const normalizeSceneSpecConditions = (
     value: unknown,
     side: SpecCondition['side'],
@@ -525,7 +530,7 @@ export const createSceneCodec = (t: Translate) => {
         ...(isPropertyCondition ? { propertyScope: propertyScope as 'state' | 'variable' } : {}),
         ...(variableSource ? { variableSource } : {}),
         relation: normalizedRelation,
-        value: conditionValue
+        value: canonicalSceneLabelValue(targetType, normalizedRelation, conditionValue)
       }
     })
   }
@@ -545,9 +550,10 @@ export const createSceneCodec = (t: Translate) => {
       rejectSceneInternalField(row, 'devices')
       assertSceneAllowedFields(
         row,
-        ['templateId', 'aConditions', 'ifConditions', 'thenConditions'],
+        ['name', 'templateId', 'aConditions', 'ifConditions', 'thenConditions'],
         `specs[${index}]`
       )
+      const name = normalizeSpecificationName(row.name, `specs[${index}].name`)
       const templateId = normalizeSceneString(row.templateId, `specs[${index}].templateId`) as Specification['templateId']
       if (!defaultSpecTemplates.some(template => template.id === templateId)) {
         throw new Error(t('app.sceneImportInvalidEnum', { field: `specs[${index}].templateId`, value: templateId || t('app.empty') }))
@@ -570,6 +576,7 @@ export const createSceneCodec = (t: Translate) => {
       }
       return {
         id: `scene_spec_${index + 1}`,
+        name,
         templateId,
         templateLabel,
         aConditions,
@@ -617,7 +624,7 @@ export const createSceneCodec = (t: Translate) => {
       }
       return {
         name,
-        manifest: deepClone(manifest)
+        manifest: { ...deepClone(manifest), Name: name }
       }
     })
   }
@@ -783,7 +790,7 @@ export const createSceneCodec = (t: Translate) => {
     index: number,
     templates: DeviceTemplate[]
   ): PortableSceneDevice => {
-    const normalized = normalizeSceneDevice(device, index)
+    const normalized = normalizeSceneDevice(device, index, templates)
     const variables = (normalized.variables || []).map(variable => ({
       name: variable.name,
       value: variable.value,
@@ -922,11 +929,12 @@ export const createSceneCodec = (t: Translate) => {
       ...(isPropertyCondition ? { propertyScope: propertyScope as 'state' | 'variable' } : {}),
       ...(variableSource ? { variableSource } : {}),
       relation: normalizedRelation,
-      value
+      value: canonicalSceneLabelValue(targetType, normalizedRelation, value)
     }
   }
 
   const canonicalSceneSpec = (spec: Specification, specIndex: number): PortableSceneSpecification => ({
+    name: normalizeSpecificationName(spec.name, `specs[${specIndex}].name`),
     templateId: normalizeSceneString(spec.templateId, `specs[${specIndex}].templateId`) as Specification['templateId'],
     aConditions: (spec.aConditions || []).map((condition, index) =>
       canonicalSceneSpecCondition(condition, `specs[${specIndex}].aConditions[${index}]`)),
@@ -996,7 +1004,7 @@ export const createSceneCodec = (t: Translate) => {
     }
     assertSceneCollectionLimit(payload.devices, 'devices', REQUEST_LIMITS.devices)
     const templates = normalizeSceneTemplates(payload.templates)
-    const devices = payload.devices.map((device: unknown, index: number) => normalizeSceneDevice(device, index))
+    const devices = payload.devices.map((device: unknown, index: number) => normalizeSceneDevice(device, index, templates))
     assertUniqueSceneDeviceIds(devices)
     assertSceneDeviceRuntimeShape(payload.devices, devices, templates)
     const scene: BoardSceneModel = {
@@ -1042,7 +1050,6 @@ export const createSceneCodec = (t: Translate) => {
 
   return {
     requireIntegerInRange,
-    optionalIntegerInRange,
     assertSceneCollectionLimit,
     assertSceneTemplateCoverage,
     assertSceneEnvironmentCoverage,

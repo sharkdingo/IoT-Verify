@@ -116,7 +116,7 @@ public class VerifyModelTool extends AbstractAiTool {
                     ts.put("traceId", trace.getId());
                     SpecificationDto violatedSpec = trace.getViolatedSpec();
                     if (violatedSpec != null) {
-                        ts.put("violatedSpecificationLabel", violatedSpec.getTemplateLabel());
+                        ts.put("violatedSpecificationLabel", violatedSpec.getName());
                         ts.put("formulaPreview", violatedSpec.getFormula());
                     }
                     ts.put("stateCount", trace.getStates() != null ? trace.getStates().size() : 0);

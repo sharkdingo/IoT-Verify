@@ -7,7 +7,7 @@ import type { Specification } from '@/types/spec'
 
 const rule: RuleForm = { id: '7', name: 'Hall light', sources: [{ fromId: 'sensor', itemType: 'variable', fromApi: 'motion', relation: '=', value: 'idle' }], toId: 'lamp', toApi: 'on' }
 const ruleWire = { id: 7, ruleString: 'Hall light', conditions: [{ deviceName: 'sensor', targetType: 'variable', attribute: 'motion', relation: '=', value: 'idle' }], command: { deviceName: 'lamp', action: 'on', contentDevice: null, content: null } }
-const spec: Specification = { id: 'spec-7', templateId: '1', templateLabel: 'Always', aConditions: [{ id: 'c', side: 'a', deviceId: 'lamp', deviceLabel: 'Hall light', targetType: 'state', key: 'state', relation: '=', value: 'off' }], ifConditions: [], thenConditions: [] }
+const spec: Specification = { name: 'Safety requirement', id: 'spec-7', templateId: '1', templateLabel: 'Always', aConditions: [{ id: 'c', side: 'a', deviceId: 'lamp', deviceLabel: 'Hall light', targetType: 'state', key: 'state', relation: '=', value: 'off' }], ifConditions: [], thenConditions: [] }
 beforeEach(() => vi.clearAllMocks())
 
 describe('targeted authoring updates', () => {

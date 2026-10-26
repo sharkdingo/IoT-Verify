@@ -85,6 +85,7 @@ public class DeviceRecommendationService {
 - 不要推荐与现有设备完全相同建议部署区域/用途的重复实例
 - intendedUse 和 suggestedPlacement 只解释推荐上下文；应用时只保存模板、suggestedLabel 和有效初始运行值，不要暗示它们会成为设备字段或形式模型输入
 - initialVariables/initialPrivacies 只能使用模板中 IsInside=true 的本地变量；共享环境变量不要放进设备实例
+- 初始本地变量必须与所选 initialState 的 Dynamics.Value 一致；由 Transitions 赋值的变量不受该状态推导约束。不确定时省略初值，由后端按所选初态补全，不能混用模板 InitState 的值。
 - 枚举初值必须保留模板声明的大小写；不同大小写可能表示不同值，不能把含糊拼写解释为列表中的第一项
 - currentStateTrust/currentStatePrivacy 和变量 trust/privacy 仅表示实例级高级覆盖；采用模板默认标签时必须省略。
 - trust 是 MEDIC 控制来源标签：多条件规则只要至少一个实际触发来源可信，目标仍可信；只有全部来源不可信时目标才不可信。它不是认证或通用数据完整性。privacy 是数据敏感性标签，不代表现实访问控制或加密
@@ -376,7 +377,7 @@ public class DeviceRecommendationService {
                         continue;
                     }
                     List<Map<String, Object>> initialVariables = normalizeInitialVariables(
-                            template, initialVariablesNode, appliedDefaults);
+                            template, initialState, initialVariablesNode, appliedDefaults);
                     if (initialVariables == null) {
                         filteredItems.add(filteredItem(inspected, "invalidInitialRuntime", language, suggestedLabel));
                         continue;
@@ -539,6 +540,7 @@ public class DeviceRecommendationService {
 
     private List<Map<String, Object>> normalizeInitialVariables(
             DeviceTemplateDto template,
+            String initialState,
             JsonNode variablesNode,
             Map<String, Object> appliedDefaults) {
         if (template == null || template.getManifest() == null) return Collections.emptyList();
@@ -554,6 +556,9 @@ public class DeviceRecommendationService {
             if (variable == null) return null;
             String value = canonicalVariableValue(variable, row.path("value").asText(""));
             if (value == null) return null;
+            String stateValue = DeviceManifestModes.stateDeclaredValue(
+                    template.getManifest(), initialState, variable.getName());
+            if (stateValue != null && !stateValue.equals(value)) return null;
             JsonNode trustNode = row.path("trust");
             String trust = normalizeTrust(trustNode.asText(""));
             if (isPresentNode(trustNode) && trust == null) return null;
@@ -566,7 +571,7 @@ public class DeviceRecommendationService {
         for (DeviceTemplateDto.DeviceManifest.InternalVariable variable : localVariables.values()) {
             String key = variable.getName().toLowerCase(Locale.ROOT);
             if (seen.contains(key)) continue;
-            String value = defaultVariableValue(template.getManifest(), variable);
+            String value = defaultVariableValue(template.getManifest(), variable, initialState);
             if (value == null) continue;
             Map<String, Object> normalized = new LinkedHashMap<>();
             normalized.put("name", variable.getName());
@@ -627,14 +632,13 @@ public class DeviceRecommendationService {
     }
 
     /**
-     * A recommended device is created in its template's InitState, so its local variables must start at the
-     * value that state declares — recommending the first enum literal instead produced a suggestion whose
-     * state and variable contradict each other. `DeviceManifestModes` owns the derivation.
+     * Local defaults follow the chosen initial state, which can differ from the template's InitState.
      */
     private String defaultVariableValue(DeviceTemplateDto.DeviceManifest manifest,
-                                        DeviceTemplateDto.DeviceManifest.InternalVariable variable) {
+                                        DeviceTemplateDto.DeviceManifest.InternalVariable variable,
+                                        String initialState) {
         String value = DeviceManifestModes.localInitialValue(
-                manifest, variable, manifest != null ? manifest.getInitState() : null);
+                manifest, variable, initialState);
         return value == null || value.isBlank() ? null : value;
     }
 

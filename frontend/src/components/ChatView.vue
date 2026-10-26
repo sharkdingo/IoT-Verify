@@ -45,6 +45,8 @@ import { useAuth } from '@/stores/auth';
 import { errorDetails, localizedTextOrFallback, type ApiErrorDetails } from '@/utils/userMessage';
 import FailureDetails from '@/components/FailureDetails.vue';
 import HouseholdGoalComposer from '@/components/HouseholdGoalComposer.vue';
+import ChatWelcome from '@/components/ChatWelcome.vue';
+import ChatTaskMemory from '@/components/ChatTaskMemory.vue';
 import { REQUEST_LIMITS } from '@/constants/requestLimits';
 import { confirmDestructive, notifyBlocked, notifyError, notifyInfo, notifySuccess } from '@/utils/feedback'
 import HintTooltip from '@/components/common/HintTooltip.vue'
@@ -57,7 +59,7 @@ type BoardChatContext = {
   templateCount?: number;
   devices?: Array<{ label?: string; templateName?: string }>;
   rules?: Array<{ name?: string; description?: string }>;
-  specs?: Array<{ name?: string; formulaPreview?: string }>;
+  specs?: Array<{ name: string; formulaPreview?: string }>;
   templates?: string[];
 };
 
@@ -114,7 +116,7 @@ const presetTasks = computed(() => [
         const ruleNames = joinNames(
             ctx.rules?.map(rule => rule.name || rule.description), p('fallback.rules'), 3);
         const specNames = joinNames(
-            ctx.specs?.map(spec => spec.name || spec.formulaPreview), p('fallback.specs'), 3);
+            ctx.specs?.map(spec => spec.name), p('fallback.specs'), 3);
 
         if (deviceCount === 0) {
           return [
@@ -321,6 +323,7 @@ const TOOL_LABEL_KEYS: Record<string, string> = {
   get_verification_run: 'app.chat.toolLabels.getVerificationRun',
   read_run_model: 'app.chat.toolLabels.readRunModel',
   read_conversation_activity: 'app.chat.toolLabels.readConversationActivity',
+  read_user_messages: 'app.chat.toolLabels.readUserMessages',
   manage_board_history: 'app.chat.toolLabels.manageBoardHistory',
   clear_board: 'app.chat.toolLabels.clearBoard',
   board_overview: 'app.chat.toolLabels.boardOverview'
@@ -585,7 +588,6 @@ const collapsedExecutionTraces = ref(new Set<string>());
 const clearPerformanceCaches = () => {
   executionTraceTotalsCache.clear();
   messageExecutionTraceCache.clear();
-  // processedContentCache is kept across sessions as message content is immutable
 };
 
 /**
@@ -1002,36 +1004,6 @@ const handleChatViewportResize = () => {
 const handlePanelWindowBlur = () => {
   stopComposerResize();
   stopPanelInteraction();
-};
-
-// ================= 文本处理辅助函数 =================
-
-const convertLatexDelimiters = (text: string) => {
-  const pattern = /(```[\S\s]*?```|`.*?`)|\\\[([\S\s]*?[^\\])\\]|\\\((.*?)\\\)/g;
-  return text.replace(pattern, (match, codeBlock, squareBracket, roundBracket) => {
-    if (codeBlock !== undefined) return codeBlock;
-    if (squareBracket !== undefined) return `$$${squareBracket}$$`;
-    if (roundBracket !== undefined) return `$${roundBracket}$`;
-    return match;
-  });
-};
-
-/**
- * 最终渲染内容的预处理（带 memoization）
- *
- * Cache prevents redundant string processing for the same content across renders.
- */
-const processedContentCache = new Map<string, string>();
-const getProcessedContent = (content: string) => {
-  if (!content) return '';
-
-  const cached = processedContentCache.get(content);
-  if (cached !== undefined) return cached;
-
-  const processed = convertLatexDelimiters(content);
-
-  processedContentCache.set(content, processed);
-  return processed;
 };
 
 const copyFullMessage = async (content: string) => {
@@ -2792,6 +2764,11 @@ const scrollToBottom = (force = false) => {
             </div>
           </div>
 
+          <ChatTaskMemory v-if="currentSessionId && messages.length > 0"
+            :key="`${authenticatedUserId}:${currentSessionId}`"
+            :user-id="authenticatedUserId" :session-id="currentSessionId" :revision="messages.length"
+            :busy="interactionLocked || isStreaming || isSettlingStream || isMonitoringRemoteExecution" />
+
           <!-- No tooltip on a drag handle: a hint would appear under the cursor at the moment the user starts
                dragging, which is the one moment it is in the way. `aria-label` still names it. -->
           <button
@@ -2837,38 +2814,16 @@ const scrollToBottom = (force = false) => {
               </button>
             </div>
 
-            <div v-else-if="messages.length === 0" class="welcome-screen">
-              <HouseholdGoalComposer v-if="boardMode"
-                :key="`${authenticatedUserId}:${currentSessionId}`"
-                :disabled="interactionLocked || isLoading || historyLoadFailed"
-                :draft-occupied="!!inputValue.trim()"
-                @draft="prepareHouseholdDraft" />
-              <div v-if="!boardMode" class="brand-logo">
-                <div class="logo-inner">
-                  <img src="/AI.png" :alt="t('app.aiAssistant')" class="custom-logo-img iot-device-artwork" />
-                </div>
-              </div>
-
-              <div class="task-grid">
-                <button
-                    type="button"
-                    v-for="(task, index) in presetTasks"
-                    :key="index"
-                    class="task-card"
-                    @click="handleTaskClick(task.text)"
-                    :disabled="interactionLocked"
-                    :style="{ animationDelay: `${index * 0.1}s` }"
-                >
-                  <div class="task-icon">
-                    <component :is="task.icon" />
-                  </div>
-                  <div class="task-info">
-                    <div class="task-title">{{ task.title }}</div>
-                    <div v-if="task.desc" class="task-desc">{{ task.desc }}</div>
-                  </div>
-                </button>
-              </div>
-            </div>
+            <ChatWelcome v-else-if="messages.length === 0"
+              :key="`${authenticatedUserId}:${currentSessionId}`"
+              :tasks="presetTasks" :disabled="interactionLocked" @select="handleTaskClick">
+              <template v-if="boardMode" #goals>
+                <HouseholdGoalComposer
+                  :disabled="interactionLocked || isLoading || historyLoadFailed"
+                  :draft-occupied="!!inputValue.trim()"
+                  @draft="prepareHouseholdDraft" />
+              </template>
+            </ChatWelcome>
 
             <div v-if="isLoadingHistory" class="thinking-state" role="status" aria-live="polite">
               <span class="thinking-text">{{ t('app.chat.loadingConversation') }}</span>
@@ -2895,29 +2850,6 @@ const scrollToBottom = (force = false) => {
               </div>
               <div class="typing-indicator" aria-hidden="true"><span></span><span></span><span></span></div>
             </div>
-            <div
-              v-if="reconciliationRequired"
-              class="reconciliation-state"
-              data-testid="chat-reconciliation-required"
-              role="alert"
-            >
-              <div>
-                <strong>{{ t('app.chat.reconciliationRequiredTitle') }}</strong>
-                <p>{{ t('app.chat.reconciliationRequiredMessage') }}</p>
-              </div>
-              <button
-                type="button"
-                class="reconciliation-retry"
-                data-testid="chat-reconciliation-retry"
-                :disabled="isRetryingReconciliation"
-                @click="retryAuthoritativeReconciliation"
-              >
-                {{ isRetryingReconciliation
-                  ? t('app.chat.reconciliationRetrying')
-                  : t('app.chat.reconciliationRetry') }}
-              </button>
-            </div>
-
             <template v-for="(msg, index) in messages" :key="msg.id || msg.turnId || `msg-${index}`">
               <div :class="['msg-row', msg.role === 'user' ? 'user-row' : 'ai-row']">
                 <div class="avatar-container">
@@ -3061,7 +2993,7 @@ const scrollToBottom = (force = false) => {
                       </span>
                       <span>{{ t('app.chat.progressElapsed', { seconds: msg.executionElapsedSeconds ?? 0 }) }}</span>
                     </div>
-                    <ChatMarkdown v-if="msg.content" :source="getProcessedContent(msg.content) || ''" />
+                    <ChatMarkdown v-if="msg.content" :source="msg.content" />
                   </article>
 
                   <div v-if="msg.role === 'assistant' && msg.content && !isStreaming" class="msg-actions">
@@ -3084,6 +3016,28 @@ const scrollToBottom = (force = false) => {
           </div>
 
           <div class="input-floating-area">
+            <div
+              v-if="reconciliationRequired"
+              class="reconciliation-state"
+              data-testid="chat-reconciliation-required"
+              role="alert"
+            >
+              <div>
+                <strong>{{ t('app.chat.reconciliationRequiredTitle') }}</strong>
+                <p id="chat-reconciliation-message">{{ t('app.chat.reconciliationRequiredMessage') }}</p>
+              </div>
+              <button
+                type="button"
+                class="reconciliation-retry"
+                data-testid="chat-reconciliation-retry"
+                :disabled="isRetryingReconciliation"
+                @click="retryAuthoritativeReconciliation"
+              >
+                {{ isRetryingReconciliation
+                  ? t('app.chat.reconciliationRetrying')
+                  : t('app.chat.reconciliationRetry') }}
+              </button>
+            </div>
             <div
               v-if="pendingConfirmationLoadFailed"
               class="protected-confirmation is-load-error"
@@ -3176,6 +3130,7 @@ const scrollToBottom = (force = false) => {
                 data-testid="chat-input"
                 :placeholder="t('app.chat.inputPlaceholder')"
                 :aria-label="t('app.chat.messageInput')"
+                :aria-describedby="reconciliationRequired ? 'chat-reconciliation-message' : undefined"
                 :disabled="interactionLocked || isLoading || historyLoadFailed"
                 rows="2"
                 :style="{ height: `${composerHeight}px` }"
@@ -3692,124 +3647,6 @@ const scrollToBottom = (force = false) => {
   flex-shrink: 0;
 }
 
-.welcome-screen {
-  min-height: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: flex-start;
-  max-width: 46rem;
-  margin: 0 auto;
-  padding: 0.85rem 0.15rem 1rem;
-  color: var(--chat-text);
-  text-align: center;
-}
-
-.brand-logo {
-  margin-bottom: 0.65rem;
-}
-
-.logo-inner {
-  width: 3.25rem;
-  height: 3.25rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--chat-accent) 34%, var(--chat-border));
-  border-radius: var(--iot-radius-panel);
-  background: color-mix(in srgb, var(--chat-accent) 12%, var(--chat-control-bg));
-  box-shadow: 0 12px 28px color-mix(in srgb, var(--chat-accent) 18%, transparent);
-}
-
-.custom-logo-img {
-  width: 125%;
-  height: 125%;
-  object-fit: contain;
-}
-
-.task-grid {
-  width: 100%;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(16rem, 100%), 1fr));
-  gap: 0.55rem;
-}
-
-.task-card {
-  width: 100%;
-  position: relative;
-  overflow: hidden;
-  display: flex;
-  align-items: flex-start;
-  gap: 0.6rem;
-  border: 1px solid var(--chat-border);
-  border-radius: var(--iot-radius-card);
-  background: var(--chat-ai-bg);
-  color: var(--chat-text);
-  cursor: pointer;
-  padding: 0.65rem;
-  text-align: left;
-  font: inherit;
-  transition: border-color 0.16s ease, background 0.16s ease, transform 0.16s ease, box-shadow 0.16s ease;
-}
-
-.task-card:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--chat-accent) 62%, var(--chat-border));
-  background: color-mix(in srgb, var(--chat-accent) 9%, var(--chat-ai-bg));
-  box-shadow: var(--shadow-raised);
-  transform: translateY(-1px);
-}
-
-.task-card:disabled {
-  cursor: not-allowed;
-  opacity: 1;
-  color: var(--chat-muted);
-  border-color: var(--chat-border);
-  background: var(--chat-control-bg);
-  box-shadow: none;
-  transform: none;
-}
-
-.task-card:disabled .task-title,
-.task-card:disabled .task-icon {
-  color: var(--chat-muted);
-}
-
-.task-card:disabled .task-icon {
-  background: var(--chat-control-bg);
-}
-
-.task-icon {
-  width: 2rem;
-  height: 2rem;
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--iot-radius-well);
-  background: color-mix(in srgb, var(--chat-accent) 14%, var(--chat-control-bg));
-  color: var(--chat-accent);
-  font-size: 1rem;
-}
-
-.task-info {
-  min-width: 0;
-  flex: 1;
-}
-
-.task-title {
-  color: var(--chat-text);
-  font-size: var(--iot-font-label);
-  font-weight: 600;
-}
-
-.task-desc {
-  margin-top: 0.15rem;
-  color: var(--chat-muted);
-  font-size: var(--iot-font-caption);
-  line-height: 1.35;
-}
-
 .msg-row {
   width: 100%;
   max-width: 48rem;
@@ -3970,7 +3807,7 @@ const scrollToBottom = (force = false) => {
 
 .reconciliation-state {
   max-width: 48rem;
-  margin: 0.75rem auto;
+  margin: 0 auto 0.55rem;
   padding: 0.75rem;
   display: flex;
   align-items: center;
@@ -4345,7 +4182,10 @@ const scrollToBottom = (force = false) => {
 .input-floating-area {
   position: relative;
   z-index: 2;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-height: 0;
+  /* Keep recovery and the draft reachable when a short panel cannot show both. */
+  overflow-y: auto;
   /* Reserve the resize corner so its target cannot cover the composer actions. */
   padding: 0.85rem 1rem var(--iot-target-min);
   background: linear-gradient(to top, var(--chat-bg) 86%, transparent);
@@ -4585,7 +4425,6 @@ const scrollToBottom = (force = false) => {
 .control-icon-button:focus-visible,
 .delete-btn-wrapper:focus-visible,
 .chat-resize-handle:focus-visible,
-.task-card:focus-visible,
 .history-pagination__button:focus-visible,
 .action-btn-small:focus-visible,
 .protected-confirmation__button:focus-visible,
@@ -4719,26 +4558,8 @@ const scrollToBottom = (force = false) => {
     width: 0;
   }
 
-  .task-grid {
-    grid-template-columns: 1fr;
-  }
-
   .messages-viewport {
     padding: 0.75rem;
-  }
-
-  .welcome-screen {
-    align-items: stretch;
-    text-align: left;
-    padding-top: 0.25rem;
-  }
-
-  .brand-logo {
-    display: none;
-  }
-
-  .task-card {
-    padding: 0.6rem;
   }
 
   .msg-row {
@@ -4804,19 +4625,6 @@ const scrollToBottom = (force = false) => {
 
   .messages-viewport {
     padding-bottom: 0.75rem;
-  }
-
-  .brand-logo {
-    display: none;
-  }
-
-  .welcome-screen {
-    justify-content: flex-start;
-    padding-top: 0.25rem;
-  }
-
-  .task-card {
-    padding: 0.55rem;
   }
 
 }

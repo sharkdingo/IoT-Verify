@@ -44,7 +44,7 @@ public final class ModelTraceToolPresenter {
             // response did not contain, leaving the label as the only clue — and "Eventually" / "Eventual
             // response" / "Persistence" are display strings that change with wording, not a contract.
             putText(result, "templateId", specification.getTemplateId());
-            putText(result, "specificationLabel", specification.getTemplateLabel());
+            putText(result, "specificationLabel", specification.getName());
             putText(result, "formulaPreview", specification.getFormula());
             putConditions(result, "aConditions", specification.getAConditions());
             putConditions(result, "ifConditions", specification.getIfConditions());

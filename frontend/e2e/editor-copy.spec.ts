@@ -1,3 +1,4 @@
+import { expandCreation } from './support/controlCenter'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { apiBaseURL, createAuthenticatedUser, expect, test } from './support/auth'
@@ -53,6 +54,7 @@ for (const variant of [
       const expand = control.getByRole('button', { name: copy.expand, exact: true })
       if (await expand.isVisible()) await clickUnderTooltip(page, expand)
       await page.getByTestId(`control-tab-${section}`).click()
+      await expandCreation(page, section)
     }
     const openDevice = async (id = 'ac_1', label = 'Living-room Air Conditioner') => {
       const collapseControl = control.getByRole('button', { name: copy.collapse, exact: true })
@@ -108,6 +110,7 @@ for (const variant of [
     await openEditor('templates')
     await page.getByTestId('reset-default-templates').click()
     const resetDefaults = page.getByRole('dialog').filter({ has: page.getByTestId('default-template-reset-confirm') })
+    await page.getByTestId('default-template-reset-confirm').hover()
     await expectFooterUsable(resetDefaults.locator('.iot-dialog__footer'))
     for (const button of await resetDefaults.locator('.iot-dialog__footer button').all()) {
       expect.soft(await button.evaluate(element => element.getBoundingClientRect().height),
@@ -235,6 +238,7 @@ for (const variant of [
     expect((await ruled).ok()).toBe(true)
 
     await openEditor('specs')
+    await page.getByTestId('spec-name').fill('Safety requirement')
     await page.getByTestId('spec-template-select').selectOption('3')
     await page.getByTestId('spec-add-condition-a').click()
     const condition = page.getByTestId('spec-condition-dialog')

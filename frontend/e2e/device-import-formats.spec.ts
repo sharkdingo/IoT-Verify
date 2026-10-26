@@ -1,3 +1,4 @@
+import { expandCreation } from './support/controlCenter'
 import { apiBaseURL, createAuthenticatedUser, expect, test } from './support/auth'
 import { clickUnderTooltip } from './support/tooltips'
 
@@ -20,6 +21,7 @@ for (const variant of [{ locale: 'en', width: 1440, height: 900 }, { locale: 'zh
     const expand = page.getByTestId('control-center').getByRole('button', { name: variant.locale === 'en' ? 'Expand Control Center' : '展开控制中心', exact: true })
     if (await expand.isVisible()) await clickUnderTooltip(page, expand)
     await page.getByTestId('control-tab-devices').click()
+    await expandCreation(page, 'devices')
     await page.getByTestId('device-create-mode-import').click()
     const saved: any[] = []
     for (const format of ['json', 'csv']) {

@@ -46,6 +46,7 @@ class SmvSpecificationBuilderErrorMessageTest {
 
         SpecificationDto spec = new SpecificationDto();
         spec.setId("test-spec");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setAConditions(List.of(cond));
 
@@ -91,6 +92,7 @@ class SmvSpecificationBuilderErrorMessageTest {
 
         SpecificationDto spec = new SpecificationDto();
         spec.setId("test-spec");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setAConditions(List.of(cond));
 
@@ -131,6 +133,7 @@ class SmvSpecificationBuilderErrorMessageTest {
 
         SpecificationDto spec = new SpecificationDto();
         spec.setId("test-spec");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setAConditions(List.of(cond));
 
@@ -171,6 +174,7 @@ class SmvSpecificationBuilderErrorMessageTest {
 
         SpecificationDto spec = new SpecificationDto();
         spec.setId("test-spec");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setAConditions(List.of(cond));
 
@@ -207,6 +211,7 @@ class SmvSpecificationBuilderErrorMessageTest {
 
         SpecificationDto spec = new SpecificationDto();
         spec.setId("test-spec");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setAConditions(List.of(cond));
 

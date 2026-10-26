@@ -1,6 +1,6 @@
 {
   "schema": "iot-verify.board-scene",
-  "version": 5,
+  "version": 6,
   "templates": [
     {
       "name": "Salus House Light",
@@ -2155,6 +2155,7 @@
   ],
   "specs": [
     {
+      "name": "Keep bedroom temperature between 21 and 27",
       "templateId": "1",
       "aConditions": [
         {
@@ -2178,6 +2179,7 @@
       "thenConditions": []
     },
     {
+      "name": "Darken the bedroom while asleep",
       "templateId": "4",
       "aConditions": [],
       "ifConditions": [
@@ -2215,6 +2217,7 @@
       ]
     },
     {
+      "name": "Turn off all lights when away",
       "templateId": "4",
       "aConditions": [],
       "ifConditions": [
@@ -2301,6 +2304,7 @@
       ]
     },
     {
+      "name": "Keep the entrance locked for unknown visitors",
       "templateId": "4",
       "aConditions": [],
       "ifConditions": [
@@ -2324,6 +2328,7 @@
       ]
     },
     {
+      "name": "Keep the balcony locked when away",
       "templateId": "4",
       "aConditions": [],
       "ifConditions": [
@@ -2347,6 +2352,7 @@
       ]
     },
     {
+      "name": "Keep kitchen gas at or below 2",
       "templateId": "1",
       "aConditions": [
         {

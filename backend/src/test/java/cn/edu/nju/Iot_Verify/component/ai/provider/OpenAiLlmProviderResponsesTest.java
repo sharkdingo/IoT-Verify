@@ -97,6 +97,25 @@ class OpenAiLlmProviderResponsesTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"absent", "empty", "null", "unknown"})
+    void missingUsageDetailDoesNotDiscardACompletedAnswerOrToolCall(String detail) throws Exception {
+        String complete = completed(MESSAGE + "," + CALL);
+        String telemetry = switch (detail) {
+            case "absent" -> "";
+            case "empty" -> ",\"output_tokens_details\":{}";
+            case "null" -> ",\"output_tokens_details\":null";
+            default -> ",\"output_tokens_details\":{\"reasoning_tokens\":\"unknown\"}";
+        };
+        complete = complete.replace(",\"output_tokens_details\":{\"reasoning_tokens\":2}", telemetry);
+        try (Gateway gateway = new Gateway(complete)) {
+            var result = gateway.provider.chat(request());
+            assertEquals("Done.", result.text());
+            assertEquals("board_overview", result.toolCalls().get(0).name());
+            assertEquals(1, gateway.requests.size());
+        }
+    }
+
     @Test
     void explicitResponsesSupportsDeploymentNamesAndAutoRecognizesDatedFamilyIds() {
         LlmConfig config = new LlmConfig();

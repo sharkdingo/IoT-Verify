@@ -457,6 +457,9 @@ const validateRun = (
   }
   for (const [id, value] of Object.entries(specifications)) {
     const spec = record(value, `${context} frozen specification`)
+    if (typeof spec.name !== 'string' || !spec.name.trim() || spec.name.length > 100) {
+      throw new FuzzResponseContractError(context, 'frozen specification name is required')
+    }
     if (spec.id !== id || !['1', '3', '4'].includes(spec.templateId)) {
       throw new FuzzResponseContractError(context, 'frozen specification identity or template is invalid')
     }

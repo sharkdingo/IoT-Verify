@@ -187,6 +187,17 @@ public class ChatToolProgressPresenter {
                         : String.format("Read %d saved counterexample records; %d unavailable. They describe the saved Board snapshot.",
                         count, unavailable);
             }
+            if ("read_user_messages".equals(functionName)) {
+                Integer count = nonNegativeInt(root.get("count"));
+                if (count == null || !hasArray(root, "messages") || arraySize(root, "messages") != count
+                        || !root.path("hasMore").isBoolean()) return null;
+                for (JsonNode message : root.path("messages")) {
+                    if (!message.path("messageId").isIntegralNumber() || message.path("messageId").longValue() <= 0
+                            || !message.path("text").isTextual()) return null;
+                }
+                return preferChinese ? String.format("已读取 %d 条用户原话；历史要求不代表当前画布状态。", count)
+                        : String.format("Read %d original user messages; historical requests are not current Board state.", count);
+            }
             if ("read_conversation_activity".equals(functionName)) {
                 Integer count = nonNegativeInt(root.get("count"));
                 if (count == null || !hasArray(root, "activities") || arraySize(root, "activities") != count

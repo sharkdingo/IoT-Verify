@@ -101,7 +101,7 @@ class BoardSceneIdentityRegressionTest {
                 .userId(userId).name("Light").manifestJson(manifestJson).defaultTemplate(true).build());
         scene = (ObjectNode) mapper.readTree("""
                 {
-                  "schema":"iot-verify.board-scene","version":5,"templates":[],
+                  "schema":"iot-verify.board-scene","version":6,"templates":[],
                   "devices":[{
                     "id":"lamp_a","templateName":"Light","label":"Scene lamp",
                     "position":{"x":1,"y":2},"state":"off","width":176,"height":128
@@ -147,6 +147,7 @@ class BoardSceneIdentityRegressionTest {
     @Test
     void legalSceneIdentityIsPreservedAndRemainsAddressable() {
         var imported = service.saveBoardBatch(userId, parseScene());
+        assertEquals(1L, users.findSceneRevision(userId).orElseThrow());
         String acceptedId = imported.getNodes().get(0).getId();
         assertEquals("lamp_a", acceptedId);
         assertEquals(acceptedId, service.getNodes(userId).get(0).getId());
@@ -154,6 +155,13 @@ class BoardSceneIdentityRegressionTest {
         var updated = assertDoesNotThrow(() -> service.updateNodeLayout(userId, acceptedId, layout()));
         assertEquals(acceptedId, updated.getCurrentDevice().getId());
         assertEquals(20.0, service.getNodes(userId).get(0).getPosition().getX());
+        assertEquals(1L, users.findSceneRevision(userId).orElseThrow());
+        service.renameNode(userId, acceptedId, "Renamed scene lamp", "Scene lamp");
+        assertEquals(1L, users.findSceneRevision(userId).orElseThrow());
+        var cleared = new BoardBatchDto(java.util.List.of(), java.util.List.of(), java.util.List.of(), java.util.List.of());
+        cleared.setImpactToken(service.previewBoardReplacement(userId).getImpactToken());
+        service.saveBoardBatch(userId, cleared);
+        assertEquals(2L, users.findSceneRevision(userId).orElseThrow());
     }
 
     @Test
@@ -214,9 +222,9 @@ class BoardSceneIdentityRegressionTest {
     @Test
     void duplicateSpecificationsReturnAnActionableTypedConflictWithoutWriting() throws Exception {
         scene.set("specs", mapper.readTree("""
-                [{"templateId":"1","aConditions":[{"deviceId":"lamp_a","targetType":"state","key":"state","relation":"=","value":"off"}],
+                [{"name": "Safety requirement", "templateId":"1","aConditions":[{"deviceId":"lamp_a","targetType":"state","key":"state","relation":"=","value":"off"}],
                   "ifConditions":[],"thenConditions":[]},
-                 {"templateId":"1","aConditions":[{"deviceId":"lamp_a","targetType":"state","key":"state","relation":"=","value":"off"}],
+                 {"name": "Safety requirement", "templateId":"1","aConditions":[{"deviceId":"lamp_a","targetType":"state","key":"state","relation":"=","value":"off"}],
                   "ifConditions":[],"thenConditions":[]}]
                 """));
         BoardContentConflictException error = assertThrows(BoardContentConflictException.class,

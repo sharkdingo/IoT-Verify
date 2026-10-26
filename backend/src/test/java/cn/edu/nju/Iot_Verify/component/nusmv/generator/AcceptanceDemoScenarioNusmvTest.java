@@ -144,7 +144,7 @@ class AcceptanceDemoScenarioNusmvTest {
         ObjectMapper objectMapper = new ObjectMapper();
         JsonNode scene = objectMapper.readTree(Files.readString(SCENE_PATH));
         assertEquals("iot-verify.board-scene", scene.path("schema").asText());
-        assertEquals(5, scene.path("version").asInt());
+        assertEquals(6, scene.path("version").asInt());
         assertEquals(4, scene.path("devices").size());
         assertEquals(3, scene.path("rules").size());
         assertEquals(5, scene.path("specs").size());
@@ -247,7 +247,7 @@ class AcceptanceDemoScenarioNusmvTest {
         ObjectMapper objectMapper = new ObjectMapper();
         JsonNode scene = objectMapper.readTree(Files.readString(MULTI_VIOLATION_SCENE_PATH));
         assertEquals("iot-verify.board-scene", scene.path("schema").asText());
-        assertEquals(5, scene.path("version").asInt());
+        assertEquals(6, scene.path("version").asInt());
         assertEquals(4, scene.path("devices").size());
         assertEquals(2, scene.path("environmentVariables").size());
         assertEquals(3, scene.path("rules").size());
@@ -1907,7 +1907,7 @@ class AcceptanceDemoScenarioNusmvTest {
         for (AdditionalScenarioExpectation expectation : ADDITIONAL_SCENARIOS) {
             JsonNode scene = objectMapper.readTree(Files.readString(expectation.path()));
             assertEquals("iot-verify.board-scene", scene.path("schema").asText(), expectation.name());
-            assertEquals(5, scene.path("version").asInt(), expectation.name());
+            assertEquals(6, scene.path("version").asInt(), expectation.name());
             assertEquals(expectation.deviceCount(), scene.path("devices").size(), expectation.name());
             assertEquals(expectation.environmentCount(), scene.path("environmentVariables").size(),
                     expectation.name());
@@ -2295,6 +2295,7 @@ class AcceptanceDemoScenarioNusmvTest {
             String id, String label, SpecConditionDto... conditions) {
         SpecificationDto spec = new SpecificationDto();
         spec.setId(id);
+        spec.setName("Safety requirement");
         spec.setTemplateId("3");
         spec.setTemplateLabel(label);
         for (SpecConditionDto condition : conditions) {
@@ -2318,6 +2319,7 @@ class AcceptanceDemoScenarioNusmvTest {
                                            List<SpecConditionDto> thenConditions) {
         SpecificationDto spec = new SpecificationDto();
         spec.setId(id);
+        spec.setName("Safety requirement");
         spec.setTemplateId(templateId);
         spec.setTemplateLabel(label);
         spec.setAConditions(List.of());

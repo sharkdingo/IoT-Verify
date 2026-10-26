@@ -283,6 +283,7 @@ class NodeToolsErrorTest {
     private SpecificationDto spec(String id, String deviceId) {
         SpecificationDto dto = new SpecificationDto();
         dto.setId(id);
+        dto.setName("Safety requirement");
         dto.setTemplateId("2");
         dto.setTemplateLabel("Spec");
 

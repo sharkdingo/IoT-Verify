@@ -1,3 +1,4 @@
+import { expandCreation } from './support/controlCenter'
 import { type Page } from '@playwright/test'
 import path from 'node:path'
 import { createAuthenticatedUser, expect, test, type AuthUser } from './support/auth'
@@ -36,6 +37,7 @@ const openWorkspace = async (page: Page, auth: AuthUser) => {
 
 const createDevice = async (page: Page, label: string) => {
   await page.getByTestId('control-tab-devices').click()
+  await expandCreation(page, 'devices')
   await expect(page.getByTestId('control-section-devices')).toBeVisible()
   const templateSelect = page.getByTestId('single-device-template')
   await expect.poll(async () => templateSelect.locator('option').count()).toBeGreaterThan(1)

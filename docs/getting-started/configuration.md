@@ -9,7 +9,7 @@ Backend options are read from `backend/src/main/resources/application.yaml` usin
 variable without editing the file. Frontend options are Vite build-time variables (see
 the [Frontend](#frontend-vite) section at the end).
 
-Verified against code on 2026-10-15. Source:
+Verified against code on 2026-10-26. Source:
 `backend/pom.xml`,
 `backend/src/main/resources/application.yaml`, `configure/ThreadPoolConfig`,
 `configure/FuzzAdmissionConfig`, `configure/AsyncTaskAdmissionConfig`,
@@ -213,7 +213,7 @@ process that starts it.
 | `CHAT_MAX_TOOL_RESULT_BYTES` | `49152` | Maximum UTF-8 bytes in one AI tool result before it becomes a structured `TOOL_RESULT_TOO_LARGE` unavailable result. Minimum `4096`. |
 | `CHAT_MAX_TOOL_CALLS_PER_ROUND` | `16` | Maximum tool calls accepted from one model planning response. A larger response executes none of its calls. Minimum `1`. |
 | `CHAT_MAX_MESSAGES_PER_SESSION` | `5000` | Stored-row ceiling for one conversation. It must reserve `2 + CHAT_MAX_TOOL_ROUNDS * (1 + CHAT_MAX_TOOL_CALLS_PER_ROUND)` rows for a complete turn. |
-| `CHAT_HISTORY_CHAR_LIMIT` | `32000` | Maximum coherent recent conversation context supplied to the model, measured in Java characters. Complete tool-call/result blocks remain atomic at the boundary. Minimum `4000`. |
+| `CHAT_HISTORY_CHAR_LIMIT` | `32000` | Shared target for task memory and coherent recent conversation, measured in Java characters; memory uses at most half. Complete newest tool-call/result blocks remain atomic and may exceed this soft target. Older large tool results can be compacted in model context only; see [chat memory](../api/chat-sse.md#task-memory-and-original-requirements). Minimum `4000`. |
 | `CHAT_EXECUTION_LEASE_TTL_MS` | `30000` | Lifetime of the cross-instance chat execution lease without a successful heartbeat. A crashed/restarted worker therefore stops reporting the session as active after at most this interval. Minimum `3000`; must be at least twice the heartbeat interval. |
 | `CHAT_EXECUTION_LEASE_HEARTBEAT_MS` | `10000` | Fixed delay between execution-lease renewals and expired-lease cleanup passes. Renewal is conditional on the same session/user/execution id, so an old worker cannot reclaim a replaced lease. Minimum `1000`. |
 | `AI_SESSION_STATE_CLEANUP_MS` | `60000` | Fixed delay between database cleanup passes for expired AI task-continuation, scenario-draft, and protected-action state. Active reads also reject and remove expired rows. |

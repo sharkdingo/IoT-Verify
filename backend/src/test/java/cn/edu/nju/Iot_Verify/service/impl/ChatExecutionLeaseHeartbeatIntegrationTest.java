@@ -155,6 +155,7 @@ class ChatExecutionLeaseHeartbeatIntegrationTest {
                 mock(AiDestructiveActionGuard.class),
                 mock(AiScenarioDraftStore.class),
                 mock(AiTaskContinuationStore.class),
+                mock(cn.edu.nju.Iot_Verify.service.AiTaskMemoryService.class),
                 objectMapper,
                 new ChatToolProgressPresenter(objectMapper),
                 mock(ChatMapper.class),

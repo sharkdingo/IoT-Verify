@@ -20,6 +20,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -42,6 +44,17 @@ class BoardOverviewToolTest {
 
     private ObjectMapper objectMapper;
     private BoardOverviewTool tool;
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{\"detail\":false} {\"detail\":true}",
+            "{\"detail\":false} trailing text", "{\"detail\":true,\"detail\":false}"})
+    void ambiguousJsonIsRejectedBeforeReadingTheBoard(String arguments) throws Exception {
+        UserContextHolder.setUserId(1L);
+        JsonNode result = objectMapper.readTree(tool.execute(arguments));
+        assertEquals("VALIDATION_ERROR", result.path("errorCode").asText());
+        assertEquals(400, result.path("status").asInt());
+        verifyNoMoreInteractions(boardStorageService);
+    }
 
     @BeforeEach
     void setUp() {
@@ -233,6 +246,7 @@ class BoardOverviewToolTest {
 
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec_1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setTemplateLabel("Always");
         SpecConditionDto specCondition = new SpecConditionDto();

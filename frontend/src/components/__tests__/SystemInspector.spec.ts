@@ -35,7 +35,7 @@ describe('SystemInspector overview placement', () => {
   it('counts inactive inventories without formatting them until their tab is opened', async () => {
     const formatRule = vi.spyOn(modelPresentation, 'presentRule')
     const formatSpec = vi.spyOn(specPresentation, 'buildSpecFormulaPreview')
-    const specification: Specification = {
+    const specification: Specification = { name: 'Safety requirement',
       id: 'spec-1', templateId: '1',
       templateLabel: 'Always', aConditions: [], ifConditions: [], thenConditions: []
     }
@@ -903,7 +903,7 @@ describe('SystemInspector rule execution order', () => {
   })
 
   it('does not add a dead tab stop to a specification card', () => {
-    const specification: Specification = {
+    const specification: Specification = { name: 'Safety requirement',
       id: 'spec-1',
       templateId: '1',
       templateLabel: 'Always',

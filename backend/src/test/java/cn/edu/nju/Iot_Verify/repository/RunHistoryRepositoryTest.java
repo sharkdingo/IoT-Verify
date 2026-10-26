@@ -244,9 +244,42 @@ class RunHistoryRepositoryTest {
                 .disabledRuleCount(0).skippedSpecCount(0)
                 .modelSemanticsJson(NO_ATTACK_SEMANTICS_JSON).modelSnapshotJson(VERIFICATION_SNAPSHOT_JSON)
                 .generationIssuesJson("[]").checkLogsJson("[\"checked\"]")
-                .specResultsJson("[{\"specId\":\"spec-1\",\"templateId\":\"1\",\"formulaKind\":\"CTLSPEC\","
-                        + "\"expression\":\"AG lamp.state = off\",\"outcome\":\"SATISFIED\","
-                        + "\"antecedentReachability\":\"NOT_APPLICABLE\"}]")
+                .specResultsJson("""
+                        [
+                          {
+                            "specId": "spec-1",
+                            "templateId": "1",
+                            "formulaKind": "CTLSPEC",
+                            "expression": "AG lamp.state = off",
+                            "outcome": "SATISFIED",
+                            "antecedentReachability": "NOT_APPLICABLE",
+                            "specificationLabel": "Keep lamp off",
+                            "specificationSnapshot": {
+                              "id": "spec-1",
+                              "name": "Keep lamp off",
+                              "templateId": "1",
+                              "aConditions": [
+                                {
+                                  "deviceId": "lamp",
+                                  "targetType": "state",
+                                  "key": "state",
+                                  "relation": "=",
+                                  "value": "off"
+                                }
+                              ],
+                              "ifConditions": [],
+                              "thenConditions": [],
+                              "devices": {
+                                "lamp": {
+                                  "label": "Lamp",
+                                  "modelTokenSource": "BUNDLED",
+                                  "modeCount": 1
+                                }
+                              }
+                            }
+                          }
+                        ]
+                        """)
                 .nusmvOutput("solver diagnostic").smvModelContent("MODULE main\n" + "-- model\n".repeat(5000))
                 .requestJson("{\"frozen\":\"" + "x".repeat(10000) + "\"}")
                 .templateSnapshotsJson("{\"schemaVersion\":1,\"manifests\":{},\"modelTokenSourcesByDeviceId\":{}}")

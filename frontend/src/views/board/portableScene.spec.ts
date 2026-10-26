@@ -23,6 +23,44 @@ const minimalScene = () => ({
   specs: []
 })
 
+describe('named requirements in portable scenes', () => {
+  const example = () => JSON.parse(readFileSync(join(process.cwd(), '..', 'docs/examples/household-entry-scene-zh.json'), 'utf8'))
+
+  it('preserves authored names across repeated import and export without changing conditions', () => {
+    const scene = example()
+    scene.specs[0].name = '  离家时访客不能开门  '
+    const once = codec.serializeSceneFile(codec.normalizeSceneFile(scene))
+    const twice = codec.serializeSceneFile(codec.normalizeSceneFile(once))
+    expect(twice).toEqual(once)
+    expect(twice.specs[0].name).toBe('离家时访客不能开门')
+    expect(twice.specs[0].ifConditions).toEqual(scene.specs[0].ifConditions)
+  })
+
+  it.each([undefined, null, '', '   ', 'n'.repeat(101), 123])('rejects invalid names without inventing one: %s', name => {
+    const scene = example()
+    scene.specs[0].name = name
+    expect(() => codec.normalizeSceneFile(scene)).toThrow()
+  })
+})
+
+describe('scene security-label values', () => {
+  it.each([
+    ['=', 'PRIVATE', 'private'],
+    ['in', 'PRIVATE; public|private', 'private, public, private'],
+    ['not in', 'PUBLIC,private', 'public, private']
+  ])('normalizes %s label values consistently on import and export', (relation, value, expected) => {
+    const input = JSON.parse(readFileSync(join(process.cwd(), '..', 'docs', 'examples', 'default-away-mode-unlock-scene.json'), 'utf8'))
+    const condition = input.specs.at(-1).aConditions[0]
+    condition.relation = relation
+    condition.value = value
+    const scene = codec.normalizeSceneFile(input)
+    expect(scene.specs.at(-1)!.aConditions[0].value).toBe(expected)
+    scene.specs.at(-1)!.aConditions[0].value = value
+    expect(codec.canonicalizeSceneFile(scene).specs.at(-1)!.aConditions[0].value).toBe(expected)
+    expect(condition.value).toBe(value)
+  })
+})
+
 describe('scene file envelope validation', () => {
   it('accepts an empty but well-formed scene', () => {
     const scene = codec.normalizeSceneFile(minimalScene())
@@ -90,7 +128,7 @@ describe('scene specification variable conditions', () => {
       width: 120,
       height: 100
     }],
-    specs: [{
+    specs: [{ name: 'Safety requirement',
       templateId: '1',
       aConditions: [condition],
       ifConditions: [],
@@ -134,6 +172,33 @@ describe('scene specification variable conditions', () => {
 })
 
 describe('scene device identity', () => {
+  it('normalizes template-name whitespace before comparing a server round trip without mutating the input', () => {
+    const input = JSON.parse(readFileSync(join(process.cwd(), '..', 'docs', 'examples', 'household-entry-scene.json'), 'utf8'))
+    const door = input.templates.find((template: any) => template.name === 'Door')
+    door.name = ' Door '
+    door.manifest.Name = ' Door '
+    const scene = codec.normalizeSceneFile(input)
+    const template = scene.templates.find(template => template.name === 'Door')!
+    expect(template.manifest.Name).toBe('Door')
+    const exported = codec.canonicalizeSceneFile(scene)
+    expect(codec.canonicalizeSceneFile(codec.normalizeSceneFile(exported))).toEqual(exported)
+    expect(door.manifest.Name).toBe(' Door ')
+  })
+
+  it('uses the canonical template spelling for imports and exports while preserving device identity and rule references', () => {
+    const input = JSON.parse(readFileSync(join(process.cwd(), '..', 'docs', 'examples', 'household-entry-scene.json'), 'utf8'))
+    const door = input.devices.find((device: any) => device.templateName === 'Door')
+    const scene = codec.normalizeSceneFile(input)
+    door.templateName = 'door'
+    const imported = codec.normalizeSceneFile(input)
+    expect(imported.devices.find(device => device.id === door.id)?.templateName).toBe('Door')
+    scene.devices.find(device => device.id === door.id)!.templateName = 'door'
+    expect(codec.canonicalizeSceneFile(scene)).toEqual(codec.canonicalizeSceneFile(imported))
+    expect(imported.devices.map(device => device.id)).toEqual(input.devices.map((device: any) => device.id))
+    expect(imported.rules).toEqual(scene.rules)
+    expect(door.templateName).toBe('door')
+  })
+
   const sceneWithDeviceId = (id: string) => {
     const scene = JSON.parse(readFileSync(join(process.cwd(), '..', 'docs', 'examples', 'default-away-mode-unlock-scene.json'), 'utf8'))
     const previousId = scene.devices[0].id
@@ -198,12 +263,6 @@ describe('integer range validation', () => {
     ['above the maximum', 11]
   ])('rejects %s', (_label, value) => {
     expect(() => codec.requireIntegerInRange(value, 'steps', 1, 10)).toThrow(/integerBetween/)
-  })
-
-  it('falls back only for null/undefined, not for an invalid value', () => {
-    expect(codec.optionalIntegerInRange(undefined, 'steps', 7, 1, 10)).toBe(7)
-    expect(codec.optionalIntegerInRange(null, 'steps', 7, 1, 10)).toBe(7)
-    expect(() => codec.optionalIntegerInRange(99, 'steps', 7, 1, 10)).toThrow(/integerBetween/)
   })
 })
 
@@ -358,6 +417,24 @@ describe('canonicalization', () => {
  * carrying no `state`. This test puts the failure a second away from the edit instead.
  */
 describe('bundled example scenes', () => {
+  it('reuses one exact definition for each template name across all example scenes', () => {
+    const directory = join(__dirname, '../../../../docs/examples')
+    const definitions = new Map<string, { file: string; manifest: unknown }>()
+    for (const file of readdirSync(directory).filter(file => file.endsWith('.json'))) {
+      const scene = JSON.parse(readFileSync(join(directory, file), 'utf8'))
+      for (const template of scene.templates) {
+        const key = template.name.trim().toLowerCase()
+        const existing = definitions.get(key)
+        if (existing) {
+          expect(template.manifest, `${template.name}: ${existing.file} vs ${file}`).toEqual(existing.manifest)
+        } else {
+          definitions.set(key, { file, manifest: template.manifest })
+        }
+      }
+    }
+    expect(definitions.size).toBeGreaterThan(0)
+  })
+
   it('every scene under docs/examples imports through the codec', () => {
     const directory = join(__dirname, '../../../../docs/examples')
     const files = readdirSync(directory).filter(file => file.endsWith('.json'))

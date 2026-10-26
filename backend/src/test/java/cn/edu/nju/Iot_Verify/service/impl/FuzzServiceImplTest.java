@@ -1041,6 +1041,7 @@ class FuzzServiceImplTest {
                 .mapToObj(index -> RuleDto.Condition.builder().deviceName("device-1").build())
                 .toList());
         SpecificationDto specification = specification("spec-1");
+        specification.setName("Safety requirement");
         specification.setTemplateId("1");
         specification.setAConditions(List.of(specCondition("condition-1")));
         specification.setAConditions(java.util.stream.IntStream.range(0, itemCount)
@@ -1898,6 +1899,7 @@ class FuzzServiceImplTest {
         changedSpecification.setTemplateLabel("Changed safety property");
         ModelInputSnapshot displayOnlySpecChange = snapshot(List.of(changedSpecification));
         SpecificationDto semanticSpecification = specification("spec-1");
+        semanticSpecification.setName("Safety requirement");
         semanticSpecification.setTemplateId("1");
         ModelInputSnapshot semanticChange = snapshot(List.of(semanticSpecification));
         DeviceVerificationDto originalDevice = new DeviceVerificationDto();
@@ -2154,6 +2156,7 @@ class FuzzServiceImplTest {
     private SpecificationDto specification(String id) {
         SpecificationDto specification = new SpecificationDto();
         specification.setId(id);
+        specification.setName("Safety requirement");
         specification.setTemplateId("6");
         specification.setTemplateLabel("Safety property " + id);
         return specification;

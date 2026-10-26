@@ -16,11 +16,10 @@ public final class PortableSceneFormat {
     public static final String SCHEMA = "iot-verify.board-scene";
 
     /**
-     * 5: a {@code variable} specification condition must carry {@code variableSource}. A version-4
-     * file cannot supply it, and guessing one would silently change what its specifications assert,
-     * so those files are rejected by the version check rather than half-read.
+     * 6: every specification has an explicit user-authored name. Older files are rejected;
+     * a template label cannot supply the identity users give their requirements.
      */
-    public static final int VERSION = 5;
+    public static final int VERSION = 6;
 
     private PortableSceneFormat() {
     }

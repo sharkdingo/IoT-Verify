@@ -88,6 +88,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -306,6 +307,19 @@ class ChatServiceImplToolLoopControlTest {
             "上述已经验证的修复方案等待确认，不会修改规约。"})
     void referencedVerifiedRepairDoesNotClaimACompletedOperation(String statement) {
         assertFalse(ChatServiceImpl.containsUnsupportedPlatformClaim(statement));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "当前修复已应用但尚未复验；我先读取画布确认仍是两条规则、三项检查要求，再在关闭攻击与隐私追踪下正式验证，并检查触发条件可达性。",
+            "当前修复已应用但尚未复验;我先读取画布。",
+            "I applied the suggestion; I will read the current board.",
+            "I applied the suggestion；I will read the current board."})
+    void completedActionsDoNotBorrowAnObjectFromTheNextSemicolonClause(String statement) {
+        assertFalse(ChatServiceImpl.containsUnsupportedPlatformClaim(statement));
+        assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim(statement + "我已保存规则。"));
+        assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim("我已保存规则；" + statement));
+        assertTrue(ChatServiceImpl.containsUnsupportedPlatformClaim(statement + "I deleted every device."));
     }
 
     @ParameterizedTest
@@ -885,6 +899,8 @@ class ChatServiceImplToolLoopControlTest {
     @Mock
     private AiTaskContinuationStore taskContinuationStore;
     @Mock
+    private cn.edu.nju.Iot_Verify.service.AiTaskMemoryService taskMemoryService;
+    @Mock
     private ChatMapper chatMapper;
     private LlmMessageCodec messageCodec;
     private TransactionTemplate transactionTemplate;
@@ -902,6 +918,7 @@ class ChatServiceImplToolLoopControlTest {
 
     @BeforeEach
     void setUp() throws Exception {
+        lenient().when(taskMemoryService.context(any(), anyInt())).thenReturn(LlmMessage.system("Task memory test context"));
         transactionPropagations.clear();
         transactionTemplate = transactionTemplateWithCommitHook(ignored -> { });
 
@@ -992,6 +1009,7 @@ class ChatServiceImplToolLoopControlTest {
                 destructiveActionGuard,
                 scenarioDraftStore,
                 taskContinuationStore,
+                taskMemoryService,
                 objectMapper,
                 new ChatToolProgressPresenter(objectMapper),
                 chatMapper,

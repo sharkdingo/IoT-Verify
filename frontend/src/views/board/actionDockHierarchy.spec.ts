@@ -10,12 +10,6 @@ describe('board action dock hierarchy', () => {
   const board = readFileSync(join(root, 'views/Board.vue'), 'utf8')
   const css = readFileSync(join(root, 'styles/board.css'), 'utf8')
 
-  const SUGGESTION_TOOLS = [
-    'open-scenario-recommendations',
-    'open-rule-recommendations',
-    'open-device-recommendations',
-    'open-spec-recommendations'
-  ]
 
   const RUN_TOOLS = [
     'open-simulation-panel',
@@ -38,7 +32,7 @@ describe('board action dock hierarchy', () => {
       node.children.forEach(child => visit(child, wrapped))
     }
     ast?.children.forEach(node => visit(node, false))
-    for (const id of [...RUN_TOOLS, ...SUGGESTION_TOOLS]) expect(tooltipParents.get(id), id).toBe(true)
+    for (const id of RUN_TOOLS) expect(tooltipParents.get(id), id).toBe(true)
     for (const id of ['toggle-action-dock', 'restore-action-dock']) {
       expect(tooltipParents.get(id), id).toBe(false)
       expect(buttonMarkup(id)).toContain(':aria-label=')
@@ -76,8 +70,8 @@ describe('board action dock hierarchy', () => {
     throw new Error(`unterminated <button> for ${testId}`)
   }
 
-  it('gives all execution, history and suggestion entries the same neutral control', () => {
-    for (const id of [...RUN_TOOLS, ...SUGGESTION_TOOLS]) {
+  it('gives all execution and history entries the same neutral control', () => {
+    for (const id of RUN_TOOLS) {
       const markup = buttonMarkup(id)
       expect(markup, id).toContain('class="board-tool-button transition-colors"')
       expect(markup, id).not.toMatch(/board-tool-button--|\bbg-|\bshadow-/)
@@ -95,16 +89,6 @@ describe('board action dock hierarchy', () => {
     expect(selected).toContain('background-color: var(--accent-surface);')
     expect(selected).not.toContain('box-shadow')
     expect(rule(".iot-board .board-tool-button[aria-pressed='true']::before")).toContain('opacity: 1;')
-  })
-
-  it('keeps every suggestion tool a real focusable button with a name', () => {
-    // This is a demotion in emphasis, not disclosure: the tools stay keyboard reachable and named.
-    for (const id of SUGGESTION_TOOLS) {
-      const markup = buttonMarkup(id)
-      expect(markup, `${id} should be a <button>`).toContain('<button')
-      expect(markup, `${id} needs an accessible name`).toContain('aria-label')
-      expect(markup, `${id} should report its panel state`).toContain('aria-pressed')
-    }
   })
 
   it('groups Run History apart from the actions that start a run', () => {
@@ -156,9 +140,6 @@ describe('board action dock hierarchy', () => {
   })
 
   it('names the set of workflow panels once', () => {
-    // `showCanvasEmptyState` spelled out the five members and also re-listed the four recommendation flags
-    // that `isAnyRecommendationPanelVisible()` owns, so a sixth panel meant remembering two lists. Only the
-    // E2E suite covers the empty state, so a unit-level mutation of that predicate was silent; this is not.
     expect(board).toContain('const isWorkflowPanelOpen = computed(')
     const listings = board.match(/showVerificationPanel\.value \|\|\s*\n\s*showSimulationPanel\.value/g) ?? []
     expect(listings, 'the workflow-panel set should be enumerated once').toHaveLength(1)

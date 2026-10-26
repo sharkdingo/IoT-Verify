@@ -34,6 +34,10 @@ public class SpecificationDto {
     @Size(max = 100, message = "Specification ID must be at most 100 characters", groups = {Default.class, FrozenModel.class})
     private String id;
 
+    @NotBlank(message = "Specification name is required", groups = {Default.class, FrozenModel.class})
+    @Size(max = 100, message = "Specification name must be at most 100 characters", groups = {Default.class, FrozenModel.class})
+    private String name;
+
     @NotBlank(message = "Template ID is required", groups = {Default.class, FrozenModel.class})
     @Pattern(regexp = "^[1-7]$", message = "Template ID must be one of 1, 2, 3, 4, 5, 6, 7", groups = {Default.class, FrozenModel.class})
     @Size(max = 10, message = "Template ID must be at most 10 characters", groups = {Default.class, FrozenModel.class})

@@ -273,6 +273,44 @@
     gap: var(--iot-space-xs);
 }
 
+/* A result's user-defined name leads; evidence, actions and diagnostics belong to that result. */
+.iot-result-item {
+    min-width: 0;
+    padding: 1rem;
+    border: 1px solid var(--border);
+    border-radius: var(--iot-radius-card);
+}
+
+.iot-result-item__heading {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.5rem 1rem;
+}
+
+.iot-result-item__title {
+    min-width: 0;
+    margin: 0;
+    color: var(--text);
+    font-size: 1rem;
+    font-weight: 600;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+}
+
+.iot-result-item__badge {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.125rem 0.5rem;
+    border: 1px solid;
+    border-radius: var(--iot-radius-pill);
+    font-size: var(--iot-font-caption);
+    font-weight: 600;
+}
+
 .verification-result-disclosure > summary {
     min-height: var(--iot-target-min);
     padding-block: var(--iot-space-sm);

@@ -9,6 +9,7 @@ import java.util.Map;
 /** Structured property and display provenance captured with its verdict, independent of the live board. */
 public record SpecificationSnapshotDto(
         String id,
+        String name,
         String templateId,
         List<SpecConditionDto> aConditions,
         List<SpecConditionDto> ifConditions,

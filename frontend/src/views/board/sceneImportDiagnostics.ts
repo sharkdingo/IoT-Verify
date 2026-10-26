@@ -1,4 +1,4 @@
-import type { BoardReplacementPreview } from '@/api/board'
+import { BOARD_RESPONSE_INCOMPLETE_CODE, validateBoardReplacementPreview, type BoardReplacementPreview } from '@/api/board'
 
 /**
  * Reads the diagnostics a rejected scene import or a stale replacement returned.
@@ -55,13 +55,10 @@ export const readBoardReplacementStalePreview = (
   const data = (error as any)?.response?.data?.data
   const preview = data?.currentPreview
   if (data?.reasonCode !== 'BOARD_REPLACEMENT_STALE' || !preview) return null
-  if (typeof preview.impactToken !== 'string' || !preview.impactToken.trim()) return null
-  const counts = [
-    preview.deviceCount,
-    preview.environmentVariableCount,
-    preview.ruleCount,
-    preview.specificationCount
-  ]
-  if (!counts.every(value => Number.isSafeInteger(value) && Number(value) >= 0)) return null
-  return preview as BoardReplacementPreview
+  try {
+    return validateBoardReplacementPreview(preview)
+  } catch (error) {
+    if ((error as { code?: string })?.code === BOARD_RESPONSE_INCOMPLETE_CODE) return null
+    throw error
+  }
 }

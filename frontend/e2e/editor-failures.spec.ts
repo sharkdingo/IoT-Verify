@@ -1,3 +1,4 @@
+import { expandCreation } from './support/controlCenter'
 import type { APIResponse, Locator, Page, Response } from '@playwright/test'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -43,7 +44,7 @@ test('narrow rule creation clears its saved draft after the inspector takes focu
   const preview = await unwrap(await request.get(`${apiBaseURL}/api/board/replacement-preview`, { headers }))
   await unwrap(await request.post(`${apiBaseURL}/api/board/scene`, { headers, data: {
     impactToken: preview.impactToken,
-    scene: { schema: 'iot-verify.board-scene', version: 5,
+    scene: { schema: 'iot-verify.board-scene', version: 6,
       templates: [{ name: manifest.Name, manifest }],
       devices: [{ id: 'narrow_lamp', label: 'Hall lamp', templateName: manifest.Name, state: 'off',
         position: { x: 220, y: 210 }, width: 176, height: 128 }],
@@ -61,6 +62,7 @@ test('narrow rule creation clears its saved draft after the inspector takes focu
   const control = page.getByTestId('control-center')
   await control.getByRole('button', { name: 'Expand Control Center', exact: true }).click()
   await page.getByTestId('control-tab-rules').click()
+  await expandCreation(page, 'rules')
   await page.locator('#rule-builder-name').fill('Hall automation')
   await page.locator('#rule-source-device').selectOption('narrow_lamp')
   await page.locator('#rule-source-type').selectOption('api')
@@ -97,7 +99,7 @@ test('Chinese editors retain real concurrent duplicate diagnostics and reconcile
   const preview = await unwrap(await request.get(`${apiBaseURL}/api/board/replacement-preview`, { headers }))
   await unwrap(await request.post(`${apiBaseURL}/api/board/scene`, { headers, data: {
     impactToken: preview.impactToken,
-    scene: { schema: 'iot-verify.board-scene', version: 5,
+    scene: { schema: 'iot-verify.board-scene', version: 6,
       templates: [{ name: manifest.Name, manifest }],
       devices: [{ id: 'editor_lamp', label: 'English Lamp', templateName: manifest.Name, state: 'off',
         position: { x: 220, y: 210 }, width: 176, height: 128 }],
@@ -118,6 +120,7 @@ test('Chinese editors retain real concurrent duplicate diagnostics and reconcile
     const endpoint = kind === 'rule' ? 'rules' : 'specs'
     await page.getByTestId(`inspector-tab-${endpoint}`).click()
     await page.getByTestId(`control-tab-${endpoint}`).click()
+    await expandCreation(page, endpoint)
     if (kind === 'rule') {
       await page.locator('#rule-builder-name').fill('English draft')
       await page.locator('#rule-source-device').selectOption('editor_lamp')
@@ -127,6 +130,7 @@ test('Chinese editors retain real concurrent duplicate diagnostics and reconcile
       await page.locator('#rule-target-device').selectOption('editor_lamp')
       await page.locator('#rule-target-action').selectOption('on')
     } else {
+      await page.getByTestId('spec-name').fill('Safety requirement')
       await page.getByTestId('spec-template-select').selectOption('3')
       await addModeCondition(page)
     }
@@ -227,7 +231,7 @@ test('Chinese editors retain real server range rejections without losing a local
   const preview = await unwrap(await request.get(`${apiBaseURL}/api/board/replacement-preview`, { headers }))
   await unwrap(await request.post(`${apiBaseURL}/api/board/scene`, { headers, data: {
     impactToken: preview.impactToken,
-    scene: { schema: 'iot-verify.board-scene', version: 5,
+    scene: { schema: 'iot-verify.board-scene', version: 6,
       templates: manifests.map(manifest => ({ name: manifest.Name, manifest })),
       devices: [
         { id: 'numeric_temp', label: 'English Thermometer', templateName: 'Temperature Sensor',
@@ -253,6 +257,7 @@ test('Chinese editors retain real server range rejections without losing a local
     const endpoint = kind === 'rule' ? 'rules' : 'specs'
     await page.getByTestId(`inspector-tab-${endpoint}`).click()
     await page.getByTestId(`control-tab-${endpoint}`).click()
+    await expandCreation(page, endpoint)
     if (kind === 'rule') {
       await page.locator('#rule-builder-name').fill('English numeric draft')
       await page.locator('#rule-source-device').selectOption('numeric_temp')
@@ -264,6 +269,7 @@ test('Chinese editors retain real server range rejections without losing a local
       await page.locator('#rule-target-device').selectOption('numeric_lamp')
       await page.locator('#rule-target-action').selectOption('on')
     } else {
+      await page.getByTestId('spec-name').fill('Safety requirement')
       await page.getByTestId('spec-template-select').selectOption('3')
       await page.getByTestId('spec-add-condition-a').click()
       await page.getByTestId('spec-condition-device').selectOption('numeric_temp')

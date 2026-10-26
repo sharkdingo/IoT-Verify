@@ -400,6 +400,7 @@ class NusmvEnvironmentPoolTest {
         labelOfAffectOnly.setValue("public");
         SpecificationDto spec = new SpecificationDto();
         spec.setId("affect_only_label");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setTemplateLabel("Affect-only label property");
         spec.setDevices(List.of());

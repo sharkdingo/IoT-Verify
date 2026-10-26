@@ -128,7 +128,7 @@ class FreshSchemaMySqlIntegrationTest {
     }
 
     private SpecificationPo specification(Long owner, String label) {
-        return SpecificationPo.builder()
+        return SpecificationPo.builder().name("Safety requirement")
                 .id("shared-spec").userId(owner).listOrder(0).templateId("1").templateLabel(label)
                 .aConditionsJson("[]").ifConditionsJson("[]").thenConditionsJson("[]")
                 .devicesJson("[]").build();

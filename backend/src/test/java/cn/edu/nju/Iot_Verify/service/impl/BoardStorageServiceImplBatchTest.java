@@ -132,9 +132,12 @@ class BoardStorageServiceImplBatchTest {
 
     @Test
     void saveBoardBatch_savesAllThreeCollections() {
+        UserPo owner = UserPo.builder().id(1L).build();
+        when(userRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(owner));
         DeviceNodeDto node = boardNode("node-1", null, "Device");
         RuleDto rule = RuleDto.builder().conditions(List.of()).build();
         SpecificationDto spec = new SpecificationDto();
+        spec.setName("Door remains closed");
 
         // node save path
         when(deviceNodeMapper.toEntity(any(), anyLong())).thenReturn(new DeviceNodePo());
@@ -160,6 +163,7 @@ class BoardStorageServiceImplBatchTest {
         // describes a reachable state. Leaving the journal would let undo "restore" a rule into a
         // scene the user replaced — an invariant that was previously untested at this layer.
         verify(editJournal).clear(1L);
+        assertEquals(1L, owner.getSceneRevision());
     }
 
     @Test
@@ -240,6 +244,7 @@ class BoardStorageServiceImplBatchTest {
         condition.setValue("on");
         SpecificationDto original = new SpecificationDto();
         original.setId("spec-1");
+        original.setName("Safety requirement");
         original.setTemplateId("1");
         original.setAConditions(List.of(condition));
         original.setDevices(List.of(new SpecificationDto.DeviceRefDto("switch_1", "Original name", List.of())));
@@ -311,9 +316,11 @@ class BoardStorageServiceImplBatchTest {
         stored.setId("spec-9");
         SpecificationDto current = new SpecificationDto();
         current.setId("spec-9");
+        current.setName("Safety requirement");
         current.setTemplateId("1");
         SpecificationDto expected = new SpecificationDto();
         expected.setId("spec-9");
+        expected.setName("Safety requirement");
         expected.setTemplateId("2");
         when(specRepo.findByUserId(1L)).thenReturn(List.of(stored));
         when(specificationMapper.toDto(stored)).thenReturn(current);
@@ -416,6 +423,39 @@ class BoardStorageServiceImplBatchTest {
     }
 
     @Test
+    void replacementPreview_distinguishesStoredTemplatesFromSceneUsage() {
+        when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(
+                DeviceTemplatePo.builder().name("Unused").manifestJson("{\"Name\":\"Unused\"}").build(),
+                DeviceTemplatePo.builder().name("Light").defaultTemplate(true)
+                        .manifestJson("{\"Name\":\"Light\"}").build(),
+                DeviceTemplatePo.builder().name("Sensor").manifestJson("{\"Name\":\"Sensor\"}").build()));
+        when(nodeRepo.findByUserId(1L)).thenReturn(List.of(new DeviceNodePo(), new DeviceNodePo()));
+        when(deviceNodeMapper.toDto(any())).thenReturn(
+                boardNode("one", "Sensor", "One"), boardNode("two", "sensor", "Two"));
+
+        var preview = JsonUtils.fromJson(JsonUtils.toJson(service.previewBoardReplacement(1L)), java.util.Map.class);
+
+        assertEquals(List.of(
+                java.util.Map.of("name", "Light", "defaultTemplate", true, "deviceCount", 0),
+                java.util.Map.of("name", "Sensor", "defaultTemplate", false, "deviceCount", 2),
+                java.util.Map.of("name", "Unused", "defaultTemplate", false, "deviceCount", 0)), preview.get("templates"));
+    }
+
+    @Test
+    void saveBoardBatch_rejectsPreviewWhenTheRetainedTemplateLibraryChanges() {
+        when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of());
+        var preview = service.previewBoardReplacement(1L);
+        when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(
+                DeviceTemplatePo.builder().name("New Sensor").manifestJson("{\"Name\":\"New Sensor\"}").build()));
+        BoardBatchDto replacement = new BoardBatchDto(List.of(), List.of(), List.of(), List.of());
+        replacement.setImpactToken(preview.getImpactToken());
+
+        assertThrows(BoardReplacementStaleException.class, () -> service.saveBoardBatch(1L, replacement));
+        verify(nodeRepo, never()).deleteAll(any());
+        verify(editJournal, never()).clear(anyLong());
+    }
+
+    @Test
     void saveBoardBatch_rejectsPreviewWhenOnlyUndoHistoryChanged() {
         when(editJournal.historyState(1L))
                 .thenReturn(historyState(1, "a"), historyState(2, "b"));
@@ -439,12 +479,14 @@ class BoardStorageServiceImplBatchTest {
     void saveSpecsInternal_persistsAndReturnsTheSubmittedSpecificationOrder() {
         SpecificationDto first = new SpecificationDto();
         first.setId("spec-b");
+        first.setName("Safety requirement");
         first.setTemplateId("1");
         first.setAConditions(List.of());
         first.setIfConditions(List.of());
         first.setThenConditions(List.of());
         SpecificationDto second = new SpecificationDto();
         second.setId("spec-a");
+        second.setName("Safety requirement");
         second.setTemplateId("2");
         second.setAConditions(List.of());
         second.setIfConditions(List.of());
@@ -452,7 +494,7 @@ class BoardStorageServiceImplBatchTest {
 
         when(specificationMapper.toEntity(any(), anyLong())).thenAnswer(invocation -> {
             SpecificationDto dto = invocation.getArgument(0);
-            return SpecificationPo.builder().id(dto.getId()).userId(1L).build();
+            return SpecificationPo.builder().name("Safety requirement").id(dto.getId()).userId(1L).build();
         });
         when(specRepo.saveAll(any())).thenReturn(List.of());
         when(specificationMapper.toDto(any())).thenAnswer(invocation -> {
@@ -525,6 +567,7 @@ class BoardStorageServiceImplBatchTest {
 
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("3");
         spec.setTemplateLabel("Misleading caller label");
         spec.setAConditions(List.of(condition));
@@ -603,6 +646,7 @@ class BoardStorageServiceImplBatchTest {
 
         SpecificationDto legacySpec = new SpecificationDto();
         legacySpec.setId("legacy-spec");
+        legacySpec.setName("Safety requirement");
         legacySpec.setTemplateId("1");
         legacySpec.setAConditions(List.of(legacyCondition));
 
@@ -663,6 +707,7 @@ class BoardStorageServiceImplBatchTest {
 
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("3");
         spec.setAConditions(List.of(condition));
 
@@ -1524,6 +1569,46 @@ class BoardStorageServiceImplBatchTest {
         assertEquals("untrusted", saved.getVariables().get(0).getTrust());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"conflict", "same", "omitted", "transition", "undeclared"})
+    void saveBoardBatch_requiresExplicitStateDerivedValuesToMatchBeforeWriting(String variant) throws Exception {
+        var manifest = JsonUtils.fromJson(new String(getClass().getResourceAsStream("/deviceTemplate/Car.json")
+                .readAllBytes(), java.nio.charset.StandardCharsets.UTF_8), DeviceTemplateDto.DeviceManifest.class);
+        if (variant.equals("transition")) {
+            manifest.setTransitions(List.of(DeviceTemplateDto.DeviceManifest.Transition.builder()
+                    .name("move").startState("away")
+                    .assignments(List.of(DeviceTemplateDto.DeviceManifest.Assignment.builder()
+                            .attribute("location").value("garage").build())).build()));
+        }
+        if (variant.equals("undeclared")) manifest.getWorkingStates().forEach(state -> state.setDynamics(List.of()));
+        var stored = DeviceTemplatePo.builder().userId(1L).name("Car")
+                .manifestJson(JsonUtils.toJson(manifest)).build();
+        when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(stored));
+        lenient().when(nodeRepo.saveAll(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        var serviceWithTemplates = new BoardStorageServiceImpl(
+                nodeRepo, environmentRepo, specRepo, ruleRepo, null, deviceTemplateRepo, null,
+                transactionTemplate, null, new SpecificationMapper(), new RuleMapper(), new DeviceNodeMapper(),
+                null, new DeviceTemplateMapper(), null, userRepository, editJournal);
+        var node = boardNode("car_1", "Car", "My car");
+        node.setState("away");
+        if (!variant.equals("omitted")) node.setVariables(List.of(new VariableStateDto("location",
+                variant.equals("same") ? "away" : "garage", "untrusted")));
+        var batch = new BoardBatchDto(List.of(node), List.of(), List.of(), List.of());
+        batch.setTemplateSnapshots(List.of(new DeviceTemplateMapper().toDto(stored)));
+        confirmedBatch(serviceWithTemplates, batch);
+        if (variant.equals("conflict")) {
+            var error = assertThrows(ValidationException.class, () -> serviceWithTemplates.saveBoardBatch(1L, batch));
+            assertTrue(error.getErrors().containsKey("nodes[0].variables[0].value"));
+            assertEquals("garage", node.getVariables().get(0).getValue());
+            verify(nodeRepo, never()).saveAll(any());
+            verify(editJournal, never()).clear(anyLong());
+        } else {
+            var saved = assertDoesNotThrow(() -> serviceWithTemplates.saveBoardBatch(1L, batch));
+            if (!variant.equals("omitted")) assertEquals(variant.equals("same") ? "away" : "garage",
+                    saved.getNodes().get(0).getVariables().get(0).getValue());
+        }
+    }
+
     @Test
     void addNodes_canonicalizesRuntimeValuesBeforePersistence() {
         DeviceNodeMapper realMapper = new DeviceNodeMapper();
@@ -1776,6 +1861,7 @@ class BoardStorageServiceImplBatchTest {
         condition.setValue("present");
         SpecificationDto spec = new SpecificationDto();
         spec.setId("safety-1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("7");
         spec.setAConditions(List.of(condition));
         spec.setIfConditions(List.of());
@@ -1951,6 +2037,7 @@ class BoardStorageServiceImplBatchTest {
         condition.setValue("TRUE");
         SpecificationDto spec = new SpecificationDto();
         spec.setId("safety-1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("7");
         spec.setAConditions(List.of(condition));
         spec.setIfConditions(List.of());
@@ -2008,6 +2095,35 @@ class BoardStorageServiceImplBatchTest {
         verify(specRepo, never()).deleteAll(any());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"name", "manifest", "both"})
+    void saveBoardBatch_reusesCanonicalTemplateAfterImportingNameWhitespace(String paddedField) {
+        var serviceWithTemplates = new BoardStorageServiceImpl(
+                nodeRepo, environmentRepo, specRepo, ruleRepo, null, deviceTemplateRepo, null,
+                transactionTemplate, null, new SpecificationMapper(), new RuleMapper(), new DeviceNodeMapper(),
+                null, new DeviceTemplateMapper(), null, userRepository, editJournal);
+        var manifest = DeviceTemplateDto.DeviceManifest.builder().name("Sensor").initState("")
+                .modes(List.of()).workingStates(List.of()).internalVariables(List.of()).apis(List.of()).build();
+        var stored = DeviceTemplatePo.builder().userId(1L).name("Sensor")
+                .manifestJson(JsonUtils.toJson(manifest)).build();
+        when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(stored));
+        when(nodeRepo.saveAll(any())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        for (int attempt = 0; attempt < 2; attempt++) {
+            var snapshot = new DeviceTemplateMapper().toDto(stored);
+            if (!paddedField.equals("manifest")) snapshot.setName(" Sensor ");
+            if (!paddedField.equals("name")) snapshot.getManifest().setName(" Sensor ");
+            var batch = new BoardBatchDto(List.of(boardNode("sensor", "sensor", "Sensor device")),
+                    List.of(), List.of(), List.of());
+            batch.setTemplateSnapshots(List.of(snapshot));
+            var result = assertDoesNotThrow(() -> serviceWithTemplates.saveBoardBatch(
+                    1L, confirmedBatch(serviceWithTemplates, batch)));
+            assertTrue(result.getCreatedTemplates().isEmpty());
+            assertEquals("Sensor", result.getNodes().get(0).getTemplateName());
+        }
+        verify(deviceTemplateRepo, never()).saveAndFlush(any());
+    }
+
     @Test
     void saveBoardBatch_sceneSnapshotNameMismatchRejectsBeforeBoardMutation() {
         BoardStorageServiceImpl serviceWithTemplates = new BoardStorageServiceImpl(
@@ -2037,7 +2153,8 @@ class BoardStorageServiceImplBatchTest {
 
         assertTrue(error.getMessage().contains("must exactly match manifest.Name"));
         assertTrue(error.getMessage().contains("cannot rename"));
-        verifyNoInteractions(deviceTemplateRepo);
+        verify(deviceTemplateRepo, never()).save(any());
+        verify(deviceTemplateRepo, never()).saveAndFlush(any());
         verify(nodeRepo, never()).deleteAll(any());
         verify(ruleRepo, never()).saveAll(any());
         verify(specRepo, never()).deleteAll(any());
@@ -2313,6 +2430,7 @@ class BoardStorageServiceImplBatchTest {
     @Test
     void addSpec_whenConditionsExceedTheCap_reportsUnderAKeyTheShapeCheckDoesNotOwn() {
         SpecificationDto spec = new SpecificationDto();
+        spec.setName("Safety requirement");
         spec.setTemplateId("4");
         List<SpecConditionDto> conditions = new ArrayList<>();
         for (int i = 0; i < RequestLimits.MAX_SPEC_CONDITIONS + 1; i++) {
@@ -2577,6 +2695,7 @@ class BoardStorageServiceImplBatchTest {
 
         SpecificationDto existing = new SpecificationDto();
         existing.setId("spec-existing");
+        existing.setName("Safety requirement");
         existing.setTemplateId("1");
         existing.setTemplateLabel("Always");
         existing.setAConditions(List.of(firstCondition, secondCondition));
@@ -2608,6 +2727,7 @@ class BoardStorageServiceImplBatchTest {
 
         SpecificationDto duplicate = new SpecificationDto();
         duplicate.setId("spec-new");
+        duplicate.setName("Safety requirement");
         duplicate.setTemplateId("1");
         duplicate.setTemplateLabel("Different display label");
         duplicate.setAConditions(List.of(duplicateSecond, duplicateFirst));
@@ -2954,6 +3074,7 @@ class BoardStorageServiceImplBatchTest {
 
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setTemplateLabel("Always");
         SpecConditionDto condition = new SpecConditionDto();

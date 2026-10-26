@@ -546,7 +546,7 @@ export const formatTraceSpec = (
     const formatToken: TraceTokenFormatter = (deviceId, value) => translate
       ? formatModelTokenBySource(sources.get(normalizeNuSmvDeviceName(deviceId || '')) || 'UNKNOWN', value, translate)
       : String(value ?? '')
-    const label = spec.templateLabel || (translate ? translate('app.unknownSpecification') : 'Specification')
+    const label = spec.name
     const aPart = joinConditions(spec.aConditions, translate, formatToken)
     const ifPart = joinConditions(spec.ifConditions, translate, formatToken)
     const thenPart = joinConditions(spec.thenConditions, translate, formatToken)

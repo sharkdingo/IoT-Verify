@@ -89,6 +89,8 @@ public class ManageSpecTool extends AbstractAiTool {
                 "enum", List.of("add", "update", "delete"),
                 "description", "Add a new specification, update one in place while preserving its ID and order, or delete one."
         ));
+        props.put("name", Map.of("type", "string", "minLength", 1, "maxLength", 100,
+                "description", "Required for add/update. A concise user-facing requirement name; preserve it unless the user requests a rename."));
         props.put("templateId", Map.of(
                 "type", "string",
                 "description", "Required for add/update. Template ID 1,2,3,7 use aConditions only; 4,5,6 use ifConditions and thenConditions only."
@@ -140,7 +142,7 @@ public class ManageSpecTool extends AbstractAiTool {
                 return e.getErrorResponse();
             }
             requireOnlyFields(args, "arguments", Set.of(
-                    "action", "templateId", "aConditions", "ifConditions", "thenConditions",
+                    "action", "name", "templateId", "aConditions", "ifConditions", "thenConditions",
                     "specId", "readRef", "confirmed", "impactToken"));
             String action = requiredTextField(args, "action", "arguments").toLowerCase(Locale.ROOT);
 
@@ -171,8 +173,8 @@ public class ManageSpecTool extends AbstractAiTool {
 
     private String executeWrite(Long userId, JsonNode args, boolean update) throws Exception {
         requireOnlyFields(args, "arguments", update
-                ? Set.of("action", "specId", "readRef", "templateId", "aConditions", "ifConditions", "thenConditions")
-                : Set.of("action", "templateId", "aConditions", "ifConditions", "thenConditions"));
+                ? Set.of("action", "specId", "readRef", "name", "templateId", "aConditions", "ifConditions", "thenConditions")
+                : Set.of("action", "name", "templateId", "aConditions", "ifConditions", "thenConditions"));
         SpecificationDto before = null;
         DeviceLookup deviceLookup = null;
         if (update) {
@@ -190,6 +192,8 @@ public class ManageSpecTool extends AbstractAiTool {
                         "This specification changed after it was read. Read list_specs again before updating it.");
             }
         }
+        String name = requiredTextField(args, "name", "arguments");
+        if (name.length() > 100) throw new IllegalArgumentException("Specification name must be at most 100 characters.");
         String templateId = requiredTextField(args, "templateId", "arguments");
         if (!TEMPLATE_IDS.contains(templateId)) {
             return errorJson("Unsupported templateId '" + templateId + "'. Allowed: 1,2,3,4,5,6,7.",
@@ -224,6 +228,7 @@ public class ManageSpecTool extends AbstractAiTool {
 
         SpecificationDto spec = new SpecificationDto();
         spec.setId(update ? before.getId() : UUID.randomUUID().toString());
+        spec.setName(name);
         spec.setTemplateId(templateId);
         spec.setAConditions(aConditions);
         spec.setIfConditions(ifConditions);
@@ -259,8 +264,9 @@ public class ManageSpecTool extends AbstractAiTool {
             return errorJson("Specification not found: " + specId, "NOT_FOUND", 404);
         }
 
+        SpecificationFormulaPreview.Context presentationContext = currentPresentationContext(userId);
         Map<String, Object> presentedSpecification = SpecificationToolPresenter.present(userId,
-                target, currentPresentationContext(userId));
+                target, presentationContext);
         Map<String, Object> bindingSnapshot = Map.of(
                 "specification", presentedSpecification);
         boolean confirmed = booleanArg(args, "confirmed", false);
@@ -321,8 +327,7 @@ public class ManageSpecTool extends AbstractAiTool {
         response.put("message", "Specification deleted successfully.");
         response.put("operation", "deleted");
         response.put("deletedSpecification", SpecificationToolPresenter.present(userId,
-                mutation.getAffectedItem(),
-                currentPresentationContext(userId)));
+                mutation.getAffectedItem(), presentationContext));
         response.put("totalSpecs", mutation.getCurrentCount());
         return successJson(response, "Specification deleted successfully.");
     }
@@ -372,7 +377,7 @@ public class ManageSpecTool extends AbstractAiTool {
             String propertyScope = nullableTextField(cn, "propertyScope", conditionPath);
             if ("trust".equals(normalizedTargetType) || "privacy".equals(normalizedTargetType)) {
                 propertyScope = propertyScope == null ? null : propertyScope.toLowerCase(Locale.ROOT);
-                if (!Set.of("state", "variable").contains(propertyScope)) {
+                if (propertyScope == null || !Set.of("state", "variable").contains(propertyScope)) {
                     throw new IllegalArgumentException(conditionLabel
                             + " requires propertyScope='state' or 'variable' for trust/privacy.");
                 }

@@ -1,3 +1,4 @@
+import { expandCreation } from './support/controlCenter'
 import { type APIRequestContext, type APIResponse, type Page } from '@playwright/test'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -126,12 +127,14 @@ const openControlSection = async (page: Page, section: 'templates' | 'devices' |
     }
     try {
       await expect(panel).toBeVisible({ timeout: 3_000 })
+      await expandCreation(page, section)
       return
     } catch {
       await page.waitForTimeout(250)
     }
   }
   await expect(panel).toBeVisible({ timeout: 10_000 })
+  await expandCreation(page, section)
 }
 
 const waitForTemplateOption = async (page: Page, templateName: string) => {
@@ -464,6 +467,7 @@ const fillSpecCondition = async (
 }
 
 const selectSpecTemplate = async (page: Page, templateId: string) => {
+  await page.getByTestId('spec-name').fill('Safety requirement');
   const select = page.getByTestId('spec-template-select')
   await expect(select).toBeEnabled({ timeout: 10_000 })
   await select.selectOption(templateId)

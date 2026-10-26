@@ -89,7 +89,7 @@ const i18n = createI18n({
   }
 })
 
-const specification: Specification = {
+const specification: Specification = { name: 'Safety requirement',
   id: 'spec-1',
   templateId: '1',
   templateLabel: 'Door remains closed',

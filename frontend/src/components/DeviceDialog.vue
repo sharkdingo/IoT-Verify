@@ -12,7 +12,6 @@ import { buildSpecFormulaPreview } from '@/utils/spec'
 import { describeSpecification } from '@/utils/modelPresentation'
 import { verdictVariableSourceKeys } from '@/views/board/verdictVariableSource'
 import { resolveImpactEnvironmentDefinition } from '@/utils/device'
-import { specTemplateDetails } from '@/assets/config/specTemplates'
 import { formatBuiltInModelToken } from '@/utils/modelTokenDisplay'
 import { resolveEffectiveNodeState } from '@/utils/canvas/nodeState'
 import { confirmDestructive } from '@/utils/feedback'
@@ -968,11 +967,6 @@ const deviceSpecs = computed(() => {
       return false
     })
     .map(spec => {
-      const template = specTemplateDetails.find(candidate => candidate.id === spec.templateId)
-      const specType = template?.labelKey
-        ? t(template.labelKey)
-        : spec.templateLabel || template?.label || t('app.unknown')
-
       const preview = buildSpecFormulaPreview(spec, { nodes: props.nodes || [] })
 
       return {
@@ -981,7 +975,7 @@ const deviceSpecs = computed(() => {
         // the dot, and renders an unrecorded one as a literal `<unresolved>`.
         variableSourceLabels: verdictVariableSourceKeys(spec)
           .map(key => ({ key, label: t(key), unresolved: key === 'app.specVariableSourceUnresolvedShort' })),
-        type: specType,
+        type: spec.name,
         description: describeSpecification(spec, presentationContext),
         formula: preview.expression,
         formulaKind: preview.kind || t('app.modelFormulaKind')

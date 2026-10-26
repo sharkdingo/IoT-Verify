@@ -116,8 +116,8 @@ final class SmvGenerationWarningCollector {
     }
 
     private String specificationLabel(SpecificationDto spec) {
-        if (spec != null && spec.getTemplateLabel() != null && !spec.getTemplateLabel().isBlank()) {
-            return spec.getTemplateLabel().trim();
+        if (spec != null && spec.getName() != null && !spec.getName().isBlank()) {
+            return spec.getName().trim();
         }
         return "Formal specification";
     }

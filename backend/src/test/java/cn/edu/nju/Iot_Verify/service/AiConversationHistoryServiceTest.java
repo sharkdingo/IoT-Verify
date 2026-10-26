@@ -34,6 +34,39 @@ class AiConversationHistoryServiceTest {
     }
 
     @Test
+    void originalRetrievalPreservesQuotesAndPaginatesAtTheCharacterBudget() {
+        ChatMessagePo old = original(2L, "最初要求：不要删除门锁。");
+        ChatMessagePo recent = original(6L, "新要求：只改照明。".repeat(1000));
+        when(messages.findUserOriginals("s1", null, null, "要求", PageRequest.of(0, 6)))
+                .thenReturn(List.of(recent, original(4L, "中间要求".repeat(1000)), old));
+        var page = service.readOriginals(7L, "s1", null, null, "要求", 5);
+        assertEquals(recent.getContent(), page.messages().get(0).text());
+        assertEquals(1, page.messages().size());
+        assertTrue(page.hasMore());
+        assertEquals(6L, page.nextBeforeMessageId());
+        when(messages.findUserOriginals("s1", 6L, null, "要求", PageRequest.of(0, 6)))
+                .thenReturn(List.of(old));
+        assertEquals("最初要求：不要删除门锁。", service.readOriginals(7L, "s1", 6L, null, "要求", 5)
+                .messages().get(0).text());
+    }
+
+    @Test
+    void originalRetrievalCannotReadAnotherAccountsSession() {
+        assertThrows(ResourceNotFoundException.class,
+                () -> service.readOriginals(8L, "s1", null, 2L, null, 1));
+        verifyNoInteractions(messages);
+    }
+
+    private ChatMessagePo original(long id, String content) {
+        ChatMessagePo row = new ChatMessagePo();
+        row.setId(id);
+        row.setRole("user");
+        row.setSessionId("s1");
+        row.setContent(content);
+        return row;
+    }
+
+    @Test
     void readsOlderCanonicalOperationsWithoutMistakingDraftOrPreviewForAppliedScene() {
         ChatMessagePo draft = operation(2, "recommend_scenario", """
                 {"draftStored":true,"scenario":{"name":"Temperature control"}}

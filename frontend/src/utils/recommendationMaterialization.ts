@@ -165,6 +165,7 @@ export const materializeSpecificationRecommendationConditions = (
 export const validateSpecificationRecommendationCandidate = (value: unknown, index: number): void => {
   const prefix = `recommendations[${index + 1}]`
   const candidate = record(value, prefix) as unknown as SpecificationRecommendation
+  if (text(candidate.name, `${prefix}.name`).length > 100) throw new RecommendationCandidateError(`${prefix}.name`)
   text(candidate.rationale, `${prefix}.rationale`)
   if (typeof candidate.templateId !== 'string' || !/^[1-7]$/.test(candidate.templateId)) {
     throw new RecommendationCandidateError(`${prefix}.templateId`)

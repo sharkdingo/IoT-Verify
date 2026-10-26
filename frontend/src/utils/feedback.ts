@@ -142,6 +142,7 @@ const BASE_BOX = { appendTo: 'body', lockScroll: false } as const
  * outcome, never an exception the caller has to catch.
  */
 export const confirmDestructive = async (options: ConfirmOptions): Promise<boolean> => {
+  dismissCompletionNotifications()
   // Counts as an open modal for the duration. A MessageBox is modal to the user but takes no scroll
   // lock, so without this a `window`-level accelerator (the board's Ctrl+Z) still reached the surface
   // behind the confirmation and mutated it.

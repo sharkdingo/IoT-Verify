@@ -90,7 +90,8 @@ const validVerification = () => ({
   specResults: [{
     specId: 'spec_1',
     templateId: '1',
-    specificationLabel: 'Always',
+    specificationLabel: 'Safety requirement',
+    specificationSnapshot: specificationSnapshot(),
     formulaPreview: 'CTL AG("Hall sensor".state = "active")',
     formulaKind: 'CTL',
     antecedentReachability: 'NOT_APPLICABLE',
@@ -104,7 +105,7 @@ const validVerification = () => ({
   nusmvOutput: '-- specification is true'
 })
 
-const specificationSnapshot = () => ({
+const specificationSnapshot = () => ({ name: 'Safety requirement',
   id: 'spec_1', templateId: '1',
   aConditions: [{ id: 'reading', side: 'a', deviceId: 'sensor', deviceLabel: 'Old label',
     targetType: 'variable', variableSource: 'reported', key: 'temperature', relation: '>', value: '25' }],
@@ -121,7 +122,11 @@ describe('frozen specification interpretation contract', () => {
 
   it.each(['4', '5', '6'])('requires explicit trigger evidence for response template %s', templateId => {
     const result = validVerification()
-    Object.assign(result.specResults[0], { templateId, antecedentReachability: 'NOT_APPLICABLE' })
+    const frozen = specificationSnapshot()
+    Object.assign(result.specResults[0], { templateId, antecedentReachability: 'NOT_APPLICABLE',
+      specificationSnapshot: { ...frozen, templateId, aConditions: [],
+        ifConditions: frozen.aConditions.map(condition => ({ ...condition, side: 'if' })),
+        thenConditions: frozen.aConditions.map(condition => ({ ...condition, side: 'then' })) } })
     expect(() => validateVerificationResult(result)).toThrow(/antecedentReachability/)
     for (const antecedentReachability of ['REACHABLE', 'UNREACHABLE', 'INCONCLUSIVE']) {
       Object.assign(result.specResults[0], { antecedentReachability })
@@ -133,15 +138,21 @@ describe('frozen specification interpretation contract', () => {
       }
     }
   })
-  it('retains recorded conditions and accepts explicitly absent evidence in older records', () => {
+  it('requires frozen requirements instead of accepting older incomplete records', () => {
     const result = validVerification()
-    expect(validateVerificationResult(result).specResults[0].specificationSnapshot).toBeUndefined()
+    for (const missing of [undefined, null]) {
+      expect(() => validateVerificationResult({ ...result, specResults: [
+        { ...result.specResults[0], specificationSnapshot: missing }
+      ] })).toThrow(/specificationSnapshot/)
+    }
     const snapshot = specificationSnapshot()
     const withSnapshot = { ...result, specResults: [{ ...result.specResults[0], specificationSnapshot: snapshot }] }
     expect(validateVerificationResult(withSnapshot).specResults[0].specificationSnapshot).toBe(snapshot)
   })
 
   it.each([
+    ['name', (snapshot: any) => { delete snapshot.name }],
+    ['mismatched name', (snapshot: any) => { snapshot.name = 'Different requirement' }],
     ['identity', (snapshot: any) => { snapshot.id = 'different_spec' }],
     ['template', (snapshot: any) => { snapshot.templateId = '6' }],
     ['condition collection', (snapshot: any) => { snapshot.aConditions = null }],
@@ -170,6 +181,7 @@ const unpersistedViolation = () => ({
   outcome: 'VIOLATED',
   traces: [{
     violatedSpecId: 'spec_1',
+    violatedSpec: specificationSnapshot(),
     checkedExpression: 'CTLSPEC AG motion',
     modelComplete: true,
     disabledRuleCount: 0,
@@ -697,7 +709,7 @@ describe('verification and simulation response contracts', () => {
       id: 17,
       verificationTaskId: summary.id,
       violatedSpecId: 'spec-1',
-      violatedSpec: {
+      violatedSpec: { name: 'Safety requirement',
         id: 'spec-1',
         templateId: '1',
         aConditions: [],

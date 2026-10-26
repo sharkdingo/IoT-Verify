@@ -65,14 +65,16 @@ const condition = (deviceId, targetType, key, relation, value, propertyScope, va
   }
 }
 
-const aSpec = (templateId, aConditions) => ({
+const aSpec = (name, templateId, aConditions) => ({
+  name,
   templateId,
   aConditions,
   ifConditions: [],
   thenConditions: []
 })
 
-const implicationSpec = (templateId, ifConditions, thenConditions) => ({
+const implicationSpec = (name, templateId, ifConditions, thenConditions) => ({
+  name,
   templateId,
   aConditions: [],
   ifConditions,
@@ -133,12 +135,12 @@ const scenes = [
     file: 'household-entry-scene.json',
     templateNames: ['Door', 'Light'],
     extraTemplates: [occupancySensorTemplate, {
-      name: 'Entrance Request Sensor',
+      name: 'Door Access Request',
       manifest: {
-        Name: 'Entrance Request Sensor',
-        Description: 'External request classification supplied by a trusted authentication system; identity verification is outside this model',
+        Name: 'Door Access Request',
+        Description: 'Door access requests supplied by an external authentication system: no request, visitor, or authenticated owner. This input does not perform identity verification.',
         InternalVariables: [{
-          Name: 'entryRequest', Description: 'Current classified entry request',
+          Name: 'entryRequest', Description: 'Door access request type supplied by the external authentication system',
           IsInside: false, Reads: true, FalsifiableWhenCompromised: false,
           Trust: 'trusted', Privacy: 'private', Values: ['none', 'visitor', 'authorized_owner']
         }],
@@ -147,7 +149,7 @@ const scenes = [
     }],
     devices: [
       device('occupancy_1', 'Occupancy Sensor', 'Resident Presence', 60, 50),
-      device('entry_1', 'Entrance Request Sensor', 'Entry Request', 60, 270),
+      device('entry_1', 'Door Access Request', 'Door Access Request', 60, 270),
       device('light_1', 'Light', 'Porch Light', 380, 50,
         { state: 'off', currentStateTrust: 'trusted', currentStatePrivacy: 'public' }),
       device('door_1', 'Door', 'Front Door', 380, 270,
@@ -170,16 +172,16 @@ const scenes = [
         toId: 'door_1', toApi: 'unlock' }
     ],
     specs: [
-      implicationSpec('4', [
+      implicationSpec("Keep the door locked for visitors while away", '4', [
         condition('occupancy_1', 'variable', 'occupancy', '=', 'absent', null, 'environment'),
         condition('entry_1', 'variable', 'entryRequest', '=', 'visitor', null, 'environment'),
         condition('door_1', 'mode', 'LockState', '=', 'locked')
       ], [condition('door_1', 'mode', 'LockState', '=', 'locked')]),
-      implicationSpec('4', [
+      implicationSpec("Light the entrance for visitors while away", '4', [
         condition('occupancy_1', 'variable', 'occupancy', '=', 'absent', null, 'environment'),
         condition('entry_1', 'variable', 'entryRequest', '=', 'visitor', null, 'environment')
       ], [condition('light_1', 'mode', 'SwitchState', '=', 'on')]),
-      implicationSpec('4', [condition('entry_1', 'variable', 'entryRequest', '=', 'authorized_owner', null, 'environment')],
+      implicationSpec("Unlock for an authorized owner", '4', [condition('entry_1', 'variable', 'entryRequest', '=', 'authorized_owner', null, 'environment')],
         [condition('door_1', 'mode', 'LockState', '=', 'unlocked')])
     ]
   },
@@ -223,15 +225,15 @@ const scenes = [
       }
     ],
     specs: [
-      implicationSpec('4',
+      implicationSpec("Sound the alarm when smoke is detected", '4',
         [condition('smoke_1', 'variable', 'smoke', '=', 'detected', null, 'environment')],
         [condition('alarm_1', 'mode', 'AlertState', '=', 'siren')]),
-      implicationSpec('4',
+      implicationSpec("Light the evacuation route when the siren sounds", '4',
         [condition('alarm_1', 'api', 'siren', '=', 'TRUE')],
         [condition('light_1', 'mode', 'SwitchState', '=', 'on')]),
-      aSpec('3', [condition('door_1', 'state', 'state', '=', 'unlocked')]),
-      aSpec('7', [condition('alarm_1', 'mode', 'AlertState', '=', 'siren')]),
-      aSpec('1', [condition('alarm_1', 'privacy', 'AlertState', '=', 'public', 'state')])
+      aSpec("Keep the door locked", '3', [condition('door_1', 'state', 'state', '=', 'unlocked')]),
+      aSpec("Require trusted alarm control", '7', [condition('alarm_1', 'mode', 'AlertState', '=', 'siren')]),
+      aSpec("Keep alarm status public", '1', [condition('alarm_1', 'privacy', 'AlertState', '=', 'public', 'state')])
     ]
   },
   {
@@ -262,15 +264,15 @@ const scenes = [
       }
     ],
     specs: [
-      implicationSpec('4',
+      implicationSpec("Cool the home when it is hot", '4',
         [condition('temperature_1', 'variable', 'temperature', '>=', '28', null, 'environment')],
         [condition('ac_1', 'mode', 'HvacMode', '=', 'cool')]),
-      aSpec('3', [
+      aSpec("Never heat an already hot home", '3', [
         condition('temperature_1', 'variable', 'temperature', '>=', '28', null, 'environment'),
         condition('ac_1', 'mode', 'HvacMode', '=', 'heat')
       ]),
-      aSpec('1', [condition('ac_1', 'privacy', 'HvacMode', '=', 'private', 'state')]),
-      aSpec('7', [condition('ac_1', 'mode', 'HvacMode', '=', 'heat')])
+      aSpec("Keep climate settings private", '1', [condition('ac_1', 'privacy', 'HvacMode', '=', 'private', 'state')]),
+      aSpec("Require trusted heating control", '7', [condition('ac_1', 'mode', 'HvacMode', '=', 'heat')])
     ]
   },
   {
@@ -319,24 +321,24 @@ const scenes = [
       }
     ],
     specs: [
-      implicationSpec('4',
+      implicationSpec("Enable the alarm when away", '4',
         [condition('occupancy_1', 'variable', 'occupancy', '=', 'absent', null, 'environment')],
         [condition('alarm_1', 'mode', 'AlertState', '=', 'strobe')]),
-      implicationSpec('4',
+      implicationSpec("Light the room when motion is detected", '4',
         [condition('motion_1', 'variable', 'motion', '=', 'active', null, 'environment')],
         [condition('light_1', 'mode', 'SwitchState', '=', 'on')]),
-      aSpec('3', [
+      aSpec("Never leave the door unlocked while away", '3', [
         condition('occupancy_1', 'variable', 'occupancy', '=', 'absent', null, 'environment'),
         condition('door_1', 'mode', 'LockState', '=', 'unlocked')
       ]),
-      implicationSpec('5',
+      implicationSpec("Relock the door after leaving", '5',
         [
           condition('occupancy_1', 'variable', 'occupancy', '=', 'absent', null, 'environment'),
           condition('door_1', 'mode', 'LockState', '=', 'unlocked')
         ],
         [condition('door_1', 'mode', 'LockState', '=', 'locked')]),
-      aSpec('7', [condition('door_1', 'mode', 'LockState', '=', 'unlocked')]),
-      aSpec('1', [condition('door_1', 'privacy', 'LockState', '=', 'private', 'state')])
+      aSpec("Require trusted door control", '7', [condition('door_1', 'mode', 'LockState', '=', 'unlocked')]),
+      aSpec("Keep door status private", '1', [condition('door_1', 'privacy', 'LockState', '=', 'private', 'state')])
     ]
   },
   {
@@ -384,18 +386,18 @@ const scenes = [
       }
     ],
     specs: [
-      implicationSpec('4',
+      implicationSpec("Unlock for an authorized card", '4',
         [condition('rfid_1', 'variable', 'RFID', '=', 'authorized', null, 'reported')],
         [condition('door_1', 'mode', 'LockState', '=', 'unlocked')]),
-      implicationSpec('4',
+      implicationSpec("Sound the alarm for an unauthorized card", '4',
         [condition('rfid_1', 'variable', 'RFID', '=', 'not authorized', null, 'reported')],
         [condition('alarm_1', 'mode', 'AlertState', '=', 'siren')]),
-      aSpec('3', [
+      aSpec("Never unlock for an unauthorized card", '3', [
         condition('rfid_1', 'variable', 'RFID', '=', 'not authorized', null, 'reported'),
         condition('door_1', 'mode', 'LockState', '=', 'unlocked')
       ]),
-      aSpec('7', [condition('door_1', 'mode', 'LockState', '=', 'unlocked')]),
-      aSpec('1', [condition('rfid_1', 'privacy', 'RFID', '=', 'private', 'variable')])
+      aSpec("Require trusted door control", '7', [condition('door_1', 'mode', 'LockState', '=', 'unlocked')]),
+      aSpec("Keep card data private", '1', [condition('rfid_1', 'privacy', 'RFID', '=', 'private', 'variable')])
     ]
   },
 
@@ -725,46 +727,46 @@ const scenes = [
     specs: [
       // Bed exit is a trigger: the lamp must respond in the next step. Requiring an
       // already-lit lamp in the trigger state rejects the initial scene before a rule runs.
-      implicationSpec('4', [
+      implicationSpec("Light the room after a night-time bed exit", '4', [
         condition('bed_sensor', 'variable', 'bedOccupancy', '=', 'empty', null, 'environment'),
         condition('clock', 'variable', 'time', 'in', '22,23,0,1,2,3,4,5,6', null, 'environment')
       ], [condition('smart_lamp', 'mode', 'SwitchState', '=', 'on')]),
       // s2 | template 5 | expected to hold. Emergency vitals must eventually sound the alarm.
-      implicationSpec('5',
+      implicationSpec("Eventually sound the alarm for a medical emergency", '5',
         [condition('vitals', 'mode', 'MonitorMode', '=', 'emergency')],
         [condition('alarm_system', 'mode', 'AlertState', '=', 'siren')]
       ),
       // s3 | template 5 | expected to hold, and it is the chain-depth property: the escalation
       // has to reach the door through the alarm and the hub, so it fails if any hop is inert.
-      implicationSpec('5',
+      implicationSpec("Eventually unlock for emergency access", '5',
         [condition('vitals', 'mode', 'MonitorMode', '=', 'emergency')],
         [condition('door_lock', 'mode', 'LockState', '=', 'unlocked')]
       ),
       // s4 | template 4 | expected to hold. The hub raising an alert must unlock the door in the
       // very next state, which pins hop 3 as immediate rather than merely eventual.
-      implicationSpec('4',
+      implicationSpec("Unlock immediately when the care hub alerts", '4',
         [condition('care_hub', 'mode', 'State', '=', 'sendingAlertMessage')],
         [condition('door_lock', 'mode', 'LockState', '=', 'unlocked')]
       ),
       // Opening from trusted CO2 readings is safe at baseline. A compromised monitor can
       // falsify that reading and taint the window's control source.
-      aSpec('7', [condition('window_1', 'mode', 'WindowState', '=', 'open')]),
+      aSpec("Require trusted window control", '7', [condition('window_1', 'mode', 'WindowState', '=', 'open')]),
       // Stale air opens the ventilation window in the next state.
-      implicationSpec('4',
+      implicationSpec("Ventilate when carbon dioxide is high", '4',
         [condition('air_quality', 'variable', 'carbonDioxide', '>', '60', null, 'environment')],
         [condition('window_1', 'mode', 'WindowState', '=', 'open')]
       ),
       // Ventilation must actually lower CO2, including under the declared natural disturbance.
       // The bundled purifier's CO2 rate is -1, which the +1 disturbance can cancel;
       // the separate ventilation window contributes -2 while open.
-      implicationSpec('5',
+      implicationSpec("Eventually restore safe carbon dioxide levels", '5',
         [condition('air_quality', 'variable', 'carbonDioxide', '>', '60', null, 'environment')],
         [condition('air_quality', 'variable', 'carbonDioxide', '<=', '60', null, 'environment')]
       ),
       // s8 | template 5 | expected to hold. Once the hub has sent a photo it must return to idle
       // at least once; this pins the hub's auto-return, which is what makes it reusable as a chain
       // hop rather than a one-shot. Framed as eventual not persistent for the same reason as s7.
-      implicationSpec('5',
+      implicationSpec("Return the care hub to idle after sending a photo", '5',
         [condition('care_hub', 'mode', 'State', '=', 'sendingPhoto')],
         [condition('care_hub', 'mode', 'State', '=', 'idle')]
       ),
@@ -773,7 +775,7 @@ const scenes = [
       // reporting a rate outside its own alert band while still claiming `normal` is a sensor
       // lying. `environment` and `reported` diverge exactly when the device is compromised, so
       // this is unfalsifiable without an attacker and is the scene's sharpest security property.
-      aSpec('3', [
+      aSpec("Never report a high heart rate as normal", '3', [
         condition('vitals', 'variable', 'heartRate', '>', '130', null, 'reported'),
         condition('vitals', 'mode', 'MonitorMode', '=', 'normal')
       ]),
@@ -781,12 +783,12 @@ const scenes = [
       // control path" is `AG !(...)`, template 3 — the shipped scene asked this with template 1,
       // which asserts the door is *always* untrusted and failed in the initial state for a reason
       // unrelated to any automation.
-      aSpec('3', [condition('door_lock', 'trust', 'LockState', '=', 'untrusted', 'state')]),
+      aSpec("Never accept untrusted door control", '3', [condition('door_lock', 'trust', 'LockState', '=', 'untrusted', 'state')]),
       // The hub's state classification must not downgrade its care messages to public.
-      aSpec('3', [condition('care_hub', 'privacy', 'State', '=', 'public', 'state')]),
+      aSpec("Keep care messages private", '3', [condition('care_hub', 'privacy', 'State', '=', 'public', 'state')]),
       // Intentional privacy violation: occupancy can change while the lamp-to-camera
       // command is in flight. A guard that was true earlier is not a current privacy check.
-      aSpec('3', [
+      aSpec("Never photograph an occupied bed at night", '3', [
         condition('camera_1', 'state', 'state', '=', 'taking photo'),
         condition('bed_sensor', 'variable', 'bedOccupancy', '=', 'occupied', null, 'environment'),
         condition('clock', 'variable', 'time', 'in', '22,23,0,1,2,3,4,5,6', null, 'environment')
@@ -799,11 +801,8 @@ fs.mkdirSync(outputDir, { recursive: true })
 for (const definition of scenes) {
   const scene = {
     schema: 'iot-verify.board-scene',
-    // 5 since `variableSource` became required on a variable spec condition. Must track
-    // `SCENE_FILE_VERSION` in frontend/src/views/board/portableScene.ts: the importer rejects a
-    // mismatch outright, so emitting 4 while writing the field produces a file that is valid under
-    // neither version.
-    version: 5,
+    // Version 6 requires a user-facing name for every requirement.
+    version: 6,
     templates: [
       ...definition.templateNames.map(loadTemplate),
       ...(definition.extraTemplates ?? [])
@@ -817,6 +816,16 @@ for (const definition of scenes) {
   // all four scenes on each run, so a real one-field change arrived as a 1600-line diff and the generator
   // read as drifted from its own output.
   fs.writeFileSync(path.join(outputDir, definition.file), `${JSON.stringify(scene, null, '\t')}\n`, 'utf8')
+  if (definition.file === 'household-entry-scene.json') {
+    const localized = structuredClone(scene)
+    const labels = { occupancy_1: '是否有人在家', entry_1: '开门请求', light_1: '门灯', door_1: '入户门' }
+    localized.devices.forEach(device => { device.label = labels[device.id] })
+    const ruleNames = ['离家时为访客亮灯', '灯亮就开门', '为已认证的主人开门']
+    localized.rules.forEach((rule, index) => { rule.name = ruleNames[index] })
+    const specNames = ['离家时访客不能开门', '离家时为访客亮灯', '允许已认证的主人开门']
+    localized.specs.forEach((spec, index) => { spec.name = specNames[index] })
+    fs.writeFileSync(path.join(outputDir, 'household-entry-scene-zh.json'), `${JSON.stringify(localized, null, '\t')}\n`, 'utf8')
+  }
 }
 
 console.log(`Generated ${scenes.length} default-template scenes in ${outputDir}`)

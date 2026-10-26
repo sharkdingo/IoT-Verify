@@ -44,7 +44,7 @@ public class ListSpecsTool extends AbstractAiTool {
         props.put("keyword", Map.of(
                 "type", "string",
                 "maxLength", 100,
-                "description", "Optional literal keyword to filter specifications by ID, template label, device, key, relation, or value. "
+                "description", "Optional literal keyword to filter specifications by name, ID, template label, device, key, relation, or value. "
                         + "Matching ignores case but does not translate. Leave empty to return all."
         ));
 

@@ -8,7 +8,7 @@ Responses are wrapped in the standard `Result<T>` envelope (authoritative defini
 [overview.md](overview.md)). The `data` shapes below are what appears under that
 envelope's `data` field.
 
-Verified against code on 2026-10-23. Source:
+Verified against code on 2026-10-25. Source:
 `controller/VerificationController.java`, `controller/SimulationController.java`,
 `service/InteractiveFixExecutionService.java`, and the DTOs under
 `dto/verification/`, `dto/simulation/`, `dto/device/`,
@@ -416,9 +416,9 @@ clients do not combine a percentage from one phase with a label from another pha
 | :--- | :--- | :--- |
 | `specId` | `String` | Stable technical `SpecificationDto.id` for correlation; ordinary result UI keeps it in technical details |
 | `templateId` | `String` | Submitted specification-template semantics captured for this run |
-| `specificationLabel` | `String` | User-facing template label captured for self-contained result interpretation |
+| `specificationLabel` | `String` | User-authored requirement name captured for self-contained result interpretation |
 | `formulaPreview` | `String` | Descriptive formula rebuilt from the submitted structured conditions, submitted device labels, and frozen template semantics; contains user concepts rather than generated NuSMV identifiers |
-| `specificationSnapshot` | `SpecificationSnapshotDto \| null` | Frozen structured interpretation of the emitted property. New emitted results include it; historical rows without it cannot provide a natural-language reconstruction from current Board data. |
+| `specificationSnapshot` | `SpecificationSnapshotDto` | Required frozen structured interpretation of the emitted property. A stored result without it is unavailable, not a usable verdict. |
 | `formulaKind` | `CTL \| LTL` | Language of the emitted property, derived from the actual emitted expression/template |
 | `antecedentReachability` | `NOT_APPLICABLE \| REACHABLE \| UNREACHABLE \| INCONCLUSIVE` | Independent trigger diagnostic: response templates `4`/`5`/`6` use the latter three values; other templates use `NOT_APPLICABLE` |
 | `outcome` | `SATISFIED \| VIOLATED \| INCONCLUSIVE` | Per-property conclusion. Missing or unreliable parser output is `INCONCLUSIVE`, never a synthetic violation. |
@@ -446,6 +446,7 @@ specifications, labels, or template definitions cannot alter the meaning shown i
 | Field | Type | Notes |
 | :--- | :--- | :--- |
 | `id` | `String` | Same identity as the containing result's `specId` |
+| `name` | `String` | Frozen requirement name; must equal the containing result's `specificationLabel`. Naming constraints follow [SpecificationDto](#specificationdto) |
 | `templateId` | `String` | Same template as the containing result; shapes follow [SpecificationDto](#specificationdto) |
 | `aConditions` / `ifConditions` / `thenConditions` | `SpecConditionDto[]` | Deep copies of the checked structured conditions; field semantics follow [SpecificationDto](#specificationdto) |
 | `devices` | `Map<String, Device>` | Referenced model device ids mapped to their frozen presentation metadata |
@@ -458,9 +459,9 @@ Each `Device` entry contains:
 | `modelTokenSource` | `BUNDLED \| CUSTOM \| UNKNOWN` | Recorded vocabulary provenance; only bundled tokens may be localized |
 | `modeCount` | `Integer \| null` | Number of modes in the frozen template, used to interpret composite state labels; null means metadata is unavailable |
 
-Clients reject malformed present snapshots, including mismatched identities, invalid condition
-shapes, or missing referenced devices. When the entire snapshot is absent, they show an explicit
-interpretation-unavailable notice and retain the recorded formula and technical expression.
+Clients reject missing or malformed snapshots, including missing or inconsistent names,
+mismatched identities, invalid condition shapes, or missing referenced devices. There is
+no partial interpretation path for older records without the required frozen evidence.
 
 ### `ModelGenerationIssueDto`
 
@@ -714,13 +715,22 @@ any API, not only signal APIs.
 | Field | Type | Notes |
 | :--- | :--- | :--- |
 | `id` | `String` | `@NotBlank`, ≤100 chars |
+| `name` | `String` | Required user-authored requirement name, non-blank and at most 100 characters; trimmed on save. Required in both authored and frozen snapshots; never inferred from the template |
 | `templateId` | `String` | `@NotBlank`, `@Pattern("^[1-7]$")`; `"6"` → LTLSPEC, `"1"`–`"5"`/`"7"` → CTLSPEC. Unknown ids are rejected at the DTO boundary and fail closed during generation |
-| `templateLabel` | `String` | `@NotBlank`, ≤255 chars |
+| `templateLabel` | `String` | Derived display cache, ≤255 chars; rebuilt from `templateId` on save and ignored as write authority |
 | `formula` | `String` | Optional display formula preview/cache persisted with board specs; ignored for verification semantics |
 | `devices` | `DeviceRefDto[]` | Selected-device metadata (`@NotNull`, max 50); persisted as JSON only when saved through board storage |
 | `aConditions` | `SpecConditionDto[]` | `@NotNull`; at most 50; serialized as `aConditions` |
 | `ifConditions` | `SpecConditionDto[]` | `@NotNull`; at most 50 |
 | `thenConditions` | `SpecConditionDto[]` | `@NotNull`; at most 50 |
+
+The name identifies the requirement to the user; `id` identifies the record. Names do not
+enter the checked formula or logical duplicate key. Different requirements may share a
+name; renaming an identical property does not evade duplicate detection. Result titles
+and trace summaries use the frozen name, while template labels explain the property
+pattern. Edit concurrency and undo include the authored name; model fingerprints do not.
+Stored specifications with missing, blank, or overlong names are rejected as invalid
+persisted data at the read boundary rather than returned as incomplete requirements.
 
 `SpecConditionDto`:
 

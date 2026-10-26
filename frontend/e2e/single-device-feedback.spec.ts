@@ -1,3 +1,4 @@
+import { expandCreation } from './support/controlCenter'
 import type { APIRequestContext, APIResponse, Page, Response } from '@playwright/test'
 import type { BoardSemanticSnapshot } from '../src/api/board'
 import { apiBaseURL, createAuthenticatedUser, expect, test, type AuthUser } from './support/auth'
@@ -41,6 +42,7 @@ const openCreationForm = async (page: Page, auth: AuthUser, name: string) => {
   const expand = control.getByRole('button', { name: '展开控制中心', exact: true })
   if (await expand.isVisible()) await expand.click()
   await page.getByTestId('control-tab-devices').click()
+  await expandCreation(page, 'devices')
   await page.getByTestId('device-create-mode-single').click()
   const template = page.getByTestId('single-device-template')
   await expect(template.locator('option[value="Thermostat"]')).toHaveCount(1)

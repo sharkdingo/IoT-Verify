@@ -316,6 +316,7 @@ class ForwardVerifyAcceptanceTest {
     private static SpecificationDto spec(String id) {
         SpecificationDto spec = new SpecificationDto();
         spec.setId(id);
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         return spec;
     }

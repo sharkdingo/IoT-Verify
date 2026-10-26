@@ -306,6 +306,7 @@ const toRuleDto = (rule: RuleForm): RuleDto => {
 // labels, device summaries, and the user-facing formula preview from these fields.
 const toBackendSpecificationWriteDto = (spec: Specification) => ({
     id: spec.id,
+    name: spec.name.trim(),
     templateId: spec.templateId,
     aConditions: (spec.aConditions || []).map(condition => ({
         deviceId: condition.deviceId,
@@ -514,6 +515,7 @@ export interface BoardReplacementPreview {
     ruleCount: number;
     specificationCount: number;
     editHistoryEntryCount: number;
+    templates: import('@/utils/templateUsage').TemplateUsage[];
 }
 
 export interface BoardEditHistoryClearPreview extends BoardUndoAvailability {
@@ -1712,7 +1714,7 @@ const validateBoardBatchResult = (value: unknown) => {
     }
 }
 
-const validateBoardReplacementPreview = (value: unknown): BoardReplacementPreview => {
+export const validateBoardReplacementPreview = (value: unknown): BoardReplacementPreview => {
     const context = 'Scene replacement preview'
     const result = requireResponseRecord(value, context)
     if (typeof result.impactToken !== 'string' || !result.impactToken.trim()) {
@@ -1728,6 +1730,25 @@ const validateBoardReplacementPreview = (value: unknown): BoardReplacementPrevie
         if (!Number.isSafeInteger(result[field]) || result[field] < 0) {
             throw new BoardResponseContractError(context, `${field} must be a non-negative integer`)
         }
+    }
+    if (!Array.isArray(result.templates)) {
+        throw new BoardResponseContractError(context, 'templates must be an array')
+    }
+    const names = new Set<string>()
+    let deviceCount = 0
+    for (const value of result.templates) {
+        const template = requireResponseRecord(value, context)
+        if (typeof template.name !== 'string' || !template.name.trim()
+            || template.name !== template.name.trim() || names.has(template.name.toLowerCase())
+            || typeof template.defaultTemplate !== 'boolean'
+            || !Number.isSafeInteger(template.deviceCount) || template.deviceCount < 0) {
+            throw new BoardResponseContractError(context, 'invalid template usage')
+        }
+        names.add(template.name.toLowerCase())
+        deviceCount += template.deviceCount
+    }
+    if (deviceCount !== result.deviceCount) {
+        throw new BoardResponseContractError(context, 'template usage must cover every device exactly once')
     }
     return result as BoardReplacementPreview
 }
@@ -2015,6 +2036,9 @@ const validateBoardSpecificationResult = (value: unknown, context: string): Spec
     const specification = requireResponseRecord(value, context)
     if (typeof specification.id !== 'string' || !specification.id.trim()) {
         throw new BoardResponseContractError(context, 'id is required')
+    }
+    if (typeof specification.name !== 'string' || !specification.name.trim() || specification.name.length > 100) {
+        throw new BoardResponseContractError(context, 'name must contain 1 to 100 characters')
     }
     if (typeof specification.templateId !== 'string' || !/^[1-7]$/.test(specification.templateId)) {
         throw new BoardResponseContractError(context, 'templateId is invalid')

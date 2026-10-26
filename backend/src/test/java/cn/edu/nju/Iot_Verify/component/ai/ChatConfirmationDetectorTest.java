@@ -46,9 +46,38 @@ class ChatConfirmationDetectorTest {
         assertEquals(BoardWritePermission.DENIED, detector.detectBoardWritePermission(request));
     }
 
+    @Test
+    void protectedActionConfirmationIncludesTheUsersFinalRestriction() {
+        String request = "同意之前的计划。" + "请仔细阅读这些背景。".repeat(500) + "但是不要应用，取消待确认的操作。";
+        when(promptCompletionService.completeClassification(anyString(), anyString(), anyDouble(), anyInt()))
+                .thenAnswer(invocation -> invocation.<String>getArgument(1).contains("取消待确认的操作")
+                        ? "{\"decision\":\"CANCELLED\",\"kind\":\"DESTRUCTIVE\"}"
+                        : "{\"decision\":\"CONFIRMED\",\"kind\":\"DESTRUCTIVE\"}");
+
+        assertEquals(DecisionType.CANCELLED,
+                detector.detect(request, EnumSet.of(ConfirmationKind.DESTRUCTIVE)).type());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"decision\":\"CONFIRMED\",\"kind\":\"DESTRUCTIVE\"} {}",
+            "```json\n{\"decision\":\"CONFIRMED\",\"kind\":\"DESTRUCTIVE\"}\n```\n{\"decision\":\"CANCELLED\",\"kind\":\"ALL\"}",
+            "```json\n{\"decision\":\"CONFIRMED\",\"kind\":\"DESTRUCTIVE\"}\n``` trailing text",
+            "{\"decision\":\"NONE\",\"decision\":\"CONFIRMED\",\"kind\":\"DESTRUCTIVE\"}",
+            "{\"decision\":\"CONFIRMED\",\"kind\":\"DESTRUCTIVE\",\"extra\":true}"})
+    void malformedConfirmationCannotAuthorizeAProtectedAction(String response) {
+        when(promptCompletionService.completeClassification(anyString(), anyString(), anyDouble(), anyInt()))
+                .thenReturn(response);
+        assertEquals(DecisionType.NONE,
+                detector.detect("请处理", EnumSet.of(ConfirmationKind.DESTRUCTIVE)).type());
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"", "{}", "[]", "{\"decision\":true}", "{\"decision\":\"MAYBE\"}",
-            "{\"decision\":\"ALLOWED\",\"extra\":true}", "not JSON"})
+            "{\"decision\":\"ALLOWED\",\"extra\":true}", "not JSON",
+            "{\"decision\":\"ALLOWED\"} {}", "{\"decision\":\"DENIED\",\"decision\":\"ALLOWED\"}",
+            "```json\n{\"decision\":\"ALLOWED\"}\n```\n{\"decision\":\"DENIED\"}",
+            "```json\n{\"decision\":\"ALLOWED\"}\n``` trailing text"})
     void malformedBoardWriteClassificationNeverGrantsPermission(String response) {
         when(promptCompletionService.completeClassification(anyString(), anyString(), anyDouble(), anyInt())).thenReturn(response);
         assertEquals(BoardWritePermission.UNAVAILABLE, detector.detectBoardWritePermission("请修改阈值"));
@@ -60,6 +89,13 @@ class ChatConfirmationDetectorTest {
                 .thenReturn("{\"decision\":\"ALLOWED\"}").thenThrow(new IllegalStateException("unavailable"));
         assertEquals(BoardWritePermission.ALLOWED, detector.detectBoardWritePermission("请只把阈值28改为30"));
         assertEquals(BoardWritePermission.UNAVAILABLE, detector.detectBoardWritePermission("请保存规则"));
+    }
+
+    @Test
+    void aCompleteFencedBoardWriteClassificationIsAccepted() {
+        when(promptCompletionService.completeClassification(anyString(), anyString(), anyDouble(), anyInt()))
+                .thenReturn("  ```json\n{\"decision\":\"ALLOWED\"}\n```  ");
+        assertEquals(BoardWritePermission.ALLOWED, detector.detectBoardWritePermission("请保存规则"));
     }
 
     @Test

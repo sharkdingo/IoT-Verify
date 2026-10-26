@@ -1,3 +1,4 @@
+import { expandCreation } from './support/controlCenter'
 import { readFile, writeFile } from 'node:fs/promises'
 import { apiBaseURL, createAuthenticatedUser, expect, test } from './support/auth'
 import { clickUnderTooltip } from './support/tooltips'
@@ -20,6 +21,7 @@ for (const locale of ['en', 'zh-CN']) for (const width of [1440, 375]) {
     const expand = page.getByTestId('control-center').getByRole('button', { name: locale === 'en' ? 'Expand Control Center' : '展开控制中心', exact: true })
     if (await expand.isVisible()) await clickUnderTooltip(page, expand)
     await page.getByTestId('control-tab-devices').click()
+    await expandCreation(page, 'devices')
     await page.getByTestId('device-create-mode-import').click()
     const nodes = async () => {
       const response = await request.get(`${apiBaseURL}/api/board/nodes`, { headers })

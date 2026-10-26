@@ -130,7 +130,7 @@ class RecommendationResultParserTest {
                  "validatedCount":1,"filteredCount":0,"filteredItems":[],
                  "rawCandidateCount":1,"inspectedCount":1,"truncatedCount":0,
                  "recommendations":[{"rationale":"Motion must trigger alarm",
-                 "templateId":"5","aConditions":[],
+                 "name": "Safety requirement", "templateId":"5","aConditions":[],
                  "ifConditions":[{"deviceId":"device_1","deviceLabel":"Hall sensor",
                  "targetType":"api","key":"motion","relation":"=","value":"TRUE"}],
                  "thenConditions":[{"deviceId":"device_2",
@@ -147,7 +147,7 @@ class RecommendationResultParserTest {
                 {"message":"One specification found.","count":1,"requestedCount":5,
                  "validatedCount":1,"filteredCount":0,"filteredItems":[],
                  "rawCandidateCount":1,"inspectedCount":1,"truncatedCount":0,
-                 "recommendations":[{"templateId":"3","aConditions":[],
+                 "recommendations":[{"name": "Safety requirement", "templateId":"3","aConditions":[],
                  "ifConditions":[],"thenConditions":[]}]}
                 """);
 
@@ -171,13 +171,13 @@ class RecommendationResultParserTest {
                  "verificationReady":true,"readinessIssues":[],
                  "semanticWarnings":[{"code":"NO_AUTOMATION_RULES",
                  "message":"The final draft contains no retained automation rules."}],
-                 "scene":{"schema":"iot-verify.board-scene","version":5,
+                 "scene":{"schema":"iot-verify.board-scene","version":6,
                  "templates":[{"name":"Sensor","manifest":{"Name":"Sensor"}}],
                  "devices":[{"id":"device_1","templateName":"Sensor","label":"Hall sensor",
                  "position":{"x":0,"y":0},"width":176,"height":128}],
                  "environmentVariables":[{"name":"temperature","value":"20",
                  "trust":"trusted","privacy":"public"}],"rules":[],
-                 "specs":[{"templateId":"3","aConditions":[{"deviceId":"device_1",
+                 "specs":[{"name": "Safety requirement", "templateId":"3","aConditions":[{"deviceId":"device_1",
                  "targetType":"variable","key":"temperature","relation":">","value":"30"}],
                  "ifConditions":[],"thenConditions":[]}]}}
                 """);
@@ -219,7 +219,7 @@ class RecommendationResultParserTest {
                    {"code":"NO_AUTOMATION_RULES","message":"No retained rules."},
                    {"code":"UNREFERENCED_DEVICES","message":"One device is unreferenced."}
                  ],
-                 "scene":{"schema":"iot-verify.board-scene","version":5,
+                 "scene":{"schema":"iot-verify.board-scene","version":6,
                  "templates":[],"devices":[{"id":"device_1","templateName":"Sensor",
                  "label":"Hall sensor","position":{"x":0,"y":0},"width":176,"height":128}],
                  "environmentVariables":[],"rules":[],"specs":[]}}
@@ -245,7 +245,7 @@ class RecommendationResultParserTest {
                    {"code":"NO_AUTOMATION_RULES","message":"No retained rules."},
                    {"code":"UNREFERENCED_DEVICES","message":"One device is unreferenced."}
                  ],
-                 "scene":{"schema":"iot-verify.board-scene","version":5,
+                 "scene":{"schema":"iot-verify.board-scene","version":6,
                  "templates":[],"devices":[{"id":"device_1","templateName":"Sensor",
                  "label":"Hall sensor","position":{"x":0,"y":0},"width":176,"height":128}],
                  "environmentVariables":[],"rules":[],"specs":[]}}

@@ -59,12 +59,10 @@ describe('violation evidence shortfall', () => {
 
   it('renders the notice independently of the counterexample section', () => {
     /*
-     * The zero-trace case is the one that matters most and the easiest to miss: the counterexample
-     * section is `v-if="verificationResult?.traces?.length"`, so with no parseable trace it does not
-     * render, and a notice placed inside it would disappear exactly when it is needed. The assertion is
-     * positional: the notice must sit outside that section's element.
+     * A violated requirement can have no parseable trace. Keep this run-level notice outside the
+     * conditional evidence groups so an empty evidence list cannot suppress it.
      */
-    const sectionAt = dialog.indexOf('aria-labelledby="violations-title"')
+    const sectionAt = dialog.indexOf('data-testid="spec-results-section"')
     const noticeAt = dialog.indexOf('data-testid="verification-evidence-shortfall"')
     expect(sectionAt, 'the counterexample section should exist').toBeGreaterThan(-1)
     expect(noticeAt, 'the notice should exist').toBeGreaterThan(-1)

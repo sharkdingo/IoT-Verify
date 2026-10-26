@@ -884,6 +884,7 @@ class FixServiceImplTest {
         // so the signed suggestion alone cannot detect the drift; the frozen-model check must catch it.
         cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto spec = new cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         currentSpecs = List.of(spec);
         stubUpdateRules(new java.util.ArrayList<>(List.of(boardRuleMatchingSnapshot())));

@@ -68,6 +68,7 @@ import { useModalAccessibility } from '@/composables/useModalAccessibility'
 import { REQUEST_LIMITS } from '@/constants/requestLimits'
 import { COLLAPSED_PANEL_RAIL_CSS } from '@/constants/boardLayout'
 import { formatBuiltInModelToken } from '@/utils/modelTokenDisplay'
+import { getTemplateUsage, normalizeTemplateLookupName, summarizeTemplateUsage } from '@/utils/templateUsage'
 import { dismissCompletionNotifications, notifyBlocked, notifyError, notifySuccess } from '@/utils/feedback'
 import { useRovingTablist } from '@/composables/useRovingTablist'
 import InfoTooltip from '@/components/common/InfoTooltip.vue'
@@ -114,6 +115,7 @@ interface Props {
   readOnlyMessage?: string
   editRule?: RuleForm | null
   editSpecification?: Specification | null
+  recommendationRunning?: Partial<Record<'devices' | 'rules' | 'specs', boolean>>
   runBoardMutation?: <T>(work: () => Promise<T>) => Promise<T>
 }
 
@@ -167,6 +169,7 @@ const emit = defineEmits<{
   'finish-rule-edit': []
   'finish-spec-edit': []
   'add-spec': [data: {
+    name: string,
     templateId: string,
     templateType: string,
     devices: Array<{deviceId: string, deviceLabel: string, selectedApis: string[]}>,
@@ -189,6 +192,19 @@ const emit = defineEmits<{
 }>()
 
 const deviceNodes = computed(() => props.nodes || [])
+const expandedRecommendations = reactive({ devices: false, rules: false, specs: false })
+const expandedCreation = reactive({ devices: false, rules: false, specs: false, templates: false })
+const templateRepositoryExpanded = ref(false)
+const creationElements: Partial<Record<'devices' | 'rules' | 'specs', HTMLDetailsElement | null>> = {}
+
+// Tab selection preserves disclosure choices; explicit Add/Edit requests reveal the editor.
+const openCreation = (section: 'devices' | 'rules' | 'specs') => {
+  expandedCreation[section] = true
+  void nextTick(() => {
+    if (activeSection.value === section && !isCollapsed.value) creationElements[section]?.querySelector('summary')?.focus()
+  })
+}
+defineExpose({ openCreation })
 
 // Device form data
 const deviceForm = reactive({
@@ -611,10 +627,20 @@ const splitImportedRuntime = (
 // Template search and filter
 const templateSearchQuery = ref('')
 const templateFilterType = ref('all')
+const templateScope = ref<'all' | 'scene'>('all')
+const templateUsage = computed(() => getTemplateUsage(props.deviceTemplates, props.nodes))
+const templateLibrarySummary = computed(() => summarizeTemplateUsage(templateUsage.value))
+const templateDeviceCounts = computed(() => new Map(templateUsage.value.map(template =>
+  [normalizeTemplateLookupName(template.name), template.deviceCount])))
 
 // Filtered templates based on search and type
 const filteredTemplates = computed(() => {
   let templates = props.deviceTemplates
+
+  if (templateScope.value === 'scene') {
+    templates = templates.filter(template =>
+      (templateDeviceCounts.value.get(normalizeTemplateLookupName(template.name)) || 0) > 0)
+  }
 
   // Filter by search query
   if (templateSearchQuery.value.trim()) {
@@ -1015,6 +1041,7 @@ const getTemplateIconUrl = (template: DeviceTemplate): string => {
 
 // Specification form data
 const specForm = reactive({
+  name: '',
   templateId: '' as SpecTemplateId | '',
   templateType: '' as SpecTemplateType | '',
   selectedDevices: [] as Array<{deviceId: string, deviceLabel: string, selectedApis: string[]}>,
@@ -1789,7 +1816,7 @@ const specConditionsMissingDevices = computed(() => Array.from(new Set(
 const isSpecConditionDeviceMissing = (deviceId: string) =>
   Boolean(deviceId) && !deviceNodes.value.some(node => node.id === deviceId)
 
-const specificationBlockedReason = computed<string | null>(() => {
+const specificationConditionBlockedReason = computed<string | null>(() => {
   if (!specForm.templateId) return t('app.selectSpecTemplate')
   const template = currentTemplateDetail.value
   if (!template) return t('app.selectSpecTemplate')
@@ -1807,6 +1834,10 @@ const specificationBlockedReason = computed<string | null>(() => {
 })
 
 // Validate specification before creation
+const specificationBlockedReason = computed(() =>
+  !specForm.name.trim() || specForm.name.trim().length > 100
+    ? t('app.specificationNameInvalid') : specificationConditionBlockedReason.value)
+
 const validateSpecification = () => {
   // Reported inline by `specificationBlockedReason`, which also disables the create button.
   return specificationBlockedReason.value === null
@@ -1824,6 +1855,7 @@ const createSpecification = async () => {
   const cloneConditions = (conditions: SpecCondition[]) =>
     conditions.map(condition => ({ ...condition }))
   const submittedForm = {
+    name: specForm.name.trim(),
     templateId: specForm.templateId,
     templateType: specForm.templateType,
     devices: specForm.selectedDevices.map(device => ({
@@ -1857,6 +1889,7 @@ const createSpecification = async () => {
 
 // Reset specification form
 const resetSpecForm = () => {
+  specForm.name = ''
   specForm.templateId = ''
   specForm.templateType = ''
   specForm.selectedDevices = []
@@ -1882,6 +1915,7 @@ watch(() => props.editSpecification, spec => {
   if (spec) {
     const draft = cloneSpecification(spec)
     Object.assign(specForm, {
+      name: draft.name,
       templateId: draft.templateId,
       aConditions: draft.aConditions,
       ifConditions: draft.ifConditions,
@@ -2085,7 +2119,6 @@ const handleTemplateDragEnd = () => {
 // Panel state
 const localCollapsed = ref(typeof window !== 'undefined' && window.innerWidth < 768)
 const localActiveSection = ref<ControlCenterSection>('templates')
-const ruleSectionExpanded = ref(true)
 
 const isControlCenterSection = (value: string | undefined): value is ControlCenterSection =>
   value === 'devices' || value === 'templates' || value === 'rules' || value === 'specs'
@@ -2122,10 +2155,10 @@ watch(() => [activeSection.value, isCollapsed.value], () => {
 }, { flush: 'sync' })
 
 const controlTabs = computed(() => [
-  { id: 'templates' as const, label: t('app.templates') },
-  { id: 'devices' as const, label: t('app.devicesTool') },
-  { id: 'rules' as const, label: t('app.rulesTool') },
-  { id: 'specs' as const, label: t('app.specificationsShort') }
+  { id: 'templates' as const, label: t('app.templates'), running: false },
+  { id: 'devices' as const, label: t('app.devicesTool'), running: props.recommendationRunning?.devices },
+  { id: 'rules' as const, label: t('app.rulesTool'), running: props.recommendationRunning?.rules },
+  { id: 'specs' as const, label: t('app.specificationsShort'), running: props.recommendationRunning?.specs }
 ])
 
 const { handleTablistKeydown: handleControlTabKeydown } = useRovingTablist<ControlCenterSection>({
@@ -2755,6 +2788,7 @@ watch(() => props.readOnly, readOnly => {
             class="board-section-tab board-section-tab--stacked"
           >
             <span class="board-section-tab__label">{{ tab.label }}</span>
+            <span v-if="tab.running" class="board-caption" role="status">{{ t('app.recommendationInProgress') }}</span>
           </button>
       </div>
     </div>
@@ -2775,7 +2809,10 @@ watch(() => props.readOnly, readOnly => {
         aria-labelledby="control-tab-devices"
         data-testid="control-section-devices"
       >
-        <details class="group mb-3 board-panel-section overflow-hidden" open>
+        <details class="group mb-3 board-panel-section overflow-hidden" data-testid="device-creation-card"
+          :ref="element => { creationElements.devices = element as HTMLDetailsElement | null }"
+          :open="expandedCreation.devices"
+          @toggle="expandedCreation.devices = ($event.target as HTMLDetailsElement).open">
         <summary class="board-section-heading list-none select-none">
           <div class="board-section-heading__identity">
             <div class="board-section-icon board-section-icon--lg">
@@ -3256,6 +3293,24 @@ watch(() => props.readOnly, readOnly => {
           </fieldset>
         </div>
       </details>
+        <details v-if="$slots['device-recommendations']"
+          data-testid="device-recommendation-section"
+          class="group mb-3 board-panel-section overflow-hidden"
+          :open="expandedRecommendations.devices"
+          @toggle="expandedRecommendations.devices = ($event.target as HTMLDetailsElement).open">
+          <summary class="board-section-heading list-none select-none" data-testid="open-device-recommendations">
+            <div class="board-section-heading__identity">
+              <div class="board-section-icon board-section-icon--lg">
+                <span class="material-symbols-outlined text-lg" aria-hidden="true">auto_awesome</span>
+              </div>
+              <span class="board-section-title">{{ t('app.deviceRecommendations') }}</span>
+            </div>
+            <span aria-hidden="true" class="board-section-heading__chevron material-symbols-outlined board-text-muted transition-transform group-open:rotate-180 text-lg">expand_more</span>
+          </summary>
+          <fieldset :disabled="props.readOnly" class="m-0 min-w-0 border-0 px-3 pb-4 pt-2">
+            <slot name="device-recommendations" />
+          </fieldset>
+        </details>
       </div>
 
       <!-- Templates -->
@@ -3267,7 +3322,9 @@ watch(() => props.readOnly, readOnly => {
         data-testid="control-section-templates"
         class="space-y-3"
       >
-        <details data-testid="control-template-create" class="group board-panel-section overflow-hidden" open>
+        <details data-testid="control-template-create" class="group board-panel-section overflow-hidden"
+          :open="expandedCreation.templates"
+          @toggle="expandedCreation.templates = ($event.target as HTMLDetailsElement).open">
           <summary class="board-section-heading list-none select-none">
             <div class="board-section-heading__identity">
               <div class="board-section-icon board-section-icon--lg">
@@ -3316,7 +3373,9 @@ watch(() => props.readOnly, readOnly => {
           </div>
         </details>
 
-        <details data-testid="control-template-repository" class="group board-panel-section overflow-hidden" open>
+        <details data-testid="control-template-repository" class="group board-panel-section overflow-hidden"
+          :open="templateRepositoryExpanded"
+          @toggle="templateRepositoryExpanded = ($event.target as HTMLDetailsElement).open">
           <summary class="board-section-heading list-none select-none">
             <div class="board-section-heading__identity">
               <div class="board-section-icon board-section-icon--lg">
@@ -3333,6 +3392,18 @@ watch(() => props.readOnly, readOnly => {
           </summary>
 
           <div class="px-3 pb-4 board-bg-muted pt-2 space-y-3">
+            <p v-if="!props.templatesLoading" class="board-text-muted text-xs" data-testid="template-library-summary">
+              {{ t('app.templateLibrarySummary', templateLibrarySummary) }}
+            </p>
+            <p class="board-text-muted text-xs">{{ t('app.templateLibraryRetentionHint') }}</p>
+            <div class="control-mode-tabs control-mode-tabs--scope" role="group" :aria-label="t('app.templateScopeLabel')">
+              <button v-for="scope in (['all', 'scene'] as const)" :key="scope" type="button"
+                :class="{ active: templateScope === scope }"
+                :aria-pressed="templateScope === scope" :data-testid="`template-scope-${scope}`"
+                @click="templateScope = scope">
+                {{ t(scope === 'all' ? 'app.templateScopeAll' : 'app.templateScopeScene') }}
+              </button>
+            </div>
             <div class="relative">
               <span aria-hidden="true" class="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 material-symbols-outlined board-text-muted text-sm">search</span>
               <input
@@ -3467,6 +3538,10 @@ watch(() => props.readOnly, readOnly => {
                             <span class="template-card__pill px-1.5 py-0.5 rounded">{{ template.manifest.InternalVariables?.length || 0 }} {{ t('app.varsShort') }}</span>
                             <span class="template-card__pill px-1.5 py-0.5 rounded">{{ template.manifest.APIs?.length || 0 }} {{ t('app.apisShort') }}</span>
                           </div>
+                          <p v-if="templateDeviceCounts.get(normalizeTemplateLookupName(template.name))"
+                            class="board-text-muted text-xs mt-1" data-testid="template-usage">
+                            {{ t('app.templateUsageDevices', { count: templateDeviceCounts.get(normalizeTemplateLookupName(template.name)) }) }}
+                          </p>
                         </div>
                       </div>
                     </button>
@@ -3512,10 +3587,10 @@ watch(() => props.readOnly, readOnly => {
                   <span class="material-symbols-outlined board-text-warning text-2xl">inventory_2</span>
                 </div>
                 <p class="text-xs board-text-muted mb-1 font-semibold">
-                  {{ templateSearchQuery ? t('app.noMatchingTemplates') : t('app.noTemplatesYet') }}
+                  {{ templateSearchQuery ? t('app.noMatchingTemplates') : t(templateScope === 'scene' ? 'app.noSceneTemplates' : 'app.noTemplatesYet') }}
                 </p>
                 <p class="text-xs board-text-muted">
-                  {{ templateSearchQuery ? t('app.tryDifferentSearchTerm') : t('app.importJsonTemplateHint') }}
+                  {{ templateSearchQuery ? t('app.tryDifferentSearchTerm') : t(templateScope === 'scene' ? 'app.selectLibraryTemplateHint' : 'app.importJsonTemplateHint') }}
                 </p>
                 <button
                   v-if="templateSearchQuery"
@@ -3538,9 +3613,10 @@ watch(() => props.readOnly, readOnly => {
         aria-labelledby="control-tab-rules"
         data-testid="control-section-rules"
       >
-        <details class="group mb-3 board-panel-section overflow-hidden" open
+        <details class="group mb-3 board-panel-section overflow-hidden" :open="expandedCreation.rules"
+          :ref="element => { creationElements.rules = element as HTMLDetailsElement | null }"
           data-testid="rule-creation-card"
-          @toggle="ruleSectionExpanded = ($event.target as HTMLDetailsElement).open">
+          @toggle="expandedCreation.rules = ($event.target as HTMLDetailsElement).open">
         <summary class="board-section-heading list-none select-none">
           <div class="board-section-heading__identity">
             <div class="board-section-icon board-section-icon--lg">
@@ -3557,7 +3633,7 @@ watch(() => props.readOnly, readOnly => {
           <RuleBuilder
             :nodes="deviceNodes"
             :device-templates="deviceTemplates"
-            :active="activeSection === 'rules' && !isCollapsed && ruleSectionExpanded"
+            :active="activeSection === 'rules' && !isCollapsed && expandedCreation.rules"
             :read-only="props.readOnly"
             :edit-rule="props.editRule"
             @finish-edit="emit('finish-rule-edit')"
@@ -3565,6 +3641,24 @@ watch(() => props.readOnly, readOnly => {
           />
         </div>
       </details>
+        <details v-if="$slots['rule-recommendations']"
+          data-testid="rule-recommendation-section"
+          class="group mb-3 board-panel-section overflow-hidden"
+          :open="expandedRecommendations.rules"
+          @toggle="expandedRecommendations.rules = ($event.target as HTMLDetailsElement).open">
+          <summary class="board-section-heading list-none select-none" data-testid="open-rule-recommendations">
+            <div class="board-section-heading__identity">
+              <div class="board-section-icon board-section-icon--lg">
+                <span class="material-symbols-outlined text-lg" aria-hidden="true">auto_awesome</span>
+              </div>
+              <span class="board-section-title">{{ t('app.ruleRecommendations') }}</span>
+            </div>
+            <span aria-hidden="true" class="board-section-heading__chevron material-symbols-outlined board-text-muted transition-transform group-open:rotate-180 text-lg">expand_more</span>
+          </summary>
+          <fieldset :disabled="props.readOnly" class="m-0 min-w-0 border-0 px-3 pb-4 pt-2">
+            <slot name="rule-recommendations" />
+          </fieldset>
+        </details>
       </div>
 
       <!-- Specs -->
@@ -3575,7 +3669,10 @@ watch(() => props.readOnly, readOnly => {
         aria-labelledby="control-tab-specs"
         data-testid="control-section-specs"
       >
-        <details class="group mb-3 board-panel-section overflow-hidden" open>
+        <details class="group mb-3 board-panel-section overflow-hidden" data-testid="spec-creation-card"
+          :ref="element => { creationElements.specs = element as HTMLDetailsElement | null }"
+          :open="expandedCreation.specs"
+          @toggle="expandedCreation.specs = ($event.target as HTMLDetailsElement).open">
         <summary class="board-section-heading list-none select-none">
           <div class="board-section-heading__identity">
             <div class="board-section-icon board-section-icon--lg">
@@ -3597,6 +3694,12 @@ watch(() => props.readOnly, readOnly => {
             :aria-busy="creatingSpecification"
             class="m-0 min-w-0 space-y-3 border-0 p-0"
           >
+            <div>
+              <label for="spec-name" class="board-form-label mb-2 block">{{ t('app.specificationName') }}</label>
+              <input id="spec-name" v-model="specForm.name" data-testid="spec-name"
+                type="text" maxlength="100" required class="board-field"
+                :placeholder="t('app.specificationNamePlaceholder')" />
+            </div>
             <!-- Step 1: Select Template -->
             <div>
               <label for="spec-template-select" class="board-form-label mb-2 block">{{ t('app.selectTemplate') }}</label>
@@ -3935,7 +4038,7 @@ watch(() => props.readOnly, readOnly => {
             </div>
 
             <!-- Step 3: Generated Specification Description -->
-            <div v-if="!specificationBlockedReason" class="relative overflow-hidden rounded-lg board-bg-elevated border border-[color:var(--border)] p-3 shadow-sm">
+            <div v-if="!specificationConditionBlockedReason" class="relative overflow-hidden rounded-lg board-bg-elevated border border-[color:var(--border)] p-3 shadow-sm">
               <div class="relative">
                 <div class="flex items-center gap-2 mb-2">
                   <span class="w-6 h-6 board-meta-chip rounded-md flex items-center justify-center">
@@ -3975,7 +4078,8 @@ watch(() => props.readOnly, readOnly => {
               v-if="specificationBlockedReason"
               id="spec-create-blocked-reason"
               role="status"
-              class="mb-2 text-xs font-semibold leading-4 board-text-danger"
+              class="mb-2 text-xs font-semibold leading-4"
+              :class="!editingSpecBaseline && !specForm.name && !specForm.templateId ? 'board-text-muted' : 'board-text-danger'"
               data-testid="spec-create-blocked-reason"
             >
               {{ specificationBlockedReason }}
@@ -3995,6 +4099,24 @@ watch(() => props.readOnly, readOnly => {
           </fieldset>
         </div>
       </details>
+        <details v-if="$slots['spec-recommendations']"
+          data-testid="spec-recommendation-section"
+          class="group mb-3 board-panel-section overflow-hidden"
+          :open="expandedRecommendations.specs"
+          @toggle="expandedRecommendations.specs = ($event.target as HTMLDetailsElement).open">
+          <summary class="board-section-heading list-none select-none" data-testid="open-spec-recommendations">
+            <div class="board-section-heading__identity">
+              <div class="board-section-icon board-section-icon--lg">
+                <span class="material-symbols-outlined text-lg" aria-hidden="true">auto_awesome</span>
+              </div>
+              <span class="board-section-title">{{ t('app.specificationRecommendations') }}</span>
+            </div>
+            <span aria-hidden="true" class="board-section-heading__chevron material-symbols-outlined board-text-muted transition-transform group-open:rotate-180 text-lg">expand_more</span>
+          </summary>
+          <fieldset :disabled="props.readOnly" class="m-0 min-w-0 border-0 px-3 pb-4 pt-2">
+            <slot name="spec-recommendations" />
+          </fieldset>
+        </details>
       </div>
 
 
@@ -4636,7 +4758,8 @@ details > summary::-webkit-details-marker {
   min-height: var(--iot-target-min);
 }
 
-.control-mode-tabs--formats {
+.control-mode-tabs--formats,
+.control-mode-tabs--scope {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
@@ -5057,11 +5180,11 @@ select:focus {
 }
 
 /* Button hover effects */
-button:not(:disabled):hover {
+button:not(:disabled):not(.iot-dialog-btn):hover {
   transform: translateY(-1px);
 }
 
-button:not(:disabled):active {
+button:not(:disabled):not(.iot-dialog-btn):active {
   transform: translateY(0);
 }
 

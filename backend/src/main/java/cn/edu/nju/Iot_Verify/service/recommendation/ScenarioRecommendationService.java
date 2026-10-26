@@ -104,7 +104,7 @@ public class ScenarioRecommendationService {
   "rationale": "为什么这个场景能支撑验证",
   "scene": {
     "schema": "iot-verify.board-scene",
-    "version": 5,
+    "version": 6,
     "devices": [
       {
         "id": "response_local_alias",
@@ -142,6 +142,7 @@ public class ScenarioRecommendationService {
     ],
     "specs": [
       {
+        "name": "简短、具体的规约名称（必填，1到100字符）",
         "templateId": "1|2|3|4|5|6|7",
         "aConditions": [],
         "ifConditions": [],
@@ -1189,6 +1190,11 @@ public class ScenarioRecommendationService {
             if (specs.size() >= maxSpecs) break;
             stats.inspectedCount++;
             candidateIndex++;
+            String name = row.path("name").isTextual() ? row.path("name").asText().trim() : "";
+            if (name.isEmpty() || name.length() > 100) {
+                filteredItems.add(filteredItem("specification", candidateIndex, "invalidSpecName", language, name));
+                continue;
+            }
             String templateId = text(row.path("templateId"), "");
             if (!SPEC_TEMPLATE_IDS.contains(templateId)) {
                 filteredItems.add(filteredItem("specification", candidateIndex, "invalidSpecTemplateId", language,
@@ -1248,6 +1254,7 @@ public class ScenarioRecommendationService {
                 continue;
             }
             Map<String, Object> spec = new LinkedHashMap<>();
+            spec.put("name", name);
             spec.put("templateId", templateId);
             spec.put("aConditions", aConditions);
             spec.put("ifConditions", ifConditions);
@@ -1493,6 +1500,9 @@ public class ScenarioRecommendationService {
             case "unreachableRuleConditions" -> zh
                     ? "场景规则使用了合法但从当前设备状态和值无法到达的触发条件。"
                     : "The scenario rule uses legal trigger conditions that are unreachable from the current device state and values.";
+            case "invalidSpecName" -> zh
+                    ? "规约名称必填，长度为 1 到 100 个字符。"
+                    : "A specification name of 1 to 100 characters is required.";
             case "invalidSpecTemplateId" -> zh
                     ? "场景规约缺少合法 templateId；必须使用 1 到 7 的规约模板。"
                     : "A scenario specification is missing a valid templateId; it must use specification template 1 through 7.";
@@ -1889,9 +1899,9 @@ public class ScenarioRecommendationService {
 
     private String languageInstruction(String language) {
         if ("zh-CN".equals(language)) {
-            return "- 输出语言: 简体中文，scenarioName/rationale/rules.name 使用简体中文。";
+            return "- 输出语言: 简体中文，scenarioName/rationale/rules.name/specs.name 使用简体中文。";
         }
-        return "- Output language: English for scenarioName, rationale, and rule names.";
+        return "- Output language: English for scenarioName, rationale, rule names, and specification names.";
     }
 
     private String message(String language, String key, int devices, int rules, int specs) {

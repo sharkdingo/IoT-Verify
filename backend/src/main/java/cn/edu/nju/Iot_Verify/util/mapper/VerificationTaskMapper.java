@@ -275,7 +275,15 @@ public class VerificationTaskMapper {
                 () -> {
                     List<SpecResultDto> results = JsonUtils.fromJsonList(po.getSpecResultsJson(), SpecResultDto.class);
                     for (SpecResultDto result : results) {
-                        if (result == null || result.getAntecedentReachability() == null
+                        if (result == null || result.getSpecificationSnapshot() == null) {
+                            throw new IllegalArgumentException("Frozen specification snapshot is required");
+                        }
+                        String name = result.getSpecificationSnapshot().name();
+                        if (name == null || name.isBlank() || name.length() > 100
+                                || !name.equals(result.getSpecificationLabel())) {
+                            throw new IllegalArgumentException("Frozen specification name is missing or inconsistent");
+                        }
+                        if (result.getAntecedentReachability() == null
                                 || cn.edu.nju.Iot_Verify.dto.verification.AntecedentReachability.appliesTo(result.getTemplateId())
                                 == (result.getAntecedentReachability()
                                 == cn.edu.nju.Iot_Verify.dto.verification.AntecedentReachability.NOT_APPLICABLE)) {

@@ -35,6 +35,7 @@ const props = defineProps<{
   visible: boolean
   traceId: number
   violatedSpecId?: string
+  violatedSpecName?: string
 }>()
 
 const emit = defineEmits<{
@@ -1359,35 +1360,16 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
         
         <div class="space-y-4">
           
-          <!-- Violation Info Card -->
-          <div class="p-5 rounded-xl bg-gradient-to-r from-[color:var(--danger-surface)] to-[color:var(--warning-surface)] border board-border-subtle">
-            <div class="flex items-center gap-3">
-              <div class="w-10 h-10 rounded-xl flex items-center justify-center board-chip-danger">
-                <span class="material-symbols-outlined board-text-danger">warning</span>
+          <section aria-labelledby="fix-target-name">
+            <h4 id="fix-target-name" data-testid="fix-target-name" class="iot-result-item__title">{{ violatedSpecName || t('app.unknownSpecification') }}</h4>
+            <details v-if="fixResult?.violatedSpecId || violatedSpecId" class="mt-2 text-xs board-text-muted">
+              <summary class="cursor-pointer font-semibold">{{ t('app.technicalDetails') }}</summary>
+              <div class="mt-1 grid gap-1 sm:grid-cols-[9rem_minmax(0,1fr)]">
+                <span class="font-medium">{{ t('app.specificationTechnicalId') }}</span>
+                <code class="break-all rounded board-bg-muted px-2 py-1 text-xs board-text-muted">{{ fixResult?.violatedSpecId || violatedSpecId }}</code>
               </div>
-              <div class="flex-1">
-                <div class="flex items-center gap-2 mt-1">
-                  <span data-testid="fix-fault-summary" class="text-sm board-text-danger">
-                    {{ faultLoading
-                      ? t('app.loadingFaultLocalization')
-                      : faultLoadError
-                        ? t('app.faultLocalization')
-                        : t('app.faultRulesIdentified', { count: faultRules.length }) }}
-                  </span>
-                </div>
-                <p v-if="localizedFaultLocalizationSummary" class="mt-2 text-xs leading-relaxed board-text-danger">
-                  {{ localizedFaultLocalizationSummary }}
-                </p>
-                <details v-if="fixResult?.violatedSpecId || violatedSpecId" class="mt-2 text-xs board-text-danger">
-                  <summary class="cursor-pointer font-semibold">{{ t('app.technicalDetails') }}</summary>
-                  <div class="mt-1 grid gap-1 sm:grid-cols-[9rem_minmax(0,1fr)]">
-                    <span class="font-medium">{{ t('app.specificationTechnicalId') }}</span>
-                    <code class="break-all rounded board-chip-danger px-2 py-1 text-xs board-text-danger">{{ fixResult?.violatedSpecId || violatedSpecId }}</code>
-                  </div>
-                </details>
-              </div>
-            </div>
-          </div>
+            </details>
+          </section>
 
           <div
             v-if="localizedFixLimitations.length || displayedFixWarnings.length || displayedSourceGenerationIssues.length"
@@ -1826,16 +1808,19 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
           </div>
 
           <!-- Fault Rules Section -->
-          <div class="border board-border-subtle rounded-xl overflow-hidden">
-            <div class="board-bg-muted px-4 py-3 border-b board-border-subtle">
-              <div class="flex items-center gap-2">
-                <span class="material-symbols-outlined board-text-muted">search</span>
+          <details class="group border-t board-border-subtle" :open="!!faultLoadError" data-testid="fix-fault-details">
+            <summary class="flex cursor-pointer list-none items-center gap-2 py-3">
+                <span class="material-symbols-outlined board-text-muted" aria-hidden="true">search</span>
                 <span class="font-semibold board-text-strong">{{ t('app.faultLocalization') }}</span>
                 <span v-if="!faultLoading && !faultLoadError" data-testid="fix-fault-count" class="ml-auto px-2 py-0.5 board-meta-chip text-xs rounded-full">{{ t('app.rulesCount', { count: faultRules.length }) }}</span>
-              </div>
-            </div>
-            
-            <div class="p-4">
+                <span class="material-symbols-outlined board-text-muted group-open:rotate-180" aria-hidden="true">expand_more</span>
+            </summary>
+            <div class="pb-3">
+              <p data-testid="fix-fault-summary" class="text-sm board-text-muted">
+                {{ faultLoading ? t('app.loadingFaultLocalization') : faultLoadError
+                  ? t('app.faultLocalization') : t('app.faultRulesIdentified', { count: faultRules.length }) }}
+              </p>
+              <p v-if="localizedFaultLocalizationSummary" class="my-2 text-xs leading-relaxed board-text-muted">{{ localizedFaultLocalizationSummary }}</p>
               <div v-if="faultLoading" class="flex items-center justify-center gap-2 py-8 text-sm board-text-muted">
                 <span class="material-symbols-outlined animate-spin" aria-hidden="true">progress_activity</span>
                 {{ t('app.loadingFaultLocalization') }}
@@ -1880,7 +1865,7 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
                 </div>
               </div>
             </div>
-          </div>
+          </details>
 
         </div>
       </div>

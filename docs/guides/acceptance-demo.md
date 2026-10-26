@@ -4,7 +4,7 @@ This runbook exercises authoring, observation, verification and repair rejection
 deliberately conflicting night-watch scene. For a successful household repair that retains
 useful functions, start with the [household workflow](household-workflow.md#run-the-entrance-demo).
 
-Verified against code on 2026-10-22. Sources:
+Verified against code on 2026-10-25. Sources:
 [`../examples/acceptance-demo-scene.json`](../examples/acceptance-demo-scene.json), the additional
 scenes linked below, and `AcceptanceDemoScenarioNusmvTest`.
 
@@ -30,7 +30,7 @@ For a care apartment with explicit lighting response timing and ventilation effe
 
 All four device types (`Motion Detector`, `Camera`, `Alarm`, and `Light`) are built-in
 default templates. The demo does not require creating or editing a custom template.
-The standard scene file still embeds exact template snapshots because version 5 scene
+The standard scene file still embeds exact template snapshots because version 6 scene
 JSON is self-contained and must support lossless export/import; import matches those
 snapshots to the existing defaults instead of creating duplicate device types. If a
 default template was edited before the demo, reset it to the project default first so
@@ -123,9 +123,10 @@ advisory rather than proof of conflict freedom.
 
 ## Build route 3: AI
 
-### AI Scene panel
+### Generate a scene with the AI assistant
 
-Set the limits to `4` devices, `3` rules, and `5` specifications, then use this request:
+Ask the assistant for exactly four devices, three rules, and five named requirements,
+using this request:
 
 ```text
 Use defaults: Motion Detector/Hall Motion Sensor, Camera/Hall Camera, Alarm/Hall Alarm,
@@ -136,9 +137,8 @@ siren; T4 alarm API -> light on; T1 camera state privacy private; T7 camera taki
 not untrusted-controlled. Full-replacement, unverified draft only.
 ```
 
-This compact prompt is 499 ASCII characters. The recommendation contract now permits up
-to 2,000 characters, so an acceptance operator may use a more natural expanded request;
-the compact form remains useful for repeatable demonstrations.
+Review the generated scene and its names before confirming full replacement.
+The assistant uses the same portable scene contract as the JSON import route.
 
 Do not use the `4 / 2 / 3 / 5` counts alone as evidence that the draft is equivalent to
 the canonical scene. Accept the draft only if the preview also shows all four exact
@@ -258,7 +258,7 @@ expected verification counts:
 - move and resize a device, zoom/pan the canvas, and reload to show layout persistence;
 - inspect device type versus device instance labels and runtime trust/privacy fields;
 - inspect the Environment Pool and reset one value only after showing the consequences;
-- open rule/specification recommendation panels and show kept/filtered/truncated details;
+- open AI recommendations in the Control Center rule/specification tabs and show kept/filtered/truncated details;
 - submit async simulation/verification, inspect task progress, and replay saved history;
 - export the scene and confirm a rejected repair did not change it;
 - use AI assistant list/overview tools, while keeping raw NuSMV output and persistence ids

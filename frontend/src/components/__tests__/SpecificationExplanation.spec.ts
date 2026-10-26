@@ -23,7 +23,7 @@ const condition = (overrides: Partial<SpecCondition> = {}): SpecCondition => ({
   id: 'condition', side: 'a', deviceId: node.id, deviceLabel: 'Old device name',
   targetType: 'state', key: 'state', relation: '=', value: 'off', ...overrides
 })
-const spec: Specification = { id: 'spec', templateId: '6', templateLabel: 'Persistence', aConditions: [],
+const spec: Specification = { name: 'Safety requirement', id: 'spec', templateId: '6', templateLabel: 'Persistence', aConditions: [],
   ifConditions: [condition({ side: 'if', targetType: 'variable', variableSource: 'reported', key: 'temperature', relation: '>', value: '25' })],
   thenConditions: [condition({ side: 'then', value: 'on' })], formula: 'STALE CTL nonsense' }
 afterEach(() => { i18n.global.locale.value = 'en' })
@@ -80,7 +80,7 @@ describe('specification explanations across both panels', () => {
         expect(description.text()).toBe(editor.get('[data-testid="spec-description"]').text())
         expect(device.get('[data-testid="device-dialog-spec-description"]').text()).toBe(description.text())
         const result = presentSpecificationResult({
-          specId: spec.id, templateId: spec.templateId, specificationLabel: spec.templateLabel,
+          specId: spec.id, templateId: spec.templateId, specificationLabel: spec.name,
           formulaPreview: '', formulaKind: 'LTL', outcome: 'SATISFIED', expression: '',
           antecedentReachability: 'REACHABLE',
           specificationSnapshot: { ...spec, devices: {
@@ -122,7 +122,7 @@ describe('specification explanations across both panels', () => {
 
   it('explains actual and undecided readings explicitly while retaining the unresolved warning and formula', async () => {
     i18n.global.locale.value = 'zh-CN'
-    const makeSpec = (id: string, variableSource?: 'environment' | 'reported'): Specification => ({
+    const makeSpec = (id: string, variableSource?: 'environment' | 'reported'): Specification => ({ name: 'Safety requirement',
       id, templateId: '1', templateLabel: 'Always',
       aConditions: [condition({ targetType: 'variable', key: 'temperature', relation: '>', value: '25', variableSource })],
       ifConditions: [], thenConditions: []

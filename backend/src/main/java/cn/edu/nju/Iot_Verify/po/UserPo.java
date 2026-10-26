@@ -43,6 +43,11 @@ public class UserPo {
     @JsonIgnore
     private Long formalOperationFence = 0L;
 
+    @Column(name = "scene_revision", nullable = false, columnDefinition = "bigint default 0")
+    @Builder.Default
+    @JsonIgnore
+    private Long sceneRevision = 0L;
+
     @PrePersist
     protected void onCreate() {
         if (createdAt == null) {

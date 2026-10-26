@@ -640,7 +640,7 @@ describe('Landing authentication usability', () => {
     const { wrapper } = await mountLanding('/')
 
     expect(wrapper.get('.model-preview').text()).toContain('示例模型')
-    expect(wrapper.get('.model-preview').text()).toContain('不代表验证结论')
+    expect(wrapper.get('.model-preview').text()).toContain('预设演示，非本次验证。')
     expect(wrapper.findAll('.preview-node')).toHaveLength(3)
     expect(wrapper.find('video').exists()).toBe(false)
     await wrapper.get('.hero-cta').trigger('click')

@@ -15,6 +15,243 @@ history into a technical spec. The spec content itself now lives under
 
 ## [Unreleased]
 
+### 2026-10-26 (review fixes)
+
+#### Fixed
+
+- Reading saved requirements now rejects missing, blank, or overlong names as invalid
+  persisted data before incomplete records can reach editing or version checks.
+- Control Center confirmation buttons retain their spacing when hovered in wrapped
+  footers on narrow screens.
+
+### 2026-10-26 (reliable assistant Markdown)
+
+#### Fixed
+
+- Chinese punctuation no longer leaves emphasis or strikethrough markers visible in
+  assistant responses, including nested code, links and table cells. Streamed replies
+  and restored history use the same parser without modifying stored message text.
+- LaTeX delimiters are parsed in Markdown context instead of rewriting raw strings,
+  preserving code, escaped literals and link destinations. Removed the unbounded cache
+  of partial streaming responses.
+- Renderer-reserved component/chart fences display as literal JSON code instead of
+  invoking unavailable renderers and breaking the assistant panel. HTML, link and image
+  safety restrictions remain in force.
+
+### 2026-10-26 (visible assistant synchronization recovery)
+
+#### Fixed
+
+- Failed Board synchronization keeps its explanation and retry beside the chat
+  input instead of above the scrolling conversation. The disabled input exposes
+  that explanation to assistive technology; recovery only synchronizes state and
+  does not repeat the AI operation. Short panels allow scrolling the composer area
+  so recovery notices cannot make the input unreachable.
+
+### 2026-10-26 (sourced conversation memory)
+
+#### Added
+
+- Conversations retain incremental task goals, constraints, decisions and questions
+  as exact user quotes with original-message sources. The assistant can retrieve old
+  originals by source id, literal search or pagination. A collapsed Current task panel
+  exposes the notes, coverage and full source text; users correct them in conversation.
+
+#### Changed
+
+- Scene replacement/clear withdraws old scene-specific notes while ordinary edits
+  retain them. Session intent remains separate from Board facts, operation receipts
+  and protected-action confirmation. Extraction failures preserve prior memory and
+  explicitly report incomplete coverage.
+- Model context shares a character target between sourced task notes and recent
+  conversation. Older large tool results can be compacted without rewriting stored
+  originals, breaking tool-call pairs, or truncating the latest evidence block.
+
+#### Fixed
+
+- Malformed memory JSON receives one bounded format-correction attempt before
+  reporting partial coverage. Complete JSON fences use the existing strict
+  classification parser, while invalid source quotations never enter memory.
+- Missing provider token-usage details no longer turn completed Responses output
+  into a failed turn. These diagnostic counters remain unknown when unavailable.
+
+### 2026-10-26 (AI tool contracts and evidence)
+
+#### Fixed
+
+- Tool arguments and authorization classifications reject duplicate JSON keys and
+  trailing content. Confirmation classification reads the complete user message,
+  preserving restrictions at the end of long replies.
+- Device recommendations derive omitted local values from the recommended initial
+  state and reject explicit state/value contradictions. Similarity checks exclude
+  the rule being edited; missing specification trust/privacy scope returns actionable
+  validation instead of an internal error.
+- Rule deletion/reordering and specification deletion prepare presentation context
+  before committing, so a later display lookup cannot disguise a completed write
+  as a failed operation.
+- Formal-counterexample and saved-simulation discovery use bounded pages with
+  continuation and distinguish summaries from state sequences. Task discovery keeps
+  searching older pages when status or initiator filters exclude newer tasks.
+
+### 2026-10-26 (apply recommendation batches)
+
+#### Added
+
+- Device, rule and specification recommendations offer Apply All for multiple
+  candidates. Items use the existing validation, confirmation and targeted save
+  flows, remain individually undoable, and show confirmed progress. A cancelled,
+  failed or unconfirmed item stops subsequent writes; scene/account changes also
+  invalidate the batch. Repeated submissions are blocked until fresh generation.
+  Batch rule creation keeps the progress panel visible on narrow screens.
+
+#### Changed
+
+- Recommendation placeholders now describe distinct device needs, automation
+  behavior and safety constraints. Devices added in a batch are spaced apart.
+
+#### Fixed
+
+- External board edits stop a recommendation batch as soon as their notification
+  arrives. A mutation response that already includes the external edit cannot hide
+  it from a later refresh and let an old batch continue in a background tab.
+- Completed/stopped batch receipts remain scoped to their recommendation kind;
+  cancelling another kind no longer re-enables an earlier batch's inactive action.
+- Rule and specification recommendation writes recheck session ownership before
+  dispatch, including after confirmation or queue waits.
+
+### 2026-10-25 (control disclosures and result hierarchy)
+
+#### Changed
+
+- Control Center tools start collapsed and retain each disclosure choice across tabs.
+  Inspector Add/Edit opens and focuses the requested editor.
+- Verification groups each named requirement, verdict and evidence in one card, prioritizes
+  problems, and uses one scroll region. Exploration and repair identify the frozen requirement
+  by name; supporting configuration and localization details have lower visual priority.
+
+#### Fixed
+
+- AI specification update/unchanged results require a valid saved name before being accepted
+  as authoritative. Specification-search tool instructions now include name matching.
+
+### 2026-10-25 (named requirements and contextual AI recommendations)
+
+#### Changed
+
+- Device, rule, and specification AI recommendations now sit beside manual creation
+  in their Control Center tabs. Collapsing or switching tabs preserves ongoing work.
+  Full-scene generation is available through the AI assistant; the duplicate standalone
+  scene recommendation panel was removed.
+- Recommendation forms ask only for optional needs or constraints. The redundant
+  quantity inputs were removed; AI chooses the candidate count within the existing
+  API limit, and users review suggestions before applying them. Assistant starter
+  prompts also request relevant suggestions without imposing arbitrary item counts.
+- Specifications require a user-authored name across manual editing, AI tools, saved
+  scenes, and frozen results. Inspector and result titles use that name; templates
+  describe the requirement pattern. Renaming is reversible and concurrency-checked,
+  while logical duplicate detection and verification fingerprints ignore the name.
+- Portable scenes use version 6 with required specification names. All bundled examples
+  were rewritten to that contract; older or unnamed inputs are rejected without fallback.
+
+#### Fixed
+
+- Recommendation help targets stay inside the Control Center cards without clipping
+  their touch area or introducing horizontal overflow.
+- Saving a requirement no longer makes a verified model stale when only its name or
+  editor condition IDs changed. Model fingerprints use the canonical logical signature.
+- Stored verification and exploration results reject missing or inconsistent frozen
+  requirement names instead of substituting current canvas data or template titles.
+
+### 2026-10-24 (imported-template copy reuse)
+
+#### Fixed
+
+- Re-importing a scene reuses its matching numbered template copy even when earlier
+  suffixes are no longer present. A gap in copy names no longer creates a duplicate or
+  incorrectly blocks an import at the template-library limit.
+
+### 2026-10-24 (reviewable scene-import recovery)
+
+#### Fixed
+
+- Equivalent trust/privacy condition spellings now round-trip consistently instead of
+  reporting a successfully saved import as unconfirmed.
+- Full-scene replacement rejects explicit state/value contradictions before values can
+  be silently rewritten. Transition-assigned variables remain independent in both clients
+  and the backend; ordinary targeted device updates retain their state/value linkage.
+
+#### Changed
+
+- Scene import previews conflicting template copies and state-required value corrections
+  before an explicit apply-and-replace confirmation. Existing definitions remain intact;
+  repeated imports reuse matching copies instead of accumulating templates. Cancellation
+  writes nothing, and library capacity is checked before submission.
+
+### 2026-10-24 (repeated scene import and export)
+
+#### Fixed
+
+- Scene import trims template snapshot names consistently when creating and reusing
+  dependencies, so surrounding whitespace cannot make a repeat import conflict with
+  the template created by its first import.
+- Scene import/export uses the referenced template's canonical spelling. A differently
+  cased device reference no longer causes a saved import to be reported as unconfirmed
+  when the backend returns its canonical representation; device ids and rule references
+  remain unchanged.
+
+### 2026-10-24 (template library and scene usage)
+
+#### Fixed
+
+- English and Chinese household examples share identical template definitions, so they
+  can be imported successively without a same-name template conflict.
+- Destructive confirmations dismiss earlier completion notices so they cannot obscure
+  the consequences of the next operation; warnings and errors remain visible.
+
+#### Changed
+
+- The template panel distinguishes reusable library contents from templates used by the
+  current scene, with a scope filter and per-template device counts. Clearing a scene
+  retains the library and displays zero usage.
+- Import, export and clear feedback includes referenced and custom-template counts.
+  Import and clear confirmations use the server's template inventory; catalog changes
+  invalidate a pending confirmation before any scene replacement is written.
+
+### 2026-10-24 (automatic Fix household demo)
+
+#### Fixed
+
+- Reply review no longer joins a completion verb and a platform object across semicolon
+  clauses, which incorrectly hid a repair-status statement followed by a plan to read the Board.
+  Independent completed operations still require their own receipts.
+
+#### Changed
+
+- The landing example now illustrates the verified removal of the unsafe light-to-unlock
+  rule, confirmation, and rechecking the same three requirements. The removed edge disappears.
+- The scene input is called Door Access Request (开门请求), with an explicit external
+  authentication boundary. A Chinese display fixture is generated from the same model for
+  importing and recording the real automatic Fix workflow.
+
+### 2026-10-24 (simpler assistant start screen)
+
+#### Changed
+
+- The assistant starts with concise contextual task suggestions and the message composer.
+  The three-question household form opens on demand, retaining unsent fields when collapsed.
+  Suggestions and related form fields adapt to the panel width; keyboard focus stays visible
+  in both themes. Preparing a requirement draft still requires a separate send action.
+
+### 2026-10-24 (household entrance landing example)
+
+#### Changed
+
+- The landing-page example now follows the household entrance demo: visitor request,
+  porch lighting, then an unsafe lighting-to-unlock rule. Three reader-selected stages
+  show the four-state risk replay, an R2 rule comparison, and the same three requirements
+  before and after repair. Full rules and requirements expand on demand; stage changes
+  stop playback. The preset illustration retains its external-authentication boundary.
+
 ### 2026-10-24 (assistant claim accuracy)
 
 #### Fixed

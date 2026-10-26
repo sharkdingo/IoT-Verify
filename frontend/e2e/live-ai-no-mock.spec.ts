@@ -1,3 +1,5 @@
+import { openRecommendation, collapseRecommendation } from './support/recommendations'
+import { expectSameBoardSnapshot } from './support/boardSnapshot'
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -93,7 +95,7 @@ test.describe('live AI full-stack audit', () => {
         const preview = await readData('replacement-preview')
         const seeded = await request.post(`${apiBaseURL}/api/board/scene`, { headers, data: {
           impactToken: preview.impactToken,
-          scene: { schema: 'iot-verify.board-scene', version: 5,
+          scene: { schema: 'iot-verify.board-scene', version: 6,
             templates: [...new Map(manifests.map(manifest => [manifest.Name, { name: manifest.Name, manifest }])).values()],
             devices: manifests.map((manifest, index) => ({ id: index === 0 ? 'live_source' : 'live_target',
               templateName: manifest.Name, label: index === 0 ? 'Source' : 'Target', state: manifest.InitState,
@@ -113,9 +115,9 @@ test.describe('live AI full-stack audit', () => {
         if (language === 'zh-CN') await page.getByRole('button', { name: '切换到中文', exact: true }).click()
         await expect(page.locator('html')).toHaveAttribute('lang', language)
         const before = await readData('snapshot')
-        await page.getByTestId('open-rule-recommendations').click()
+        await openRecommendation(page, 'rule')
         const panel = page.getByTestId('rule-recommendation-panel')
-        await panel.locator('input[type="number"]').fill('1')
+        await expect(panel.getByRole('spinbutton')).toHaveCount(0)
         await panel.locator('textarea').fill(language === 'en'
           ? `Recommend exactly one rule. ${scene.en} Use only the existing device IDs and capabilities.`
           : `只推荐一条规则。${scene.zh}只使用现有设备 ID 和能力。`)
@@ -163,7 +165,7 @@ test.describe('live AI full-stack audit', () => {
           hasText: /^(?:Why it is suggested|推荐依据)$/ }) })
         await rationale.locator('summary').click()
         await expect(rationale.locator('p')).toHaveText(candidate.reason)
-        expect(await readData('snapshot')).toEqual(before)
+        expectSameBoardSnapshot(await readData('snapshot'), before)
         const saved = page.waitForResponse(response => response.request().method() === 'POST'
           && new URL(response.url()).pathname === '/api/board/rules')
         await panel.getByRole('button', { name: /^(?:add\s+)?(?:Add This Rule|添加此规则)$/ }).click()
@@ -179,7 +181,7 @@ test.describe('live AI full-stack audit', () => {
         expect(added.command).toMatchObject({ deviceName: 'live_target', action: scene.action })
         expect(added.command.contentDevice ?? null).toBe(scene.contentDevice ?? null)
         expect(added.command.content ?? null).toBe(scene.content ?? null)
-        expect(after).toEqual({ ...before, rules: [added] })
+        expectSameBoardSnapshot(after, { ...before, rules: [added] })
         await page.screenshot({ path: testInfo.outputPath('rule-flow.png'), fullPage: true })
         const undoResponse = page.waitForResponse(response => response.request().method() === 'POST'
           && new URL(response.url()).pathname === '/api/board/edits/undo')
@@ -188,7 +190,7 @@ test.describe('live AI full-stack audit', () => {
         const undoBody = await undo.json()
         expect(undo.ok(), JSON.stringify(undoBody)).toBeTruthy()
         expect(undoBody.data.applied).toBe(true)
-        expect(await readData('snapshot')).toEqual(before)
+        expectSameBoardSnapshot(await readData('snapshot'), before)
         await testInfo.attach('applied-and-undone', { contentType: 'application/json', body: Buffer.from(JSON.stringify({
           scenario: scene.id, language, requestId: input.requestId, writeStatus: write.status(), undoStatus: undo.status(), added
         })) })
@@ -212,7 +214,7 @@ test.describe('live AI full-stack audit', () => {
       'resources', 'deviceTemplate', 'Light.json'), 'utf8'))
     const preview = await readData('replacement-preview')
     const seeded = await request.post(`${apiBaseURL}/api/board/scene`, { headers, data: { impactToken: preview.impactToken,
-      scene: { schema: 'iot-verify.board-scene', version: 5, templates: [{ name: manifest.Name, manifest }],
+      scene: { schema: 'iot-verify.board-scene', version: 6, templates: [{ name: manifest.Name, manifest }],
         devices: ['a', 'b'].map((suffix, index) => ({ id: `live_lamp_${suffix}`, templateName: manifest.Name,
           label: `Hall light ${suffix.toUpperCase()}`, state: 'off', position: { x: 220 + index * 220, y: 210 }, width: 176, height: 128 })),
         environmentVariables: [{ name: 'illuminance', value: '10', trust: 'untrusted', privacy: 'public' }], rules: [], specs: [] }
@@ -232,9 +234,9 @@ test.describe('live AI full-stack audit', () => {
       const collection = kind === 'rule' ? 'rules' : 'specifications'
       const endpoint = kind === 'rule' ? 'rules' : 'specs'
       const before = await readData('snapshot')
-      await page.getByTestId(`open-${kind}-recommendations`).click()
+      await openRecommendation(page, kind)
       const panel = page.getByTestId(`${kind}-recommendation-panel`)
-      await panel.locator('input[type="number"]').fill('1')
+      await expect(panel.getByRole('spinbutton')).toHaveCount(0)
       await panel.locator('textarea').fill(kind === 'rule'
         ? 'Recommend exactly one automation: when Hall light A receives the on API event, turn Hall light B off. Use only these existing device IDs and template APIs.'
         : 'Recommend exactly one Never safety specification (template 3): Hall light A must never be in the on working state. Use only the existing device ID and working-state condition.')
@@ -250,10 +252,12 @@ test.describe('live AI full-stack audit', () => {
       expect.soft(body.code, JSON.stringify(body)).toBe(200)
       expect.soft(body.data?.recommendations, JSON.stringify(body)).toHaveLength(1)
       if (!generation.ok() || body.code !== 200 || body.data?.recommendations?.length !== 1) {
-        await panel.getByTestId(`close-${kind}-recommendations`).click()
+        await collapseRecommendation(page, kind)
         continue
       }
       const candidate = body.data.recommendations[0]
+      expect(typeof candidate.name).toBe('string')
+      expect(candidate.name.trim().length).toBeGreaterThan(0)
       if (kind === 'rule') {
         expect(candidate.conditions).toEqual([expect.objectContaining({
           deviceId: 'live_lamp_a', attribute: 'on', targetType: 'api'
@@ -289,7 +293,7 @@ test.describe('live AI full-stack audit', () => {
       })
       await rationale.locator('summary').click()
       await expect(rationale.locator('p')).toBeVisible()
-      expect(await readData('snapshot')).toEqual(before)
+      expectSameBoardSnapshot(await readData('snapshot'), before)
       const saved = page.waitForResponse(response => response.request().method() === 'POST'
         && new URL(response.url()).pathname === `/api/board/${endpoint}`)
       await panel.getByRole('button', { name: kind === 'rule'
@@ -312,6 +316,7 @@ test.describe('live AI full-stack audit', () => {
       await testInfo.attach(`${kind}-candidate-added`, { path: screenshot, contentType: 'image/png' })
       expect(after[collection]).toHaveLength(before[collection].length + 1)
       const added = after[collection].at(-1)
+      if (kind === 'spec') expect(added.name).toBe(candidate.name.trim())
       if (kind === 'rule') {
         expect(added.id).toEqual(expect.any(Number))
         expect(added.createdAt).toEqual(expect.any(String))
@@ -330,7 +335,7 @@ test.describe('live AI full-stack audit', () => {
         expect(added.ifConditions).toEqual([])
         expect(added.thenConditions).toEqual([])
       }
-      expect(after).toEqual({ ...before, [collection]: [...before[collection], added] })
+      expectSameBoardSnapshot(after, { ...before, [collection]: [...before[collection], added] })
       expect(availability.canUndo).toBe(true)
       const undoResponse = page.waitForResponse(response => response.request().method() === 'POST'
         && new URL(response.url()).pathname === '/api/board/edits/undo')
@@ -343,11 +348,61 @@ test.describe('live AI full-stack audit', () => {
       })) })
       expect(undo.ok(), JSON.stringify(undoBody)).toBeTruthy()
       expect(undoBody.data.applied).toBe(true)
-      expect(restored).toEqual(before)
+      expectSameBoardSnapshot(restored, before)
       applied.push(kind)
       await expect(page.getByTestId('board-undo')).toBeDisabled()
     }
     expect(applied).toEqual(['rule', 'spec'])
+  })
+
+  test('renames a saved requirement through the assistant and preserves its conditions and undo', async ({ request }, testInfo) => {
+    const auth = await createAuthenticatedUser(request, { usernamePrefix: 'livename' })
+    const headers = { Authorization: `Bearer ${auth.token}` }
+    const readData = async (endpoint: string) => {
+      const response = await request.get(`${apiBaseURL}/api/${endpoint}`, { headers })
+      expect(response.ok(), await response.text()).toBeTruthy()
+      return (await response.json()).data
+    }
+    const scene = JSON.parse(await readFile(path.resolve(process.cwd(), '..', 'docs', 'examples',
+      'household-entry-scene-zh.json'), 'utf8'))
+    const preview = await readData('board/replacement-preview')
+    const imported = await request.post(`${apiBaseURL}/api/board/scene`, {
+      headers, data: { impactToken: preview.impactToken, scene }
+    })
+    expect(imported.ok(), await imported.text()).toBeTruthy()
+    const before = await readData('board/snapshot')
+    const original = before.specifications[0]
+    const desiredName = '离家时保持入户门上锁'
+    expect(original.name).not.toBe(desiredName)
+    const session = await request.post(`${apiBaseURL}/api/chat/sessions`, { headers, data: null })
+    expect(session.ok(), await session.text()).toBeTruthy()
+    const sessionId = (await session.json()).data.id
+    const turnId = randomUUID()
+    const response = await request.post(`${apiBaseURL}/api/chat/completions`, {
+      headers: { ...headers, Accept: 'text/event-stream' }, timeout: 240_000,
+      data: { sessionId, turnId, locale: 'zh-CN',
+        content: `请把现有规约“${original.name}”重命名为“${desiredName}”。请先读取现有规约，再直接保存新名称。保持所有条件和其他内容不变，不新增或删除规约，不运行验证。` }
+    })
+    expect(response.ok(), await response.text()).toBeTruthy()
+    const history = await readData(`chat/sessions/${sessionId}/messages`)
+    const message = history.messages.find((item: any) => item.role === 'assistant' && item.turnId === turnId)
+    const after = await readData('board/snapshot')
+    await testInfo.attach('requirement-rename', { contentType: 'application/json',
+      body: Buffer.from(JSON.stringify({ before, after, message })) })
+    expect(message).toMatchObject({ executionStatus: 'COMPLETED' })
+    expect(message.executionTrace.some((step: any) => step.stage === 'TOOL_RESULT'
+      && step.toolName === 'manage_spec' && step.outcome === 'USABLE')).toBe(true)
+    // Condition IDs are generated editor metadata, not authored inputs (docs/api/board.md).
+    // Preserve the requirement ID, every condition field, and all display caches in this comparison.
+    const withoutConditionIds = (spec: any) => ({ ...spec,
+      ...Object.fromEntries(['aConditions', 'ifConditions', 'thenConditions'].map(group =>
+        [group, spec[group].map(({ id: _id, ...condition }: any) => condition)])) })
+    expectSameBoardSnapshot({ ...after, specifications: after.specifications.map(withoutConditionIds) }, { ...before,
+      specifications: before.specifications.map((spec: any) =>
+        withoutConditionIds(spec.id === original.id ? { ...spec, name: desiredName } : spec)) })
+    const undone = await request.post(`${apiBaseURL}/api/board/edits/undo`, { headers, data: null })
+    expect(undone.ok(), await undone.text()).toBeTruthy()
+    expectSameBoardSnapshot(await readData('board/snapshot'), before)
   })
 
   test('returns a validated scene recommendation and streams a tool-backed board answer', async ({ request }) => {
@@ -376,7 +431,7 @@ test.describe('live AI full-stack audit', () => {
     expect(recommendationBody.code, JSON.stringify(recommendationBody)).toBe(200)
     expect(recommendationBody.data.scene).toMatchObject({
       schema: 'iot-verify.board-scene',
-      version: 5
+      version: 6
     })
     expect(Array.isArray(recommendationBody.data.scene.devices)).toBeTruthy()
     expect(Array.isArray(recommendationBody.data.scene.rules)).toBeTruthy()
@@ -606,7 +661,7 @@ test.describe('live AI full-stack audit', () => {
       expect(added.createdAt).not.toBe('')
       expect(before.rules.map((rule: any) => rule.id)).not.toContain(added.id)
       // Full raw snapshots retain rule IDs/timestamps, original order, and every other collection.
-      expect(after).toEqual({ ...before, rules: [...before.rules, added] })
+      expectSameBoardSnapshot(after, { ...before, rules: [...before.rules, added] })
       expect(availabilityBody.data.canUndo).toBe(true)
 
       const undo = await request.post(`${apiBaseURL}/api/board/edits/undo`, { headers: H })
@@ -625,7 +680,7 @@ test.describe('live AI full-stack audit', () => {
       expect(undoBody.data.rules).toEqual(before.rules)
       expect(restoredResponse.ok(), await restoredResponse.text()).toBeTruthy()
       expect(restoredBody.code, JSON.stringify(restoredBody)).toBe(200)
-      expect(restoredBody.data).toEqual(before)
+      expectSameBoardSnapshot(restoredBody.data, before)
     }
   })
 
@@ -706,7 +761,7 @@ test.describe('live AI full-stack audit', () => {
       expect(originalTrace.verificationTaskId).toBe(baseline.id)
       const repair = await turn('请针对刚才的问题查找能够通过正式验证的修复方案，保留目前已经满足的全部要求，不修改规约。把可用方案和它们的影响告诉我，暂时不要应用。')
       expect(hasTool(repair, ['fix_violation'])).toBeTruthy()
-      expect(await readData('/api/board/snapshot')).toEqual(before)
+      expectSameBoardSnapshot(await readData('/api/board/snapshot'), before)
       const preview = await turn('我选择只移除“灯亮就开门”的危险便利规则这个方案，保留访客亮灯和主人请求开门的规则。请申请它的应用预览，列出将改变的内容，等我确认后再执行。不要改动规约。', 'AWAITING_CONFIRMATION')
       expect(hasTool(preview, ['apply_fix'], 'CONFIRMATION_REQUIRED')).toBeTruthy()
       await expect(page.getByTestId('chat-protected-confirmation')).toBeVisible()
@@ -716,12 +771,12 @@ test.describe('live AI full-stack audit', () => {
       expect(unsafe).toBeTruthy()
       await expect(page.getByTestId('chat-confirmation-target')).toHaveText(unsafe.ruleString)
       await page.screenshot({ path: testInfo.outputPath('live-assistant-repair-preview.png') })
-      expect(await readData('/api/board/snapshot')).toEqual(before)
+      expectSameBoardSnapshot(await readData('/api/board/snapshot'), before)
       const applied = await turn(null)
       expect(hasTool(applied, ['apply_fix'])).toBeTruthy()
       await expect(page.getByTestId('chat-protected-confirmation')).toHaveCount(0)
       const after = await readData('/api/board/snapshot')
-      expect(after).toEqual({ ...before, rules: before.rules.filter((rule: any) => rule.id !== unsafe.id) })
+      expectSameBoardSnapshot(after, { ...before, rules: before.rules.filter((rule: any) => rule.id !== unsafe.id) })
       expect((await readData('/api/board/edits/availability')).canUndo).toBe(true)
       const finalReply = await turn('请重新正式验证当前画布，攻击和隐私检查仍关闭。说明全部要求现在的结论、触发条件是否可达和任何剩余问题。不要修改任何内容。')
       expect(hasTool(finalReply, ['verify_model', 'verify_model_async'])).toBeTruthy()
@@ -772,7 +827,7 @@ test.describe('live AI full-stack audit', () => {
       await page.getByTestId('trace-timeline-close').click()
       await expect(page.getByTestId('trace-timeline')).toBeHidden()
       expect((await readData('/api/verify/traces')).find((trace: any) => trace.id === originalTrace.id)).toEqual(originalTrace)
-      expect(await readData('/api/board/snapshot')).toEqual(after)
+      expectSameBoardSnapshot(await readData('/api/board/snapshot'), after)
       await expect(page.getByTestId('open-ai-assistant')).toBeEnabled({ timeout: 60_000 })
       await page.getByTestId('open-ai-assistant').click()
       const historyToggle = page.getByTestId('chat-sidebar-toggle')

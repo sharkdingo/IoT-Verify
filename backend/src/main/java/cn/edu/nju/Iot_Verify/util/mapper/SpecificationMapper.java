@@ -2,6 +2,7 @@ package cn.edu.nju.Iot_Verify.util.mapper;
 
 import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
+import cn.edu.nju.Iot_Verify.exception.PersistedDataIntegrityException;
 import cn.edu.nju.Iot_Verify.po.SpecificationPo;
 import cn.edu.nju.Iot_Verify.util.JsonUtils;
 import org.springframework.stereotype.Component;
@@ -22,8 +23,13 @@ public class SpecificationMapper {
         if (po == null) {
             return null;
         }
+        if (po.getName() == null || po.getName().isBlank() || po.getName().length() > 100) {
+            throw new PersistedDataIntegrityException("specification", po.getId(), "name",
+                    "A requirement name of 1 to 100 characters is required");
+        }
         SpecificationDto dto = new SpecificationDto();
         dto.setId(po.getId());
+        dto.setName(po.getName());
         dto.setTemplateId(po.getTemplateId());
         dto.setTemplateLabel(po.getTemplateLabel());
 
@@ -54,6 +60,7 @@ public class SpecificationMapper {
         SpecificationPo po = new SpecificationPo();
         po.setId(dto.getId());
         po.setUserId(userId);
+        po.setName(dto.getName());
         po.setTemplateId(dto.getTemplateId());
         po.setTemplateLabel(dto.getTemplateLabel());
 

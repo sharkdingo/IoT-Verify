@@ -131,7 +131,10 @@ final class OpenAiResponsesCodec {
         if (text.isEmpty() && calls.isEmpty()) {
             throw new OpenAIInvalidDataException("Model returned no answer or function calls");
         }
-        long reasoningTokens = response.usage().map(usage -> usage.outputTokensDetails().reasoningTokens()).orElse(-1L);
+        // Usage is diagnostic metadata; missing provider counters cannot invalidate completed output.
+        long reasoningTokens = response._usage().asKnown()
+                .flatMap(usage -> usage._outputTokensDetails().asKnown())
+                .flatMap(details -> details._reasoningTokens().asKnown()).orElse(-1L);
         log.info("LLM Responses completed: functionCalls={}, reasoningTokens={}, continuationItems={}",
                 calls.size(), reasoningTokens, continuation.size());
         return new LlmChatResponse(text.toString(), calls,

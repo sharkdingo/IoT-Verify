@@ -91,7 +91,10 @@ similarity 达到 0.8 及以上会强制转人工复核。
 
     public RuleSimilarityResultDto checkSimilarity(Long userId, RuleDto newRule) {
         newRule = RuleCandidateNormalizer.normalize(newRule);
-        List<RuleDto> existingRules = safeList(boardStorageService.getRules(userId));
+        Long editedRuleId = newRule.getId();
+        List<RuleDto> existingRules = safeList(boardStorageService.getRules(userId)).stream()
+                .filter(rule -> editedRuleId == null || !editedRuleId.equals(rule.getId()))
+                .toList();
         log.debug("AI rule similarity request: userId={}, existingRules={}", userId, existingRules.size());
         if (existingRules.isEmpty()) return noExistingRules();
         Map<String, RuleDto> references = ruleReferences(existingRules);
@@ -226,7 +229,7 @@ similarity 达到 0.8 及以上会强制转人工复核。
         body.put("similarity", 0.0);
         body.put("reasonCode", "NO_EXISTING_RULES");
         body.put("reason", "no existing rules");
-        body.put("message", "No existing rules to compare. This is the first rule.");
+        body.put("message", "No other saved rules to compare.");
         return resultParser.parseRuleSimilarityResult(body);
     }
 

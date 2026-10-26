@@ -147,19 +147,19 @@ describe('elevation scale', () => {
     expect(dock, 'the clipped span must not come back').not.toContain('board-tool-tooltip')
 
     const buttons = dock.match(/class="board-tool-button[^"]*"/g) ?? []
-    expect(buttons.length, 'the dock buttons should be found').toBeGreaterThanOrEqual(8)
+    expect(buttons.length, 'the dock buttons should be found').toBeGreaterThanOrEqual(4)
     // Functional tools keep hints; layout switches retain only their accessible names.
     const wrappers = dock.match(/<HintTooltip/g) ?? []
     expect(wrappers.length).toBeGreaterThanOrEqual(buttons.length)
   })
 
   it('keeps every dock button inside the toolbar elevation', () => {
-    // `open-verification-panel` carried Tailwind's `shadow-lg` while its seven siblings declared
-    // `box-shadow: none` — one of eight floating above a strip they all belong to, inside a panel that is
+    // `open-verification-panel` carried Tailwind's `shadow-lg` while its siblings declared
+    // `box-shadow: none` — one action floating above a strip they all belong to, inside a panel that is
     // itself elevated. It read as a depth difference where the product means an emphasis difference.
     const board = readFileSync(join(SRC, 'views/Board.vue'), 'utf8')
     const tags = board.match(/class="board-tool-button[^"]*"/g) ?? []
-    expect(tags.length, 'the dock buttons should be found').toBeGreaterThanOrEqual(8)
+    expect(tags.length, 'the dock buttons should be found').toBeGreaterThanOrEqual(4)
     for (const tag of tags) {
       expect(tag, `a dock button must not carry its own elevation: ${tag}`).not.toMatch(/\bshadow-(sm|md|lg|xl|2xl)\b/)
     }

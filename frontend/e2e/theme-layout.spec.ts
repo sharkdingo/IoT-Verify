@@ -1,3 +1,4 @@
+import { openRecommendation, collapseRecommendation } from './support/recommendations'
 import { type Locator, type Page } from '@playwright/test'
 import {
   apiBaseURL,
@@ -9,6 +10,7 @@ import {
   type AuthUser
 } from './support/auth'
 import { clickUnderTooltip } from './support/tooltips'
+import { expandControlTool } from './support/controlCenter'
 
 type ThemeMode = 'light' | 'dark'
 
@@ -279,6 +281,7 @@ test.describe('public theme and layout', () => {
     await expectDarkSurface(page.locator('.board-nav-bar'))
     await expectDarkSurface(page.locator('.modern-panel'))
     await expectDarkSurface(page.locator('.glass-panel'))
+    await expandControlTool(page, 'control-template-repository')
     await expectDarkSurface(page.locator('.modern-panel input:not(.hidden)').first())
     await expectDarkSurface(page.locator('.canvas-map'))
     await expectDarkSurface(page.locator('.canvas-map__viewport'))
@@ -350,44 +353,18 @@ test.describe('public theme and layout', () => {
     await expect(page.locator('.chat-panel')).toBeVisible({ timeout: 15_000 })
   })
 
-  test('workspace action dock keeps every AI tool reachable in a short landscape viewport', async ({ page, request }) => {
+  test('control center keeps every AI recommendation reachable in a short landscape viewport', async ({ page, request }) => {
     const auth = await createAuthenticatedUser(request)
     await page.setViewportSize({ width: 844, height: 390 })
     await openWorkspace(page, auth)
-
-    const panel = page.locator('.board-action-dock__panel')
-    await expect(panel).toBeVisible()
-    const panelMetrics = await panel.evaluate(element => {
-      const rect = element.getBoundingClientRect()
-      const style = getComputedStyle(element)
-      return {
-        top: rect.top,
-        bottom: rect.bottom,
-        viewportHeight: window.innerHeight,
-        overflowY: style.overflowY,
-        scrollHeight: element.scrollHeight,
-        clientHeight: element.clientHeight
-      }
-    })
-    expect(panelMetrics.top).toBeGreaterThanOrEqual(0)
-    expect(panelMetrics.bottom).toBeLessThanOrEqual(panelMetrics.viewportHeight)
-    expect(panelMetrics.overflowY).toBe('auto')
-
-    for (const testId of [
-      'open-rule-recommendations',
-      'open-device-recommendations',
-      'open-spec-recommendations'
-    ]) {
-      const tool = page.getByTestId(testId)
-      await tool.scrollIntoViewIfNeeded()
-      await expect(tool).toBeVisible()
-
-      const panelBox = await panel.boundingBox()
-      const toolBox = await tool.boundingBox()
-      expect(panelBox).not.toBeNull()
-      expect(toolBox).not.toBeNull()
-      expect(toolBox!.y).toBeGreaterThanOrEqual(panelBox!.y - 1)
-      expect(toolBox!.y + toolBox!.height).toBeLessThanOrEqual(panelBox!.y + panelBox!.height + 1)
+    for (const kind of ['rule', 'device', 'spec'] as const) {
+      await openRecommendation(page, kind)
+      const panel = page.getByTestId(`${kind}-recommendation-panel`)
+      const action = panel.getByTestId(`generate-${kind}-recommendations`)
+      await action.scrollIntoViewIfNeeded()
+      await expect(action).toBeInViewport({ ratio: 1 })
+      expect(await panel.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
+      await collapseRecommendation(page, kind)
     }
   })
 

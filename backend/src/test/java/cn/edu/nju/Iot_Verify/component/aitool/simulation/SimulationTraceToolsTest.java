@@ -1,6 +1,10 @@
 package cn.edu.nju.Iot_Verify.component.aitool.simulation;
 
 import cn.edu.nju.Iot_Verify.component.aitool.AiDestructiveActionGuard;
+import cn.edu.nju.Iot_Verify.component.ai.ChatConfirmationDetector;
+import cn.edu.nju.Iot_Verify.component.aitool.AiToolManager;
+import cn.edu.nju.Iot_Verify.configure.ChatExecutionConfig;
+import cn.edu.nju.Iot_Verify.dto.model.ModelGenerationIssueDto;
 import cn.edu.nju.Iot_Verify.dto.simulation.SimulationTraceDto;
 import cn.edu.nju.Iot_Verify.dto.simulation.SimulationTraceSummaryDto;
 import cn.edu.nju.Iot_Verify.exception.ResourceNotFoundException;
@@ -16,6 +20,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
+import java.nio.charset.StandardCharsets;
 import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -23,6 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -40,7 +46,7 @@ class SimulationTraceToolsTest {
     void setUp() {
         objectMapper = new ObjectMapper();
         AiDestructiveActionGuard destructiveActionGuard = new AiDestructiveActionGuard(objectMapper);
-        listTool = new ListSimulationTracesTool(simulationService, objectMapper);
+        listTool = new ListSimulationTracesTool(simulationService, objectMapper, new ChatExecutionConfig());
         getTool = new GetSimulationTraceTool(simulationService, objectMapper);
         deleteTool = new DeleteSimulationTraceTool(
                 simulationService, objectMapper, destructiveActionGuard);
@@ -89,7 +95,7 @@ class SimulationTraceToolsTest {
     @Test
     void listSimulations_withUnknownField_shouldRejectBeforeListing() throws Exception {
         UserContextHolder.setUserId(1L);
-        JsonNode json = objectMapper.readTree(listTool.execute("{\"limit\":10}"));
+        JsonNode json = objectMapper.readTree(listTool.execute("{\"unknown\":10}"));
 
         assertEquals("VALIDATION_ERROR", json.path("errorCode").asText());
         verify(simulationService, never()).getUserSimulations(1L);
@@ -121,6 +127,73 @@ class SimulationTraceToolsTest {
         assertTrue(json.path("traces").get(0).path("isAttack").asBoolean());
         assertEquals(1, json.path("availableCount").asInt());
         assertEquals(0, json.path("unavailableCount").asInt());
+    }
+
+    @Test
+    void listSimulations_pagesOwnedRunsWithContinuation() throws Exception {
+        UserContextHolder.setUserId(1L);
+        when(simulationService.getUserSimulations(1L)).thenReturn(List.of(
+                SimulationTraceSummaryDto.builder().id(3L).dataAvailable(true).build(),
+                SimulationTraceSummaryDto.builder().id(2L).dataAvailable(true).build(),
+                SimulationTraceSummaryDto.builder().id(1L).dataAvailable(true).build()));
+
+        JsonNode first = objectMapper.readTree(listTool.execute("{\"limit\":2}"));
+        JsonNode second = objectMapper.readTree(listTool.execute("{\"offset\":2,\"limit\":2}"));
+
+        assertEquals(3, first.path("totalCount").asInt());
+        assertEquals(2, first.path("count").asInt());
+        assertEquals(3L, first.path("traces").get(0).path("simulationId").asLong());
+        assertTrue(first.path("hasMore").asBoolean());
+        assertEquals(2, first.path("nextOffset").asInt());
+        assertEquals(1L, second.path("traces").get(0).path("simulationId").asLong());
+        assertFalse(second.path("hasMore").asBoolean());
+    }
+
+    @Test
+    void listSimulations_reducesPageToFitByteBudgetWithoutLosingContinuation() throws Exception {
+        UserContextHolder.setUserId(1L);
+        ChatExecutionConfig config = new ChatExecutionConfig();
+        config.setMaxToolResultBytes(4096);
+        listTool = new ListSimulationTracesTool(simulationService, objectMapper, config);
+        List<SimulationTraceSummaryDto> runs = java.util.stream.LongStream.rangeClosed(1, 8)
+                .mapToObj(id -> SimulationTraceSummaryDto.builder().id(id).dataAvailable(true)
+                        .generationIssues(List.of(ModelGenerationIssueDto.builder()
+                                .issueType("rule").itemLabel("long issue")
+                                .reason("cause ".repeat(90)).build())).build())
+                .toList();
+        when(simulationService.getUserSimulations(1L)).thenReturn(runs);
+
+        AiToolManager manager = new AiToolManager(List.of(listTool), objectMapper, config,
+                mock(ChatConfirmationDetector.class));
+        manager.init();
+        String response = manager.execute("list_simulation_traces", "{\"limit\":8}");
+        JsonNode page = objectMapper.readTree(response);
+
+        assertEquals(8, page.path("totalCount").asInt());
+        assertTrue(page.path("count").asInt() < 8);
+        assertTrue(page.path("count").asInt() > 0);
+        assertEquals(page.path("count").asInt(), page.path("nextOffset").asInt());
+        assertTrue(page.path("hasMore").asBoolean());
+        assertEquals("SUCCESS", page.path("resultStatus").asText());
+        assertTrue(response.getBytes(StandardCharsets.UTF_8).length <= 4096);
+    }
+
+    @Test
+    void listSimulations_singleOversizedSummaryStillExposesSimulationIdAndContinuation() throws Exception {
+        UserContextHolder.setUserId(1L);
+        ChatExecutionConfig config = new ChatExecutionConfig();
+        config.setMaxToolResultBytes(4096);
+        listTool = new ListSimulationTracesTool(simulationService, objectMapper, config);
+        when(simulationService.getUserSimulations(1L)).thenReturn(List.of(
+                SimulationTraceSummaryDto.builder().id(5L).dataAvailable(true)
+                        .generationIssues(List.of(ModelGenerationIssueDto.builder()
+                                .issueType("rule").reason("cause ".repeat(900)).build())).build()));
+
+        JsonNode page = objectMapper.readTree(listTool.execute("{}"));
+
+        assertEquals("RESULT_UNAVAILABLE", page.path("resultStatus").asText());
+        assertEquals(5L, page.path("simulationId").asLong());
+        assertEquals(1, page.path("nextOffset").asInt());
     }
 
     @Test

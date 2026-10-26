@@ -41,7 +41,7 @@ public class ChatExecutionConfig {
     @Min(100)
     private int maxMessagesPerSession = 5_000;
 
-    /** Recent coherent conversation context supplied to the model, measured in Java characters. */
+    /** Shared soft target for task memory and recent coherent history, measured in Java characters. */
     @Min(4000)
     private int historyCharLimit = 32_000;
 

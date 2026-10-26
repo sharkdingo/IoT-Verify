@@ -21,13 +21,13 @@ public class SpecResultDto {
     /** Template semantics captured from the submitted specification. */
     private String templateId;
 
-    /** User-facing template label captured for result interpretation. */
+    /** User-authored requirement name captured for result interpretation. */
     private String specificationLabel;
 
     /** Descriptive formula rebuilt from submitted structured conditions and device labels. */
     private String formulaPreview;
 
-    /** Null when a stored result has no structured interpretation evidence. */
+    /** Required frozen interpretation evidence for the emitted requirement. */
     private SpecificationSnapshotDto specificationSnapshot;
 
     /** Actual emitted property language: CTL or LTL. */

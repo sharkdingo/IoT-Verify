@@ -35,6 +35,20 @@ public interface ChatMessageRepository extends JpaRepository<ChatMessagePo, Long
     // Recent message window for AI context. The database id is the cross-instance order.
     List<ChatMessagePo> findTop80BySessionIdOrderByIdDesc(String sessionId);
 
+    @Query("""
+            select m from ChatMessagePo m where m.sessionId = :sessionId and m.role = 'user'
+              and (:beforeId is null or m.id < :beforeId)
+              and (:messageId is null or m.id = :messageId)
+              and (:query is null or locate(lower(:query), lower(m.content)) > 0)
+            order by m.id desc
+            """)
+    List<ChatMessagePo> findUserOriginals(@Param("sessionId") String sessionId,
+            @Param("beforeId") Long beforeId, @Param("messageId") Long messageId,
+            @Param("query") String query, Pageable pageable);
+
+    List<ChatMessagePo> findBySessionIdAndRoleAndIdGreaterThanOrderByIdAsc(
+            String sessionId, String role, Long afterId, Pageable pageable);
+
     long countBySessionId(String sessionId);
     boolean existsBySessionIdAndTurnId(String sessionId, String turnId);
     boolean existsBySessionIdAndTurnIdAndExecutionIdAndRole(

@@ -38,6 +38,7 @@ class ListSpecsToolTest {
         node.setLabel("Front door");
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec-internal-1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("3");
         spec.setTemplateLabel("Door must never be open");
         spec.setFormula("CTLSPEC AG !(node-door.state = open)");
@@ -67,6 +68,11 @@ class ListSpecsToolTest {
         assertTrue(presented.path("formula").isMissingNode());
         assertTrue(presented.path("description").asText().contains("Front door"));
 
+        JsonNode nameSearch = new ObjectMapper().readTree(new ListSpecsTool(storage, new ObjectMapper())
+                .execute("{\"keyword\":\"safety requirement\"}"));
+        assertEquals(1, nameSearch.path("count").asInt());
+        assertEquals("Safety requirement", nameSearch.path("specs").get(0).path("name").asText());
+
         JsonNode versionSearch = new ObjectMapper().readTree(new ListSpecsTool(storage, new ObjectMapper())
                 .execute("{\"keyword\":\"" + presented.path("expectedVersion").asText() + "\"}"));
         assertEquals(0, versionSearch.path("count").asInt(), "Version tokens are not searchable specification content");
@@ -75,7 +81,7 @@ class ListSpecsToolTest {
         assertEquals(0, unmatched.path("count").asInt());
         assertEquals("No specifications match this literal keyword. Use an empty keyword to list all specifications.",
                 unmatched.path("message").asText());
-        verify(storage, times(3)).getSemanticSnapshot(1L);
+        verify(storage, times(4)).getSemanticSnapshot(1L);
         verifyNoMoreInteractions(storage);
     }
 

@@ -218,6 +218,7 @@ class PaperMonitorFsmTest {
             List<SpecConditionDto> thenConditions) {
         SpecificationDto specification = new SpecificationDto();
         specification.setId("spec-" + templateId);
+        specification.setName("Safety requirement");
         specification.setTemplateId(templateId);
         specification.setAConditions(aConditions);
         specification.setIfConditions(ifConditions);

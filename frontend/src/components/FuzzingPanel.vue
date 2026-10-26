@@ -9,7 +9,6 @@ import type {
   FuzzingTaskSummary
 } from '@/types/fuzzing'
 import { isValidFuzzPaperDomainFingerprint } from '@/types/fuzzing'
-import { formatTraceSpec } from '@/utils/traceView'
 import {
   FUZZ_ITERATIONS_MAX,
   FUZZ_ITERATIONS_MIN,
@@ -250,10 +249,6 @@ const specIneligibilityMessageKey = (spec: Specification) => {
 const onSpecChange = (id: string, event: Event) => {
   toggleSpec(id, (event.target as HTMLInputElement).checked)
 }
-
-const specTitle = (spec: Specification) =>
-  formatTraceSpec(spec, t, Object.fromEntries(props.bundledDeviceIds.map(id => [id, 'BUNDLED'])))
-    || spec.templateLabel || spec.formula || t('app.unknownSpecification')
 
 const formatDomainValues = (
   values: string[],
@@ -516,7 +511,7 @@ const frozenTargetScope = computed(() => {
               @change="onSpecChange(spec.id, $event)"
             />
             <span class="min-w-0 flex-1 leading-4" :class="isSpecEligible(spec) ? 'board-text-strong' : 'board-text-muted'">
-              <span class="block">{{ specTitle(spec) }}</span>
+              <span class="block">{{ spec.name }}</span>
               <span v-if="!isSpecEligible(spec)" class="mt-0.5 block text-xs leading-4 board-text-muted">
                 {{ t(specIneligibilityMessageKey(spec)) }}
               </span>

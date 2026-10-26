@@ -1,10 +1,10 @@
 # Additional Default-Template Scenarios
 
 These scenes exercise care, security, and comfort rules beyond the night-watch acceptance demo. Each
-file is a standard version 5 `iot-verify.board-scene` document that can be imported from
+file is a standard version 6 `iot-verify.board-scene` document that can be imported from
 the Board with its bundled and scene-specific template snapshots.
 
-Verified against code on 2026-10-22. Real NuSMV checks include `HouseholdEntrySceneNusmvTest`. Sources:
+Verified against code on 2026-10-25. Real NuSMV checks include `HouseholdEntrySceneNusmvTest`. Sources:
 `scripts/generate-default-template-scenes.mjs`, the bundled manifests under
 `backend/src/main/resources/deviceTemplate/`, and
 `AcceptanceDemoScenarioNusmvTest`.
@@ -35,8 +35,10 @@ scene. These results describe the formal model, not guaranteed physical-home beh
 ## Household entry
 
 Import [household-entry-scene.json](../examples/household-entry-scene.json) for the main
-end-to-end demonstration. It uses bundled `Door` and `Light` plus scene-defined resident
-presence and entry-request sensors. The shared `entryRequest` domain is `none`, `visitor`,
+end-to-end demonstration, or [the Chinese display version](../examples/household-entry-scene-zh.json)
+used by the recorded demo. Both are generated from the same model; only device labels, rule names,
+and requirement names differ. It uses bundled `Door` and `Light` plus scene-defined resident presence and a
+`Door Access Request` input (displayed as **开门请求** in Chinese). The shared `entryRequest` domain is `none`, `visitor`,
 or `authorized_owner`: classification is supplied by an assumed trusted external
 authentication system. The scene does not implement authentication or prove that this input
 cannot be forged in a physical home. Presence and request values may change on every step;
@@ -54,11 +56,13 @@ The requirements are deliberately paired:
 The first property is about a visitor causing an unlock. It does not claim the door must
 be locked whenever a visitor is present: an owner may already have opened it. The baseline
 violates the first property through the lighting-to-unlock chain and satisfies the latter
-two, with all three antecedents reachable. Inspect the counterexample, then edit the unsafe
-rule in place to add `Entry Request.entryRequest = authorized_owner`. Verify again: all three
-properties hold and all three triggers remain reachable. Deleting only that unsafe coupling
-also passes. Removing the owner entry rule or visitor lighting fails a useful-response
-requirement. Undo the edit to recover the violation, and redo it to recover the passing model.
+two, with all three antecedents reachable. Inspect the counterexample, request automatic
+`remove` repair suggestions, and review the verified suggestion that removes only the unsafe
+lighting-to-unlock rule. Confirm its application, then verify the saved board again: all three
+properties hold and all three triggers remain reachable. An explicit rule edit adding
+`entryRequest = authorized_owner` also passes, but is a separate workflow from automatic Fix.
+Removing the owner entry rule or visitor lighting fails a useful-response
+requirement. Undo the change to recover the violation, and redo it to recover the passing model.
 
 The run proves these statements in the declared synchronous model, without attack selection
 or privacy modeling. It does not establish real authentication, physical timing, attack

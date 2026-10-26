@@ -1,3 +1,4 @@
+import { expandCreation } from './support/controlCenter'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { type Page } from '@playwright/test'
@@ -33,6 +34,7 @@ test('a confirmed scene import refreshes another visible window like a targeted 
       response.request().method() === 'GET'
       && new URL(response.url()).pathname === '/api/board/snapshot')
     await observer.getByTestId('control-tab-devices').click()
+    await expandCreation(observer, 'devices')
     const templateSelect = observer.getByTestId('single-device-template')
     await expect(templateSelect.locator('option[value="Light"]')).toHaveCount(1)
     await templateSelect.selectOption('Light')
@@ -60,7 +62,7 @@ test('a confirmed scene import refreshes another visible window like a targeted 
       process.cwd(), '..', 'backend', 'src', 'main', 'resources', 'deviceTemplate', 'Light.json'
     ), 'utf8'))
     const scene = {
-      schema: 'iot-verify.board-scene', version: 5,
+      schema: 'iot-verify.board-scene', version: 6,
       templates: [{ name: 'Light', manifest }],
       devices: [{
         id: 'imported_lamp', templateName: 'Light', label: 'Imported replacement lamp',

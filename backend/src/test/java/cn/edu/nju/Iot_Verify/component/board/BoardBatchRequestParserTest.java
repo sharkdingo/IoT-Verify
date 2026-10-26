@@ -126,7 +126,7 @@ class BoardBatchRequestParserTest {
                   "templateSnapshots": [],
                   "specs": [{
                     "id": "spec-1",
-                    "templateId": "1",
+                    "name": "Safety requirement", "templateId": "1",
                     "aConditions": [{
                       "side": "a",
                       "deviceId": "sensor_1",
@@ -162,7 +162,7 @@ class BoardBatchRequestParserTest {
                   "templateSnapshots": [],
                   "specs": [{
                     "id": "spec-1",
-                    "templateId": "1",
+                    "name": "Safety requirement", "templateId": "1",
                     "aConditions": [{
                       "side": "a",
                       "deviceId": "sensor_1",

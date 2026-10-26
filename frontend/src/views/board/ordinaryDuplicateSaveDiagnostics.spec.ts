@@ -55,7 +55,7 @@ describe('ordinary save rejection diagnostics in production Board handlers', () 
   for (const [kind, code] of [['rule', 'DUPLICATE_RULE'], ['spec', 'DUPLICATE_SPECIFICATION']] as const) {
     const submit = async (state: ReturnType<typeof setup>, complete: ReturnType<typeof vi.fn>) => kind === 'rule'
       ? state.handleAddRule({ rule: { sources: [{ fromId: 'lamp', fromApi: 'state' }], toId: 'lamp', toApi: 'on' }, complete })
-      : state.handleAddSpec({ templateId: '1', aConditions: [], ifConditions: [], thenConditions: [], complete })
+      : state.handleAddSpec({ name: 'Safety requirement', templateId: '1', aConditions: [], ifConditions: [], thenConditions: [], complete })
 
     it(`${kind}: passes a typed duplicate's exact details back to its editing form`, async () => {
       const error = failure(code)

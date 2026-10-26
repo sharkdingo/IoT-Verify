@@ -33,7 +33,7 @@ test('an unavailable current-model comparison withholds historical Fix and expla
   }))
   await unwrap(await request.post(`${apiBaseURL}/api/board/specs`, {
     headers,
-    data: {
+    data: { name: 'Safety requirement',
       id: 'unknown_never', templateId: '3',
       aConditions: [{ deviceId: 'unknown_light', targetType: 'mode',
         key: 'SwitchState', relation: '=', value: 'on' }],

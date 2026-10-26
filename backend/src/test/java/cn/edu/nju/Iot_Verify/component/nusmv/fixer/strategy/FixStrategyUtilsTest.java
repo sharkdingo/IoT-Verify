@@ -135,6 +135,7 @@ class FixStrategyUtilsTest {
     private SpecificationDto buildSpec(SpecConditionDto... conditions) {
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setTemplateLabel("test");
         List<SpecConditionDto> list = new ArrayList<>(Arrays.asList(conditions));
@@ -436,6 +437,7 @@ class FixStrategyUtilsTest {
         }
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setTemplateLabel("test");
         spec.setAConditions(conds);
@@ -475,6 +477,7 @@ class FixStrategyUtilsTest {
         // Same condition in aConditions and ifConditions
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setTemplateLabel("test");
         spec.setAConditions(List.of(buildSpecCond("sensor", "variable", "temperature", ">", "30")));

@@ -79,6 +79,7 @@ public class PortableSceneDto {
             isGetterVisibility = JsonAutoDetect.Visibility.NONE,
             fieldVisibility = JsonAutoDetect.Visibility.ANY)
     public static class PortableSpecificationDto {
+        private String name;
         private String templateId;
         @JsonProperty("aConditions")
         private List<PortableSpecConditionDto> aConditions;

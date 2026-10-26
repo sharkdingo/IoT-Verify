@@ -40,6 +40,8 @@ test('revises a household requirement in place and restores it through undo and 
   await page.getByTestId('inspector-tab-specs').click()
   await page.getByTestId(`edit-spec-${original.id}`).click()
   const editor = page.getByTestId('spec-editor-fieldset')
+  await expect(editor.getByTestId('spec-name')).toHaveValue(original.name)
+  await editor.getByTestId('spec-name').fill('Light the entrance when a visitor arrives at home')
   await expect(editor.getByTestId('spec-template-select')).toHaveValue(original.templateId)
   await expect(editor.getByTestId('spec-create')).toHaveText('Save changes')
   // The first IF condition controls whether the visitor-light requirement applies at home or away.
@@ -58,10 +60,10 @@ test('revises a household requirement in place and restores it through undo and 
   const response = await saved
   expect(response.ok(), await response.text()).toBe(true)
   expect(response.request().postDataJSON()).toMatchObject({
-    expected: { id: original.id, ifConditions: original.ifConditions.map((condition: any) => ({
+    expected: { id: original.id, name: original.name, ifConditions: original.ifConditions.map((condition: any) => ({
       deviceId: condition.deviceId, value: condition.value
     })) },
-    desired: { id: original.id, ifConditions: [{ deviceId: 'occupancy_1', value: 'present' }, { deviceId: 'entry_1', value: 'visitor' }] }
+    desired: { id: original.id, name: 'Light the entrance when a visitor arrives at home', ifConditions: [{ deviceId: 'occupancy_1', value: 'present' }, { deviceId: 'entry_1', value: 'visitor' }] }
   })
   const mutation = (await response.json()).data
   expect(mutation).toMatchObject({ operation: 'updated', canUndo: true, canRedo: false })
@@ -71,6 +73,7 @@ test('revises a household requirement in place and restores it through undo and 
   expect(after.specifications.filter((spec: any) => spec.id !== original.id))
     .toEqual(before.specifications.filter((spec: any) => spec.id !== original.id))
   const edited = after.specifications.find((spec: any) => spec.id === original.id)
+  await expect(page.locator(`[data-spec-id="${original.id}"] h4`)).toHaveText(edited.name)
   expect(edited.ifConditions[0]).toMatchObject({ deviceId: 'occupancy_1', variableSource: 'environment', value: 'present' })
   expect(after.rules).toEqual(before.rules)
   expect(after.nodes).toEqual(before.nodes)

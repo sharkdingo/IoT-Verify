@@ -43,7 +43,7 @@ public class SpecificationRecommendationService {
     private static final int MAX_TOKENS = 4000;
     private static final Set<String> ALLOWED_TEMPLATE_IDS = Set.of("1", "2", "3", "4", "5", "6", "7");
     private static final Set<String> RECOMMENDATION_FIELDS =
-            Set.of("rationale", "templateId", "templateLabel",
+            Set.of("name", "rationale", "templateId", "templateLabel",
                     "aConditions", "ifConditions", "thenConditions");
     private static final Set<String> CONDITION_FIELDS =
             Set.of("deviceId", "deviceLabel", "targetType", "key", "propertyScope", "variableSource",
@@ -114,6 +114,7 @@ value/trust/privacy 是用户当前覆盖后的共享值。
 {
   "recommendations": [
     {
+      "name": "简短、具体的规约名称（必填，1到100字符）",
       "rationale": "解释为什么建议检查这条规约；仅用于推荐说明，不是规约字段",
       "templateId": "规约模板ID（必填，只能是 1|2|3|4|5|6|7）",
       "aConditions": [ <Condition>, ... ],
@@ -315,9 +316,9 @@ value/trust/privacy 是用户当前覆盖后的共享值。
 
     private String languageInstruction(String language) {
         if ("zh-CN".equals(language)) {
-            return "- 输出语言: 简体中文。rationale 必须使用简体中文。";
+            return "- 输出语言: 简体中文。name 和 rationale 必须使用简体中文。";
         }
-        return "- Output language: English. Use English for the rationale.";
+        return "- Output language: English. Use English for name and rationale.";
     }
 
     private String recommendationMessage(String language, String key, int count) {
@@ -507,6 +508,7 @@ value/trust/privacy 是用户当前覆盖后的共享值。
             List<Map<String, Object>> specsInfo = new ArrayList<>();
             for (SpecificationDto spec : existingSpecs) {
                 Map<String, Object> specInfo = new LinkedHashMap<>();
+                specInfo.put("name", spec.getName());
                 specInfo.put("templateId", spec.getTemplateId());
                 specInfo.put("templateLabel", spec.getTemplateLabel());
                 specInfo.put("aConditions", specConditionContext(spec.getAConditions()));
@@ -665,6 +667,9 @@ value/trust/privacy 是用户当前覆盖后的共享值。
             return invalid("missingSpecificationRationale", language);
         }
         recommendation.put("rationale", rationale);
+        String name = recommendation.get("name") instanceof String text ? asTrimmedString(text) : null;
+        if (name == null || name.length() > 100) return invalid("invalidSpecificationName", language);
+        recommendation.put("name", name);
         String templateId = asTrimmedString(recommendation.get("templateId"));
         if (!ALLOWED_TEMPLATE_IDS.contains(templateId)) {
             return invalid("invalidTemplateId", language);
@@ -855,6 +860,9 @@ value/trust/privacy 是用户当前覆盖后的共享值。
     private String validationReason(String language, String reasonCode) {
         boolean zh = "zh-CN".equals(language);
         return switch (reasonCode) {
+            case "invalidSpecificationName" -> zh
+                    ? "规约名称必填，长度为 1 到 100 个字符。"
+                    : "A specification name of 1 to 100 characters is required.";
             case "invalidTemplateId" -> zh
                     ? "缺少合法 templateId；规约推荐必须使用 1 到 7 的模板编号。"
                     : "Missing a valid templateId; specification recommendations must use template 1 through 7.";

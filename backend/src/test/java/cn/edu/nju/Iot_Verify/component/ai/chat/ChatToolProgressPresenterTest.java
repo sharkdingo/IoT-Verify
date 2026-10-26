@@ -12,7 +12,7 @@ class ChatToolProgressPresenterTest {
     void specificationUpdateRefreshesTheListButAnUnchangedDraftDoesNotClaimAnEdit() {
         String result = """
                 {"operation":"updated","verificationStatus":"NOT_VERIFIED","totalSpecs":1,
-                 "specification":{"specId":"spec-1","templateId":"3","aConditions":[{}],
+                 "specification":{"specId":"spec-1","name":"Keep the light on","templateId":"3","aConditions":[{}],
                  "ifConditions":[],"thenConditions":[],"formulaPreview":"AF light.state = on"}}
                 """;
         var receipt = presenter.actionReceipt("manage_spec", result, true).orElseThrow();

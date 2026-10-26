@@ -707,29 +707,6 @@
     color: var(--board-text);
 }
 
-/* Recommendation panels can coexist with the persistent fail-closed banner.
- * Keep their controls above that banner so a failed initial load cannot trap a
- * user inside a panel that was already open. */
-.iot-board .board-recommendation-panel {
-    z-index: var(--z-board-panel-above-alert);
-}
-
-.iot-board .board-floating-panel.board-recommendation-panel {
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-}
-
-.iot-board .board-recommendation-panel > :first-child {
-    flex-shrink: 0;
-}
-
-.iot-board .board-recommendation-panel__body {
-    min-height: 0;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-}
-
 .iot-board .board-floating-panel.fuzzing-panel {
     overflow: hidden;
 }
@@ -3024,9 +3001,6 @@
         --board-floating-panel-max-width: 21rem;
     }
 
-    .iot-board .board-recommendation-panel {
-        --board-floating-panel-max-width: 26rem;
-    }
 }
 
 @media (max-width: 639.98px), (max-height: 599.98px) {

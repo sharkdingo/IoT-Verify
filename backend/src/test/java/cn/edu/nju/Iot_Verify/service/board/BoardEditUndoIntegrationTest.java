@@ -603,10 +603,29 @@ class BoardEditUndoIntegrationTest {
     }
 
     @Test
+    void renamingASpecificationPersistsAndRejectsStaleEditsWithoutChangingItsLogic() {
+        SpecificationDto original = service.addSpec(userId, newSpec("on")).getAffectedItem();
+        SpecificationDto desired = newSpec("on");
+        desired.setId(original.getId());
+        desired.setName("  Keep the hallway lit  ");
+        var result = service.updateSpecIfUnchanged(userId, original.getId(), original, desired);
+        assertEquals("updated", result.getOperation());
+        assertEquals("Keep the hallway lit", service.getSpecs(userId).get(0).getName());
+        assertEquals(original.getAConditions(), result.getAffectedItem().getAConditions());
+        assertEquals("SPEC_EDIT_STALE", assertThrows(ConflictException.class,
+                () -> service.updateSpecIfUnchanged(userId, original.getId(), original, original)).getReasonCode());
+        assertTrue(service.undoLastEdit(userId).isApplied());
+        assertEquals(original, service.getSpecs(userId).get(0));
+        assertTrue(service.redoLastUndoneEdit(userId).isApplied());
+        assertEquals("Keep the hallway lit", service.getSpecs(userId).get(0).getName());
+    }
+
+    @Test
     void editingOneSpecificationRebuildsDisplayCachesAndRoundTripsWithoutMovingIt() {
         SpecificationDto original = service.addSpec(userId, newSpec("on")).getAffectedItem();
         SpecificationDto other = service.addSpec(userId, newSpec("off")).getAffectedItem();
         SpecificationDto desired = newSpec("on");
+        desired.setName("Safety requirement");
         desired.setTemplateId("3");
         desired.setTemplateLabel("forged template label");
         desired.setFormula("forged formula");
@@ -659,6 +678,7 @@ class BoardEditUndoIntegrationTest {
         RuleDto changedRule = newRule("newer", "on", "on");
         changedRule.setId(originalRule.getId());
         SpecificationDto changedSpec = newSpec("on");
+        changedSpec.setName("Safety requirement");
         changedSpec.setTemplateId("3");
         if (rule) service.updateRuleIfUnchanged(userId, originalRule.getId(), originalRule, changedRule);
         else service.updateSpecIfUnchanged(userId, originalSpec.getId(), originalSpec, changedSpec);
@@ -750,6 +770,7 @@ class BoardEditUndoIntegrationTest {
         RuleDto desiredRule = newRule("updated");
         desiredRule.setId(originalRule.getId());
         SpecificationDto desiredSpec = newSpec("on");
+        desiredSpec.setName("Safety requirement");
         desiredSpec.setTemplateId("3");
         if (rule) service.updateRuleIfUnchanged(userId, originalRule.getId(), originalRule, desiredRule);
         else service.updateSpecIfUnchanged(userId, originalSpec.getId(), originalSpec, desiredSpec);
@@ -816,9 +837,11 @@ class BoardEditUndoIntegrationTest {
             rules.saveAndFlush(changed);
         } else {
             SpecificationDto desired = newSpec("on");
+            desired.setName("Safety requirement");
             desired.setTemplateId("3");
             service.updateSpecIfUnchanged(userId, originalSpec.getId(), originalSpec, desired);
             var changed = specs.findByUserId(userId).get(0);
+            changed.setName("Safety requirement");
             changed.setTemplateId("2");
             specs.saveAndFlush(changed);
         }
@@ -850,6 +873,7 @@ class BoardEditUndoIntegrationTest {
             RuleDto desiredRule = newRule("updated", "on", "on");
             desiredRule.setId(originalRule.getId());
             SpecificationDto desiredSpec = newSpec("on");
+            desiredSpec.setName("Safety requirement");
             desiredSpec.setTemplateId("3");
 
             assertThrows(IllegalStateException.class, () -> {
@@ -931,6 +955,7 @@ class BoardEditUndoIntegrationTest {
         SpecificationDto spec = new SpecificationDto();
         // Specification ids are author-supplied strings, not IDENTITY-generated.
         spec.setId("spec-" + state);
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         // Template 1 ("always") uses A conditions only, so the state is what distinguishes the two
         // fixtures — the board rejects two semantically identical specifications.

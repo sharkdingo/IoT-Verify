@@ -27,6 +27,7 @@ public final class SpecificationToolPresenter {
                                               SpecificationFormulaPreview.Context context) {
         Map<String, Object> result = new LinkedHashMap<>();
         putIfText(result, "specId", spec.getId());
+        result.put("name", spec.getName());
         if (text(spec.getId()) != null) {
             result.put("expectedVersion", BoardItemVersion.specification(userId, spec));
         }

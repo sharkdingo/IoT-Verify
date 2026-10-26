@@ -97,6 +97,7 @@ class GetTraceToolTest {
         UserContextHolder.setUserId(1L);
         SpecificationDto violatedSpec = new SpecificationDto();
         violatedSpec.setId("spec_1");
+        violatedSpec.setName("Never");
         violatedSpec.setTemplateId("3");
         violatedSpec.setTemplateLabel("Never");
         violatedSpec.setFormula("AG(!camera.recording)");
@@ -458,6 +459,7 @@ class GetTraceToolTest {
         UserContextHolder.setUserId(1L);
         SpecificationDto violatedSpec = new SpecificationDto();
         violatedSpec.setId("spec_5");
+        violatedSpec.setName("Never");
         violatedSpec.setTemplateId("5");
         TraceDto trace = TraceDto.builder()
                 .id(9L)

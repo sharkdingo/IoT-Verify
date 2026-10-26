@@ -129,11 +129,44 @@ const mountChat = (props: Record<string, unknown> = {}) => {
 }
 
 describe('ChatView', () => {
+  it('passes historical Markdown to the renderer unchanged, including unfinished code fences', async () => {
+    const content = '~~~text\n' + String.raw`\(x_1\) 场景**“测试”**`
+    chatApi.getSessionList.mockResolvedValue([session])
+    chatApi.getSessionHistory.mockResolvedValue(historyPage([{ role: 'assistant', content }]))
+    chatStore.openChat()
+    const wrapper = mountChat()
+    await flushPromises()
+    await wrapper.get('[data-testid="chat-session-session-1"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.chat-markdown-stub').text()).toBe(content)
+  })
+
+  it('starts with task suggestions and reveals guidance without losing its unsent fields', async () => {
+    chatStore.openChat()
+    const wrapper = mountChat()
+    await flushPromises()
+    const guidance = wrapper.get('[data-testid="chat-guided-goals"]')
+    expect(guidance.attributes('open')).toBeUndefined()
+    expect(wrapper.findAll('[data-testid="chat-preset-task"]')).toHaveLength(4)
+    expect(wrapper.get('.welcome-screen h2').text()).toBe(i18n.global.t('app.chat.welcomeTitle'))
+    await guidance.get('summary').trigger('click')
+    expect(guidance.attributes('open')).toBeDefined()
+    await wrapper.get('[data-testid="household-want"]').setValue('有访客时亮灯')
+    await guidance.get('summary').trigger('click')
+    expect(guidance.attributes('open')).toBeUndefined()
+    await guidance.get('summary').trigger('click')
+    expect(wrapper.get<HTMLTextAreaElement>('[data-testid="household-want"]').element.value).toBe('有访客时亮灯')
+    expect(chatApi.createSession).not.toHaveBeenCalled()
+    expect(chatApi.sendStreamChat).not.toHaveBeenCalled()
+    expect(wrapper.get<HTMLTextAreaElement>('[data-testid="chat-input"]').element.value).toBe('')
+  })
+
   it('drafts household goals for review without sending or overwriting a message', async () => {
     chatStore.openChat()
     const wrapper = mountChat()
     await flushPromises()
     expect(wrapper.find('[data-testid="household-goal-composer"]').exists()).toBe(true)
+    await wrapper.get('[data-testid="chat-guided-goals"] summary').trigger('click')
     await wrapper.get('[data-testid="household-want"]').setValue('访客到门口就亮灯')
     await wrapper.get('[data-testid="household-avoid"]').setValue('访客不能触发开门')
     await wrapper.get('[data-testid="household-preserve"]').setValue('主人回来仍可开门')
@@ -149,6 +182,21 @@ describe('ChatView', () => {
     await wrapper.get('[data-testid="household-want"]').setValue('另一个草稿')
     await wrapper.get('[data-testid="household-draft"]').trigger('click')
     expect((input.element as HTMLTextAreaElement).value).toBe(draft)
+  })
+
+  it('starts a new conversation with its guidance closed and its own empty fields', async () => {
+    chatApi.createSession.mockResolvedValue(session)
+    chatStore.openChat()
+    const wrapper = mountChat()
+    await flushPromises()
+    await wrapper.get('[data-testid="chat-guided-goals"] summary').trigger('click')
+    await wrapper.get('[data-testid="household-want"]').setValue('有访客时亮灯')
+    await wrapper.get('.new-chat-btn').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="chat-guided-goals"]').attributes('open')).toBeUndefined()
+    await wrapper.get('[data-testid="chat-guided-goals"] summary').trigger('click')
+    expect(wrapper.get<HTMLTextAreaElement>('[data-testid="household-want"]').element.value).toBe('')
+    expect(chatApi.sendStreamChat).not.toHaveBeenCalled()
   })
 
   beforeEach(() => {
@@ -3579,6 +3627,12 @@ describe('ChatView', () => {
 
     expect(wrapper.get('[data-testid="chat-reconciliation-required"]').text())
       .toContain('需要重新同步当前状态')
+    const recovery = wrapper.get('[data-testid="chat-reconciliation-required"]')
+    expect(recovery.element.closest('.messages-viewport')).toBeNull()
+    expect(recovery.element.closest('.input-floating-area')).not.toBeNull()
+    expect(recovery.get('p').attributes('id')).toBeTruthy()
+    expect(wrapper.get('[data-testid="chat-input"]').attributes('aria-describedby'))
+      .toBe(recovery.get('p').attributes('id'))
     expect(wrapper.get('[data-testid="chat-send"]').attributes('disabled')).toBeDefined()
     expect(chatStore.state.streaming).toBe(true)
 
@@ -3586,6 +3640,8 @@ describe('ChatView', () => {
     await flushPromises()
 
     expect(wrapper.find('[data-testid="chat-reconciliation-required"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="chat-input"]').attributes('aria-describedby')).toBeUndefined()
+    expect(chatApi.sendStreamChat).toHaveBeenCalledTimes(1)
     expect(chatStore.state.streaming).toBe(false)
     wrapper.unmount()
   })

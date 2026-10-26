@@ -687,7 +687,7 @@ const displaySpecs = computed(() => {
 
     return {
       id: spec.id,
-      type: specType,
+      type: spec.name,
       formula: preview.expression,
       formulaKind: preview.kind,
       description: describeSpecification(spec, modelPresentationContext()),
@@ -698,6 +698,7 @@ const displaySpecs = computed(() => {
         .map(key => ({ key, label: t(key), unresolved: key === 'app.specVariableSourceUnresolvedShort' })),
       searchText: [
         spec.id,
+        spec.name,
         spec.templateId,
         spec.templateLabel,
         specType,

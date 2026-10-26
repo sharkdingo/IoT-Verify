@@ -1605,17 +1605,15 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                                        String parsedExpression,
                                        SpecificationFormulaPreview.Context formulaPreviewContext,
                                        Map<String, DeviceSmvData> deviceSmvMap) {
-        SpecificationDto spec = emittedSpec != null ? emittedSpec.spec() : null;
-        String templateId = spec != null ? firstText(spec.getTemplateId(), "unknown") : "unknown";
+        SpecificationDto spec = Objects.requireNonNull(Objects.requireNonNull(emittedSpec).spec());
+        String templateId = spec.getTemplateId();
         String checkedExpression = firstText(parsedExpression, expression(emittedSpec));
         return SpecResultDto.builder()
                 .specId(specId(emittedSpec))
                 .templateId(templateId)
-                .specificationLabel(SpecificationFormulaPreview.templateLabel(templateId))
-                .formulaPreview(spec != null
-                        ? SpecificationFormulaPreview.format(spec, formulaPreviewContext)
-                        : "Structured specification")
-                .specificationSnapshot(spec != null ? snapshotSpecification(spec, deviceSmvMap) : null)
+                .specificationLabel(spec.getName())
+                .formulaPreview(SpecificationFormulaPreview.format(spec, formulaPreviewContext))
+                .specificationSnapshot(snapshotSpecification(spec, deviceSmvMap))
                 .formulaKind(checkedFormulaKind(checkedExpression, templateId))
                 .outcome(outcome)
                 .antecedentReachability(cn.edu.nju.Iot_Verify.dto.verification.AntecedentReachability.appliesTo(templateId)
@@ -1642,7 +1640,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                         device != null ? device.getModes().size() : null));
             }
         }
-        return new SpecificationSnapshotDto(copy.getId(), copy.getTemplateId(),
+        return new SpecificationSnapshotDto(copy.getId(), copy.getName(), copy.getTemplateId(),
                 List.copyOf(copy.getAConditions()), List.copyOf(copy.getIfConditions()),
                 List.copyOf(copy.getThenConditions()), Map.copyOf(devices));
     }

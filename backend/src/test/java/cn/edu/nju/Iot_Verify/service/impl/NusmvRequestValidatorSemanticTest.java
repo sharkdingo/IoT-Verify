@@ -107,6 +107,7 @@ class NusmvRequestValidatorSemanticTest {
         Map<String, String> errors = NusmvRequestValidator.newErrors();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setTemplateLabel("Always");
         spec.setAConditions(new ArrayList<>(List.of(
@@ -136,6 +137,7 @@ class NusmvRequestValidatorSemanticTest {
         device.setTemplateName("Sensor");
         SpecificationDto hiddenImplication = new SpecificationDto();
         hiddenImplication.setId("spec-hidden");
+        hiddenImplication.setName("Safety requirement");
         hiddenImplication.setTemplateId("1");
         hiddenImplication.setTemplateLabel("Always");
         hiddenImplication.setAConditions(new ArrayList<>());
@@ -157,6 +159,7 @@ class NusmvRequestValidatorSemanticTest {
         DeviceVerificationDto device = device("sensor_1", "Sensor");
         SpecificationDto safety = new SpecificationDto();
         safety.setId("safety-ambiguous");
+        safety.setName("Safety requirement");
         safety.setTemplateId("7");
         safety.setTemplateLabel("Untrusted input must not cause A");
         safety.setAConditions(new ArrayList<>(List.of(
@@ -180,6 +183,7 @@ class NusmvRequestValidatorSemanticTest {
         Map<String, String> errors = NusmvRequestValidator.newErrors();
         SpecificationDto safety = new SpecificationDto();
         safety.setId("safety-signal-without-end-state");
+        safety.setName("Safety requirement");
         safety.setTemplateId("7");
         safety.setAConditions(List.of(condition("api", "detected", "=", "TRUE")));
         safety.setIfConditions(new ArrayList<>());
@@ -209,6 +213,7 @@ class NusmvRequestValidatorSemanticTest {
                 .build();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec2");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setTemplateLabel("Always");
         spec.setAConditions(new ArrayList<>(List.of(condition("variable", "level", ">", "9"))));
@@ -549,6 +554,7 @@ class NusmvRequestValidatorSemanticTest {
         Map<String, String> errors = NusmvRequestValidator.newErrors();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec-env-prefix");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setTemplateLabel("Always");
         spec.setAConditions(new ArrayList<>(List.of(condition("variable", "a_temperature", ">", "28", "environment"))));
@@ -567,6 +573,7 @@ class NusmvRequestValidatorSemanticTest {
         Map<String, String> errors = NusmvRequestValidator.newErrors();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec-env-literal-prefix");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setTemplateLabel("Always");
         spec.setAConditions(new ArrayList<>(List.of(condition("variable", "a_temperature", ">", "28", "environment"))));
@@ -586,6 +593,7 @@ class NusmvRequestValidatorSemanticTest {
     void specificationBuilder_generatesNuSmvPrefixForLiteralAPrefixedEnvironmentName() {
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec-env-literal-prefix");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setTemplateLabel("Always");
         spec.setAConditions(new ArrayList<>(List.of(condition("variable", "a_temperature", ">", "28", "environment"))));
@@ -604,6 +612,7 @@ class NusmvRequestValidatorSemanticTest {
         Map<String, String> errors = NusmvRequestValidator.newErrors();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec-trust-prefix");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setTemplateLabel("Always");
         spec.setAConditions(new ArrayList<>(List.of(
@@ -622,6 +631,7 @@ class NusmvRequestValidatorSemanticTest {
     void specificationBuilder_treatsGeneratedTrustPrefixAsLiteralVariableName() {
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec-trust-literal-prefix");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setTemplateLabel("Always");
         spec.setAConditions(new ArrayList<>(List.of(
@@ -669,6 +679,7 @@ class NusmvRequestValidatorSemanticTest {
         Map<String, String> errors = NusmvRequestValidator.newErrors();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec-missing-source");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setTemplateLabel("Always");
         spec.setAConditions(new ArrayList<>(List.of(condition("variable", "fanMode", "=", "fan only"))));
@@ -688,6 +699,7 @@ class NusmvRequestValidatorSemanticTest {
         Map<String, String> errors = NusmvRequestValidator.newErrors();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec-local-environment");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setTemplateLabel("Always");
         // `fanMode` is declared IsInside=true in smv(), so it has no value in the home to compare against.
@@ -708,6 +720,7 @@ class NusmvRequestValidatorSemanticTest {
     void specificationBuilder_cleansEnumVariableValuesWithSpaces() {
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec3");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setTemplateLabel("Always");
         spec.setAConditions(new ArrayList<>(List.of(condition("variable", "fanMode", "=", "fan only", "reported"))));

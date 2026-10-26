@@ -1,6 +1,6 @@
 {
 	"schema": "iot-verify.board-scene",
-	"version": 5,
+	"version": 6,
 	"templates": [
 		{
 			"name": "Alarm",
@@ -360,6 +360,7 @@
 	],
 	"specs": [
 		{
+			"name": "Never take a photo",
 			"templateId": "3",
 			"aConditions": [
 				{
@@ -374,6 +375,7 @@
 			"thenConditions": []
 		},
 		{
+			"name": "Sound the alarm after a photo command",
 			"templateId": "4",
 			"aConditions": [],
 			"ifConditions": [
@@ -396,6 +398,7 @@
 			]
 		},
 		{
+			"name": "Turn on the light when the siren sounds",
 			"templateId": "4",
 			"aConditions": [],
 			"ifConditions": [
@@ -418,6 +421,7 @@
 			]
 		},
 		{
+			"name": "Keep camera activity private",
 			"templateId": "1",
 			"aConditions": [
 				{
@@ -433,6 +437,7 @@
 			"thenConditions": []
 		},
 		{
+			"name": "Require trusted camera control",
 			"templateId": "7",
 			"aConditions": [
 				{

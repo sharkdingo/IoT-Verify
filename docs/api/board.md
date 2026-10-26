@@ -11,6 +11,8 @@ transaction retain the exclusive capture path because their caller may write aft
 The frontend uses it for initial Board hydration so an
 unloaded collection is never presented as an authoritative zero count. Layout remains separate
 because it does not affect formal-model semantics.
+`deviceTemplates` is an unordered account-library inventory; compare entries by ID and content,
+not by their array positions. This does not change the order semantics of scene devices or rules.
 All scalar and JSON columns are fetched before releasing the capture lock. DTO/JSON decoding runs
 after that capture; standalone reads have already released their transaction and connection, while
 calls inside an enclosing transaction retain its ownership. Later edits cannot change the captured rows.
@@ -18,7 +20,10 @@ The `Result<T>` envelope, auth, and error codes are defined in
 [overview.md](overview.md).
 
 All endpoints are authenticated and scoped to the current user (`@CurrentUser`).
-Verified against code on 2026-10-22. Source:
+Each account has one development board and one reusable template library: multiple
+tabs of that account view the same board. Moving a portable scene between accounts
+resolves dependencies in the target account without modifying the source account.
+Verified against code on 2026-10-26. Source:
 `service/impl/BoardStorageServiceImpl.java`, `service/recommendation/`,
 `controller/BoardStorageController.java`, `dto/device/`, `dto/board/`, `dto/rule/`,
 `dto/spec/`, `dto/recommendation/`, `component/board/PortableSceneDiagnostics.java`,
@@ -51,6 +56,9 @@ current `editHistoryEntryCount`; the opaque token binds both the complete scene 
 exact undo/redo journal. A successful replacement discards that journal because its
 recorded inverses no longer describe the replacement scene. If only the journal changes
 after confirmation, the request still returns `409` and writes nothing.
+The same transaction advances the user's internal scene revision. This distinguishes
+replacement/clear from ordinary edits for [task-memory scope](chat-sse.md#task-memory-and-original-requirements);
+the revision is not a semantic model fingerprint or a client-authored field.
 
 Rejected portable imports report authored file coordinates in `data.errors`, including collection
 indexes: for example `rules[1].toId`, `rules[0].sources[1].fromApi`, and
@@ -125,8 +133,8 @@ other-account record returns `404`. The current authored semantics must still ma
 `expected`; a stale snapshot returns `409` without changing the record or edit history,
 with `data.reasonCode: RULE_EDIT_STALE` or `SPEC_EDIT_STALE` and an `errors.expected`
 message. Keep the user's draft and reload the current record before opening a new edit.
-Rule comparison includes its display string; specification display caches are derived
-and do not participate in this comparison. Condition ordering is immaterial, while
+Rule comparison includes its display string; specification comparison includes the
+authored `name`. Derived specification display caches do not participate in this comparison. Condition ordering is immaterial, while
 condition multiplicity remains part of the snapshot.
 
 The update preserves the record's id, owner, and current collection position, including
@@ -142,7 +150,9 @@ authoritative `currentItems`/`currentCount`, and `canUndo`/`canRedo`. One edit r
 its recorded position before applying the inverse; it never moves an independently
 reordered item. An unchanged request returns `operation: "unchanged"` with current
 availability, writes no history, and preserves any redo branch. Neither outcome is a
-verification result: rerun the relevant check after changing rules or requirements.
+verification result: rerun the relevant check after changing rule or requirement logic.
+A name-only change preserves the model fingerprint and does not stale a verified result.
+The required name contract is defined by [SpecificationDto](verification.md#specificationdto).
 
 ### Current model fingerprints
 
@@ -157,7 +167,9 @@ verification result: rerun the relevant check after changing rules or requiremen
 It sorts object/map keys and environment entries; device and rule order remain meaningful
 because simultaneous writes use ordered priority. Canvas geometry, panel layout, display names,
 descriptions, icons, formula previews, rule display strings, and creation timestamps do not enter
-the identity. Referenced template content does; unused template-library entries do not.
+the identity. Specification condition ids/sides and device-display caches are also excluded:
+the fingerprint uses the same structured logical signature as specification equality.
+Referenced template content does; unused template-library entries do not.
 Presentation-field exclusions apply to manifest properties, never to template-name map keys:
 a template named `icon` or `description` retains its identity and semantic content in the hash.
 Run configuration such as attack/privacy settings, requested simulation steps, and search budgets
@@ -501,9 +513,16 @@ so a misspelled field cannot be discarded and then reported as a successful impo
 ### `BoardBatchDto` scene-import fields
 
 First call `GET /api/board/replacement-preview`. `BoardReplacementPreviewDto` is
-`{ impactToken, deviceCount, environmentVariableCount, ruleCount, specificationCount, editHistoryEntryCount }`.
+`{ impactToken, deviceCount, environmentVariableCount, ruleCount, specificationCount, editHistoryEntryCount, templates }`.
 The counts describe the authoritative server scene the user is about to replace, not a
 possibly stale local canvas.
+`templates` lists the account's retained template library as
+`{ name, defaultTemplate, deviceCount }[]`, sorted by case-insensitive name. Each device
+counts against exactly one template; a template with `deviceCount: 0` is available for
+reuse but is not part of the current scene. The client derives distinct-template and
+custom-template counts from this inventory. A missing incoming template becomes custom;
+an existing matching template retains its stored provenance. Import and clear retain the
+library; scene export includes only referenced templates.
 
 The subsequent batch requires non-null complete `nodes`, `environmentVariables`, `rules`,
 `specs`, and `templateSnapshots` arrays. `nodes`, `rules`, `specs`, and
@@ -517,13 +536,40 @@ endpoints own partial intent.
 | Field | Direction | Meaning |
 | :--- | :--- | :--- |
 | `impactToken` | Request | Opaque token copied from the exact preview the user confirmed. It is request-only and never becomes portable scene semantics. |
-| `templateSnapshots` | Request | Exact self-contained `DeviceTemplateDto[]` dependency set for submitted `nodes`: every snapshot must contain equal, case-sensitive `name` and `manifest.Name` values; every referenced template must have one matching snapshot; no unreferenced snapshot is accepted; an existing template must have the same manifest; and a missing template is created in the transaction. Import never renames a template implicitly. Submit `[]` when the replacement scene contains no devices, including Clear Scene. |
+| `templateSnapshots` | Request | Exact self-contained `DeviceTemplateDto[]` dependency set for submitted `nodes`: every snapshot must contain equal, case-sensitive `name` and `manifest.Name` values after trimming; every referenced template must have one matching snapshot; no unreferenced snapshot is accepted; an existing template must have the same manifest; and a missing template is created in the transaction. Import never renames a template implicitly. Submit `[]` when the replacement scene contains no devices, including Clear Scene. |
 | `createdTemplates` | Response | `DeviceTemplateDto[]` created during this request. It is empty when every referenced template already existed. |
+
+Template lookup ignores name case and surrounding whitespace. Snapshot `name` and
+`manifest.Name` are trimmed before both creation and reuse comparisons; device
+`templateName` references adopt the resolved template's exact spelling on import/export.
+This normalization does not change device ids or rule/specification references.
+Reuse still requires the complete manifest to match, including description, icon,
+declaration order, and the case of `Name`. A same-name lookup with a different manifest
+returns `SCENE_TEMPLATE_MISMATCH`; it never overwrites the library definition or silently
+creates a renamed copy. Consequently repeated imports of the same exported scene reuse
+dependencies without accumulating templates, while an independently changed same-name
+definition must be resolved explicitly before importing.
+
+The scene-import UI prepares a local proposal against the current template catalog before
+confirmation. For a conflicting definition it proposes an available ` (imported)` name
+(numbered when necessary), searches existing matching imported copies before allocating a
+new name (including when lower-numbered copies have been deleted),
+and updates only the snapshot name, manifest `Name`, and device `templateName` references.
+The preview lists these changes; only explicit confirmation submits the adjusted scene.
+Cancelling writes nothing. Library-capacity failures block submission with the required
+additional count; the client never deletes another template to make room.
+
+Full-scene replacement rejects an explicitly supplied local variable value that contradicts
+the selected state's fixed declaration with `422` and the variable's field path, before
+canonicalization can rewrite it. Variables assigned by transitions remain independent.
+The import UI can propose the required value and display its old value, new value and
+controlling state for confirmation. Ordinary targeted device edits retain their state/value
+linkage; this full-scene check does not change that behavior.
 
 Under the same user row lock used by board writes, the server recomputes the complete
 current-board impact before resolving a template or changing a collection. If any device
 layout/runtime/identity, Environment Pool value/label, rule/order, or specification/order
-changed after preview, the token no longer matches and the server returns `409` before
+or template-library contents/provenance changed after preview, the token no longer matches and the server returns `409` before
 writing. Its error `data` is `{ reasonCode: "BOARD_REPLACEMENT_STALE", currentPreview }`,
 where `currentPreview` is a fresh `BoardReplacementPreviewDto`. The client must say that
 nothing was replaced, refresh the Board, and require another explicit confirmation; it
@@ -563,18 +609,21 @@ unnamed environment value/rule source or inventing a missing relation. A complet
 import/export therefore never means that malformed input was silently repaired into a
 different scene.
 
-The standard portable JSON shape is `{ schema: "iot-verify.board-scene", version: 5,
+The standard portable JSON shape is `{ schema: "iot-verify.board-scene", version: 6,
 templates, devices, environmentVariables, rules, specs }`. It contains stable device
 references and authored semantics, but excludes database rule/spec/template ids and
 derived caches (`templateLabel`, `formula`, `devices[]`, condition ids/sides/display
 labels). Every shared environment variable required by a referenced template appears
 exactly once with explicit `value`, `trust`, and `privacy`. Export
-canonicalizes ordering and relations; import rejects unsupported versions, unknown
+canonicalizes ordering, relations, and trust/privacy condition labels (lower case, with
+comma-space-separated membership lists); it preserves arbitrary enum-value case.
+Import rejects unsupported versions, unknown
 device references, incomplete environment/template snapshots, and internal/derived fields before
-uploading the file to `POST /api/board/scene`, which re-checks schema/version server-side. Version 5 requires `variableSource` on every `variable`
-specification condition and rejects it on every other target type; a version-4 file cannot supply
-it and guessing one would change what its specifications assert, so those files are rejected by the
-version check rather than half-read. Consequently a valid exported file can be imported
+uploading the file to `POST /api/board/scene`, which re-checks schema/version server-side.
+Version 6 requires a user-authored `name` on every specification, following
+[SpecificationDto](verification.md#specificationdto), and `variableSource` on every
+`variable` condition (rejected on other target types). Older formats are rejected; no
+name is synthesized from a template label or inferred from conditions. Consequently a valid exported file can be imported
 and exported byte-identically, while the reconstructed canvas may use new database ids
 for rules/specs without changing its semantic model. Portable device geometry uses the
 same domain as targeted canvas writes and AI scene drafts: coordinates are finite within
@@ -602,11 +651,11 @@ explicit non-blank `value`; `privacies[]` names are also unique. Every shared
 `environmentVariables[]` entry likewise has a unique non-blank `name` and an explicit
 non-blank `value`. Duplicate names fail before the replacement preview or batch request.
 An omitted or empty runtime value would mean "use a default" in targeted creation/update semantics,
-which is not lossless scene semantics, so v5 import rejects it. A rule's human-readable
+which is not lossless scene semantics, so v6 import rejects it. A rule's human-readable
 `name` is optional; rule array order and its structured trigger/action fields carry the
 model semantics.
 
-Version 4 removed the canvas-only `Working` placeholder from portable semantics. A device
+Portable semantics exclude the canvas-only `Working` placeholder. A device
 whose template has both `Modes` and non-empty `WorkingStates` must include `state` and may
 include `currentStateTrust` / `currentStatePrivacy`. A no-state-machine device must omit all
 three fields and express readings through local variables or the shared environment pool.
@@ -643,7 +692,7 @@ including errors and planned renames beyond the first screen, inspectable before
 all-or-nothing create action is enabled.
 
 After a scene-replacement `200` response, the Board canonicalizes the returned nodes,
-environment pool, rules, and specifications and compares them with the requested v5
+environment pool, rules, and specifications and compares them with the requested v6
 semantics before showing a completed replacement. Template-manifest object properties
 that are explicitly `null` in the request compare equal to properties omitted by the
 backend's non-null DTO serialization. This equivalence does not apply to non-null values
@@ -722,7 +771,7 @@ reference **values** are boundary-specific. Board storage endpoints persist raw
 `BoardDataConverter` in the server-captured scene; their REST endpoints accept only
 [run parameters](verification.md#post-apiverify--synchronous).
 
-The authoritative specification write shape is `{ id, templateId, aConditions,
+The authoritative specification write shape is `{ id, name, templateId, aConditions,
 ifConditions, thenConditions }`. Each condition write contains only `deviceId`,
 `targetType`, `key`, optional `propertyScope`, `variableSource` (required for
 `targetType: variable`, rejected on every other target type — see
@@ -1174,6 +1223,10 @@ Duplicate-check `reasonCode` is one of `NO_EXISTING_RULES`, `EXACT_MATCH`,
 recompute it from the score. The score and AI reason are evidence, not proof of safety or
 conflict freedom.
 
+Both checks exclude the saved rule whose id equals the candidate's optional `id`,
+so editing a rule never compares it with itself. With no other saved rules, AI
+similarity returns `NO_EXISTING_RULES` without calling the provider.
+
 > Standalone device/rule/spec recommendation responses include backend-generated `message`,
 > `count`, `requestedCount`, `validatedCount`, `filteredCount`, `filteredItems`,
 > `rawCandidateCount`, `inspectedCount`, `truncatedCount`, and `recommendations`.
@@ -1247,9 +1300,12 @@ conflict freedom.
 > `currentStatePrivacy`, per-variable trust, and `initialPrivacies`. Runtime values are
 > constrained to local template variables (`IsInside=true`). If an AI candidate supplies an
 > invalid initial state, malformed runtime arrays, unknown local variables, invalid local
-> variable values, or invalid trust/privacy values, the whole device candidate is rejected
+> variable values, values contradicting the selected state's declared dynamics, or invalid
+> trust/privacy values, the whole device candidate is rejected
 > with a `filteredItems[]` reason instead of being returned with those fields silently
-> dropped. Omitted state/value fields are materialized from template defaults and reported in
+> dropped. Omitted state fields use the template's initial state; omitted local values are
+> derived from the effective selected state, then template defaults. Transition-assigned
+> variables remain independent of state-derived values. These adjustments are reported in
 > `adjustedItems[]` as `{ type, index?, reasonCode, reason, label?, appliedValues }`, so the
 > preview and later create request use the same initial model. Omitted trust/privacy
 > fields stay absent so the active template remains authoritative. Display labels are unique

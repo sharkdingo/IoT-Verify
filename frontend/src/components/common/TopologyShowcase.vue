@@ -13,6 +13,13 @@ const world = ref<HTMLElement>()
 const sceneSize = ref({ width: 600, height: 360 })
 const motionAllowed = computed(() => !reducedMotion.value)
 const arrowId = `showcase-arrow-${useId()}`
+const stageContentId = `showcase-stage-${useId()}`
+const stages = [
+  { id: 'risk', label: 'app.landingStageRisk' },
+  { id: 'repair', label: 'app.landingStageRepair' },
+  { id: 'recheck', label: 'app.landingStageRecheck' }
+] as const
+const stage = ref<(typeof stages)[number]['id']>('risk')
 let motionQuery: MediaQueryList | undefined
 let resizeObserver: ResizeObserver | undefined
 let frame: number | undefined
@@ -23,42 +30,61 @@ let targetPitch = 0
 let targetYaw = 0
 
 const nodes = [
-  { id: 'source', x: 12, y: 50, type: 'Motion Detector', label: 'app.landingMotionSensor',
-    states: [['Working', 'app.landingMotionIdle'], ['Working', 'app.landingMotionDetected'], ['Working', 'app.landingMotionDetected']] },
-  { id: 'light', x: 64, y: 25, type: 'Light', label: 'app.landingLight',
-    states: [['off', 'app.landingLightOff'], ['off', 'app.landingLightOff'], ['on', 'app.landingLightOn']] },
-  { id: 'door', x: 64, y: 75, type: 'Door', label: 'app.landingDoor',
-    states: [['locked', 'app.landingDoorLocked'], ['locked', 'app.landingDoorLocked'], ['unlocked', 'app.landingDoorUnlocked']] }
+  { id: 'source', x: 8, y: 50, type: 'Door Access Request', label: 'app.landingEntrySensor',
+    states: [['Working', 'app.landingEntryIdle'], ['Working', 'app.landingEntryVisitor'], ['Working', 'app.landingEntryVisitor'], ['Working', 'app.landingEntryVisitor']] },
+  { id: 'light', x: 60, y: 25, type: 'Light', label: 'app.landingLight',
+    states: [['off', 'app.landingLightOff'], ['off', 'app.landingLightOff'], ['on', 'app.landingLightOn'], ['on', 'app.landingLightOn']] },
+  { id: 'door', x: 60, y: 75, type: 'Door', label: 'app.landingDoor',
+    states: [['locked', 'app.landingDoorLocked'], ['locked', 'app.landingDoorLocked'], ['locked', 'app.landingDoorLocked'], ['unlocked', 'app.landingDoorUnlocked']] }
 ] as const
 const nodeWidth = 28
 const edges = computed(() => {
   const { width, height } = sceneSize.value
   const sourceX = (nodes[0].x + nodeWidth) / 100 * width
   const sourceY = nodes[0].y / 100 * height
-  return nodes.slice(1).map((node, index) => {
+  const requestEdges = nodes.slice(1).map((node, index) => {
     const x = node.x / 100 * width
     const y = node.y / 100 * height
     const bend = (sourceX + x) / 2
     const radius = Math.min(16, (x - sourceX) / 4, Math.abs(y - sourceY) / 2)
     const direction = Math.sign(y - sourceY)
     return {
-      id: node.id, label: `R${index + 1}`,
+      id: node.id, label: index === 0 ? 'R1' : 'R3', active: index === 0 && displayStep.value >= 2,
       path: `M${sourceX} ${sourceY} H${bend - radius} Q${bend} ${sourceY} ${bend} ${sourceY + direction * radius} V${y - direction * radius} Q${bend} ${y} ${bend + radius} ${y} H${x}`,
       labelX: bend, labelY: (sourceY + y) / 2
     }
   })
+  // R2 starts at the light, not at the request input. Route it around the
+  // right-hand ports so the owner-only R3 remains a separate, inactive branch.
+  const rightX = (nodes[1].x + nodeWidth) / 100 * width
+  const bend = 0.95 * width
+  const lightY = nodes[1].y / 100 * height
+  const doorY = nodes[2].y / 100 * height
+  const radius = Math.min(16, (bend - rightX) / 2, (doorY - lightY) / 4)
+  const lightEdge = {
+    id: 'light-door', label: 'R2', active: violated.value,
+    path: `M${rightX} ${lightY} H${bend - radius} Q${bend} ${lightY} ${bend} ${lightY + radius} V${doorY - radius} Q${bend} ${doorY} ${bend - radius} ${doorY} H${rightX}`,
+    labelX: bend, labelY: (lightY + doorY) / 2
+  }
+  return stage.value === 'risk'
+    ? [requestEdges[0]!, lightEdge, requestEdges[1]!]
+    : requestEdges
 })
 const traceSteps = [
   { label: 'app.landingTraceInitial', description: 'app.landingTraceInitialDescription', changed: [] },
   { label: 'app.landingTraceTrigger', description: 'app.landingTraceTriggerDescription', changed: ['source'] },
-  { label: 'app.landingTraceUnsafe', description: 'app.landingCounterexampleDescription', changed: ['light', 'door'] }
+  { label: 'app.landingTraceLight', description: 'app.landingTraceLightDescription', changed: ['light'] },
+  { label: 'app.landingTraceUnsafe', description: 'app.landingCounterexampleDescription', changed: ['door'] }
 ]
 // The preset opens on its counterexample; replay restores every state before advancing.
 const lastStep = traceSteps.length - 1
 const currentStep = ref(lastStep)
 const playing = ref(false)
 const step = computed(() => traceSteps[currentStep.value]!)
-const violated = computed(() => currentStep.value === lastStep)
+// The repaired visitor illustration has the same readings as state 3: light on, door locked.
+const displayStep = computed(() => stage.value === 'risk' ? currentStep.value : 2)
+const violated = computed(() => stage.value === 'risk' && currentStep.value === lastStep)
+const recheckRequirements = ['app.landingResultSafety', 'app.landingResultLighting', 'app.landingResultOwner']
 let playbackTimer: ReturnType<typeof setTimeout> | undefined
 
 const pausePlayback = () => {
@@ -70,6 +96,13 @@ const pausePlayback = () => {
 const selectStep = (index: number) => {
   pausePlayback()
   currentStep.value = Math.max(0, Math.min(lastStep, index))
+}
+
+const selectStage = (id: typeof stage.value) => {
+  if (stage.value === id) return
+  pausePlayback()
+  stage.value = id
+  currentStep.value = lastStep
 }
 
 const scheduleStep = () => {
@@ -181,6 +214,12 @@ onUnmounted(() => {
       </span>
       <span class="showcase-heading__example">{{ t('app.landingExample') }}</span>
     </div>
+    <div class="showcase-stages" role="group" :aria-label="t('app.landingStagesLabel')">
+      <button v-for="(item, index) in stages" :key="item.id" type="button"
+        :aria-pressed="stage === item.id" :aria-controls="stageContentId" @click="selectStage(item.id)">
+        <span aria-hidden="true">{{ index + 1 }}</span>{{ t(item.label) }}
+      </button>
+    </div>
     <p class="showcase-context">
       <span class="material-symbols-outlined" aria-hidden="true">home</span>
       {{ t('app.landingExampleContext') }}
@@ -195,9 +234,9 @@ onUnmounted(() => {
               <path d="M1 1 L9 5 L1 9 Z" class="showcase-arrow" :class="{ 'showcase-arrow--active': active }" />
             </marker>
           </defs>
-          <g v-for="edge in edges" :key="edge.id">
-            <path class="showcase-edge" :class="{ 'showcase-edge--active': violated }" :d="edge.path" :marker-end="`url(#${arrowId}${violated ? '-active' : ''})`" />
-            <path v-if="violated" class="showcase-signal" :d="edge.path" pathLength="100" />
+          <g v-for="edge in edges" :key="edge.id" :data-testid="`showcase-rule-${edge.label}`">
+            <path class="showcase-edge" :class="{ 'showcase-edge--active': edge.active }" :d="edge.path" :marker-end="`url(#${arrowId}${edge.active ? '-active' : ''})`" />
+            <path v-if="edge.active" class="showcase-signal" :d="edge.path" pathLength="100" />
           </g>
         </svg>
         <span v-for="edge in edges" :key="edge.id" class="showcase-edge-label" :style="{ left: `${edge.labelX}px`, top: `${edge.labelY}px` }" aria-hidden="true">{{ edge.label }}</span>
@@ -212,13 +251,13 @@ onUnmounted(() => {
             '--showcase-node-border': getNodeBorderColor(node.id)
           }"
           :class="[`showcase-node--${node.id}`, {
-            'showcase-node--changed': step.changed.includes(node.id),
+            'showcase-node--changed': stage === 'risk' && step.changed.includes(node.id),
             'showcase-node--violation': node.id === 'door' && violated
           }]"
         >
           <span class="showcase-node__artwork">
             <Transition name="trace-device-icon">
-              <img :key="node.states[currentStep]![0]" class="showcase-node__image iot-device-artwork" :src="getDeviceIconUrl(node.type, node.states[currentStep]![0])" alt="" draggable="false" />
+              <img :key="node.states[displayStep]![0]" class="showcase-node__image iot-device-artwork" :src="getDeviceIconUrl(node.type, node.states[displayStep]![0])" alt="" draggable="false" />
             </Transition>
           </span>
           <span class="showcase-node__label">{{ t(node.label) }}</span>
@@ -226,57 +265,98 @@ onUnmounted(() => {
             <span class="showcase-node__dot" aria-hidden="true"></span>
             <span class="device-reading-slot">
               <Transition name="trace-device-state">
-                <span :key="node.states[currentStep]![1]">{{ t(node.states[currentStep]![1]) }}</span>
+                <span :key="node.states[displayStep]![1]">{{ t(node.states[displayStep]![1]) }}</span>
               </Transition>
             </span>
           </span>
-          <span v-if="step.changed.includes(node.id)" class="showcase-node__change material-symbols-outlined" :aria-label="t('app.traceVisualization.changed')">sync_alt</span>
+          <span v-if="stage === 'risk' && step.changed.includes(node.id)" class="showcase-node__change material-symbols-outlined" :aria-label="t('app.traceVisualization.changed')">sync_alt</span>
           <span class="showcase-node__port" aria-hidden="true"></span>
+          <span v-if="node.id !== 'source'" class="showcase-node__port showcase-node__port--right" aria-hidden="true"></span>
         </div>
       </div>
     </div>
 
-    <div v-if="!compact" class="showcase-details">
-      <div>
-        <span class="showcase-details__label">{{ t('app.landingRuleLabel') }}</span>
-        <p><span class="showcase-rule-id">R1</span>{{ t('app.landingRuleLight') }}</p>
-        <p><span class="showcase-rule-id">R2</span>{{ t('app.landingRuleDoor') }}</p>
+    <div :id="stageContentId" class="showcase-stage-content">
+      <template v-if="stage === 'risk'">
+        <ol v-if="!compact" class="showcase-trace" :aria-label="t('app.landingTraceLabel')">
+          <li v-for="(traceStep, index) in traceSteps" :key="traceStep.label">
+            <button type="button" :aria-current="currentStep === index ? 'step' : undefined" @click="selectStep(index)">
+              <span class="showcase-trace__number" aria-hidden="true">{{ String(index + 1).padStart(2, '0') }}</span>
+              <span>{{ t(traceStep.label) }}</span>
+            </button>
+          </li>
+        </ol>
+        <div class="showcase-counterexample" :class="{ 'showcase-counterexample--unsafe': violated }" role="status" aria-live="polite" aria-atomic="true">
+          <span class="material-symbols-outlined" aria-hidden="true">{{ violated ? 'warning' : 'timeline' }}</span>
+          <div>
+            <span class="showcase-counterexample__label">{{ t(violated ? 'app.landingCounterexampleLabel' : step.label) }}</span>
+            <p>{{ t(step.description) }}</p>
+          </div>
+        </div>
+        <div class="showcase-playback" :aria-label="t('app.landingTraceLabel')">
+          <span class="showcase-playback__position">{{ String(currentStep + 1).padStart(2, '0') }} / {{ String(traceSteps.length).padStart(2, '0') }}</span>
+          <div class="showcase-playback__actions">
+            <button type="button" class="showcase-step-control" :aria-label="t('app.traceVisualization.previousState')" :disabled="currentStep === 0" @click="selectStep(currentStep - 1)">
+              <span class="material-symbols-outlined" aria-hidden="true">chevron_left</span>
+            </button>
+            <button type="button" class="showcase-replay" @click="togglePlayback">
+              <span class="material-symbols-outlined" aria-hidden="true">{{ playing ? 'pause' : currentStep === lastStep ? 'replay' : 'play_arrow' }}</span>
+              <span>{{ t(playing ? 'app.traceVisualization.pause' : currentStep === lastStep ? 'app.landingReplayExample' : 'app.traceVisualization.play') }}</span>
+            </button>
+            <button type="button" class="showcase-step-control" :aria-label="t('app.traceVisualization.nextState')" :disabled="currentStep === lastStep" @click="selectStep(currentStep + 1)">
+              <span class="material-symbols-outlined" aria-hidden="true">chevron_right</span>
+            </button>
+          </div>
+        </div>
+      </template>
+      <div v-else-if="stage === 'repair'" class="showcase-rule-change">
+        <h3>{{ t('app.landingRepairTitle') }}</h3>
+        <dl>
+          <div>
+            <dt>{{ t('app.landingBeforeRepair') }}</dt>
+            <dd>{{ t('app.landingLightCondition') }} → {{ t('app.landingUnlockAction') }}</dd>
+          </div>
+          <div>
+            <dt>{{ t('app.landingAfterRepair') }}</dt>
+            <dd><mark>{{ t('app.landingRemovedCoupling') }}</mark></dd>
+          </div>
+        </dl>
+        <p class="showcase-rule-scope">{{ t('app.landingRepairScope') }}</p>
       </div>
-      <div>
-        <span class="showcase-details__label">{{ t('app.landingSpecLabel') }}</span>
-        <p>{{ t('app.landingSpecExample') }}</p>
+      <div v-else>
+        <table class="showcase-results">
+          <caption>{{ t('app.landingRecheckTitle') }}</caption>
+          <thead><tr>
+            <th scope="col">{{ t('app.landingSpecLabel') }}</th>
+            <th scope="col">{{ t('app.landingBeforeRepair') }}</th>
+            <th scope="col">{{ t('app.landingAfterRepair') }}</th>
+          </tr></thead>
+          <tbody><tr v-for="(requirement, index) in recheckRequirements" :key="requirement">
+            <th scope="row">{{ t(requirement) }}</th>
+            <td :class="{ 'showcase-result--violated': index === 0 }">{{ t(index === 0 ? 'app.landingResultViolated' : 'app.landingResultMet') }}</td>
+            <td>{{ t('app.landingResultMet') }}</td>
+          </tr></tbody>
+        </table>
+        <p class="showcase-reachability">{{ t('app.landingRecheckReachability') }}</p>
       </div>
     </div>
-    <ol v-if="!compact" class="showcase-trace" :aria-label="t('app.landingTraceLabel')">
-      <li v-for="(traceStep, index) in traceSteps" :key="traceStep.label">
-        <button type="button" :aria-current="currentStep === index ? 'step' : undefined" @click="selectStep(index)">
-          <span class="showcase-trace__number" aria-hidden="true">{{ String(index + 1).padStart(2, '0') }}</span>
-          <span>{{ t(traceStep.label) }}</span>
-        </button>
-      </li>
-    </ol>
-    <div class="showcase-counterexample" :class="{ 'showcase-counterexample--unsafe': violated }" role="status" aria-live="polite" aria-atomic="true">
-      <span class="material-symbols-outlined" aria-hidden="true">{{ violated ? 'warning' : 'timeline' }}</span>
-      <div>
-        <span class="showcase-counterexample__label">{{ t(violated ? 'app.landingCounterexampleLabel' : step.label) }}</span>
-        <p>{{ t(step.description) }}</p>
+    <details v-if="!compact" class="showcase-model-details">
+      <summary>{{ t('app.landingModelDetails') }}</summary>
+      <div class="showcase-details">
+        <div>
+          <span class="showcase-details__label">{{ t('app.landingRuleLabel') }}</span>
+          <p><span class="showcase-rule-id">R1</span>{{ t('app.landingRuleLight') }}</p>
+          <p data-testid="showcase-rule-definition-R2"><span class="showcase-rule-id">R2</span>{{ t(stage === 'risk' ? 'app.landingRuleDoor' : 'app.landingRuleDoorRepaired') }}</p>
+          <p><span class="showcase-rule-id">R3</span>{{ t('app.landingRuleOwner') }}</p>
+        </div>
+        <div class="showcase-requirements">
+          <span class="showcase-details__label">{{ t('app.landingSpecLabel') }}</span>
+          <p>{{ t('app.landingSpecExample') }}</p>
+          <p>{{ t('app.landingSpecLighting') }}</p>
+          <p>{{ t('app.landingSpecOwner') }}</p>
+        </div>
       </div>
-    </div>
-    <div class="showcase-playback" :aria-label="t('app.landingTraceLabel')">
-      <span class="showcase-playback__position">{{ String(currentStep + 1).padStart(2, '0') }} / {{ String(traceSteps.length).padStart(2, '0') }}</span>
-      <div class="showcase-playback__actions">
-        <button type="button" class="showcase-step-control" :aria-label="t('app.traceVisualization.previousState')" :disabled="currentStep === 0" @click="selectStep(currentStep - 1)">
-          <span class="material-symbols-outlined" aria-hidden="true">chevron_left</span>
-        </button>
-        <button type="button" class="showcase-replay" @click="togglePlayback">
-          <span class="material-symbols-outlined" aria-hidden="true">{{ playing ? 'pause' : currentStep === lastStep ? 'replay' : 'play_arrow' }}</span>
-          <span>{{ t(playing ? 'app.traceVisualization.pause' : currentStep === lastStep ? 'app.landingReplayExample' : 'app.traceVisualization.play') }}</span>
-        </button>
-        <button type="button" class="showcase-step-control" :aria-label="t('app.traceVisualization.nextState')" :disabled="currentStep === lastStep" @click="selectStep(currentStep + 1)">
-          <span class="material-symbols-outlined" aria-hidden="true">chevron_right</span>
-        </button>
-      </div>
-    </div>
+    </details>
     <p class="showcase-note">{{ t('app.landingPreviewNote') }}</p>
   </section>
 </template>
@@ -293,6 +373,38 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: var(--iot-space-sm);
+}
+
+.showcase-stages {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: var(--iot-space-lg);
+  border-bottom: 1px solid var(--border);
+}
+
+.showcase-stages button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--iot-space-xs);
+  min-height: var(--iot-target-min);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  padding: var(--iot-space-sm) var(--iot-space-2xs);
+  color: var(--text-muted);
+  font-size: var(--iot-font-label);
+  cursor: pointer;
+}
+
+.showcase-stages button[aria-pressed='true'] {
+  border-bottom-color: var(--accent-strong);
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.showcase-stages button > span {
+  font-variant-numeric: tabular-nums;
 }
 
 .showcase-heading {
@@ -528,7 +640,8 @@ onUnmounted(() => {
   top: calc(50% - 3px);
 }
 
-.showcase-node--source .showcase-node__port {
+.showcase-node--source .showcase-node__port,
+.showcase-node__port--right {
   left: auto;
   right: -4px;
 }
@@ -537,8 +650,20 @@ onUnmounted(() => {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: var(--iot-space-xl);
+  padding: var(--iot-space-sm) 0 var(--iot-space-lg);
+}
+
+.showcase-model-details {
+  margin-top: var(--iot-space-md);
   border-top: 1px solid var(--border);
-  padding-top: var(--iot-space-lg);
+}
+
+.showcase-model-details summary {
+  align-content: center;
+  min-height: var(--iot-target-min);
+  color: var(--text-muted);
+  font-size: var(--iot-font-caption);
+  cursor: pointer;
 }
 
 .showcase-details__label {
@@ -561,7 +686,7 @@ onUnmounted(() => {
 
 .showcase-trace {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--iot-space-xs);
   margin: var(--iot-space-lg) 0 0;
   padding: 0;
@@ -684,6 +809,7 @@ onUnmounted(() => {
 
 .showcase-replay:hover,
 .showcase-step-control:hover:not(:disabled),
+.showcase-stages button:hover,
 .showcase-trace button:hover {
   background: var(--surface-control-hover);
   color: var(--text);
@@ -696,6 +822,8 @@ onUnmounted(() => {
 
 .showcase-replay:focus-visible,
 .showcase-step-control:focus-visible,
+.showcase-stages button:focus-visible,
+.showcase-model-details summary:focus-visible,
 .showcase-trace button:focus-visible {
   outline: 2px solid var(--accent-border);
   outline-offset: 2px;
@@ -713,8 +841,89 @@ onUnmounted(() => {
   line-height: 1.6;
 }
 
+.showcase-stage-content {
+  min-height: 14rem;
+}
+
+.showcase-rule-change h3,
+.showcase-results caption {
+  margin: 0 0 var(--iot-space-md);
+  color: var(--text);
+  font-size: var(--iot-font-label);
+  font-weight: 600;
+  text-align: left;
+}
+
+.showcase-rule-change dl {
+  margin: 0;
+}
+
+.showcase-rule-change dl > div {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--iot-space-lg);
+  padding: var(--iot-space-md) 0;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--iot-font-label);
+  line-height: 1.8;
+}
+
+.showcase-rule-change dt {
+  color: var(--text-muted);
+}
+
+.showcase-rule-change dd {
+  margin: 0;
+}
+
+.showcase-rule-change mark {
+  background: var(--accent-surface);
+  color: var(--accent-strong);
+  box-decoration-break: clone;
+}
+
+.showcase-results {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--iot-font-label);
+  line-height: 1.5;
+}
+
+.showcase-results th,
+.showcase-results td {
+  border-bottom: 1px solid var(--border);
+  padding: var(--iot-space-sm) var(--iot-space-xs);
+  font-weight: 400;
+  text-align: center;
+}
+
+.showcase-results th:first-child {
+  padding-left: 0;
+  text-align: left;
+}
+
+.showcase-results thead {
+  color: var(--text-muted);
+}
+
+.showcase-result--violated {
+  color: var(--danger);
+}
+
+.showcase-rule-scope,
+.showcase-reachability {
+  margin: var(--iot-space-sm) 0 0;
+  color: var(--text-muted);
+  font-size: var(--iot-font-caption);
+  line-height: 1.6;
+}
+
 .topology-showcase--compact .showcase-node {
   font-size: var(--iot-font-caption);
+}
+
+.topology-showcase--compact .showcase-stage-content {
+  min-height: 0;
 }
 
 @keyframes showcase-flow {
@@ -736,6 +945,9 @@ onUnmounted(() => {
 }
 
 @media (max-width: 520px) {
+  .showcase-trace {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
   .showcase-node {
     font-size: var(--iot-font-caption);
   }

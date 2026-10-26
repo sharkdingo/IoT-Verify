@@ -61,8 +61,7 @@ public class TraceMapper {
         dto.setVerificationTaskId(requireVerificationTaskId(tracePo.getId(), tracePo.getVerificationTaskId()));
         dto.setViolatedSpecId(tracePo.getViolatedSpecId());
         dto.setViolatedSpecJson(tracePo.getViolatedSpecJson());
-        dto.setViolatedSpec(JsonUtils.readPersistedRequired("verification trace", tracePo.getId(),
-                "violatedSpecJson", () -> JsonUtils.fromJson(tracePo.getViolatedSpecJson(), SpecificationDto.class)));
+        dto.setViolatedSpec(readSpecification(tracePo.getId(), tracePo.getViolatedSpecJson()));
         dto.setCheckedExpression(tracePo.getCheckedExpression());
         dto.setModelSnapshot(context.modelSnapshot());
         dto.setPlaybackScene(run.playbackScene());
@@ -139,9 +138,7 @@ public class TraceMapper {
 
     public TraceSummaryDto toSummaryDto(TraceSummaryProjection projection, TraceTokenSourceProjection tokenSources) {
         if (projection == null) return null;
-        SpecificationDto violatedSpec = JsonUtils.readPersistedRequired(
-                "verification trace", projection.getId(), "violatedSpecJson",
-                () -> JsonUtils.fromJson(projection.getViolatedSpecJson(), SpecificationDto.class));
+        SpecificationDto violatedSpec = readSpecification(projection.getId(), projection.getViolatedSpecJson());
         return TraceSummaryDto.builder()
                 .id(projection.getId())
                 .verificationTaskId(requireVerificationTaskId(
@@ -153,6 +150,16 @@ public class TraceMapper {
                 .createdAt(projection.getCreatedAt())
                 .dataAvailable(true)
                 .build();
+    }
+
+    private SpecificationDto readSpecification(Long id, String json) {
+        return JsonUtils.readPersistedRequired("verification trace", id, "violatedSpecJson", () -> {
+            SpecificationDto spec = JsonUtils.fromJson(json, SpecificationDto.class);
+            if (spec == null || spec.getName() == null || spec.getName().isBlank() || spec.getName().length() > 100) {
+                throw new IllegalArgumentException("Frozen specification name is missing or invalid");
+            }
+            return spec;
+        });
     }
 
     private Map<String, ModelTokenSource> readSummaryTokenSources(Long id, TraceTokenSourceProjection projection) {

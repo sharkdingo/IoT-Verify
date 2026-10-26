@@ -30,6 +30,9 @@ public class SpecificationPo {
     @Column(name = "list_order", nullable = false)
     private Integer listOrder;
 
+    @Column(nullable = false, length = 100)
+    private String name;
+
     @Column(name = "template_id", nullable = false, length = 10)
     private String templateId;
 

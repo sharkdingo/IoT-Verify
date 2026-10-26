@@ -7,7 +7,7 @@ import {
   test,
   type AuthUser
 } from './support/auth'
-import type { PersistedChatMessage, StreamProgress } from '../src/types/chat'
+import type { PersistedChatMessage, StreamCommand, StreamProgress } from '../src/types/chat'
 import { collapseChatSidebar } from './support/chatSidebar'
 
 const rgba = (value: string): [number, number, number, number] => {
@@ -141,7 +141,8 @@ const installPersistedPartialChatMock = async (
   sessionId: string,
   assistantContent: string,
   beforeResponse?: () => Promise<void>,
-  errorMessage?: string
+  errorMessage?: string,
+  command?: StreamCommand
 ) => {
   let messages: PersistedChatMessage[] = []
 
@@ -192,6 +193,7 @@ const installPersistedPartialChatMock = async (
     ]
     const frames = [
       ...executionTrace.map(progress => ({ progress })),
+      ...(command ? [{ command }] : []),
       errorMessage ? { error: errorMessage } : { content: assistantContent },
       { terminal: { turnId: request.turnId, executionStatus: 'PARTIAL' } }
     ]
@@ -202,6 +204,53 @@ const installPersistedPartialChatMock = async (
     })
   })
 }
+
+test('renders CJK Markdown and literal code consistently after streaming and history reload', async ({ page, request }) => {
+  const auth = await createAuthenticatedUser(request)
+  const session = await unwrap<{ id: string }>(await request.post(`${apiBaseURL}/api/chat/sessions`, {
+    headers: { Authorization: `Bearer ${auth.token}` }
+  }))
+  const markdown = [
+    '场景**“家庭空气质量与舒适度联动”已成功原子替换并应用**。',
+    '注意*“尚未验证”*。删除~~“旧规则”~~后继续。',
+    String.raw`温度为\(x_1 + 2\)。`,
+    '```echarts {}\n{"title":"场景**“测试”**"}\n```',
+    '```component-json {}\n{"status":"ok"}\n```',
+    '~~~text\n' + String.raw`\(x_1\) 场景**“测试”**` + '\n~~~',
+    '参考**[unsafe](javascript:alert(1))**。'
+  ].join('\n\n')
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  await installPersistedPartialChatMock(page, session.id, markdown)
+  await openWorkspace(page, auth, 'dark')
+  const openSession = async () => {
+    await page.getByTestId('open-ai-assistant').click()
+    const toggle = page.getByTestId('chat-sidebar-toggle')
+    if (await toggle.getAttribute('aria-expanded') === 'false') await toggle.click()
+    await page.getByTestId(`chat-session-${session.id}`).click()
+  }
+  const expectRendered = async () => {
+    const reply = page.locator('.ai-row').last()
+    await expect(reply.locator('strong').filter({ hasText: '“家庭空气质量与舒适度联动”已成功原子替换并应用' }))
+      .toHaveText('“家庭空气质量与舒适度联动”已成功原子替换并应用')
+    await expect(reply.locator('em')).toHaveText('“尚未验证”')
+    await expect(reply.locator('del')).toHaveText('“旧规则”')
+    await expect(reply.locator('annotation')).toHaveText('x_1 + 2')
+    await expect(reply.locator('.code-content')).toHaveText([
+      '{"title":"场景**“测试”**"}', '{"status":"ok"}', String.raw`\(x_1\) 场景**“测试”**`
+    ])
+    await expect(reply.getByText('unsafe', { exact: true })).not.toHaveAttribute('href')
+    await expect(page.getByTestId('chat-input')).toBeEnabled()
+    expect(errors).toEqual([])
+  }
+  await openSession()
+  await page.getByTestId('chat-input').fill('展示格式检查结果')
+  await page.getByTestId('chat-send').click()
+  await expectRendered()
+  await page.reload()
+  await openSession()
+  await expectRendered()
+})
 
 test('reopens the assistant after a provider error and failed Board synchronization', async ({ page, request }) => {
   const auth = await createAuthenticatedUser(request)
@@ -237,6 +286,79 @@ test('reopens the assistant after a provider error and failed Board synchronizat
   await expect(page.getByTestId('chat-input')).toBeEnabled()
   await expect(page.getByTestId('chat-panel').getByText(failure, { exact: true })).toBeVisible()
 })
+
+for (const { width, height, theme } of [
+  { width: 1440, height: 900, theme: 'light' },
+  { width: 1280, height: 600, theme: 'dark' },
+  { width: 320, height: 600, theme: 'dark' },
+  { width: 320, height: 360, theme: 'dark' }
+] as const) {
+  test(`keeps synchronization recovery beside a long conversation (${width}x${height}, ${theme})`, async ({ page, request }, testInfo) => {
+    const auth = await createAuthenticatedUser(request)
+    const session = await unwrap<{ id: string }>(await request.post(`${apiBaseURL}/api/chat/sessions`, {
+      headers: { Authorization: `Bearer ${auth.token}` }
+    }))
+    let snapshotUnavailable = false
+    let aiRequests = 0
+    let failedSnapshots = 0
+    await page.route('**/api/board/snapshot', async route => {
+      if (!snapshotUnavailable) return route.continue()
+      failedSnapshots++
+      await route.abort('connectionfailed')
+    })
+    const reply = Array.from({ length: 24 }, (_, index) =>
+      `第 ${index + 1} 项说明：这里是设备与规则的详细说明，请核对当前场景。`).join('\n\n')
+    await installPersistedPartialChatMock(page, session.id, reply, async () => {
+      aiRequests++
+      snapshotUnavailable = true
+    }, undefined, { type: 'REFRESH_DATA', payload: { target: 'board_state' } })
+    await page.setViewportSize({ width, height })
+    await openWorkspace(page, auth, theme)
+    await page.getByTestId('open-ai-assistant').click()
+    await page.getByTestId('chat-sidebar-toggle').click()
+    await page.getByTestId(`chat-session-${session.id}`).click()
+    if (await page.getByTestId('chat-sidebar-scrim').isVisible()) await collapseChatSidebar(page)
+    const input = page.getByTestId('chat-input')
+    await input.fill('请说明当前场景')
+    await page.getByTestId('chat-send').click()
+    const retry = page.getByTestId('chat-reconciliation-retry')
+    await expect(retry).toBeEnabled()
+    await expect(input).toBeDisabled()
+    await expect(input).toHaveAccessibleDescription('当前状态未同步，输入已暂停。重新同步不会重复执行 AI 操作。')
+    const history = page.getByTestId('chat-panel').locator('.messages-viewport')
+    await expect(history.getByText('第 24 项说明：这里是设备与规则的详细说明，请核对当前场景。', { exact: true }))
+      .toBeAttached()
+    await expect.poll(() => history.evaluate(element => element.scrollHeight - element.clientHeight))
+      .toBeGreaterThan(200)
+    await history.evaluate(element => { element.scrollTo({ top: element.scrollHeight, behavior: 'instant' }) })
+    await expect.poll(() => history.evaluate(element => element.scrollHeight - element.clientHeight - element.scrollTop))
+      .toBeLessThan(2)
+    await expect(retry).toBeInViewport({ ratio: 1 })
+    if (height === 360) {
+      const recoveryBounds = (await retry.boundingBox())!
+      await page.mouse.move(recoveryBounds.x + recoveryBounds.width / 2, recoveryBounds.y + recoveryBounds.height / 2)
+      await page.mouse.wheel(0, 500)
+    }
+    await expect(input).toBeInViewport({ ratio: 1 })
+    if (height === 360) {
+      await page.mouse.wheel(0, -500)
+      await expect(retry).toBeInViewport({ ratio: 1 })
+    }
+    await page.getByTestId('chat-close').hover()
+    await page.screenshot({ path: testInfo.outputPath('sync-recovery.png') })
+    await retry.click()
+    await expect(retry).toBeEnabled()
+    expect(failedSnapshots).toBeGreaterThanOrEqual(2)
+    await expect(input).toBeDisabled()
+    await expect(retry).toBeInViewport({ ratio: 1 })
+    snapshotUnavailable = false
+    await retry.click()
+    await expect(page.getByTestId('chat-reconciliation-required')).toHaveCount(0)
+    await expect(input).toBeEnabled()
+    await expect(input).not.toHaveAttribute('aria-describedby')
+    expect(aiRequests).toBe(1)
+  })
+}
 
 for (const { width, height, theme } of [
   { width: 1440, height: 900, theme: 'light' },
@@ -284,7 +406,7 @@ for (const { width, height, theme } of [
 }
 
 for (const { width, theme } of [{ width: 1440, theme: 'light' }, { width: 320, theme: 'dark' }] as const) {
-  test(`keeps assistant controls legible during a pending reply at ${width}px in ${theme}`, async ({ page, request }) => {
+  test(`keeps assistant controls legible during a pending reply at ${width}px in ${theme}`, async ({ page, request }, testInfo) => {
     await page.setViewportSize({ width, height: 900 })
     const auth = await createAuthenticatedUser(request)
     const session = await unwrap<{ id: string }>(await request.post(`${apiBaseURL}/api/chat/sessions`, {
@@ -304,10 +426,30 @@ for (const { width, theme } of [{ width: 1440, theme: 'light' }, { width: 320, t
     await sessionRow.click()
     const sidebarScrim = page.getByTestId('chat-sidebar-scrim')
     if (await sidebarScrim.isVisible()) await collapseChatSidebar(page)
-    const task = panel.locator('.task-card').first()
+    const tasks = panel.getByTestId('chat-preset-task')
+    const task = tasks.first()
     await page.getByTestId('chat-close').press('Tab')
     const resize = page.getByTestId('chat-resize-handle')
     if (await resize.isVisible()) await resize.press('Tab')
+    const guidance = panel.getByTestId('chat-guided-goals')
+    const summary = guidance.locator('summary')
+    await expect(guidance).not.toHaveAttribute('open')
+    await expect(panel.getByTestId('household-want')).toBeHidden()
+    await expect(tasks).toHaveCount(4)
+    await expect.poll(() => panel.evaluate(element => element.getAnimations({ subtree: true })
+      .filter(animation => animation.playState === 'running').length)).toBe(0)
+    await page.screenshot({ path: testInfo.outputPath('assistant-home.png') })
+    for (const suggestion of await tasks.all()) {
+      await expect(suggestion).toBeFocused()
+      await expect(suggestion).toHaveCSS('outline-width', '2px')
+      await expect(suggestion).toHaveCSS('outline-style', 'solid')
+      await expect.poll(() => suggestion.evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44)
+      await suggestion.press('Tab')
+    }
+    await expect(summary).toBeFocused()
+    await summary.press('Enter')
+    await expect(guidance).toHaveAttribute('open')
+    await summary.press('Tab')
     await expect(panel.getByTestId('household-draft')).toBeDisabled()
     for (const name of ['希望发生什么', '哪些事情不能发生（选填）', '修改后仍要保留什么（选填）']) {
       const goalField = panel.getByRole('textbox', { name, exact: true })
@@ -316,9 +458,6 @@ for (const { width, theme } of [{ width: 1440, theme: 'light' }, { width: 320, t
       await expect(goalField).toHaveCSS('outline-style', 'solid')
       await goalField.press('Tab')
     }
-    await expect(task).toBeFocused()
-    await expect(task).toHaveCSS('outline-width', '2px')
-    await expect(task).toHaveCSS('outline-style', 'solid')
     const input = page.getByTestId('chat-input')
     await task.click()
     await expect(input).toBeFocused()

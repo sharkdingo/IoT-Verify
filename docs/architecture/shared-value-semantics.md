@@ -220,8 +220,9 @@ condition editor presents both readings for a shared value with neither preselec
 `reported` for a device-local one, and names the chosen reading on every display surface (formula
 preview, plain-language description, condition rows, counterexample verdicts). A stored condition
 without a recorded choice renders as unresolved and blocks the run instead of being assigned a side
-on load. Portable scene files declare `version: 5` for this reason — a version-4 file cannot supply
-the field and no guess preserves what its specifications assert.
+on load. The [portable scene contract](../api/board.md#boardbatchdto-scene-import-fields)
+requires this field; older files that omit it are rejected because no guess preserves what
+their specifications assert.
 
 The asymmetry with rules is intended and load-bearing. A rule or a device transition is *inside* the
 system and can only act on what a sensor reported, so it always compiles to the mirror. A

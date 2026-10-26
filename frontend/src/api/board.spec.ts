@@ -35,7 +35,7 @@ const device: DeviceNode = {
  */
 const portableScene = (): PortableSceneFile => ({
   schema: 'iot-verify.board-scene',
-  version: 5,
+  version: 6,
   templates: [{ name: 'Sensor', manifest: { Name: 'Sensor' } as never }],
   devices: [{
     id: 'device_1',
@@ -61,7 +61,7 @@ const portableScene = (): PortableSceneFile => ({
     toId: 'device_1',
     toApi: 'alert'
   }],
-  specs: [{
+  specs: [{ name: 'Safety requirement',
     templateId: '1',
     aConditions: [{
       deviceId: 'device_1',
@@ -135,7 +135,7 @@ const confirmedRule = {
   toApi: 'notify'
 }
 
-const deletedSpecification: Specification = {
+const deletedSpecification: Specification = { name: 'Safety requirement',
   id: 'spec-1',
   templateId: '1',
   templateLabel: 'Always',
@@ -905,12 +905,33 @@ describe('board mutation response contracts', () => {
       environmentVariableCount: 1,
       ruleCount: 3,
       specificationCount: 4,
-      editHistoryEntryCount: 5
+      editHistoryEntryCount: 5,
+      templates: [
+        { name: 'Light', defaultTemplate: true, deviceCount: 2 },
+        { name: 'Unused', defaultTemplate: false, deviceCount: 0 }
+      ]
     }
     vi.mocked(http.get).mockResolvedValue(resultEnvelope(preview))
 
     await expect(boardApi.previewBoardReplacement()).resolves.toEqual(preview)
     expect(vi.mocked(http.get)).toHaveBeenCalledWith('/board/replacement-preview')
+  })
+
+  it.each([
+    undefined,
+    [{ name: 'Sensor', deviceCount: 1 }],
+    [{ name: 'Sensor', defaultTemplate: false, deviceCount: -1 }],
+    [{ name: 'Sensor', defaultTemplate: false, deviceCount: 0 }],
+    [{ name: 'Sensor', defaultTemplate: false, deviceCount: 1 },
+      { name: 'sensor', defaultTemplate: false, deviceCount: 0 }]
+  ])('rejects missing or inconsistent template usage in replacement previews: %j', async templates => {
+    vi.mocked(http.get).mockResolvedValue(resultEnvelope({
+      impactToken: 'preview', deviceCount: 1, environmentVariableCount: 0,
+      ruleCount: 0, specificationCount: 0, editHistoryEntryCount: 0, templates
+    }))
+    await expect(boardApi.previewBoardReplacement()).rejects.toMatchObject({
+      code: BOARD_RESPONSE_INCOMPLETE_CODE
+    })
   })
 
   it('sends the portable scene verbatim beside its confirmed impact token', async () => {
@@ -962,7 +983,7 @@ describe('board mutation response contracts', () => {
   })
 
   it('sends only structured specification semantics and not display caches', async () => {
-    const specification: Specification = {
+    const specification: Specification = { name: 'Safety requirement',
       id: 'spec-1',
       templateId: '1',
       templateLabel: 'Caller cache',
@@ -992,7 +1013,7 @@ describe('board mutation response contracts', () => {
 
     await boardApi.addSpec(specification)
 
-    expect(vi.mocked(http.post)).toHaveBeenCalledWith('/board/specs', {
+    expect(vi.mocked(http.post)).toHaveBeenCalledWith('/board/specs', { name: 'Safety requirement',
       id: 'spec-1',
       templateId: '1',
       aConditions: [{
@@ -1020,7 +1041,7 @@ describe('board mutation response contracts', () => {
       value: '20',
       ...overrides
     })
-    const specification = (overrides: Record<string, unknown>): Specification => ({
+    const specification = (overrides: Record<string, unknown>): Specification => ({ name: 'Safety requirement',
       id: 'spec-1',
       templateId: '1',
       templateLabel: 'Always',
@@ -1060,7 +1081,7 @@ describe('board mutation response contracts', () => {
      * for the only data it existed for. A present-but-unrecognised value stays a violation: the server
      * normalizes to one of two literals.
      */
-    const specWithSource = (variableSource: unknown): unknown => ({
+    const specWithSource = (variableSource: unknown): unknown => ({ name: 'Safety requirement',
       id: 'spec-1',
       templateId: '1',
       templateLabel: 'Always',
@@ -1091,7 +1112,7 @@ describe('board mutation response contracts', () => {
   })
 
   it('preserves the source the server echoes back on a write, without inventing one', async () => {
-    const specification = {
+    const specification = { name: 'Safety requirement',
       id: 'spec-1',
       templateId: '1',
       templateLabel: 'Always',
@@ -1156,7 +1177,7 @@ describe('board mutation response contracts', () => {
       canRedo: false
     }))
 
-    await expect(boardApi.addSpec({
+    await expect(boardApi.addSpec({ name: 'Safety requirement',
       id: 'spec-1',
       templateId: '1',
       templateLabel: 'Always',
@@ -1469,7 +1490,7 @@ describe('board mutation response contracts', () => {
       affectedItem: { id: deletedSpecification.id }
     })
     expect(vi.mocked(http.delete)).toHaveBeenCalledWith('/board/specs/spec-1', {
-      data: {
+      data: { name: 'Safety requirement',
         id: 'spec-1',
         templateId: '1',
         aConditions: [],

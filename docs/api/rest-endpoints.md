@@ -14,7 +14,7 @@ All paths are relative to the server root. Response representations and authenti
 follow [overview.md](overview.md). SSE streams and successful SMV downloads are direct
 responses rather than JSON envelopes.
 
-Verified against code on 2026-10-22.
+Verified against code on 2026-10-26.
 
 ---
 
@@ -149,6 +149,7 @@ Verified against code on 2026-10-22.
 | GET | `/api/chat/sessions` | List chat sessions | [chat-sse.md](chat-sse.md) |
 | POST | `/api/chat/sessions` | Create session | [chat-sse.md](chat-sse.md) |
 | GET | `/api/chat/sessions/{sessionId}/messages` | Cursor-paged message history (`beforeId`, `limit`) | [chat-sse.md](chat-sse.md) |
+| GET | `/api/chat/sessions/{sessionId}/memory` | Current task notes with original-message sources and coverage status | [chat-sse.md](chat-sse.md#task-memory-and-original-requirements) |
 | POST | `/api/chat/sessions/{sessionId}/seen` | Acknowledge the exact terminal assistant message rendered to the user | [chat-sse.md](chat-sse.md) |
 | GET | `/api/chat/sessions/{sessionId}/activity` | Check whether server work is still active for the session | [chat-sse.md](chat-sse.md) |
 | GET | `/api/chat/sessions/{sessionId}/confirmation` | Read pending protected actions with confirmation identities and targets for explicit UI confirmation | [chat-sse.md](chat-sse.md) |
@@ -171,6 +172,7 @@ backend/src/main/java/cn/edu/nju/Iot_Verify/controller/
 ├── AuthController.java
 ├── BoardStorageController.java
 ├── ChatController.java
+├── ChatTaskMemoryController.java
 ├── FuzzController.java
 ├── SimulationController.java
 └── VerificationController.java

@@ -406,6 +406,12 @@ const parameterApplied = (suggestion: FixResult['suggestions'][number]) => ({
 })
 
 describe('FixResultDialog strategy workflow', () => {
+  it('identifies the frozen requirement being repaired before the strategies', async () => {
+    const wrapper = mountDialog()
+    await wrapper.setProps({ violatedSpecName: 'Keep the entrance locked' })
+    expect(wrapper.get('[data-testid="fix-target-name"]').text()).toBe('Keep the entrance locked')
+  })
+
   beforeEach(() => {
     vi.useRealTimers()
     vi.clearAllMocks()

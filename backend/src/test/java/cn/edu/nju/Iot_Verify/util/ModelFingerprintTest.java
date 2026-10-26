@@ -25,14 +25,14 @@ class ModelFingerprintTest {
     private final ModelFingerprint fingerprint = new ModelFingerprint(new ObjectMapper().findAndRegisterModules());
 
     @Test
-    void canonicalFingerprintsKeepTheirExistingPersistedValues() {
+    void canonicalFingerprintsUseTheLogicalSpecificationShape() {
         var spec = new SpecificationDto();
         spec.setId("s1");
         var board = snapshot(List.of(spec), List.of());
         var pair = fingerprint.boardFingerprints(board);
-        assertEquals("9c8f850df3586400b1b42a05dda49c70e8f2eae2ccc0047b750ba0ae9a9c641c", pair.verification());
+        assertEquals("c889a292b6784a8377274f7774ef88b7b77d0bcb967e3469e76819c28b18010a", pair.verification());
         assertEquals("db23109e9940c050afd0e0ba51c845473e2eab78f497528f13cb9cc3d91da019", pair.simulation());
-        assertEquals("caa58a133d8c53c67c1afba47d622b2a613765149d2e019b33de03e396ebf9c4",
+        assertEquals("fe6a502aeaa5ee1d70c9c548a5b5266424c4bc20cb492ad9a20142fdba364cc5",
                 fingerprint.paperDomainFingerprint(board, 5));
     }
 
@@ -66,6 +66,29 @@ class ModelFingerprintTest {
         assertNotEquals(pair.verification(), pair.simulation());
         assertEquals(1, deviceSerializations.get());
         assertEquals(before, JsonUtils.toJson(board));
+    }
+
+    @Test
+    void renamingARequirementDoesNotInvalidateItsVerifiedModel() {
+        var spec = new SpecificationDto();
+        spec.setId("s1");
+        spec.setName("Keep the door locked");
+        var condition = new cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto();
+        condition.setId("editor-condition-1");
+        condition.setSide("a");
+        condition.setDeviceId("door");
+        condition.setTargetType("state");
+        condition.setKey("state");
+        condition.setRelation("=");
+        condition.setValue("locked");
+        spec.setAConditions(List.of(condition));
+        var board = snapshot(List.of(spec), List.of());
+        String before = fingerprint.modelFingerprint(board);
+        spec.setName("Prevent an unexpected unlock");
+        condition.setId(null);
+        assertEquals(before, fingerprint.modelFingerprint(board));
+        condition.setValue("unlocked");
+        assertNotEquals(before, fingerprint.modelFingerprint(board));
     }
 
     @Test

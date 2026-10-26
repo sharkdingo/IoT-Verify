@@ -290,7 +290,7 @@ class FuzzMapperTest {
     void mapsCompletedRunAndEmbedsFindingSummaries() {
         LocalDateTime createdAt = LocalDateTime.of(2026, 7, 14, 9, 30);
         SpecificationDto specification = supportedSpecification("spec-1");
-        specification.setTemplateLabel("Never unlock while away");
+        specification.setName("Never unlock while away");
         ModelInputSnapshot frozenInput = inputSnapshot(List.of(specification));
         TraceStateDto state = TraceStateDto.builder()
                 .stateIndex(0)
@@ -661,6 +661,7 @@ class FuzzMapperTest {
     @Test
     void runSummaryRejectsUnsupportedEligibleTemplate() {
         SpecificationDto unsupported = supportedSpecification("spec-1");
+        unsupported.setName("Safety requirement");
         unsupported.setTemplateId("6");
         FuzzTaskPo run = completedRun(
                 List.of(unsupported),
@@ -1141,6 +1142,17 @@ class FuzzMapperTest {
                 () -> mapper.toRunSummaryDto(legacyRun, List.of()));
     }
 
+    @Test
+    void projectedSummaryRejectsNamesThatDifferFromFrozenRequirements() {
+        FuzzTaskSummaryProjection task = projectedRun(1, 1L, 1, 10);
+        FuzzSpecificationPresentationProjection presentation = projectedPresentation();
+        SpecificationDto spec = supportedSpecification("spec-1");
+        spec.setName("A different requirement name");
+        when(presentation.getSpecificationsJson()).thenReturn(JsonUtils.toJson(List.of(spec)));
+        assertThrows(PersistedDataIntegrityException.class,
+                () -> mapper.toRunSummaryDtoFromTaskProjection(task, List.of(), presentation));
+    }
+
     private FuzzSpecificationPresentationProjection projectedPresentation() {
         FuzzSpecificationPresentationProjection presentation = mock(FuzzSpecificationPresentationProjection.class);
         when(presentation.getId()).thenReturn(90L);
@@ -1276,6 +1288,7 @@ class FuzzMapperTest {
         FuzzTaskSummaryProjection run = projectedRun(1, 1L, 1, 10);
         FuzzSpecificationPresentationProjection presentation = projectedPresentation();
         SpecificationDto specification = supportedSpecification("spec-1");
+        specification.setName("Safety property");
         specification.setTemplateId("3");
         specification.setTemplateLabel("Never");
         specification.getAConditions().get(0).setValue("heat");
@@ -1383,8 +1396,7 @@ class FuzzMapperTest {
             Map<String, String> labels = new java.util.LinkedHashMap<>();
             for (String id : eligibility.getEligibleSpecIds()) {
                 SpecificationDto specification = byId.get(id);
-                labels.put(id, specification != null && specification.getTemplateLabel() != null
-                        ? specification.getTemplateLabel() : id);
+                labels.put(id, specification == null ? id : specification.getName());
             }
             eligibility.setEligibleSpecLabels(labels);
         }
@@ -1540,6 +1552,7 @@ class FuzzMapperTest {
         condition.setValue("on");
         SpecificationDto specification = new SpecificationDto();
         specification.setId(id);
+        specification.setName("Safety property");
         specification.setTemplateId("1");
         specification.setAConditions(List.of(condition));
         return specification;

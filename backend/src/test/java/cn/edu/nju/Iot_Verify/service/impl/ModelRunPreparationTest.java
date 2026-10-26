@@ -190,6 +190,7 @@ class ModelRunPreparationTest {
     private SpecificationDto specification(String key) {
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec_1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         SpecConditionDto condition = new SpecConditionDto();
         condition.setDeviceId("sensor_1");

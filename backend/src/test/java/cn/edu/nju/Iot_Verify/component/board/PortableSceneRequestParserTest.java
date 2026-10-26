@@ -34,7 +34,7 @@ class PortableSceneRequestParserTest {
     }
 
     private static final String SUPPORTED_SCENE = """
-            "schema":"iot-verify.board-scene","version":5,
+            "schema":"iot-verify.board-scene","version":6,
             "templates":[],"devices":[],"environmentVariables":[],"rules":[],"specs":[]
             """;
 
@@ -69,7 +69,7 @@ class PortableSceneRequestParserTest {
                 "templates":[],"devices":[],"environmentVariables":[],"rules":[],"specs":[]
                 """)));
 
-        assertTrue(failure.getMessage().contains("version 5"), failure.getMessage());
+        assertTrue(failure.getMessage().contains("version 6"), failure.getMessage());
         assertTrue(failure.getMessage().contains("version 4"), failure.getMessage());
         assertTrue(failure.getMessage().contains("No board data was changed"), failure.getMessage());
         verifyNoInteractions(batchMapper);

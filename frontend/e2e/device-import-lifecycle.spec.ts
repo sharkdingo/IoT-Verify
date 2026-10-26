@@ -1,3 +1,4 @@
+import { expandCreation } from './support/controlCenter'
 import { readFileSync } from 'node:fs'
 import type { Page } from '@playwright/test'
 import { apiBaseURL, createAuthenticatedUser, expect, test } from './support/auth'
@@ -62,6 +63,7 @@ const addReferences = async (page: Page, firstId: string, secondId: string, loca
     })
     if (await expand.isVisible()) await clickUnderTooltip(page, expand)
     await page.getByTestId(`control-tab-${section}`).click()
+    await expandCreation(page, section)
   }
   for (const [source, event, target, action, contentDevice, name] of [
     [firstId, 'take photo', secondId, 'upload to cloud', firstId, '导入手机发送照片'],
@@ -87,6 +89,7 @@ const addReferences = async (page: Page, firstId: string, secondId: string, loca
   }
   for (const id of [firstId, secondId]) {
     await openEditor('specs')
+    await page.getByTestId('spec-name').fill('Safety requirement')
     await page.getByTestId('spec-template-select').selectOption('1')
     await page.getByTestId('spec-add-condition-a').click()
     await page.getByTestId('spec-condition-device').selectOption(id)
@@ -162,6 +165,7 @@ for (const locale of ['en', 'zh-CN']) for (const format of ['json', 'utf-8', 'gb
     })
     if (await expandControl.isVisible()) await clickUnderTooltip(page, expandControl)
     await page.getByTestId('control-tab-devices').click()
+    await expandCreation(page, 'devices')
     await page.getByTestId('device-create-mode-import').click()
     await page.getByTestId(`device-import-format-${format === 'json' ? 'json' : 'csv'}`).click()
     if (format !== 'json') await page.getByTestId('device-import-csv-encoding').selectOption(format)

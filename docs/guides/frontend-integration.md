@@ -3,7 +3,7 @@
 How the Vue 3 frontend calls the backend: the HTTP client, the API modules and their
 real shapes, SSE streaming, and where the TypeScript types live.
 
-Verified against code on 2026-10-18 (workspace reload, failure ownership, account settings, and run lifecycle). Source: `frontend/src/api/`,
+Verified against code on 2026-10-25 (workspace reload, failure ownership, account settings, and run lifecycle). Source: `frontend/src/api/`,
 `frontend/src/types/`, `frontend/src/components/ChatView.vue`,
 `frontend/src/views/Board.vue`, `frontend/src/App.vue`, and `frontend/src/router/index.ts`.
 
@@ -361,7 +361,7 @@ Non-exhaustive:
 - Scene import/export lives in the Board header as a whole-board portability affordance,
   not as a backend endpoint. Export requests a browser download for an
   `iot-verify.board-scene` JSON file with
-  exact `schema`, `version: 5`, referenced `templates`, `devices`,
+  exact `schema` and `version` from the [portable scene contract](../api/board.md#boardbatchdto-scene-import-fields), referenced `templates`, `devices`,
   `environmentVariables`, `rules`, and
   `specs`; there is no timestamp inside the JSON because scene files are meant to be
   canonical and round-trip comparable. The toast reports that the download was requested,
@@ -377,7 +377,7 @@ Non-exhaustive:
   an imported scene creates fresh backend rows, as do specifications; only stable device ids are
   preserved.
   Import rejects a missing/different schema or any unsupported version instead of
-  guessing aliases and rewriting future data into version 5. It validates duplicate
+  guessing aliases and rewriting future data into version 6. It validates duplicate
   device ids, required identity/position/size, state required only for state-machine
   templates, state forbidden for stateless templates, required rule target command fields
   (`toId`/`toApi`), supported relation operators, specification template condition-side
@@ -394,7 +394,7 @@ Non-exhaustive:
   are limited to `-1000000..1000000`, width to `80..2000`, and height to `60..2000`.
   This exact domain also applies to AI scene drafts, preserving export/import closure at
   the range boundaries.
-  The canvas may hold `Working` as a stateless rendering placeholder, but version 5 export
+  The canvas may hold `Working` as a stateless rendering placeholder, but version 6 export
   omits it together with current-state trust/privacy; import restores it only internally.
   Specification `templateLabel`, formula/device caches, and condition display metadata
   are excluded and rebuilt from `templateId` plus conditions. The environment pool is
@@ -701,13 +701,14 @@ Board layout and visual shell rules:
   NuSMV aliases are not displayed or matched as a frontend contract. Runtime NuSMV
   globals such as the actual `compromisedPointCount` are exposed separately through
   `TraceStateDto.globalVariables` so they cannot collide with user environment names.
-- The simulation/counterexample-exploration/verification/history/recommendation actions live in a right-side tool
-  rail placed just outside the inspector, never overlapping the inspector itself.
+- Run and history actions live in a right-side tool rail outside the inspector.
+  Recommendation placement and form inputs follow
+  [frontend UI conventions](./frontend-ui-conventions.md#deliberately-not-in-the-url).
 - Model-trace playback is one exclusive review surface. While either the simulation
   timeline or counterexample timeline is open, the Action Dock cannot open run history,
-  task inbox, run settings, or recommendations; handlers enforce the same guard as the
-  disabled controls. Users close the current trace before choosing another saved run.
-  Desktop widths show icon+text buttons grouped as run tools and AI suggestion tools;
+  task inbox or run settings, and Control Center remains read-only; handlers enforce
+  the same guard as the disabled controls. Users close the current trace before
+  choosing another saved run. Desktop widths show icon+text buttons for run tools;
   narrower viewports collapse the labels but keep `aria-label`, `role="toolbar"`, and
   grouped `role="group"` semantics. Desktop floating panels open to the left of this
   rail so close buttons and form controls are never covered by toolbar hit areas. Do
@@ -724,9 +725,6 @@ Board layout and visual shell rules:
   recovery controls from rendering.
 - Recommendation panels must use i18n keys for labels, counts, empty states, and action
   buttons. They are opened in real-browser tests under both English and Chinese locales.
-  Scenario counts use one validated request projection for inline errors and submission;
-  invalid count fields are linked to the visible reason and generation remains disabled
-  until corrected. Invalid criteria never claim request ownership or call the AI endpoint.
   Request failures retain localized guidance, visible causes/field errors and expandable logs in
   the owning panel, separate from a successful empty candidate list. Unknown requests
   remain under the existing status-recovery owner; after confirmed termination without
@@ -739,10 +737,8 @@ Board layout and visual shell rules:
   localized `reason`, optional `label`) instead of making the smaller result count look
   like an unexplained failure. When `truncatedCount > 0`, also surface that raw AI
   candidates were not inspected because the requested result limit had already been
-  reached. A coupled-scene recommendation belongs to the exact minimums, maximums, and
-  requirement text submitted for that attempt. Editing any of those fields invalidates the
-  displayed result immediately; export and full-scene replacement remain unavailable until a
-  fresh response for the edited criteria arrives.
+  reached. Full-scene drafts and their confirmation lifecycle belong to the
+  [AI assistant's scene tools](../api/ai-tools.md#rules).
 - Device images should degrade to an inline SVG fallback when a template asset is
   missing or fails to load, so long-running trace animation remains understandable.
 - Timeline state chips stay compact for short traces and become horizontally scrollable
@@ -957,9 +953,8 @@ NuSMV output through the persisted `SimulationTraceDto` referenced by
 
 Verification traces return a structured verification-time `violatedSpec`; raw
 `violatedSpecJson`, ownership ids, and request snapshots remain backend-internal.
-Verification `specResults` is an array of `{ specId, templateId, specificationLabel,
-formulaPreview, formulaKind, outcome, expression }` objects for the specifications
-actually emitted to NuSMV. Render `specificationLabel`/localized `templateId`,
+Verification `specResults` follows the [frozen result contract](../api/verification.md#specresultdto)
+for specifications actually emitted to NuSMV. Render the frozen requirement name from `specificationLabel`,
 `formulaPreview`, and `formulaKind` in the ordinary result row; keep technical `specId`
 and the actual NuSMV `expression` in an expandable technical section. These fields are
 captured from the submitted run, so never look up the mutable current Board by `specId`

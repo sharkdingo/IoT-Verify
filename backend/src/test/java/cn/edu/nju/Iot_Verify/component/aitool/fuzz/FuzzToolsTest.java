@@ -472,6 +472,7 @@ class FuzzToolsTest {
     private SpecificationDto violatedSpecification() {
         SpecificationDto specification = new SpecificationDto();
         specification.setId("s1");
+        specification.setName("Safety invariant");
         specification.setTemplateId("1");
         specification.setTemplateLabel("Safety invariant");
         specification.setFormula("AG safe");

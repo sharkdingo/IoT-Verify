@@ -19,7 +19,7 @@ const condition = (overrides: Partial<SpecCondition> = {}): SpecCondition => ({
   id: 'condition', side: 'a', deviceId: node.id, deviceLabel: 'Old light name',
   targetType: 'state', key: 'state', relation: '=', value: 'on', ...overrides
 })
-const specification = (templateId: Specification['templateId']): Specification => ({
+const specification = (templateId: Specification['templateId']): Specification => ({ name: 'Safety requirement',
   id: 'spec', templateId, templateLabel: 'Old template title',
   aConditions: [condition()], ifConditions: [condition({ side: 'if' })],
   thenConditions: [condition({ side: 'then', value: 'off' })]

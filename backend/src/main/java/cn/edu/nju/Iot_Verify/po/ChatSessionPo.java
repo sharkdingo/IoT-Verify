@@ -29,6 +29,11 @@ public class ChatSessionPo {
 
     private String title; // 会话标题
 
+    @Lob
+    @Column(name = "task_memory_json", columnDefinition = "LONGTEXT")
+    @lombok.ToString.Exclude
+    private String taskMemoryJson;
+
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 

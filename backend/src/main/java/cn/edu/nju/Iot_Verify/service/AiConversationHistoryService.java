@@ -35,6 +35,39 @@ public class AiConversationHistoryService {
     private final ChatToolProgressPresenter presenter;
     private final ObjectMapper objectMapper;
 
+    public record UserOriginal(Long messageId, String text) {}
+    public record OriginalPage(List<UserOriginal> messages, Long nextBeforeMessageId, boolean hasMore) {}
+
+    @Transactional(readOnly = true)
+    public OriginalPage readOriginals(Long userId, String sessionId, Long beforeId,
+                                     Long messageId, String query, int limit) {
+        if (sessionId == null || sessionId.isBlank() || limit < 1 || limit > 10
+                || (beforeId != null && beforeId <= 0) || (messageId != null && messageId <= 0)
+                || (messageId != null && (beforeId != null || query != null))
+                || (query != null && (query.isBlank() || query.length() > 100))) {
+            throw new BadRequestException("Invalid user-original search or cursor. Use messageId alone for an exact read.");
+        }
+        sessionRepository.findByIdAndUserId(sessionId, userId)
+                .orElseThrow(() -> ResourceNotFoundException.session(sessionId));
+        var rows = messageRepository.findUserOriginals(sessionId, beforeId, messageId, query,
+                PageRequest.of(0, limit + 1));
+        List<UserOriginal> selected = new ArrayList<>();
+        int chars = 0;
+        for (ChatMessagePo row : rows) {
+            if (selected.size() == limit) break;
+            String text = row.getContent();
+            if (text == null || text.length() > 10_000) {
+                throw new BadRequestException("Original message " + row.getId() + " is unavailable; do not infer its contents.");
+            }
+            if (chars + text.length() > 10_000 && !selected.isEmpty()) break;
+            selected.add(new UserOriginal(row.getId(), text));
+            chars += text.length();
+        }
+        boolean hasMore = rows.size() > selected.size();
+        Long cursor = hasMore ? selected.get(selected.size() - 1).messageId() : null;
+        return new OriginalPage(List.copyOf(selected), cursor, hasMore);
+    }
+
     @Transactional(readOnly = true)
     public ActivityPage readPage(Long userId, String sessionId, Long beforeId, int limit) {
         if (sessionId == null || sessionId.isBlank()) {

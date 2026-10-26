@@ -1,4 +1,5 @@
 <script lang="ts">
+import { buildSpecificationSemanticKey } from '../utils/spec'
 export type BoardResultRetryOptions<T> = {
   load: () => Promise<T>
   shouldRetry: (error: unknown) => boolean
@@ -408,43 +409,6 @@ export const hasFrozenBundledTokenSource = (
   value: { modelTokenSource?: string | null }
 ): boolean => value.modelTokenSource === 'BUNDLED'
 
-export type ScenarioRecommendationCountField =
-  | 'minDevices'
-  | 'minRules'
-  | 'minSpecs'
-  | 'maxDevices'
-  | 'maxRules'
-  | 'maxSpecs'
-
-export type ScenarioRecommendationTargetRequest = Record<ScenarioRecommendationCountField, number> & {
-  language: string
-  userRequirement: string
-}
-
-export const buildScenarioRecommendationTargetRequest = (
-  input: Record<ScenarioRecommendationCountField, unknown> & {
-    language: string
-    userRequirement: string
-  },
-  validateCount: (value: unknown, field: ScenarioRecommendationCountField) => number,
-  rangeError: (field: 'devices' | 'rules' | 'specifications') => Error
-): ScenarioRecommendationTargetRequest => {
-  const request: ScenarioRecommendationTargetRequest = {
-    minDevices: validateCount(input.minDevices, 'minDevices'),
-    minRules: validateCount(input.minRules, 'minRules'),
-    minSpecs: validateCount(input.minSpecs, 'minSpecs'),
-    maxDevices: validateCount(input.maxDevices, 'maxDevices'),
-    maxRules: validateCount(input.maxRules, 'maxRules'),
-    maxSpecs: validateCount(input.maxSpecs, 'maxSpecs'),
-    language: input.language,
-    userRequirement: input.userRequirement
-  }
-  if (request.minDevices > request.maxDevices) throw rangeError('devices')
-  if (request.minRules > request.maxRules) throw rangeError('rules')
-  if (request.minSpecs > request.maxSpecs) throw rangeError('specifications')
-  return request
-}
-
 export const canonicalBoardSnapshotValue = (value: unknown): unknown => {
   if (Array.isArray(value)) return value.map(canonicalBoardSnapshotValue)
   if (value && typeof value === 'object') {
@@ -499,7 +463,12 @@ export const recommendationSceneFingerprint = (
   environmentVariables: canonicalUnorderedCollection(snapshot.environmentVariables),
   // Rule order is execution order and therefore remains part of the fingerprint.
   rules: snapshot.rules.map(canonicalBoardSnapshotValue),
-  specifications: canonicalUnorderedCollection(snapshot.specifications),
+  // Requirement names are authored metadata; a rename does not change the checked model.
+  specifications: canonicalUnorderedCollection(snapshot.specifications, value => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return value
+    const spec = value as Parameters<typeof buildSpecificationSemanticKey>[0] & { id?: string }
+    return { id: spec.id, logic: buildSpecificationSemanticKey(spec) }
+  }),
   deviceTemplates: canonicalUnorderedCollection(snapshot.deviceTemplates)
 }))
 
@@ -643,7 +612,7 @@ import {
   notifyInfo,
   notifySuccess
 } from '@/utils/feedback'
-import { countResponseTriggerWarnings, getVerificationOutcome, presentSpecificationResult } from './board/verificationResult'
+import { countResponseTriggerWarnings, getVerificationOutcome, groupVerificationEvidence, presentSpecificationResult } from './board/verificationResult'
 import {
   applyBoardRunTarget,
   hasUnusableBoardRunParams,
@@ -672,7 +641,6 @@ import { createDeviceInstanceId, deviceLabelKey, getUniqueLabel } from '../utils
 import { screenToWorld } from '../utils/canvas/geometry'
 import {
   buildSpecDeviceRefsFromConditions,
-  buildSpecificationSemanticKey,
   buildSpecFormula,
   isSameSpecification,
   isSpecRelatedToNode,
@@ -723,11 +691,13 @@ import { RECOMMENDATION_RESPONSE_INCOMPLETE_CODE } from '@/utils/recommendationR
 import { sceneTemplatesCoveredByCatalog } from '@/utils/sceneTemplateCoverage'
 import {
   createSceneCodec,
-  normalizeTemplateLookupName,
   SCENE_FILE_SCHEMA,
   SCENE_FILE_VERSION,
   type BoardSceneModel
 } from './board/portableScene'
+import { getTemplateUsage, normalizeTemplateLookupName, summarizeImportedTemplates, summarizeTemplateUsage } from '@/utils/templateUsage'
+import { prepareSceneImport } from './board/sceneImportPreparation'
+import SceneImportRepairs from '@/components/SceneImportRepairs.vue'
 import {
   FUZZ_RESPONSE_INCOMPLETE_CODE,
   getFuzzActiveTaskLimit,
@@ -810,7 +780,6 @@ import boardApi, {
   type EnvironmentVariableChange,
   type RecommendationAdjustmentItem,
   type RecommendationFilteredItem,
-  type ScenarioRecommendationResponse,
   type SpecificationRecommendation
 } from '@/api/board'
 import simulationApi from '@/api/simulation'
@@ -827,7 +796,6 @@ import InfoTooltip from '@/components/common/InfoTooltip.vue'
 import BackgroundTaskSummary from '@/components/BackgroundTaskSummary.vue'
 import { describeSpecification, presentRule } from '@/utils/modelPresentation'
 import ToggleSwitch from '@/components/common/ToggleSwitch.vue'
-import ScenarioObjectiveIssues from '@/components/ScenarioObjectiveIssues.vue'
 import { useModalAccessibility } from '@/composables/useModalAccessibility'
 import { openModalDepth } from '@/composables/useBodyScrollLock'
 import { useBoardUndo } from '@/composables/useBoardUndo'
@@ -1102,30 +1070,6 @@ const ensureDeviceRuntimeCapacity = (runtime?: DeviceRuntimeConfig) =>
     t('app.devicePrivacies'), runtime?.privacies?.length || 0, REQUEST_LIMITS.devicePrivacies
   )
 
-
-type ScenarioRecommendationResult = {
-  message: string
-  count: number
-  requestedCount: number
-  validatedCount: number
-  filteredCount: number
-  filteredItems: RecommendationFilteredItem[]
-  adjustedCount: number
-  adjustedItems: RecommendationAdjustmentItem[]
-  rawCandidateCount: number
-  inspectedCount: number
-  truncatedCount: number
-  scenarioName: string
-  rationale: string
-  objectiveTargets: ScenarioRecommendationResponse['objectiveTargets']
-  objectiveStatus: ScenarioRecommendationResponse['objectiveStatus']
-  objectiveIssues: ScenarioRecommendationResponse['objectiveIssues']
-  verificationReady: boolean
-  readinessIssues: ScenarioRecommendationResponse['readinessIssues']
-  semanticWarnings: ScenarioRecommendationResponse['semanticWarnings']
-  scene: BoardSceneModel | null
-}
-
 class PollingAbortedError extends Error {
   constructor() {
     super('Polling aborted')
@@ -1316,7 +1260,6 @@ const hasActionDockActivity = computed(() =>
   isVerifying.value ||
   simulationAnimationState.value.visible ||
   traceAnimationState.value.visible ||
-  isRecommendingScenario.value ||
   isAnyRecommendationRunning() ||
   unreadFuzzNotificationCount.value > 0
 )
@@ -1342,10 +1285,6 @@ const verificationTooltipContent = computed(() => {
     : t('app.openVerificationSettings')
   return `${status}\n${t('app.outcomeVerification')}`
 })
-const scenarioTooltipContent = computed(() => t('app.openScenarioRecommendations'))
-const ruleTooltipContent = computed(() => t('app.openRuleRecommendations'))
-const deviceTooltipContent = computed(() => t('app.openDeviceRecommendations'))
-const specTooltipContent = computed(() => t('app.openSpecificationRecommendations'))
 /*
  * The rail width table owns the paint width; the reserved width adds the gap the dock is inset by, which
  * the fit math needs and the paint does not.
@@ -1905,11 +1844,6 @@ const isVerificationModelComplete = (
   _outcome = getVerificationOutcome(result)
 ): boolean => result?.modelComplete === true
 
-const getSpecResultDisplayTitle = (spec: Specification | undefined, index: number): string => {
-  const detail = specTemplateDetails.find(template => template.id === spec?.templateId)
-  if (detail?.labelKey) return t(detail.labelKey)
-  return spec?.templateLabel || detail?.label || t('app.specificationNumber', { number: index + 1 })
-}
 
 const getTraceSpecDisplayTitle = (trace: (Pick<Trace, 'violatedSpecId' | 'violatedSpec'> & Partial<Pick<Trace, 'states'>>) | null | undefined): string => {
   if (!trace) return t('app.unknown')
@@ -3120,7 +3054,8 @@ const confirmRecommendedRuleSimilarity = async (candidate: RuleForm): Promise<bo
 }
 
 // 应用推荐的规则
-const applyRecommendation = async (rec: RuleRecommendation, index: number) => {
+const applyRecommendation = async (rec: RuleRecommendation, index: number, fromBatch = false) => {
+  if (!fromBatch && isRecommendationBatchLocked('rule')) return
   if (!ensurePlaybackClosedForMutation()) return
   if (!ensureBoardDataReady(['nodes', 'templates', 'rules'])) return
   if (appliedRuleRecommendations.value.has(index)) {
@@ -3186,13 +3121,10 @@ const applyRecommendation = async (rec: RuleRecommendation, index: number) => {
     applyingRuleRecommendations.value.add(index)
     const shouldApply = await confirmRecommendedRuleSimilarity(newRule)
     if (!shouldApply) return
-    if (recommendationEpoch !== ruleRecommendationRequestEpoch
-      || requestSceneGeneration !== recommendationSceneGeneration
-      || isSceneReplacementInProgress.value) return
+    if (!isApplyCandidateCurrent() || isSceneReplacementInProgress.value) return
 
     await enqueueBoardMutation(async () => {
-      if (recommendationEpoch !== ruleRecommendationRequestEpoch
-        || requestSceneGeneration !== recommendationSceneGeneration
+      if (!isApplyCandidateCurrent()
         || !isBoardDataReady.value
         || isSceneReplacementInProgress.value) return
       try {
@@ -3201,7 +3133,8 @@ const applyRecommendation = async (rec: RuleRecommendation, index: number) => {
         commitSemanticScene({ rules: mutation.currentItems, availability: mutation })
         recommendationConfirmedApplied = true
         const createdRule = mutation.affectedItem
-        if (createdRule?.id) {
+        // A batch must keep its progress visible; focusing the inspector closes the narrow control panel.
+        if (createdRule?.id && !fromBatch) {
           await focusRuleOnCanvas(createdRule.id)
         }
         if (isApplyCandidateCurrent()) {
@@ -3816,8 +3749,7 @@ const deleteCurrentNodeWithConfirm = async (nodeId: string) => {
     }
     deleteConfirmDialogData.relatedRules = relatedRules.map((rule, index) =>
       rule.name || t('app.ruleNumber', { number: index + 1 }))
-    deleteConfirmDialogData.relatedSpecs = relatedSpecs.map((spec, index) =>
-      getSpecResultDisplayTitle(spec, index))
+    deleteConfirmDialogData.relatedSpecs = relatedSpecs.map(spec => spec.name)
     deleteConfirmDialogData.environmentChanges = environmentChanges
     deleteConfirmDialogData.impactToken = impactToken
     deleteConfirmReviewSnapshotKey.value = currentDeletionReviewSnapshotKey()
@@ -3990,6 +3922,7 @@ const sortConfirmationConditions = <T,>(conditions: T[]) =>
 
 const authoredSpecificationConfirmationSnapshot = (specification: Specification) => ({
   id: normalizeConfirmationText(specification.id),
+  name: normalizeConfirmationText(specification.name),
   templateId: normalizeConfirmationText(specification.templateId),
   aConditions: sortConfirmationConditions(
     (specification.aConditions || []).map(authoredSpecificationConditionSnapshot)
@@ -4157,7 +4090,7 @@ const deleteSpecification = async (specId: string) => {
     if (!await confirmDestructive({
       title: t('app.deleteSpecConfirmTitle'),
       message: t('app.deleteSpecConfirmMessage', {
-        name: getSpecResultDisplayTitle(specToDelete, 0) || t('app.unnamedSpecification')
+        name: specToDelete.name
       }),
       confirmText: t('app.delete')
     })) return
@@ -4408,6 +4341,7 @@ watch(
   { flush: 'sync' }
 )
 
+const controlCenterRef = ref<InstanceType<typeof ControlCenter> | null>(null)
 const openControlSection = (section: InspectorSection) => {
   if (section === 'rules') editingRule.value = null
   if (section === 'specs') editingSpecification.value = null
@@ -4423,6 +4357,7 @@ const openControlSection = (section: InspectorSection) => {
   boardPanels.control.collapsed = false
   if (isNarrowViewport()) boardPanels.inspector.collapsed = true
   boardPanels.control.activeSection = controlSection
+  controlCenterRef.value?.openCreation(controlSection)
 }
 
 const handleControlCollapsedUpdate = (value: boolean) => {
@@ -4673,6 +4608,9 @@ const refreshBoardOnForeground = () => {
 const boardInvalidationBinding = createScopedBoardInvalidationBinding(
   subscribeBoardInvalidation,
   () => {
+    // The pending write may already return the external edit in its snapshot, leaving
+    // no later refresh delta. Stop the old cohort when the external change is announced.
+    if (recommendationBatch.value?.running) invalidateRecommendationsForSceneChange({ notify: true })
     invalidateCurrentBoardModelFingerprints()
     requestBoardSnapshotRefresh()
   }
@@ -4778,7 +4716,6 @@ const saveEnvironmentVariables = async (
 // pure functions; the codec binds the translator once so rejection messages stay localized.
 const {
   requireIntegerInRange,
-  optionalIntegerInRange,
   assertSceneTemplateCoverage,
   assertSceneEnvironmentCoverage,
   assertUniqueSceneDeviceIds,
@@ -4852,11 +4789,14 @@ const exportScene = () => {
   }
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
   downloadJsonFile(`iot-verify-scene-${timestamp}.json`, serialized)
+  const templateCounts = summarizeTemplateUsage(getTemplateUsage(deviceTemplates.value, scene.devices))
   notifySuccess(t('app.sceneExportStarted', {
     devices: scene.devices.length,
     variables: scene.environmentVariables.length,
     rules: scene.rules.length,
-    specs: scene.specs.length
+    specs: scene.specs.length,
+    templates: templateCounts.used,
+    customTemplates: templateCounts.usedCustom
   }))
 }
 
@@ -5211,12 +5151,13 @@ const currentBoardMatchesScene = (scene: BoardSceneModel): boolean => {
 
 const savedBatchMatchesScene = (
   saved: Awaited<ReturnType<typeof boardApi.importScene>>,
-  scene: BoardSceneModel
+  scene: BoardSceneModel,
+  catalog: DeviceTemplate[]
 ): boolean => {
   try {
     if (!sceneTemplatesCoveredByCatalog(
       scene.templates,
-      deviceTemplates.value,
+      catalog,
       saved.createdTemplates
     )) {
       return false
@@ -5264,17 +5205,34 @@ const importScene = async (
     if (!isAdmitted()) return false
     if (!ensureBoardDataReady()) return false
     let replacementPreview: BoardReplacementPreview
+    let importCatalog: DeviceTemplate[]
     try {
       replacementPreview = await boardApi.previewBoardReplacement()
+      importCatalog = await boardApi.getDeviceTemplates()
     } catch (error: any) {
       if (!isAdmitted()) return false
       notifyError(localizedErrorMessage(error, t('app.sceneReplacementPreviewFailed'), locale.value))
       return false
     }
     if (!isAdmitted()) return false
+    const importPlan = prepareSceneImport(scene, importCatalog)
+    if (importPlan.libraryLimitExceeded) {
+      await acknowledgeFailure({
+        title: t('app.sceneImportLibraryFullTitle'),
+        message: t('app.sceneImportLibraryFull', { current: importCatalog.length, added: importPlan.addedTemplates,
+          limit: REQUEST_LIMITS.templates }),
+        suggestion: t('app.sceneImportLibraryFullHint')
+      })
+      return false
+    }
+    scene = importPlan.scene
+    const hasRepairs = importPlan.templateRenames.length > 0 || importPlan.variableCorrections.length > 0
+    const templateCounts = summarizeTemplateUsage(replacementPreview.templates)
+    const incomingTemplates = summarizeImportedTemplates(scene.templates, replacementPreview.templates)
     if (!await confirmDestructive({
       title: t('app.sceneImportConfirmTitle'),
       message: h('div', { class: 'scene-import-preview' }, [
+        h(SceneImportRepairs, { plan: importPlan, t }),
         h('table', { 'data-testid': 'scene-import-comparison' }, [
           h('thead', [h('tr', [
             h('th', { scope: 'col' }, t('app.sceneContents')),
@@ -5285,12 +5243,16 @@ const importScene = async (
             ['app.devices', replacementPreview.deviceCount, scene.devices.length],
             ['app.environmentVariables', replacementPreview.environmentVariableCount, scene.environmentVariables.length],
             ['app.rules', replacementPreview.ruleCount, scene.rules.length],
-            ['app.specifications', replacementPreview.specificationCount, scene.specs.length]
+            ['app.specifications', replacementPreview.specificationCount, scene.specs.length],
+            ['app.sceneReferencedTemplates', templateCounts.used, incomingTemplates.total],
+            ['app.sceneReferencedCustomTemplates', templateCounts.usedCustom, incomingTemplates.custom]
           ].map(([label, current, incoming]) => h('tr', [
             h('th', { scope: 'row' }, t(String(label))),
             h('td', String(current)), h('td', String(incoming))
           ])))
         ]),
+        h('p', { class: 'board-text-muted text-xs', 'data-testid': 'scene-import-template-summary' },
+          t('app.sceneImportTemplateSummary', { retained: templateCounts.custom, added: incomingTemplates.added })),
         h('p', { class: 'iot-dialog__consequence', 'data-testid': 'scene-import-consequence' },
           t('app.sceneImportConfirmMessage', { historyEntries: replacementPreview.editHistoryEntryCount })),
         h('details', { 'data-testid': 'scene-import-template-rule-details' }, [
@@ -5299,7 +5261,7 @@ const importScene = async (
           h('p', t('app.sceneImportRulePriorityNotice'))
         ])
       ]),
-      confirmText: t('app.sceneImportConfirmAction'),
+      confirmText: t(hasRepairs ? 'app.sceneImportRepairConfirmAction' : 'app.sceneImportConfirmAction'),
       customClass: 'scene-replacement-confirm'
     })) return false
     if (!isAdmitted()) return false
@@ -5311,7 +5273,7 @@ const importScene = async (
           impactToken: replacementPreview.impactToken,
           scene: serializeSceneFile(scene)
         })
-        if (!savedBatchMatchesScene(saved, scene)) {
+        if (!savedBatchMatchesScene(saved, scene, importCatalog)) {
           throw new Error('Scene replacement response did not match the requested semantic scene')
         }
       } catch (error: any) {
@@ -5344,11 +5306,11 @@ const importScene = async (
       environmentVariables.value = saved.environmentVariables
       rules.value = saved.rules
       specifications.value = saved.specs
-      if (saved.createdTemplates.length > 0) {
-        const existingTemplateNames = new Set(deviceTemplates.value.map(template =>
+      {
+        const existingTemplateNames = new Set(importCatalog.map(template =>
           normalizeTemplateLookupName(template.name || template.manifest?.Name)))
         deviceTemplates.value = [
-          ...deviceTemplates.value,
+          ...importCatalog,
           ...saved.createdTemplates.filter(template => {
             const key = normalizeTemplateLookupName(template.name || template.manifest?.Name)
             if (!key || existingTemplateNames.has(key)) return false
@@ -5359,20 +5321,15 @@ const importScene = async (
       }
       syncRuleDerivedEdges()
       await resetSceneSelectionAfterReplacement()
-      const importMessage = saved.createdTemplates.length > 0
-        ? t('app.sceneImportSuccessWithTemplates', {
-            devices: nodes.value.length,
-            variables: environmentVariables.value.length,
-            rules: rules.value.length,
-            specs: specifications.value.length,
-            templates: saved.createdTemplates.length
-          })
-        : t('app.sceneImportSuccess', {
-            devices: nodes.value.length,
-            variables: environmentVariables.value.length,
-            rules: rules.value.length,
-            specs: specifications.value.length
-          })
+      const importMessage = t('app.sceneImportSuccess', {
+        devices: nodes.value.length,
+        variables: environmentVariables.value.length,
+        rules: rules.value.length,
+        specs: specifications.value.length,
+        templates: incomingTemplates.total,
+        customTemplates: incomingTemplates.custom,
+        added: saved.createdTemplates.length
+      })
       notifySuccess(importMessage)
       return true
     }, { admissionGuard, trackSemanticChange: false })
@@ -5402,6 +5359,7 @@ const clearScene = async () => {
       notifyError(localizedErrorMessage(error, t('app.sceneReplacementPreviewFailed'), locale.value))
       return
     }
+    const templateCounts = summarizeTemplateUsage(replacementPreview.templates)
     if (!await confirmDestructive({
       title: t('app.sceneClearConfirmTitle'),
       message: t('app.sceneClearConfirmMessage', {
@@ -5409,6 +5367,9 @@ const clearScene = async () => {
         variables: replacementPreview.environmentVariableCount,
         rules: replacementPreview.ruleCount,
         specs: replacementPreview.specificationCount,
+        templates: templateCounts.used,
+        customTemplates: templateCounts.usedCustom,
+        retained: templateCounts.custom,
         historyEntries: replacementPreview.editHistoryEntryCount
       }),
       confirmText: t('app.sceneClearConfirmAction'),
@@ -5430,7 +5391,7 @@ const clearScene = async () => {
         syncRuleDerivedEdges()
         dialogVisible.value = false
         focusHighlight.clear()
-        notifySuccess(t('app.sceneClearSuccess'))
+        notifySuccess(t('app.sceneClearSuccess', { retained: templateCounts.custom }))
       } catch (error: any) {
         console.error('Failed to clear scene', error)
         if (await reportBoardReplacementDrift(error)) return
@@ -6489,13 +6450,13 @@ const handleSaveRule = (request: {
 const handleSaveSpecification = (data: Parameters<typeof handleAddSpec>[0] & { expected?: Specification }) => {
   if (!data.expected) return handleAddSpec(data)
   const desired: Specification = {
-    ...data.expected, templateId: data.templateId as SpecTemplateId,
+    ...data.expected, name: data.name.trim(), templateId: data.templateId as SpecTemplateId,
     aConditions: data.aConditions, ifConditions: data.ifConditions, thenConditions: data.thenConditions
   }
   return saveBoardItemEdit({
     expected: data.expected, desired, complete: data.complete,
     requiredKeys: ['nodes', 'templates', 'specs'], update: boardApi.updateSpec,
-    commit: mutation => commitSemanticScene({ specs: mutation.currentItems, availability: mutation, semanticChanged: mutation.operation !== 'unchanged' }),
+    commit: mutation => commitSemanticScene({ specs: mutation.currentItems, availability: mutation, semanticChanged: !isSameSpecification(data.expected!, desired) }),
     focus: focusSpecInInspector, refresh: refreshSpecifications
   })
 }
@@ -6526,7 +6487,8 @@ const openRuleBuilder = () => {
   openControlSection('rules')
 }
 
-const handleAddSpec = async (data: { 
+const handleAddSpec = async (data: {
+  name: string,
   templateId: string, 
   devices: Array<{deviceId: string, deviceLabel: string, selectedApis: string[]}>, 
   formula: string,
@@ -6563,6 +6525,7 @@ const handleAddSpec = async (data: {
 
         const newSpec: Specification = {
           id: 'spec_' + Date.now(),
+          name: data.name.trim(),
           templateId: templateId as any,
           templateLabel,
           aConditions: aConditions || [],
@@ -6742,12 +6705,6 @@ onBeforeUnmount(() => {
     specRecommendationAbortController.value
   )
   specRecommendationAbortController.value = null
-  scenarioRecommendationRequestEpoch += 1
-  cancelRecommendationDuringTeardown(
-    scenarioRecommendationRequestId.value,
-    scenarioRecommendationAbortController.value
-  )
-  scenarioRecommendationAbortController.value = null
   if (recommendationProgressTimer) {
     clearInterval(recommendationProgressTimer)
     recommendationProgressTimer = null
@@ -6821,8 +6778,8 @@ const getChatSuggestionContext = () => {
       name: rule.name?.trim() || t('app.ruleNumber', { number: index + 1 }),
       description: `${(rule.sources || []).map(source => displayDevice(source.fromId)).join(' + ')} -> ${displayDevice(rule.toId)}.${rule.toApi || t('app.unknownModelItem')}`
     })),
-    specs: specifications.value.slice(0, 6).map((spec, index) => ({
-      name: getSpecResultDisplayTitle(spec, index),
+    specs: specifications.value.slice(0, 6).map(spec => ({
+      name: spec.name,
       formulaPreview: buildSpecFormula(spec, {
         nodes: nodes.value
       })
@@ -6994,17 +6951,10 @@ const compareRunToCurrentBoard = (
 const isRecommendingRules = ref(false)
 const isRecommendingDevices = ref(false)
 const isRecommendingSpecs = ref(false)
-const isRecommendingScenario = ref(false)
 const ruleRecommendations = ref<RuleRecommendation[]>([])
 const ruleRecommendationMessage = ref('')
 const localizedRecommendationText = (value: unknown, fallback = ''): string =>
   localizedTextOrFallback(value, fallback, locale.value)
-const formatScenarioObjectiveIssue = (
-  issue: ScenarioRecommendationResponse['objectiveIssues'][number]
-): string => localizedRecommendationText(
-  issue.message,
-  t(`app.scenarioObjectiveIssues.${issue.code}`)
-)
 const ruleRecommendationFilteredCount = ref(0)
 const ruleRecommendationFilteredItems = ref<RecommendationFilteredItem[]>([])
 const ruleRecommendationAdjustedItems = ref<RecommendationAdjustmentItem[]>([])
@@ -7014,18 +6964,13 @@ const ruleRecommendationTruncatedCount = ref(0)
 const ruleRecommendationIsAppliedConfirmation = ref(false)
 const appliedRuleRecommendations = ref<Set<number>>(new Set())
 const applyingRuleRecommendations = ref<Set<number>>(new Set())
-const showRecommendationPanel = ref(false)
 const ruleRecommendationRequested = ref(false)
 const ruleRecommendationFilters = reactive({
-  maxRecommendations: 5,
   userRequirement: ''
 })
 const ruleRecommendationAbortController = ref<AbortController | null>(null)
 const ruleRecommendationRequestId = ref<string | null>(null)
 let ruleRecommendationRequestEpoch = 0
-
-const validateRecommendationCount = (value: unknown, field = t('app.maxRecommendationsField')): number =>
-  optionalIntegerInRange(value, field, 5, 1, 10)
 
 // Wording rules live in `board/recommendationFilterText.ts` so they can be tested without the board.
 const recommendationTextContext = computed(() => ({ t, locale: locale.value }))
@@ -7034,15 +6979,8 @@ const formatRecommendationFilteredType = (type: unknown): string =>
 const formatRecommendationFilteredItem = (item: RecommendationFilteredItem): string =>
   formatFilteredItem(item, recommendationTextContext.value)
 
-/*
- * `'spec'` joined this union when the specification panel started rendering its adjusted items.
- *
- * The union used to enumerate exactly the three panels that displayed them, which made it a type-level record of
- * the gap rather than of a design: spec never read the field, so a server-completed value was discarded silently.
- * `'spec'` behaves like `'rule'` here — only `'device'` and `'scenario'` branch, to resolve a label back to its
- * template for model-token formatting.
- */
-type RecommendationAdjustmentContext = 'rule' | 'device' | 'scenario' | 'spec'
+// Device adjustments resolve display tokens against the proposed template.
+type RecommendationAdjustmentContext = 'rule' | 'device' | 'spec'
 
 const recommendationAdjustmentTemplate = (
   item: RecommendationAdjustmentItem,
@@ -7055,10 +6993,6 @@ const recommendationAdjustmentTemplate = (
     const recommendation = deviceRecommendations.value.find(candidate => candidate.suggestedLabel === label)
     return findTemplateByAnyName(recommendation?.templateName)
   }
-  if (context === 'scenario') {
-    const device = recommendedScenarioScene.value?.devices.find(candidate => candidate.label === label)
-    return findTemplateByAnyName(device?.templateName)
-  }
   return undefined
 }
 
@@ -7067,14 +7001,10 @@ const formatRecommendationAdjustmentToken = (
   context: RecommendationAdjustmentContext,
   value: unknown
 ): string => {
-  if (context === 'scenario' && String(item.type).toLowerCase() === 'environment') {
-    const name = item.label?.trim() || ''
-    return formatScenarioEnvironmentModelToken(name, value)
-  }
   return formatTemplateModelToken(recommendationAdjustmentTemplate(item, context), value)
 }
 
-const formatScenarioAdjustmentValue = (
+const formatRecommendationAdjustmentValue = (
   item: RecommendationAdjustmentItem,
   context: RecommendationAdjustmentContext,
   key: string,
@@ -7119,7 +7049,7 @@ const formatRecommendationAdjustmentItem = (
     ? formatRecommendationAdjustmentToken(item, context, rawLabel)
     : formatRecommendationFilteredType(item.type)
   const values = Object.entries(item.appliedValues || {})
-    .map(([key, value]) => formatScenarioAdjustmentValue(item, context, key, value))
+    .map(([key, value]) => formatRecommendationAdjustmentValue(item, context, key, value))
     .filter((value): value is string => Boolean(value))
   const hasLayoutDefaults = Object.keys(item.appliedValues || {})
     .some(key => key === 'position' || key.startsWith('position.') || key === 'width' || key === 'height')
@@ -7136,7 +7066,7 @@ const specificationExists = (recommendation: any): boolean => {
   return specifications.value.some(spec => buildSpecificationSemanticKey(spec) === key)
 }
 
-type RecommendationPanelKind = 'rule' | 'device' | 'spec' | 'scenario'
+type RecommendationPanelKind = 'rule' | 'device' | 'spec'
 const recommendationFailures = reactive<Partial<Record<RecommendationPanelKind,
   ApiErrorDetails & { message: string; suggestion: string; outcomeUnknown: boolean }>>>({})
 const recommendationApplyFailures = reactive<Record<'rule' | 'device' | 'spec', Record<number,
@@ -7459,7 +7389,6 @@ const stopActiveRecommendation = async (
 }
 
 const getRunningRecommendationKind = (): RecommendationPanelKind | null => {
-  if (isRecommendingScenario.value) return 'scenario'
   if (isRecommendingRules.value) return 'rule'
   if (isRecommendingDevices.value) return 'device'
   if (isRecommendingSpecs.value) return 'spec'
@@ -7539,18 +7468,13 @@ watch(
   }
 )
 
-const isAnyRecommendationPanelVisible = (): boolean =>
-  showRecommendationPanel.value ||
-  showDeviceRecommendationPanel.value ||
-  showSpecRecommendationPanel.value ||
-  showScenarioRecommendationPanel.value
-
 const isRecommendationRunningForAnother = (kind: RecommendationPanelKind): boolean => {
   const runningKind = getRunningRecommendationKind()
   return runningKind !== null && runningKind !== kind
 }
 
-const canOpenRecommendationPanel = (kind: RecommendationPanelKind): boolean => {
+const canGenerateRecommendations = (kind: RecommendationPanelKind): boolean => {
+  if (recommendationBatch.value?.running) return false
   if (!ensureBoardDataReady()) return false
   if (isSceneReplacementInProgress.value) {
     notifyBlocked(t('app.sceneReplacementInProgress'))
@@ -7572,6 +7496,7 @@ const canOpenRecommendationPanel = (kind: RecommendationPanelKind): boolean => {
 }
 
 const resetRuleRecommendationResults = () => {
+  delete recommendationBatches.rule
   recommendationApplyFailures.rule = {}
   delete recommendationFailures.rule
   ruleRecommendations.value = []
@@ -7589,6 +7514,7 @@ const resetRuleRecommendationResults = () => {
 }
 
 const resetDeviceRecommendationResults = () => {
+  delete recommendationBatches.device
   recommendationApplyFailures.device = {}
   delete recommendationFailures.device
   deviceRecommendations.value = []
@@ -7606,6 +7532,7 @@ const resetDeviceRecommendationResults = () => {
 }
 
 const resetSpecRecommendationResults = () => {
+  delete recommendationBatches.spec
   recommendationApplyFailures.spec = {}
   delete recommendationFailures.spec
   specRecommendations.value = []
@@ -7620,13 +7547,6 @@ const resetSpecRecommendationResults = () => {
   appliedSpecRecommendations.value.clear()
   applyingSpecRecommendations.value.clear()
   specRecommendationRequested.value = false
-}
-
-const resetScenarioRecommendationResults = () => {
-  delete recommendationFailures.scenario
-  scenarioRecommendationResult.value = null
-  scenarioRecommendationMessage.value = ''
-  scenarioRecommendationRequested.value = false
 }
 
 // Closing a surface is not a fresh result, so it must not clear a stale flag: `lastVerificationResult`
@@ -7649,70 +7569,6 @@ function closeResultSurfaces() {
   showFuzzingResultDialog.value = false
 }
 
-/**
- * Recommendation panels are mutually exclusive with each other and with the run panels.
- * One table-driven opener keeps that invariant in a single place: the previous
- * copy-per-panel version had already drifted (the scenario panel closed *itself*, which
- * threw away the state it had just reset).
- *
- * Accessors are lazy because the per-panel close handlers are declared further down.
- */
-const recommendationPanels: Record<RecommendationPanelKind, {
-  isVisible: () => boolean
-  show: () => void
-  close: () => void
-  resetResults: () => void
-}> = {
-  rule: {
-    isVisible: () => showRecommendationPanel.value,
-    show: () => { showRecommendationPanel.value = true },
-    close: () => closeRecommendationPanel(),
-    resetResults: () => resetRuleRecommendationResults()
-  },
-  device: {
-    isVisible: () => showDeviceRecommendationPanel.value,
-    show: () => { showDeviceRecommendationPanel.value = true },
-    close: () => closeDeviceRecommendationPanel(),
-    resetResults: () => resetDeviceRecommendationResults()
-  },
-  spec: {
-    isVisible: () => showSpecRecommendationPanel.value,
-    show: () => { showSpecRecommendationPanel.value = true },
-    close: () => closeSpecRecommendationPanel(),
-    resetResults: () => resetSpecRecommendationResults()
-  },
-  scenario: {
-    isVisible: () => showScenarioRecommendationPanel.value,
-    show: () => { showScenarioRecommendationPanel.value = true },
-    close: () => closeScenarioRecommendationPanel(),
-    resetResults: () => resetScenarioRecommendationResults()
-  }
-}
-
-const openRecommendationPanel = (kind: RecommendationPanelKind): boolean => {
-  const panel = recommendationPanels[kind]
-  if (panel.isVisible()) return true
-  if (!canOpenRecommendationPanel(kind)) return false
-
-  closeResultSurfaces()
-  closeHistoryPanel()
-  showSimulationPanel.value = false
-  showVerificationPanel.value = false
-  showFuzzingPanel.value = false
-  for (const otherKind of Object.keys(recommendationPanels) as RecommendationPanelKind[]) {
-    if (otherKind !== kind) recommendationPanels[otherKind].close()
-  }
-
-  panel.resetResults()
-  panel.show()
-  return true
-}
-
-const openRuleRecommendationPanel = () => openRecommendationPanel('rule')
-const openDeviceRecommendationPanel = () => openRecommendationPanel('device')
-const openSpecRecommendationPanel = () => openRecommendationPanel('spec')
-const openScenarioRecommendationPanel = () => openRecommendationPanel('scenario')
-
 const fetchRuleRecommendations = async () => {
   if (isRecommendationRequestActive(isRecommendingRules.value, ruleRecommendationRequestId.value)) {
     ruleRecommendationRequestEpoch += 1
@@ -7725,30 +7581,14 @@ const fetchRuleRecommendations = async () => {
   }
   if (!ensureBoardDataReady(['nodes', 'templates', 'rules'])) return
 
-  if (showRecommendationPanel.value) {
-    if (!canOpenRecommendationPanel('rule')) return
-  } else if (!openRuleRecommendationPanel()) {
-    return
-  }
+  if (!canGenerateRecommendations('rule')) return
 
   const requestOwner = captureRecommendationRequestOwner()
   if (!requestOwner) return
 
   isRecommendingRules.value = true
-  recommendationApplyFailures.rule = {}
+  resetRuleRecommendationResults()
   ruleRecommendationRequested.value = true
-  delete recommendationFailures.rule
-  ruleRecommendations.value = []
-  ruleRecommendationMessage.value = ''
-  ruleRecommendationFilteredCount.value = 0
-  ruleRecommendationFilteredItems.value = []
-  ruleRecommendationAdjustedItems.value = []
-  ruleRecommendationRawCandidateCount.value = 0
-  ruleRecommendationInspectedCount.value = 0
-  ruleRecommendationTruncatedCount.value = 0
-  ruleRecommendationIsAppliedConfirmation.value = false
-  appliedRuleRecommendations.value.clear()
-  applyingRuleRecommendations.value.clear()
   const requestEpoch = ++ruleRecommendationRequestEpoch
   const requestSceneGeneration = recommendationSceneGeneration
   const controller = new AbortController()
@@ -7758,17 +7598,14 @@ const fetchRuleRecommendations = async () => {
   recommendationRequestOwners.set(requestId, requestOwner)
   recommendationProgressRequestId.value = requestId
   let postTerminal = false
-  let requestDispatched = false
   try {
-    const validatedMaxRecommendations = validateRecommendationCount(ruleRecommendationFilters.maxRecommendations)
-    requestDispatched = true
     const response = await rulesApi.recommendRules(
       {
         requestId,
         authToken: requestOwner.authToken,
         signal: controller.signal
       },
-      validatedMaxRecommendations,
+      undefined,
       locale.value,
       ruleRecommendationFilters.userRequirement
     )
@@ -7791,7 +7628,7 @@ const fetchRuleRecommendations = async () => {
     if (error.name === 'CanceledError' || error.code === 'ERR_CANCELED') {
       return
     }
-    if (requestDispatched && !postTerminal && isRecommendationPostOutcomeUnknown(error)) {
+    if (!postTerminal && isRecommendationPostOutcomeUnknown(error)) {
       beginUnknownRecommendationRecovery(ruleRecommendationPanel, requestId,
         requestEpoch === ruleRecommendationRequestEpoch && requestSceneGeneration === recommendationSceneGeneration ? error : undefined)
       return
@@ -7809,10 +7646,9 @@ const fetchRuleRecommendations = async () => {
 }
 
 // 关闭推荐面板
-const closeRecommendationPanel = () => {
+const invalidateRuleRecommendations = () => {
   ruleRecommendationRequestEpoch += 1
   void stopActiveRecommendation(ruleRecommendationPanel, { showMessage: false })
-  showRecommendationPanel.value = false
   resetRuleRecommendationResults()
 }
 
@@ -7828,12 +7664,10 @@ const deviceRecommendationTruncatedCount = ref(0)
 const deviceRecommendationIsAppliedConfirmation = ref(false)
 const appliedDeviceRecommendations = ref<Set<number>>(new Set())
 const applyingDeviceRecommendations = ref<Set<number>>(new Set())
-const showDeviceRecommendationPanel = ref(false)
 const deviceRecommendationAbortController = ref<AbortController | null>(null)
 const deviceRecommendationRequestId = ref<string | null>(null)
 const deviceRecommendationRequested = ref(false)
 const deviceRecommendationFilters = reactive({
-  maxRecommendations: 5,
   userRequirement: ''
 })
 let deviceRecommendationRequestEpoch = 0
@@ -7859,21 +7693,13 @@ const specRecommendationTruncatedCount = ref(0)
 const specRecommendationIsAppliedConfirmation = ref(false)
 const appliedSpecRecommendations = ref<Set<number>>(new Set())
 const applyingSpecRecommendations = ref<Set<number>>(new Set())
-const showSpecRecommendationPanel = ref(false)
 const specRecommendationAbortController = ref<AbortController | null>(null)
 const specRecommendationRequestId = ref<string | null>(null)
 const specRecommendationRequested = ref(false)
 const specRecommendationFilters = reactive({
-  maxRecommendations: 5,
   userRequirement: ''
 })
 let specRecommendationRequestEpoch = 0
-
-// ==== Coupled Scenario Recommendation Logic ====
-const showScenarioRecommendationPanel = ref(false)
-const scenarioRecommendationAbortController = ref<AbortController | null>(null)
-const scenarioRecommendationRequestId = ref<string | null>(null)
-const scenarioRecommendationRequested = ref(false)
 
 /**
  * One handle per recommendation panel, so the shared ownership / cancellation / recovery
@@ -7900,67 +7726,12 @@ const specRecommendationPanel: RecommendationRequestHandle = {
   running: isRecommendingSpecs,
   cancelledMessageKey: 'app.specificationRecommendationCancelled'
 }
-const scenarioRecommendationPanel: RecommendationRequestHandle = {
-  kind: 'scenario',
-  requestId: scenarioRecommendationRequestId,
-  abortController: scenarioRecommendationAbortController,
-  running: isRecommendingScenario,
-  cancelledMessageKey: 'app.scenarioRecommendationCancelled'
-}
-const scenarioRecommendationMessage = ref('')
-const scenarioRecommendationResult = ref<ScenarioRecommendationResult | null>(null)
-const scenarioRecommendationFilters = reactive({
-  minDevices: 2,
-  minRules: 1,
-  minSpecs: 1,
-  maxDevices: 6,
-  maxRules: 5,
-  maxSpecs: 5,
-  userRequirement: ''
-})
-let scenarioRecommendationRequestEpoch = 0
-let scenarioRecommendationCriteriaVersion = 0
-const scenarioRecommendationInput = computed(() => {
-  const invalidFields: ScenarioRecommendationCountField[] = []
-  const countLabels: Record<ScenarioRecommendationCountField, string> = {
-    minDevices: t('app.minDevicesField'), minRules: t('app.minRulesField'), minSpecs: t('app.minSpecsField'),
-    maxDevices: t('app.maxDevicesField'), maxRules: t('app.maxRulesField'), maxSpecs: t('app.maxSpecsField')
-  }
-  const rangeLabels = {
-    devices: t('app.devicesTool'), rules: t('app.rulesTool'), specifications: t('app.specificationsTool')
-  }
-  const rangeFields: Record<keyof typeof rangeLabels, ScenarioRecommendationCountField[]> = {
-    devices: ['minDevices', 'maxDevices'], rules: ['minRules', 'maxRules'], specifications: ['minSpecs', 'maxSpecs']
-  }
-  try {
-    const request = buildScenarioRecommendationTargetRequest(
-      { ...scenarioRecommendationFilters, language: locale.value },
-      (value, field) => {
-        try {
-          return requireIntegerInRange(value, countLabels[field], 1, 10)
-        } catch (error) {
-          invalidFields.push(field)
-          throw error
-        }
-      },
-      field => {
-        invalidFields.push(...rangeFields[field])
-        return new Error(t('app.scenarioMinimumExceedsMaximum', { field: rangeLabels[field] }))
-      }
-    )
-    return { request, error: '', invalidFields }
-  } catch (error) {
-    return { request: null, error: (error as Error).message, invalidFields }
-  }
-})
-const recommendedScenarioScene = computed(() => scenarioRecommendationResult.value?.scene || null)
 
 const prepareActiveRecommendationsForLogout = async (): Promise<InteractiveLogoutPreparation> => {
   const activeRequests = [
     ruleRecommendationPanel,
     deviceRecommendationPanel,
-    specRecommendationPanel,
-    scenarioRecommendationPanel
+    specRecommendationPanel
   ].flatMap(panel => {
     const requestId = panel.requestId.value
     const owner = requestId ? getRecommendationRequestOwner(requestId) : null
@@ -7987,23 +7758,6 @@ const prepareActiveRecommendationsForLogout = async (): Promise<InteractiveLogou
   return outcomes.every(outcome => outcome === 'ready') ? 'ready' : 'outcome-unknown'
 }
 
-watch(
-  () => [
-    scenarioRecommendationFilters.minDevices,
-    scenarioRecommendationFilters.minRules,
-    scenarioRecommendationFilters.minSpecs,
-    scenarioRecommendationFilters.maxDevices,
-    scenarioRecommendationFilters.maxRules,
-    scenarioRecommendationFilters.maxSpecs,
-    scenarioRecommendationFilters.userRequirement
-  ],
-  () => {
-    scenarioRecommendationCriteriaVersion += 1
-    resetScenarioRecommendationResults()
-  },
-  { flush: 'sync' }
-)
-
 const fetchDeviceRecommendations = async () => {
   if (isRecommendationRequestActive(isRecommendingDevices.value, deviceRecommendationRequestId.value)) {
     deviceRecommendationRequestEpoch += 1
@@ -8016,30 +7770,14 @@ const fetchDeviceRecommendations = async () => {
   }
   if (!ensureBoardDataReady(['nodes', 'templates'])) return
 
-  if (showDeviceRecommendationPanel.value) {
-    if (!canOpenRecommendationPanel('device')) return
-  } else if (!openDeviceRecommendationPanel()) {
-    return
-  }
+  if (!canGenerateRecommendations('device')) return
 
   const requestOwner = captureRecommendationRequestOwner()
   if (!requestOwner) return
   
   isRecommendingDevices.value = true
-  recommendationApplyFailures.device = {}
+  resetDeviceRecommendationResults()
   deviceRecommendationRequested.value = true
-  delete recommendationFailures.device
-  deviceRecommendations.value = []
-  deviceRecommendationMessage.value = ''
-  deviceRecommendationFilteredCount.value = 0
-  deviceRecommendationFilteredItems.value = []
-  deviceRecommendationAdjustedItems.value = []
-  deviceRecommendationRawCandidateCount.value = 0
-  deviceRecommendationInspectedCount.value = 0
-  deviceRecommendationTruncatedCount.value = 0
-  deviceRecommendationIsAppliedConfirmation.value = false
-  appliedDeviceRecommendations.value.clear()
-  applyingDeviceRecommendations.value.clear()
   const requestEpoch = ++deviceRecommendationRequestEpoch
   const requestSceneGeneration = recommendationSceneGeneration
   const controller = new AbortController()
@@ -8049,18 +7787,15 @@ const fetchDeviceRecommendations = async () => {
   recommendationRequestOwners.set(requestId, requestOwner)
   recommendationProgressRequestId.value = requestId
   let postTerminal = false
-  let requestDispatched = false
 
   try {
-    const validatedMaxRecommendations = validateRecommendationCount(deviceRecommendationFilters.maxRecommendations)
-    requestDispatched = true
     const response = await boardApi.recommendRelatedDevices(
       {
         requestId,
         authToken: requestOwner.authToken,
         signal: controller.signal
       },
-      validatedMaxRecommendations,
+      undefined,
       locale.value,
       deviceRecommendationFilters.userRequirement
     )
@@ -8082,7 +7817,7 @@ const fetchDeviceRecommendations = async () => {
     if (error.name === 'CanceledError' || error.code === 'ERR_CANCELED') {
       return
     }
-    if (requestDispatched && !postTerminal && isRecommendationPostOutcomeUnknown(error)) {
+    if (!postTerminal && isRecommendationPostOutcomeUnknown(error)) {
       beginUnknownRecommendationRecovery(deviceRecommendationPanel, requestId,
         requestEpoch === deviceRecommendationRequestEpoch && requestSceneGeneration === recommendationSceneGeneration ? error : undefined)
       return
@@ -8100,10 +7835,9 @@ const fetchDeviceRecommendations = async () => {
 }
 
 // 关闭设备推荐面板
-const closeDeviceRecommendationPanel = () => {
+const invalidateDeviceRecommendations = () => {
   deviceRecommendationRequestEpoch += 1
   void stopActiveRecommendation(deviceRecommendationPanel, { showMessage: false })
-  showDeviceRecommendationPanel.value = false
   resetDeviceRecommendationResults()
 }
 
@@ -8120,30 +7854,14 @@ const fetchSpecRecommendations = async () => {
   }
   if (!ensureBoardDataReady(['nodes', 'templates', 'rules', 'specs'])) return
 
-  if (showSpecRecommendationPanel.value) {
-    if (!canOpenRecommendationPanel('spec')) return
-  } else if (!openSpecRecommendationPanel()) {
-    return
-  }
+  if (!canGenerateRecommendations('spec')) return
 
   const requestOwner = captureRecommendationRequestOwner()
   if (!requestOwner) return
 
   isRecommendingSpecs.value = true
-  recommendationApplyFailures.spec = {}
+  resetSpecRecommendationResults()
   specRecommendationRequested.value = true
-  delete recommendationFailures.spec
-  specRecommendations.value = []
-  specRecommendationMessage.value = ''
-  specRecommendationFilteredCount.value = 0
-  specRecommendationFilteredItems.value = []
-  specRecommendationRawCandidateCount.value = 0
-  specRecommendationInspectedCount.value = 0
-  specRecommendationTruncatedCount.value = 0
-  specRecommendationAdjustedItems.value = []
-  specRecommendationIsAppliedConfirmation.value = false
-  appliedSpecRecommendations.value.clear()
-  applyingSpecRecommendations.value.clear()
   const requestEpoch = ++specRecommendationRequestEpoch
   const requestSceneGeneration = recommendationSceneGeneration
   const controller = new AbortController()
@@ -8153,18 +7871,15 @@ const fetchSpecRecommendations = async () => {
   recommendationRequestOwners.set(requestId, requestOwner)
   recommendationProgressRequestId.value = requestId
   let postTerminal = false
-  let requestDispatched = false
 
   try {
-    const validatedMaxRecommendations = validateRecommendationCount(specRecommendationFilters.maxRecommendations)
-    requestDispatched = true
     const response = await boardApi.recommendSpecifications(
       {
         requestId,
         authToken: requestOwner.authToken,
         signal: controller.signal
       },
-      validatedMaxRecommendations,
+      undefined,
       locale.value,
       specRecommendationFilters.userRequirement
     )
@@ -8186,7 +7901,7 @@ const fetchSpecRecommendations = async () => {
     if (error.name === 'CanceledError' || error.code === 'ERR_CANCELED') {
       return
     }
-    if (requestDispatched && !postTerminal && isRecommendationPostOutcomeUnknown(error)) {
+    if (!postTerminal && isRecommendationPostOutcomeUnknown(error)) {
       beginUnknownRecommendationRecovery(specRecommendationPanel, requestId,
         requestEpoch === specRecommendationRequestEpoch && requestSceneGeneration === recommendationSceneGeneration ? error : undefined)
       return
@@ -8204,122 +7919,75 @@ const fetchSpecRecommendations = async () => {
 }
 
 // 关闭规约推荐面板
-const closeSpecRecommendationPanel = () => {
+const invalidateSpecRecommendations = () => {
   specRecommendationRequestEpoch += 1
   void stopActiveRecommendation(specRecommendationPanel, { showMessage: false })
-  showSpecRecommendationPanel.value = false
   resetSpecRecommendationResults()
 }
 
-const fetchScenarioRecommendation = async () => {
-  if (isRecommendationRequestActive(isRecommendingScenario.value, scenarioRecommendationRequestId.value)) {
-    scenarioRecommendationRequestEpoch += 1
-    await stopActiveRecommendation(scenarioRecommendationPanel)
-    return
+type RecommendationBatchState = {
+  kind: 'rule' | 'device' | 'spec'
+  running: boolean
+  applied: number
+  total: number
+  deviceOrigin?: { x: number; y: number }
+}
+const recommendationBatches = reactive<Partial<Record<RecommendationPanelKind, RecommendationBatchState>>>({})
+const recommendationBatch = computed(() => Object.values(recommendationBatches).find(batch => batch.running) ?? null)
+const isRecommendationBatchLocked = (kind: RecommendationBatchState['kind']) =>
+  Boolean(recommendationBatch.value || recommendationBatches[kind])
+
+const recommendationBatchBlockedReason = (kind: RecommendationBatchState['kind']): string => {
+  const batch = recommendationBatches[kind]
+  if (batch) {
+    return t(batch.running ? 'app.recommendationBatchProgress'
+      : batch.applied === batch.total ? 'app.recommendationBatchComplete' : 'app.recommendationBatchStopped',
+    { count: batch.applied, total: batch.total })
   }
-  if (isSceneReplacementInProgress.value) {
-    notifyBlocked(t('app.sceneReplacementInProgress'))
-    return
-  }
-  if (!ensureBoardDataReady()) return
-
-  if (showScenarioRecommendationPanel.value) {
-    if (!canOpenRecommendationPanel('scenario')) return
-  } else if (!openScenarioRecommendationPanel()) {
-    return
-  }
-
-  const request = scenarioRecommendationInput.value.request
-  if (!request) return
-  const requestOwner = captureRecommendationRequestOwner()
-  if (!requestOwner) return
-
-  isRecommendingScenario.value = true
-  scenarioRecommendationRequested.value = true
-  delete recommendationFailures.scenario
-  scenarioRecommendationResult.value = null
-  scenarioRecommendationMessage.value = ''
-  const requestEpoch = ++scenarioRecommendationRequestEpoch
-  const requestSceneGeneration = recommendationSceneGeneration
-  const requestCriteriaVersion = scenarioRecommendationCriteriaVersion
-  const controller = new AbortController()
-  const requestId = crypto.randomUUID()
-  scenarioRecommendationAbortController.value = controller
-  scenarioRecommendationRequestId.value = requestId
-  recommendationRequestOwners.set(requestId, requestOwner)
-  recommendationProgressRequestId.value = requestId
-  let postTerminal = false
-
-  try {
-    const response = await boardApi.recommendScenario(request, {
-      requestId,
-      authToken: requestOwner.authToken,
-      signal: controller.signal
-    })
-    postTerminal = true
-    if (requestEpoch !== scenarioRecommendationRequestEpoch
-      || requestCriteriaVersion !== scenarioRecommendationCriteriaVersion
-      || requestSceneGeneration !== recommendationSceneGeneration) return
-
-    const rawScene = response.scene
-    const scene = rawScene && Array.isArray(rawScene.devices) && rawScene.devices.length > 0
-      ? normalizeSceneFile(rawScene)
-      : null
-    scenarioRecommendationResult.value = {
-      message: localizedRecommendationText(
-        response.message,
-        t('app.recommendationsFound', { count: response.count })
-      ),
-      count: response.count,
-      requestedCount: response.requestedCount,
-      validatedCount: response.validatedCount,
-      filteredCount: response.filteredCount,
-      filteredItems: response.filteredItems,
-      adjustedCount: response.adjustedCount,
-      adjustedItems: response.adjustedItems,
-      rawCandidateCount: response.rawCandidateCount,
-      inspectedCount: response.inspectedCount,
-      truncatedCount: response.truncatedCount,
-      scenarioName: response.scenarioName,
-      rationale: response.rationale,
-      objectiveTargets: response.objectiveTargets,
-      objectiveStatus: response.objectiveStatus,
-      objectiveIssues: response.objectiveIssues,
-      verificationReady: response.verificationReady,
-      readinessIssues: response.readinessIssues,
-      semanticWarnings: response.semanticWarnings,
-      scene
-    }
-    scenarioRecommendationMessage.value = localizedRecommendationText(
-      response.message,
-      t('app.recommendationsFound', { count: response.count })
-    )
-  } catch (error: any) {
-    if (error.name === 'CanceledError' || error.code === 'ERR_CANCELED') {
-      return
-    }
-    if (!postTerminal && isRecommendationPostOutcomeUnknown(error)) {
-      beginUnknownRecommendationRecovery(scenarioRecommendationPanel, requestId,
-        requestEpoch === scenarioRecommendationRequestEpoch && requestSceneGeneration === recommendationSceneGeneration ? error : undefined)
-      return
-    }
-    postTerminal = true
-    if (requestEpoch !== scenarioRecommendationRequestEpoch
-      || requestSceneGeneration !== recommendationSceneGeneration) return
-    console.error('Failed to fetch scenario recommendation:', error)
-    reportRecommendationFailure('scenario', error, t('app.failedToFetchScenarioRecommendation'))
-  } finally {
-    if (postTerminal) {
-      settleRecommendationPost(scenarioRecommendationPanel, requestId, controller)
-    }
-  }
+  if (recommendationBatch.value || applyingRuleRecommendations.value.size || applyingDeviceRecommendations.value.size
+    || applyingSpecRecommendations.value.size) return t('app.applyingRecommendation')
+  if (isAnyRecommendationRunning()) return t('app.recommendationGenerationInProgress')
+  if (isSceneReplacementInProgress.value) return t('app.sceneReplacementInProgress')
+  if (!isBoardDataReady.value) return t('app.loading')
+  return ''
 }
 
-const closeScenarioRecommendationPanel = () => {
-  scenarioRecommendationRequestEpoch += 1
-  void stopActiveRecommendation(scenarioRecommendationPanel, { showMessage: false })
-  showScenarioRecommendationPanel.value = false
-  resetScenarioRecommendationResults()
+const applyAllRecommendations = async (kind: RecommendationBatchState['kind']) => {
+  if (recommendationBatchBlockedReason(kind) || !ensurePlaybackClosedForMutation()) return
+  const candidates = kind === 'rule' ? ruleRecommendations.value
+    : kind === 'device' ? deviceRecommendations.value : specRecommendations.value
+  const applied = kind === 'rule' ? appliedRuleRecommendations.value
+    : kind === 'device' ? appliedDeviceRecommendations.value : appliedSpecRecommendations.value
+  if (!candidates.length || applied.size) return
+  const deviceOrigin = kind === 'device' ? getVisibleCanvasCenterWorld() ?? undefined : undefined
+  if (kind === 'device' && !deviceOrigin) return
+  const generation = recommendationSceneGeneration
+  const authEpoch = boardAuthScopeEpoch
+  const token = getToken()
+  recommendationBatches[kind] = { kind, running: true, applied: 0, total: candidates.length, deviceOrigin }
+  const batch = recommendationBatches[kind]!
+  const isCurrent = () => recommendationBatches[kind] === batch && generation === recommendationSceneGeneration
+    && isCurrentBoardAuthScope(authEpoch) && isCurrentSessionToken(token)
+  let index = 0
+  try {
+    // Each item uses the ordinary targeted write and its own undo entry. A failed or
+    // unconfirmed item must stop the batch before any later item is dispatched.
+    for (; index < candidates.length && isCurrent(); index++) {
+      if (recommendationApplyFailures[kind][index]?.outcomeUnknown) break
+      if (kind === 'rule') await applyRecommendation(candidates[index] as RuleRecommendation, index, true)
+      else if (kind === 'device') await applyDeviceRecommendation(candidates[index] as DeviceRecommendation, index, true)
+      else await applySpecRecommendation(candidates[index] as SpecificationRecommendation, index, true)
+      if (!isCurrent() || !applied.has(index)) break
+      batch.applied += 1
+    }
+  } catch (error) {
+    if (isCurrent()) reportRecommendationApplyFailure(kind, index, error,
+      t('app.recommendationBatchStopped', { count: batch.applied, total: batch.total }),
+      !isDefinitiveMutationRejection(error))
+  } finally {
+    batch.running = false
+    if (isCurrent()) recommendationSceneGeneration += 1
+  }
 }
 
 const keepAppliedRecommendationAdjustments = (
@@ -8333,6 +8001,14 @@ const preserveAppliedRecommendationAfterSceneChange = (
   kind: 'rule' | 'device' | 'spec',
   appliedIndex: number
 ) => {
+  if (recommendationBatch.value?.running && recommendationBatch.value.kind === kind) {
+    // Only this explicitly selected batch survives its own appends. Other board edits
+    // still invalidate the generation and stop the loop, including cross-tab refreshes.
+    if (kind !== 'rule') invalidateRuleRecommendations()
+    if (kind !== 'device') invalidateDeviceRecommendations()
+    if (kind !== 'spec') invalidateSpecRecommendations()
+    return
+  }
   recommendationApplyFailures[kind] = {}
   if (kind === 'rule') {
     const appliedRecommendation = ruleRecommendations.value[appliedIndex]
@@ -8342,9 +8018,8 @@ const preserveAppliedRecommendationAfterSceneChange = (
     }
     const hadOtherCandidates = ruleRecommendations.value.length > 1
     recommendationSceneGeneration += 1
-    closeDeviceRecommendationPanel()
-    closeSpecRecommendationPanel()
-    closeScenarioRecommendationPanel()
+    invalidateDeviceRecommendations()
+    invalidateSpecRecommendations()
     ruleRecommendations.value = [appliedRecommendation]
     ruleRecommendationMessage.value = hadOtherCandidates ? t('app.appliedRecommendationOnlyNotice') : ''
     ruleRecommendationFilteredCount.value = 0
@@ -8369,9 +8044,8 @@ const preserveAppliedRecommendationAfterSceneChange = (
     }
     const hadOtherCandidates = deviceRecommendations.value.length > 1
     recommendationSceneGeneration += 1
-    closeRecommendationPanel()
-    closeSpecRecommendationPanel()
-    closeScenarioRecommendationPanel()
+    invalidateRuleRecommendations()
+    invalidateSpecRecommendations()
     deviceRecommendations.value = [appliedRecommendation]
     deviceRecommendationMessage.value = hadOtherCandidates ? t('app.appliedRecommendationOnlyNotice') : ''
     deviceRecommendationFilteredCount.value = 0
@@ -8396,9 +8070,8 @@ const preserveAppliedRecommendationAfterSceneChange = (
   }
   const hadOtherCandidates = specRecommendations.value.length > 1
   recommendationSceneGeneration += 1
-  closeRecommendationPanel()
-  closeDeviceRecommendationPanel()
-  closeScenarioRecommendationPanel()
+  invalidateRuleRecommendations()
+  invalidateDeviceRecommendations()
   specRecommendations.value = [appliedRecommendation]
   specRecommendationMessage.value = hadOtherCandidates ? t('app.appliedRecommendationOnlyNotice') : ''
   specRecommendationFilteredCount.value = 0
@@ -8413,16 +8086,15 @@ const preserveAppliedRecommendationAfterSceneChange = (
 }
 
 const invalidateRecommendationsForSceneChange = ({ notify = false }: { notify?: boolean } = {}) => {
-  const hadRecommendationContext = isAnyRecommendationPanelVisible() || isAnyRecommendationRunning()
+  const hadRecommendationContext = ruleRecommendationRequested.value || deviceRecommendationRequested.value || specRecommendationRequested.value || isAnyRecommendationRunning()
   recommendationSceneGeneration += 1
-  // Close every panel and advance each request epoch. stopActiveRecommendation
+  // Discard obsolete candidates and advance each request epoch. stopActiveRecommendation
   // keeps the transport alive until the server acknowledges cancellation; the
   // generation/epoch checks make the UI safe even if that acknowledgement races
   // with the scene change.
-  closeRecommendationPanel()
-  closeDeviceRecommendationPanel()
-  closeSpecRecommendationPanel()
-  closeScenarioRecommendationPanel()
+  invalidateRuleRecommendations()
+  invalidateDeviceRecommendations()
+  invalidateSpecRecommendations()
   if (notify && hadRecommendationContext) {
     notifyInfo(t('app.recommendationsInvalidatedByBoardRefresh'))
   }
@@ -8448,96 +8120,6 @@ const notifyUndoJournalCleared = () => {
   void loadBoardUndoAvailability()
 }
 
-const applyRecommendedScenario = async () => {
-  if (!ensurePlaybackClosedForMutation()) return
-  const scene = recommendedScenarioScene.value
-  if (!scene) {
-    notifyBlocked(t('app.noScenarioToApply'))
-    return
-  }
-  const requestEpoch = scenarioRecommendationRequestEpoch
-  const sceneGeneration = recommendationSceneGeneration
-  const isRecommendationCurrent = () =>
-    requestEpoch === scenarioRecommendationRequestEpoch
-    && sceneGeneration === recommendationSceneGeneration
-    && recommendedScenarioScene.value === scene
-  const imported = await importScene(scene, isRecommendationCurrent)
-  if (imported) {
-    closeScenarioRecommendationPanel()
-  }
-}
-
-const exportRecommendedScenario = () => {
-  const scene = recommendedScenarioScene.value
-  if (!scene) {
-    notifyBlocked(t('app.noScenarioToApply'))
-    return
-  }
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
-  const portableScene = canonicalizeSceneFile(scene)
-  downloadJsonFile(`iot-verify-ai-scenario-${timestamp}.json`, portableScene)
-  notifySuccess(t('app.sceneExportStarted', {
-    devices: scene.devices.length,
-    variables: scene.environmentVariables.length,
-    rules: scene.rules.length,
-    specs: scene.specs.length
-  }))
-}
-
-const formatScenarioDeviceLabel = (deviceId: string): string => {
-  const device = recommendedScenarioScene.value?.devices.find(candidate => candidate.id === deviceId)
-  return device?.label || t('app.unknownModelItem')
-}
-
-const scenarioDeviceById = (deviceId: string): DeviceNode | undefined =>
-  recommendedScenarioScene.value?.devices.find(candidate => candidate.id === deviceId)
-
-const formatScenarioDeviceModelToken = (device: DeviceNode, value: unknown): string =>
-  formatTemplateModelToken(findTemplateByAnyName(device.templateName), value)
-
-const formatScenarioRuleModelToken = (deviceId: string, value: unknown): string => {
-  const device = scenarioDeviceById(deviceId)
-  return device ? formatScenarioDeviceModelToken(device, value) : String(value ?? '')
-}
-
-const scenarioBundledEnvironmentNames = computed(() =>
-  getBundledEnvironmentNames(recommendedScenarioScene.value?.devices || [])
-)
-
-const formatScenarioEnvironmentModelToken = (name: string, value: unknown): string =>
-  scenarioBundledEnvironmentNames.value.includes(name)
-    ? formatBundledModelToken(value)
-    : String(value ?? '')
-
-const scenarioDeviceTemplate = (device: DeviceNode): DeviceTemplate | undefined =>
-  recommendedScenarioScene.value?.templates.find(candidate => {
-    const candidateName = candidate.manifest?.Name || candidate.name
-    return candidateName?.trim().toLocaleLowerCase() === device.templateName.trim().toLocaleLowerCase()
-  })
-
-const scenarioDeviceHasStateMachine = (device: DeviceNode): boolean => {
-  const template = scenarioDeviceTemplate(device)
-  return Boolean(template?.manifest?.Modes?.length && template.manifest.WorkingStates?.length)
-}
-
-const scenarioDeviceStateTrust = (device: DeviceNode): string =>
-  device.currentStateTrust
-  || findTemplateStateTrust(scenarioDeviceTemplate(device), device.state || '')
-  || 'trusted'
-
-const scenarioDeviceStatePrivacy = (device: DeviceNode): string =>
-  device.currentStatePrivacy
-  || findTemplateStatePrivacy(scenarioDeviceTemplate(device), device.state || '')
-  || 'public'
-
-const scenarioDeviceVariableTrust = (
-  device: DeviceNode,
-  variable: NonNullable<DeviceNode['variables']>[number]
-): string => variable.trust
-  || getTemplateLocalVariables(scenarioDeviceTemplate(device))
-    .find(candidate => candidate.Name === variable.name)?.Trust
-  || 'trusted'
-
 const formatRelationForDisplay = (relation: unknown): string => {
   const raw = String(relation ?? '').trim()
   const normalized = raw.toLowerCase().replace(/_/g, ' ')
@@ -8546,25 +8128,6 @@ const formatRelationForDisplay = (relation: unknown): string => {
   return raw
 }
 
-const formatScenarioRuleSource = (source: RuleForm['sources'][number]): string => {
-  const device = formatScenarioDeviceLabel(source.fromId)
-  const attribute = formatScenarioRuleModelToken(source.fromId, source.fromApi)
-  if (source.itemType === 'api') return `${device}.${attribute}`
-  const value = formatScenarioRuleModelToken(source.fromId, source.value)
-  return `${device}.${attribute} ${formatRelationForDisplay(source.relation || '=')} ${value}`.trim()
-}
-
-const formatScenarioRuleAction = (rule: RuleForm): string => {
-  const action = `${formatScenarioDeviceLabel(rule.toId)}.${formatScenarioRuleModelToken(rule.toId, rule.toApi)}`
-  if (!rule.contentDevice || !rule.content) return action
-  return `${action} · ${t('app.copyFrom')} ${formatScenarioDeviceLabel(rule.contentDevice)}.${formatScenarioRuleModelToken(rule.contentDevice, rule.content)}`
-}
-
-const formatScenarioSpecFormula = (spec: Specification): string =>
-  buildSpecFormula(spec, {
-    nodes: recommendedScenarioScene.value?.devices || []
-  })
-
 const recommendedSpecTemplateLabel = (templateId: unknown): string => {
   const id = String(templateId ?? '')
   const detail = specTemplateDetails.find(template => template.id === id)
@@ -8572,7 +8135,8 @@ const recommendedSpecTemplateLabel = (templateId: unknown): string => {
 }
 
 // 应用规约推荐 - 将推荐的规约添加到画布
-const applySpecRecommendation = async (recommendation: SpecificationRecommendation, index: number) => {
+const applySpecRecommendation = async (recommendation: SpecificationRecommendation, index: number, fromBatch = false) => {
+  if (!fromBatch && isRecommendationBatchLocked('spec')) return
   if (!ensurePlaybackClosedForMutation()) return
   if (!ensureBoardDataReady(['nodes', 'templates', 'specs'])) return
   if (appliedSpecRecommendations.value.has(index)) {
@@ -8626,6 +8190,7 @@ const applySpecRecommendation = async (recommendation: SpecificationRecommendati
   const templateLabel = recommendedSpecTemplateLabel(templateId)
   const newSpec = {
     id: 'spec_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
+    name: recommendation.name.trim(),
     templateId,
     templateLabel,
     aConditions,
@@ -8651,11 +8216,9 @@ const applySpecRecommendation = async (recommendation: SpecificationRecommendati
   // 获取现有规约
   applyingSpecRecommendations.value.add(index)
   try {
-    if (requestSceneGeneration !== recommendationSceneGeneration
-      || isSceneReplacementInProgress.value) return
+    if (!isApplyCandidateCurrent() || isSceneReplacementInProgress.value) return
     await enqueueBoardMutation(async () => {
-      if (recommendationEpoch !== specRecommendationRequestEpoch
-        || requestSceneGeneration !== recommendationSceneGeneration
+      if (!isApplyCandidateCurrent()
         || !isBoardDataReady.value
         || isSceneReplacementInProgress.value) return
       try {
@@ -8814,7 +8377,8 @@ const buildRecommendedDeviceRuntime = (recommendation: DeviceRecommendation): Re
 }
 
 // 应用设备推荐 - 将推荐的设备添加到画布
-const applyDeviceRecommendation = async (recommendation: DeviceRecommendation, index: number) => {
+const applyDeviceRecommendation = async (recommendation: DeviceRecommendation, index: number, fromBatch = false) => {
+  if (!fromBatch && isRecommendationBatchLocked('device')) return
   if (!ensurePlaybackClosedForMutation()) return
   if (appliedDeviceRecommendations.value.has(index)) {
     notifyBlocked(t('app.recommendationAlreadyApplied'))
@@ -8850,7 +8414,11 @@ const applyDeviceRecommendation = async (recommendation: DeviceRecommendation, i
     return
   }
   
-  const center = getVisibleCanvasCenterWorld()
+  // Keep one origin for the batch: focusing each new device moves the viewport.
+  const origin = fromBatch ? recommendationBatch.value?.deviceOrigin : undefined
+  const center = fromBatch
+    ? origin && { x: origin.x + index * (DEFAULT_NODE_WIDTH + 24), y: origin.y }
+    : getVisibleCanvasCenterWorld()
   if (!center) return
 
   const label = recommendedDeviceLabel(recommendation)
@@ -10655,24 +10223,12 @@ const closeHistoryPanel = (invalidatePendingDetail = true) => {
   showHistoryPanel.value = false
 }
 
-/**
- * Clear every workflow surface except the one about to open.
- *
- * The board shows one workflow surface at a time, so each opener has to close the others first. That was
- * written out as the same eight lines at two call sites (`toggleHistoryPanel` and `openTaskInbox`) — byte for
- * byte, including the ordering — so a seventh surface would have had to be remembered in both. The set is the
- * same one `isWorkflowPanelOpen` reports on; keeping the closing side as a copy while the reading side had an
- * owner is how the two drift apart.
- */
+// Workflow panels share one closing path; inline authoring disclosures remain available.
 const closeOtherWorkflowSurfaces = () => {
   closeResultSurfaces()
   showSimulationPanel.value = false
   showVerificationPanel.value = false
   showFuzzingPanel.value = false
-  closeRecommendationPanel()
-  closeDeviceRecommendationPanel()
-  closeSpecRecommendationPanel()
-  closeScenarioRecommendationPanel()
 }
 
 const toggleHistoryPanel = async (layer: HistoryLayer = activeHistoryLayer.value) => {
@@ -10959,7 +10515,7 @@ const summarizeFuzzingRun = (run: FuzzingRun): AvailableFuzzingRunSummary => ({
     fuzzTaskId: finding.fuzzTaskId,
     violatedSpecId: finding.violatedSpecId,
     violatedSpec: finding.violatedSpec,
-    specificationLabel: finding.violatedSpec.templateLabel
+    specificationLabel: finding.violatedSpec.name
       || finding.violatedSpec.formula
       || finding.violatedSpecId,
     firstViolationStep: finding.firstViolationStep,
@@ -11250,8 +10806,8 @@ const ensureHistoricalPlaybackUiAdmission = (): boolean => {
     notifyBlocked(t('app.closeCurrentSimulationFirst'))
     return false
   }
-  if (isAnyRecommendationPanelVisible()) {
-    notifyBlocked(t('app.closeRecommendationPanelsFirst'))
+  if (isAnyRecommendationRunning()) {
+    notifyBlocked(t('app.recommendationGenerationInProgress'))
     return false
   }
   return ensureLiveBoardEditorClosedForPlayback()
@@ -11330,7 +10886,7 @@ const openFixForVerificationTrace = (trace: TraceSummary) => {
     return
   }
   closeHistoryPanel()
-  openFixDialog(trace.id, trace.violatedSpecId)
+  openFixDialog(trace.id, trace.violatedSpecId, trace.violatedSpec.name)
 }
 
 /**
@@ -11726,8 +11282,7 @@ const showVerificationPanelForHandoff = () => {
 
 const openFormalVerificationForFuzzFinding = (finding: FuzzingFindingSummary | FuzzingFinding) => {
   const sourceRun = availableFuzzRunForFinding(finding)
-  const specificationLabel = finding.violatedSpec?.templateLabel
-    || finding.violatedSpec?.formula
+  const specificationLabel = finding.violatedSpec?.name
     || ('specificationLabel' in finding ? finding.specificationLabel : '')
     || finding.violatedSpecId
   fuzzVerificationHandoff.value = {
@@ -11885,10 +11440,6 @@ const closeSimulationPanel = () => {
 // focus restoration. Anything that claims `role="dialog"` + `aria-modal="true"` must
 // keep `trapFocus` on.
 const floatingPanelAccessibility = { trapFocus: false } as const
-const recommendationPanelAccessibility = {
-  trapFocus: false,
-  shouldRestoreFocus: () => !isAnyRecommendationPanelVisible()
-} as const
 const {
   setDialogRef: setVerificationPanelRef,
   handleModalKeydown: handleVerificationPanelKeydown
@@ -11907,50 +11458,15 @@ const {
   () => document.querySelector<HTMLElement>('[data-testid="open-simulation-panel"]'),
   floatingPanelAccessibility
 )
-const {
-  setDialogRef: setRuleRecommendationPanelRef,
-  handleModalKeydown: handleRuleRecommendationPanelKeydown
-} = useModalAccessibility(
-  showRecommendationPanel,
-  closeRecommendationPanel,
-  () => document.querySelector<HTMLElement>('[data-testid="open-rule-recommendations"]'),
-  recommendationPanelAccessibility
-)
-const {
-  setDialogRef: setDeviceRecommendationPanelRef,
-  handleModalKeydown: handleDeviceRecommendationPanelKeydown
-} = useModalAccessibility(
-  showDeviceRecommendationPanel,
-  closeDeviceRecommendationPanel,
-  () => document.querySelector<HTMLElement>('[data-testid="open-device-recommendations"]'),
-  recommendationPanelAccessibility
-)
-const {
-  setDialogRef: setSpecRecommendationPanelRef,
-  handleModalKeydown: handleSpecRecommendationPanelKeydown
-} = useModalAccessibility(
-  showSpecRecommendationPanel,
-  closeSpecRecommendationPanel,
-  () => document.querySelector<HTMLElement>('[data-testid="open-spec-recommendations"]'),
-  recommendationPanelAccessibility
-)
-const {
-  setDialogRef: setScenarioRecommendationPanelRef,
-  handleModalKeydown: handleScenarioRecommendationPanelKeydown
-} = useModalAccessibility(
-  showScenarioRecommendationPanel,
-  closeScenarioRecommendationPanel,
-  () => document.querySelector<HTMLElement>('[data-testid="open-scenario-recommendations"]'),
-  recommendationPanelAccessibility
-)
 
 // Fix dialog 状态
 const showFixDialog = ref(false)
 const fixTraceId = ref<number | null>(null)
 const fixViolatedSpecId = ref<string>('')
+const fixViolatedSpecName = ref<string>('')
 
 // 打开 Fix 弹窗
-const openFixDialog = (traceId: number, violatedSpecId: string) => {
+const openFixDialog = (traceId: number, violatedSpecId: string, name: string) => {
   if (fixResultDialogRef.value?.canOpenTrace?.(traceId) === false) {
     notifyBlocked(t('app.fixTraceSwitchBlockedByActiveSearch'))
     showFixDialog.value = true
@@ -11958,6 +11474,7 @@ const openFixDialog = (traceId: number, violatedSpecId: string) => {
   }
   fixTraceId.value = traceId
   fixViolatedSpecId.value = violatedSpecId
+  fixViolatedSpecName.value = name
   dismissCompletionNotifications()
   showFixDialog.value = true
 }
@@ -11981,7 +11498,7 @@ const canFixVerificationResultTrace = (trace: Trace): trace is PersistedTrace =>
 
 const openFixForVerificationResultTrace = (trace: Trace) => {
   if (!canFixVerificationResultTrace(trace)) return
-  openFixDialog(trace.id, trace.violatedSpecId)
+  openFixDialog(trace.id, trace.violatedSpecId, trace.violatedSpec?.name || t('app.unknownSpecification'))
 }
 
 const cancelAsyncVerification = async () => {
@@ -12132,10 +11649,6 @@ const togglePanel = (panel: 'simulation' | 'fuzzing' | 'verification') => {
   dismissCompletionNotifications()
   closeResultSurfaces()
   closeHistoryPanel()
-  closeRecommendationPanel()
-  closeDeviceRecommendationPanel()
-  closeSpecRecommendationPanel()
-  closeScenarioRecommendationPanel()
   
   if (panel === 'simulation') {
     if (showSimulationPanel.value) {
@@ -12213,22 +11726,6 @@ const openHistoryFromActionDock = () => {
   // user saw. When work is genuinely active the inbox is still the right landing place.
   const workInFlight = isVerifying.value || isSimulating.value || isFuzzing.value
   void toggleHistoryPanel(workInFlight ? 'tasks' : 'results')
-}
-
-const openRuleRecommendationsFromActionDock = () => {
-  openRuleRecommendationPanel()
-}
-
-const openDeviceRecommendationsFromActionDock = () => {
-  openDeviceRecommendationPanel()
-}
-
-const openSpecRecommendationsFromActionDock = () => {
-  openSpecRecommendationPanel()
-}
-
-const openScenarioRecommendationsFromActionDock = () => {
-  openScenarioRecommendationPanel()
 }
 
 // 模拟时间轴动画状态
@@ -12448,7 +11945,14 @@ const {
     environmentVariables: result.environmentVariables,
     rules: result.rules,
     specs: result.specs,
-    availability: result
+    availability: result,
+    semanticChanged: hasRecommendationSceneChanged({
+      nodes: nodes.value, environmentVariables: environmentVariables.value, rules: rules.value,
+      specifications: specifications.value, deviceTemplates: deviceTemplates.value
+    }, {
+      nodes: result.nodes, environmentVariables: result.environmentVariables, rules: result.rules,
+      specifications: result.specs, deviceTemplates: deviceTemplates.value
+    })
   }),
   // Serializes with every other board mutation, and re-checks admission when the slot is reached:
   // `isBlocked()` is evaluated once before queueing, so without this a undo queued behind a slow
@@ -12915,21 +12419,12 @@ let playInterval: ReturnType<typeof setInterval> | null = null
  * are the board's viewport controls and must survive every one of these, because a result panel is
  * exactly when a user zooms to look at what it points at.
  */
-/**
- * Is one of the board's workflow panels open?
- *
- * The five members (verification, simulation, exploration, run history, and the recommendation group) were
- * enumerated at two call sites, one of which also spelled out the four recommendation flags that
- * `isAnyRecommendationPanelVisible()` already owns, and the two timeline flags that `isAnimationLocked`
- * owns. Adding a sixth panel therefore meant remembering up to three lists. Naming the set once means a new
- * panel joins it in one place.
- */
+/** Embedded recommendations stay in the Control Center and do not occupy the canvas workspace. */
 const isWorkflowPanelOpen = computed(() =>
   showVerificationPanel.value ||
   showSimulationPanel.value ||
   showFuzzingPanel.value ||
-  showHistoryPanel.value ||
-  isAnyRecommendationPanelVisible()
+  showHistoryPanel.value
 )
 
 /*
@@ -12994,8 +12489,8 @@ const selectAndPlayTrace = (traceIndex: number) => {
     return
   }
   
-  if (isAnyRecommendationPanelVisible()) {
-    notifyBlocked(t('app.closeRecommendationPanelsFirst'))
+  if (isAnyRecommendationRunning()) {
+    notifyBlocked(t('app.recommendationGenerationInProgress'))
     return
   }
   if (!ensureLiveBoardEditorClosedForPlayback()) return
@@ -14580,12 +14075,11 @@ const downloadCurrentSimulationRunSmv = () => {
   void downloadSimulationTraceSmv(runId)
 }
 const verificationSpecResultSummary = computed(() => {
-  const results = (verificationResult.value?.specResults || []).map((result, index) => {
+  const results = (verificationResult.value?.specResults || []).map(result => {
     const interpretation = presentSpecificationResult(result, t)
     return {
       ...result,
       ...interpretation,
-      displayTitle: t('app.specificationNumber', { number: index + 1 }),
       presentation: result.outcome === 'SATISFIED' && interpretation.triggerWarning
         ? {
             borderClass: 'board-border-subtle',
@@ -14628,6 +14122,9 @@ const verificationSpecResultSummary = computed(() => {
     triggerWarnings: countResponseTriggerWarnings(results)
   }
 })
+const verificationEvidenceGroups = computed(() => groupVerificationEvidence(
+  verificationSpecResultSummary.value.results, verificationResult.value?.traces || []
+))
 /**
  * The headline violation count, taking whichever source claims more.
  *
@@ -15311,6 +14808,7 @@ const attackSelectionSummary = (
 
     <!-- Left Sidebar - Control Center -->
     <ControlCenter
+      ref="controlCenterRef"
       :device-templates="deviceTemplates"
       :templates-loading="templatesLoading"
       :nodes="nodes"
@@ -15337,7 +14835,772 @@ const attackSelectionSummary = (
       @authoritative-state-unavailable="handleAuthoritativeBoardStateUnavailable"
       @update:collapsed="handleControlCollapsedUpdate"
       @update:active-section="handleControlActiveSectionUpdate"
-    />
+      :recommendation-running="{ devices: isRecommendingDevices, rules: isRecommendingRules, specs: isRecommendingSpecs }"
+    >
+      <template #device-recommendations>
+        <div data-testid="device-recommendation-panel" class="min-w-0 space-y-3 break-words">
+          <div class="board-form-label rounded-lg border board-border-subtle board-bg-elevated p-2 block">
+            <div class="flex items-center justify-between gap-3 pr-3">
+              <label for="device-recommendation-requirement" class="board-form-label">{{ t('app.recommendationScenario') }}</label>
+              <InfoTooltip :text="t('app.recommendationBasisHint')" :label="t('app.showHelpFor', { topic: t('app.recommendationScenario') })" test-id="device-recommendation-help" />
+            </div>
+            <textarea
+              id="device-recommendation-requirement"
+              v-model.trim="deviceRecommendationFilters.userRequirement"
+              :disabled="isRecommendingDevices || recommendationBatch?.running"
+              rows="3"
+              :maxlength="AI_RECOMMENDATION_REQUIREMENT_MAX_LENGTH"
+              :placeholder="t('app.deviceRecommendationPlaceholder')"
+              class="board-field mt-1 resize-none leading-relaxed"
+            ></textarea>
+          </div>
+
+          <button
+            type="button"
+            data-testid="generate-device-recommendations"
+            @click="fetchDeviceRecommendations"
+            :disabled="recommendationBatch?.running || isSceneReplacementInProgress || isRecommendationRunningForAnother('device')"
+            :class="[
+              'board-panel-submit board-action-disarmed',
+              isRecommendingDevices ? 'bg-[color:var(--danger-fill)] hover:bg-[color:var(--danger-fill-hover)]' : 'bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)]'
+            ]"
+          >
+            <span class="material-symbols-outlined text-base">
+              {{ isRecommendingDevices ? 'stop' : 'auto_awesome' }}
+            </span>
+            {{ isRecommendingDevices ? t('app.stopDeviceRecommendations') : t('app.generateRecommendations') }}
+          </button>
+
+          <RecommendationProgressStatus
+            v-if="isRecommendingDevices"
+            :elapsed-seconds="recommendationProgressElapsed"
+            :stage="recommendationProgressStage"
+            :template-count="deviceTemplates.length"
+            :device-count="nodes.length"
+            :rule-count="rules.length"
+            :spec-count="specifications.length"
+          />
+
+          <div v-if="recommendationFailures.device" data-testid="device-recommendation-error"
+            role="alert" class="rounded-lg board-surface-danger px-3 py-2 text-xs leading-5 board-text-danger">
+            <p class="font-semibold">{{ recommendationFailures.device.message }}</p>
+            <FailureDetails v-bind="recommendationFailures.device" />
+          </div>
+          <p v-if="deviceRecommendationMessage && !isRecommendingDevices && deviceRecommendationIsAppliedConfirmation" class="text-xs board-text-muted">
+            {{ deviceRecommendationMessage }}
+          </p>
+          <div
+            v-if="deviceRecommendationFilteredCount > 0 && !isRecommendingDevices"
+            class="rounded-lg border board-border-subtle board-bg-muted px-3 py-2 text-xs font-medium board-text-muted"
+          >
+            <p>{{ t('app.recommendationFilteredNotice', { count: deviceRecommendationFilteredCount }) }}</p>
+            <ul
+              v-if="deviceRecommendationFilteredItems.length"
+              class="iot-scroll-region mt-1 max-h-32 list-disc space-y-0.5 pl-4 pr-1 font-normal leading-relaxed"
+            >
+              <li
+                v-for="(item, index) in deviceRecommendationFilteredItems"
+                :key="`${item.type || 'item'}-${item.index || index}-${item.reasonCode || item.reason}`"
+              >
+                {{ formatRecommendationFilteredItem(item) }}
+              </li>
+            </ul>
+            <p v-else class="mt-1 font-normal board-text-muted">
+              {{ t('app.recommendationFilteredNoDetails') }}
+            </p>
+          </div>
+          <div
+            v-if="deviceRecommendationAdjustedItems.length > 0 && !isRecommendingDevices"
+            data-testid="device-adjusted-items"
+            class="rounded-lg board-surface-warning px-3 py-2 text-xs font-medium board-text-warning"
+          >
+            <p>{{ t('app.deviceRecommendationAdjustedNotice', { count: deviceRecommendationAdjustedItems.length }) }}</p>
+            <ul class="iot-scroll-region mt-1 max-h-36 list-disc space-y-0.5 pl-4 pr-1 font-normal leading-relaxed">
+              <li
+                v-for="(item, index) in deviceRecommendationAdjustedItems"
+                :key="`${item.type || 'device'}-${item.index || index}-${item.reasonCode || item.reason}`"
+              >
+                {{ formatRecommendationAdjustmentItem(item, 'device') }}
+              </li>
+            </ul>
+          </div>
+
+          <div v-if="!isRecommendingDevices && deviceRecommendationRequested && deviceRecommendations.length === 0 && !recommendationFailures.device" class="flex flex-col items-center justify-center py-10">
+            <div class="w-16 h-16 board-bg-control rounded-full flex items-center justify-center mb-3">
+              <span class="material-symbols-outlined board-text-muted text-3xl">devices</span>
+            </div>
+            <p class="board-text-muted text-sm font-medium mt-2">{{ t('app.noRecommendationsAvailable') }}</p>
+            <p class="board-text-muted text-xs mt-1 text-center px-4">{{ t('app.recommendationEmptyGuidance') }}</p>
+          </div>
+
+          <p v-if="!isRecommendingDevices && deviceRecommendations.length" data-testid="device-recommendations-unverified" class="text-xs board-text-muted">
+            {{ t('app.recommendationsNotVerified') }}
+          </p>
+
+          <!-- Recommendations List -->
+          <div v-if="!isRecommendingDevices && deviceRecommendations.length && !recommendationFailures.device" class="space-y-3">
+            <!-- Header with count -->
+            <div class="flex items-center justify-between px-1">
+              <span class="text-xs font-medium board-text-muted">{{ t('app.devicesRecommended', { count: deviceRecommendations.length }) }}</span>
+              <button
+                @click="fetchDeviceRecommendations"
+                :disabled="recommendationBatch?.running || isSceneReplacementInProgress"
+                class="text-xs board-text-info hover:font-medium flex items-center gap-1"
+              >
+                <span class="material-symbols-outlined text-sm">refresh</span>
+                {{ t('app.regenerateRecommendations') }}
+              </button>
+            </div>
+
+            <div v-if="deviceRecommendations.length > 1" class="space-y-2">
+              <button type="button" data-testid="apply-all-device-recommendations"
+                class="board-panel-submit board-action-disarmed bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)]"
+                @click="applyAllRecommendations('device')"
+                :disabled="Boolean(recommendationBatchBlockedReason('device'))"
+                :aria-busy="recommendationBatch?.kind === 'device' && recommendationBatch.running"
+                aria-describedby="device-batch-apply-status">
+                {{ t('app.applyAllRecommendations', { count: deviceRecommendations.length }) }}
+              </button>
+              <p id="device-batch-apply-status" role="status" class="text-xs leading-relaxed board-text-muted">
+                {{ recommendationBatchBlockedReason('device') || t('app.recommendationBatchHint') }}
+              </p>
+            </div>
+
+            <div
+              v-for="(rec, index) in deviceRecommendations"
+              :key="index"
+              class="board-card board-card--raised rounded-xl border board-border-subtle hover:transition-all overflow-hidden group"
+            >
+              <!-- Card Header -->
+              <div class="p-3 pb-2">
+                <div class="flex items-start justify-between gap-2">
+                  <div class="flex min-w-0 items-center gap-2">
+                    <!-- Device Icon -->
+                    <div class="board-section-icon board-section-icon--lg">
+                      <span class="material-symbols-outlined">device_hub</span>
+                    </div>
+                    <div class="min-w-0">
+                      <h4 class="board-section-title truncate" :title="rec.suggestedLabel || rec.templateName">
+                        {{ rec.suggestedLabel || rec.templateName }}
+                      </h4>
+                      <p class="text-xs font-medium board-text-info truncate" :title="rec.templateName">{{ rec.templateName }}</p>
+                      <p v-if="rec.description?.trim()" class="text-xs board-text-muted break-words">{{ rec.description }}</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Reason -->
+              <div class="px-3 pb-2">
+                <div v-if="rec.intendedUse || rec.suggestedPlacement || rec.initialState || rec.currentStateTrust || rec.currentStatePrivacy" class="mb-2 flex flex-wrap gap-1">
+                  <span v-if="rec.intendedUse" class="rounded-full board-chip-info px-2 py-1 text-xs font-medium board-text-info">
+                    {{ t('app.deviceRecommendationIntendedUse', { value: localizedRecommendationText(rec.intendedUse, t('app.recommendedBasedOnCurrentDevices')) }) }}
+                  </span>
+                  <span v-if="rec.suggestedPlacement" class="rounded-full board-bg-muted px-2 py-1 text-xs font-medium board-text-muted">
+                    {{ t('app.deviceRecommendationSuggestedPlacement', { value: localizedRecommendationText(rec.suggestedPlacement, t('app.recommendedBasedOnCurrentDevices')) }) }}
+                  </span>
+                  <span v-if="rec.initialState" class="rounded-full board-bg-muted px-2 py-1 text-xs font-medium board-text-muted">
+                    {{ t('app.deviceRecommendationInitialState', { value: formatRecommendedDeviceModelToken(rec, rec.initialState) }) }}
+                  </span>
+                  <span v-if="rec.currentStateTrust" class="rounded-full board-chip-success px-2 py-1 text-xs font-medium board-text-success">
+                    {{ t('app.deviceRecommendationStateTrust', { value: t(`app.${rec.currentStateTrust}`) }) }}
+                  </span>
+                  <span v-if="rec.currentStatePrivacy" class="rounded-full board-chip-info px-2 py-1 text-xs font-medium board-text-info">
+                    {{ t('app.deviceRecommendationStatePrivacy', { value: t(`app.${rec.currentStatePrivacy}`) }) }}
+                  </span>
+                </div>
+                <p v-if="rec.intendedUse || rec.suggestedPlacement" class="mb-2 text-xs leading-relaxed board-text-muted">
+                  {{ t('app.deviceRecommendationContextAdvisory') }}
+                </p>
+                <p
+                  v-if="recommendedDeviceEnvironmentAdditions(rec).length > 0"
+                  class="mb-2 rounded-lg board-surface-info px-2 py-1.5 text-xs leading-relaxed board-text-info"
+                >
+                  {{ t('app.deviceCreationEnvironmentAdditionsPreview', { names: formatRecommendedDeviceEnvironmentAdditions(rec) }) }}
+                </p>
+                <div v-if="rec.initialVariables?.length || rec.initialPrivacies?.length" class="mb-2 space-y-1 text-xs board-text-muted">
+                  <div v-for="variable in rec.initialVariables || []" :key="`value-${variable.name}`" class="break-words">
+                    {{ t('app.deviceRecommendationInitialVariable', {
+                      name: formatRecommendedDeviceModelToken(rec, variable.name),
+                      value: formatRecommendedDeviceModelToken(rec, variable.value),
+                      trust: variable.trust ? t(`app.${variable.trust}`) : t('app.useTemplateDefault')
+                    }) }}
+                  </div>
+                  <div v-for="privacy in rec.initialPrivacies || []" :key="`privacy-${privacy.name}`" class="break-words">
+                    {{ t('app.deviceRecommendationInitialPrivacy', {
+                      name: formatRecommendedDeviceModelToken(rec, privacy.name),
+                      privacy: t(`app.${privacy.privacy}`)
+                    }) }}
+                  </div>
+                </div>
+                <p class="text-xs board-text-muted break-words">{{ localizedRecommendationText(rec.reason, t('app.recommendedBasedOnCurrentDevices')) }}</p>
+              </div>
+
+              <!-- Action Button -->
+              <div class="px-3 pb-3">
+                <div v-if="recommendationApplyFailures.device[index]" :data-testid="`device-recommendation-apply-failure-${index}`" role="alert" class="mb-2 text-sm">
+                  <p class="font-semibold board-text-danger">{{ recommendationApplyFailures.device[index].message }}</p>
+                  <FailureDetails v-bind="recommendationApplyFailures.device[index]" />
+                </div>
+                <button
+                  @click="applyDeviceRecommendation(rec, index)"
+                  :disabled="isSceneReplacementInProgress || isRecommendationBatchLocked('device') || appliedDeviceRecommendations.has(index) || applyingDeviceRecommendations.has(index) || recommendationApplyFailures.device[index]?.outcomeUnknown"
+                  :aria-busy="applyingDeviceRecommendations.has(index)"
+                  :class="[
+                    'w-full py-2 px-4 text-white text-sm font-medium rounded-lg transition-colors flex items-center justify-center gap-2',
+                    appliedDeviceRecommendations.has(index)
+                      ? 'bg-[color:var(--success-fill)] cursor-default'
+                      : applyingDeviceRecommendations.has(index)
+                        ? 'bg-[color:var(--accent-fill-disabled)] cursor-wait'
+                        : 'bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)]'
+                  ]"
+                >
+                  <span
+                    class="material-symbols-outlined text-sm"
+                    :class="{ 'animate-spin': applyingDeviceRecommendations.has(index) }"
+                  >
+                    {{ appliedDeviceRecommendations.has(index) ? 'check' : applyingDeviceRecommendations.has(index) ? 'progress_activity' : 'add' }}
+                  </span>
+                  {{ appliedDeviceRecommendations.has(index)
+                    ? t('app.addedToBoard')
+                    : applyingDeviceRecommendations.has(index)
+                      ? t('app.applyingRecommendation')
+                      : t('app.addThisDevice') }}
+                </button>
+              </div>
+            </div>
+          </div>
+          <details
+            v-if="deviceRecommendationMessage && !isRecommendingDevices && !deviceRecommendationIsAppliedConfirmation"
+            data-testid="device-candidate-accounting"
+            class="board-card rounded-lg border board-border-subtle px-3 py-2 text-xs leading-relaxed board-text-muted"
+          >
+            <summary class="cursor-pointer py-2 font-semibold">{{ t('app.recommendationGenerationDetails') }}</summary>
+            <p class="mt-1">{{ deviceRecommendationMessage }}</p>
+            {{ t('app.recommendationCandidateSummary', {
+              raw: deviceRecommendationRawCandidateCount,
+              inspected: deviceRecommendationInspectedCount,
+              kept: deviceRecommendations.length,
+              filtered: deviceRecommendationFilteredCount,
+              truncated: deviceRecommendationTruncatedCount
+            }) }}
+          </details>
+        </div>
+      </template>
+      <template #rule-recommendations>
+        <div data-testid="rule-recommendation-panel" class="min-w-0 space-y-3 break-words">
+          <div class="board-form-label rounded-lg border board-border-subtle board-bg-elevated p-2 block">
+            <div class="flex items-center justify-between gap-3 pr-3">
+              <label for="rule-recommendation-requirement" class="board-form-label">{{ t('app.recommendationScenario') }}</label>
+              <InfoTooltip :text="t('app.recommendationBasisHint')" :label="t('app.showHelpFor', { topic: t('app.recommendationScenario') })" test-id="rule-recommendation-help" />
+            </div>
+            <textarea
+              id="rule-recommendation-requirement"
+              v-model.trim="ruleRecommendationFilters.userRequirement"
+              :disabled="isRecommendingRules || recommendationBatch?.running"
+              rows="3"
+              :maxlength="AI_RECOMMENDATION_REQUIREMENT_MAX_LENGTH"
+              :placeholder="t('app.ruleRecommendationPlaceholder')"
+              class="board-field mt-1 resize-none leading-relaxed"
+            ></textarea>
+          </div>
+
+          <button
+            type="button"
+            data-testid="generate-rule-recommendations"
+            @click="fetchRuleRecommendations"
+            :disabled="recommendationBatch?.running || isSceneReplacementInProgress || isRecommendationRunningForAnother('rule')"
+            :class="[
+              'board-panel-submit board-action-disarmed',
+              isRecommendingRules ? 'bg-[color:var(--danger-fill)] hover:bg-[color:var(--danger-fill-hover)]' : 'bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)]'
+            ]"
+          >
+            <span class="material-symbols-outlined text-base">
+              {{ isRecommendingRules ? 'stop' : 'auto_awesome' }}
+            </span>
+            {{ isRecommendingRules ? t('app.stopRuleRecommendations') : t('app.generateRecommendations') }}
+          </button>
+
+          <RecommendationProgressStatus
+            v-if="isRecommendingRules"
+            :elapsed-seconds="recommendationProgressElapsed"
+            :stage="recommendationProgressStage"
+            :template-count="deviceTemplates.length"
+            :device-count="nodes.length"
+            :rule-count="rules.length"
+            :spec-count="specifications.length"
+          />
+
+          <div v-if="recommendationFailures.rule" data-testid="rule-recommendation-error"
+            role="alert" class="rounded-lg board-surface-danger px-3 py-2 text-xs leading-5 board-text-danger">
+            <p class="font-semibold">{{ recommendationFailures.rule.message }}</p>
+            <FailureDetails v-bind="recommendationFailures.rule" />
+          </div>
+          <p v-if="ruleRecommendationMessage && !isRecommendingRules && ruleRecommendationIsAppliedConfirmation" class="text-xs board-text-muted">
+            {{ ruleRecommendationMessage }}
+          </p>
+          <div
+            v-if="ruleRecommendationFilteredCount > 0 && !isRecommendingRules"
+            class="rounded-lg border board-border-subtle board-bg-muted px-3 py-2 text-xs font-medium board-text-muted"
+          >
+            <p>{{ t('app.recommendationFilteredNotice', { count: ruleRecommendationFilteredCount }) }}</p>
+            <ul
+              v-if="ruleRecommendationFilteredItems.length"
+              class="iot-scroll-region mt-1 max-h-32 list-disc space-y-0.5 pl-4 pr-1 font-normal leading-relaxed"
+            >
+              <li
+                v-for="(item, index) in ruleRecommendationFilteredItems"
+                :key="`${item.type || 'item'}-${item.index || index}-${item.reasonCode || item.reason}`"
+              >
+                {{ formatRecommendationFilteredItem(item) }}
+              </li>
+            </ul>
+            <p v-else class="mt-1 font-normal board-text-muted">
+              {{ t('app.recommendationFilteredNoDetails') }}
+            </p>
+          </div>
+          <div
+            v-if="ruleRecommendationAdjustedItems.length > 0 && !isRecommendingRules"
+            data-testid="rule-adjusted-items"
+            class="rounded-lg board-surface-warning px-3 py-2 text-xs font-medium board-text-warning"
+          >
+            <p>{{ t('app.recommendationAdjustedNotice', { count: ruleRecommendationAdjustedItems.length }) }}</p>
+            <ul class="iot-scroll-region mt-1 max-h-36 list-disc space-y-0.5 pl-4 pr-1 font-normal leading-relaxed">
+              <li
+                v-for="(item, index) in ruleRecommendationAdjustedItems"
+                :key="`${item.type || 'item'}-${item.index || index}-${item.reasonCode || item.reason}`"
+              >
+                {{ formatRecommendationAdjustmentItem(item, 'rule') }}
+              </li>
+            </ul>
+          </div>
+
+          <div v-if="!isRecommendingRules && ruleRecommendationRequested && ruleRecommendations.length === 0 && !recommendationFailures.rule" class="flex flex-col items-center justify-center py-10">
+            <div class="w-16 h-16 board-bg-control rounded-full flex items-center justify-center mb-3">
+              <span class="material-symbols-outlined board-text-muted text-3xl">psychology</span>
+            </div>
+            <p class="board-text-muted text-sm font-medium mt-2">{{ t('app.noRecommendationsAvailable') }}</p>
+            <p class="board-text-muted text-xs mt-1 text-center px-4">{{ t('app.recommendationEmptyGuidance') }}</p>
+          </div>
+
+          <p v-if="!isRecommendingRules && ruleRecommendations.length" data-testid="rule-recommendations-unverified" class="text-xs board-text-muted">
+            {{ t('app.recommendationsNotVerified') }}
+          </p>
+
+          <!-- Recommendations List -->
+          <div v-if="!isRecommendingRules && ruleRecommendations.length && !recommendationFailures.rule" class="space-y-3">
+            <!-- Header with count -->
+            <div class="flex items-center justify-between px-1">
+              <span class="text-xs font-medium board-text-muted">{{ t('app.recommendationsFound', { count: ruleRecommendations.length }) }}</span>
+              <button
+                @click="fetchRuleRecommendations"
+                :disabled="recommendationBatch?.running || isSceneReplacementInProgress"
+                class="text-xs board-text-warning hover:font-medium flex items-center gap-1"
+              >
+                <span class="material-symbols-outlined text-sm">refresh</span>
+                {{ t('app.regenerateRecommendations') }}
+              </button>
+            </div>
+
+            <div v-if="ruleRecommendations.length > 1" class="space-y-2">
+              <button type="button" data-testid="apply-all-rule-recommendations"
+                class="board-panel-submit board-action-disarmed bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)]"
+                @click="applyAllRecommendations('rule')"
+                :disabled="Boolean(recommendationBatchBlockedReason('rule'))"
+                :aria-busy="recommendationBatch?.kind === 'rule' && recommendationBatch.running"
+                aria-describedby="rule-batch-apply-status">
+                {{ t('app.applyAllRecommendations', { count: ruleRecommendations.length }) }}
+              </button>
+              <p id="rule-batch-apply-status" role="status" class="text-xs leading-relaxed board-text-muted">
+                {{ recommendationBatchBlockedReason('rule') || t('app.recommendationBatchHint') }}
+              </p>
+            </div>
+
+            <div
+              v-for="(rec, index) in ruleRecommendations"
+              :key="index"
+              class="board-card board-card--raised rounded-xl border board-border-subtle hover:transition-all overflow-hidden group"
+            >
+              <!-- Card Header -->
+              <div class="p-3 pb-2">
+                <div class="flex items-start justify-between gap-2">
+                  <div class="flex min-w-0 items-center gap-2">
+                    <!-- Rule Icon -->
+                    <div class="board-section-icon board-section-icon--lg">
+                      <span class="material-symbols-outlined">smart_toy</span>
+                    </div>
+                    <div class="min-w-0">
+                      <h4 class="board-section-title break-words">{{ rec.name }}</h4>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Reason -->
+              <div class="px-3 pb-2">
+                <p class="board-copy break-words board-text-strong" data-testid="rule-recommendation-description">{{ presentedRuleRecommendations[index].description }}</p>
+                <p v-if="presentedRuleRecommendations[index].contentSource" class="mt-1 text-xs board-text-muted">{{ t('app.copyFrom') }} {{ presentedRuleRecommendations[index].contentSource }}</p>
+                <details v-if="localizedRecommendationText(rec.reason)" class="mt-2 text-xs board-text-muted">
+                  <summary class="cursor-pointer py-2 font-semibold">{{ t('app.recommendationRationale') }}</summary>
+                  <p class="break-words">{{ localizedRecommendationText(rec.reason) }}</p>
+                </details>
+              </div>
+
+              <!-- Details -->
+              <div class="px-3 pb-2">
+                <details class="text-xs">
+                  <summary class="flex cursor-pointer items-center gap-1 font-medium board-text-warning hover:board-text-strong">
+                    <span class="material-symbols-outlined text-sm">info</span>
+                    {{ t('app.viewDetails') }}
+                  </summary>
+                  <div class="mt-2 space-y-2 rounded-lg board-bg-muted p-2 board-text-strong">
+                    <div v-if="rec.conditions && rec.conditions.length">
+                      <div class="mb-1 font-semibold board-text-warning">{{ t('app.trigger') }}:</div>
+                      <ul class="space-y-1">
+                        <li v-for="(cond, condIndex) in rec.conditions" :key="condIndex" class="text-xs">
+                          <span class="board-card font-mono rounded px-1 py-0.5">
+                            {{ formatRecommendedRuleConditionDevice(cond) }}.{{ formatRecommendedRuleConditionAttribute(cond) }}
+                          </span>
+                          <template v-if="isValueBasedRuleRecommendationCondition(cond.targetType)">
+                            <span class="mx-1">{{ formatRelationForDisplay(cond.relation) }}</span>
+                            <span class="board-card font-mono rounded px-1 py-0.5">{{ formatRecommendedRuleConditionValue(cond) }}</span>
+                          </template>
+                          <span v-else class="ml-1 board-text-muted">{{ t('app.apiSignalFires') }}</span>
+                        </li>
+                      </ul>
+                    </div>
+                    <div v-if="rec.command">
+                      <div class="mb-1 font-semibold board-text-warning">{{ t('app.action') }}:</div>
+                      <div class="text-xs">
+                        <span class="board-card font-mono rounded px-1 py-0.5">
+                          {{ formatRecommendedRuleCommandDevice(rec.command) }}.{{ formatRecommendedRuleCommandAction(rec.command) }}
+                        </span>
+                        <span v-if="rec.command.contentDevice && rec.command.content" class="ml-2 board-text-muted">
+                          ({{ t('app.copyFrom') }} {{ formatRecommendedRuleContentDevice(rec.command) }}<template v-if="rec.command.content">.{{ formatRecommendedRuleCommandContent(rec.command) }}<template v-if="rec.command.contentPrivacy"> ({{ t(`app.${rec.command.contentPrivacy}`) }})</template></template>)
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </details>
+              </div>
+
+              <!-- Action Button -->
+              <div class="px-3 pb-3">
+                <div v-if="recommendationApplyFailures.rule[index]" :data-testid="`rule-recommendation-apply-failure-${index}`" role="alert" class="mb-2 text-sm">
+                  <p class="font-semibold board-text-danger">{{ recommendationApplyFailures.rule[index].message }}</p>
+                  <FailureDetails v-bind="recommendationApplyFailures.rule[index]" />
+                </div>
+                <button
+                  @click="applyRecommendation(rec, index)"
+                  :disabled="isSceneReplacementInProgress || isRecommendationBatchLocked('rule') || appliedRuleRecommendations.has(index) || applyingRuleRecommendations.has(index) || recommendationApplyFailures.rule[index]?.outcomeUnknown"
+                  :aria-busy="applyingRuleRecommendations.has(index)"
+                  :class="[
+                    'w-full py-2 px-4 text-white text-sm font-medium rounded-lg transition-colors flex items-center justify-center gap-2',
+                    appliedRuleRecommendations.has(index)
+                      ? 'bg-[color:var(--success-fill)] cursor-default'
+                      : applyingRuleRecommendations.has(index)
+                        ? 'bg-[color:var(--accent-fill-disabled)] cursor-wait'
+                        : 'bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)]'
+                  ]"
+                >
+                  <span
+                    class="material-symbols-outlined text-sm"
+                    :class="{ 'animate-spin': applyingRuleRecommendations.has(index) }"
+                  >
+                    {{ appliedRuleRecommendations.has(index) ? 'check' : applyingRuleRecommendations.has(index) ? 'progress_activity' : 'add' }}
+                  </span>
+                  {{ appliedRuleRecommendations.has(index)
+                    ? t('app.addedToBoard')
+                    : applyingRuleRecommendations.has(index)
+                      ? t('app.applyingRecommendation')
+                      : t('app.applyThisRule') }}
+                </button>
+              </div>
+            </div>
+          </div>
+          <details
+            v-if="ruleRecommendationMessage && !isRecommendingRules && !ruleRecommendationIsAppliedConfirmation"
+            data-testid="rule-candidate-accounting"
+            class="board-card rounded-lg border board-border-subtle px-3 py-2 text-xs leading-relaxed board-text-muted"
+          >
+            <summary class="cursor-pointer py-2 font-semibold">{{ t('app.recommendationGenerationDetails') }}</summary>
+            <p class="mt-1">{{ ruleRecommendationMessage }}</p>
+            {{ t('app.recommendationCandidateSummary', {
+              raw: ruleRecommendationRawCandidateCount,
+              inspected: ruleRecommendationInspectedCount,
+              kept: ruleRecommendations.length,
+              filtered: ruleRecommendationFilteredCount,
+              truncated: ruleRecommendationTruncatedCount
+            }) }}
+          </details>
+        </div>
+      </template>
+      <template #spec-recommendations>
+        <div data-testid="spec-recommendation-panel" class="min-w-0 space-y-3 break-words">
+          <div class="board-form-label rounded-lg border board-border-subtle board-bg-elevated p-2 block">
+            <div class="flex items-center justify-between gap-3 pr-3">
+              <label for="spec-recommendation-requirement" class="board-form-label">{{ t('app.recommendationScenario') }}</label>
+              <InfoTooltip :text="t('app.recommendationBasisHint')" :label="t('app.showHelpFor', { topic: t('app.recommendationScenario') })" test-id="spec-recommendation-help" />
+            </div>
+            <textarea
+              id="spec-recommendation-requirement"
+              v-model.trim="specRecommendationFilters.userRequirement"
+              :disabled="isRecommendingSpecs || recommendationBatch?.running"
+              rows="3"
+              :maxlength="AI_RECOMMENDATION_REQUIREMENT_MAX_LENGTH"
+              :placeholder="t('app.specRecommendationPlaceholder')"
+              class="board-field mt-1 resize-none leading-relaxed"
+            ></textarea>
+          </div>
+
+          <button
+            type="button"
+            data-testid="generate-spec-recommendations"
+            @click="fetchSpecRecommendations"
+            :disabled="recommendationBatch?.running || isSceneReplacementInProgress || isRecommendationRunningForAnother('spec')"
+            :class="[
+              'board-panel-submit board-action-disarmed',
+              isRecommendingSpecs ? 'bg-[color:var(--danger-fill)] hover:bg-[color:var(--danger-fill-hover)]' : 'bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)]'
+            ]"
+          >
+            <span class="material-symbols-outlined text-base">
+              {{ isRecommendingSpecs ? 'stop' : 'auto_awesome' }}
+            </span>
+            {{ isRecommendingSpecs ? t('app.stopSpecificationRecommendations') : t('app.generateRecommendations') }}
+          </button>
+
+          <RecommendationProgressStatus
+            v-if="isRecommendingSpecs"
+            :elapsed-seconds="recommendationProgressElapsed"
+            :stage="recommendationProgressStage"
+            :template-count="deviceTemplates.length"
+            :device-count="nodes.length"
+            :rule-count="rules.length"
+            :spec-count="specifications.length"
+          />
+
+          <div v-if="recommendationFailures.spec" data-testid="spec-recommendation-error"
+            role="alert" class="rounded-lg board-surface-danger px-3 py-2 text-xs leading-5 board-text-danger">
+            <p class="font-semibold">{{ recommendationFailures.spec.message }}</p>
+            <FailureDetails v-bind="recommendationFailures.spec" />
+          </div>
+          <p v-if="specRecommendationMessage && !isRecommendingSpecs && specRecommendationIsAppliedConfirmation" class="text-xs board-text-muted">
+            {{ specRecommendationMessage }}
+          </p>
+          <!--
+            The server-completed values, which this panel used to discard.
+            Rule, device and scenario all show this notice; spec did not read the field at all. It is the panel that
+            most needs it: `BoardStorageController:535` passes `requireAdjustments=false` for specifications alone, so
+            this is exactly the case where the recommender may adjust a candidate silently. Applying a value the
+            system completed for you, without being told it did, is the outcome the other three panels prevent.
+          -->
+          <div
+            v-if="specRecommendationAdjustedItems.length > 0 && !isRecommendingSpecs"
+            data-testid="spec-adjusted-items"
+            class="rounded-lg board-surface-warning px-3 py-2 text-xs font-medium board-text-warning"
+          >
+            <p>{{ t('app.recommendationAdjustedNotice', { count: specRecommendationAdjustedItems.length }) }}</p>
+            <ul class="iot-scroll-region mt-1 max-h-36 list-disc space-y-0.5 pl-4 pr-1 font-normal leading-relaxed">
+              <li
+                v-for="(item, index) in specRecommendationAdjustedItems"
+                :key="`${item.type || 'item'}-${item.index || index}-${item.reasonCode || item.reason}`"
+              >
+                {{ formatRecommendationAdjustmentItem(item, 'spec') }}
+              </li>
+            </ul>
+          </div>
+          <div
+            v-if="specRecommendationFilteredCount > 0 && !isRecommendingSpecs"
+            class="rounded-lg border board-border-subtle board-bg-muted px-3 py-2 text-xs font-medium board-text-muted"
+          >
+            <p>{{ t('app.recommendationFilteredNotice', { count: specRecommendationFilteredCount }) }}</p>
+            <ul
+              v-if="specRecommendationFilteredItems.length"
+              class="iot-scroll-region mt-1 max-h-32 list-disc space-y-0.5 pl-4 pr-1 font-normal leading-relaxed"
+            >
+              <li
+                v-for="(item, index) in specRecommendationFilteredItems"
+                :key="`${item.type || 'item'}-${item.index || index}-${item.reasonCode || item.reason}`"
+              >
+                {{ formatRecommendationFilteredItem(item) }}
+              </li>
+            </ul>
+            <p v-else class="mt-1 font-normal board-text-muted">
+              {{ t('app.recommendationFilteredNoDetails') }}
+            </p>
+          </div>
+
+          <div v-if="!isRecommendingSpecs && specRecommendationRequested && specRecommendations.length === 0 && !recommendationFailures.spec" class="flex flex-col items-center justify-center py-10">
+            <div class="w-16 h-16 board-bg-control rounded-full flex items-center justify-center mb-3">
+              <span class="material-symbols-outlined board-text-muted text-3xl">policy</span>
+            </div>
+            <p class="board-text-muted text-sm font-medium mt-2">{{ t('app.noRecommendationsAvailable') }}</p>
+            <p class="board-text-muted text-xs mt-1 text-center px-4">{{ t('app.recommendationEmptyGuidance') }}</p>
+          </div>
+
+          <p v-if="!isRecommendingSpecs && specRecommendations.length" data-testid="spec-recommendations-unverified" class="text-xs board-text-muted">
+            {{ t('app.recommendationsNotVerified') }}
+          </p>
+
+          <!-- Recommendations List -->
+          <div v-if="!isRecommendingSpecs && specRecommendations.length && !recommendationFailures.spec" class="space-y-3">
+            <!-- Header with count -->
+            <div class="flex items-center justify-between px-1">
+              <span class="text-xs font-medium board-text-muted">{{ t('app.specificationsRecommended', { count: specRecommendations.length }) }}</span>
+              <button
+                @click="fetchSpecRecommendations"
+                :disabled="recommendationBatch?.running || isSceneReplacementInProgress"
+                class="text-xs board-text-danger hover:font-medium flex items-center gap-1"
+              >
+                <span class="material-symbols-outlined text-sm">refresh</span>
+                {{ t('app.regenerateRecommendations') }}
+              </button>
+            </div>
+
+            <div v-if="specRecommendations.length > 1" class="space-y-2">
+              <button type="button" data-testid="apply-all-spec-recommendations"
+                class="board-panel-submit board-action-disarmed bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)]"
+                @click="applyAllRecommendations('spec')"
+                :disabled="Boolean(recommendationBatchBlockedReason('spec'))"
+                :aria-busy="recommendationBatch?.kind === 'spec' && recommendationBatch.running"
+                aria-describedby="spec-batch-apply-status">
+                {{ t('app.applyAllRecommendations', { count: specRecommendations.length }) }}
+              </button>
+              <p id="spec-batch-apply-status" role="status" class="text-xs leading-relaxed board-text-muted">
+                {{ recommendationBatchBlockedReason('spec') || t('app.recommendationBatchHint') }}
+              </p>
+            </div>
+
+            <div
+              v-for="(rec, index) in specRecommendations"
+              :key="index"
+              class="board-card board-card--raised rounded-xl border board-border-subtle hover:transition-all overflow-hidden group"
+            >
+              <!-- Card Header -->
+              <div class="p-3 pb-2">
+                <div class="flex items-start justify-between gap-2">
+                  <div class="flex min-w-0 items-center gap-2">
+                    <!-- Specification Icon -->
+                    <div class="board-section-icon board-section-icon--lg">
+                      <span class="material-symbols-outlined">policy</span>
+                    </div>
+                    <div class="min-w-0">
+                      <h4 class="board-section-title break-words">
+                        {{ rec.name }}
+                      </h4>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="px-3 pb-2">
+                <p class="board-copy break-words board-text-strong" data-testid="spec-recommendation-description">{{ presentedSpecRecommendations[index] }}</p>
+                <details v-if="localizedRecommendationText(rec.rationale)" class="mt-2 text-xs board-text-muted">
+                  <summary class="cursor-pointer py-2 font-semibold">{{ t('app.recommendationRationale') }}</summary>
+                  <p class="break-words">{{ localizedRecommendationText(rec.rationale) }}</p>
+                </details>
+              </div>
+
+              <!-- Details -->
+              <div class="px-3 pb-2">
+                <details class="text-xs">
+                  <summary class="flex cursor-pointer items-center gap-1 font-medium board-text-danger hover:board-text-strong">
+                    <span class="material-symbols-outlined text-sm">info</span>
+                    {{ t('app.viewDetails') }}
+                  </summary>
+                  <div class="mt-2 space-y-2 rounded-lg board-bg-muted p-2 board-text-strong">
+                    <div v-if="rec.aConditions && rec.aConditions.length">
+                      <div class="mb-1 font-semibold board-text-danger">{{ t('app.alwaysConditions') }}:</div>
+                      <ul class="space-y-1">
+                        <li v-for="(cond, condIndex) in rec.aConditions" :key="condIndex" class="text-xs">
+                          <span class="board-card font-mono rounded px-1 py-0.5">
+                            {{ formatRecommendedSpecConditionTarget(cond) }}
+                          </span>
+                          <span class="mx-1">{{ formatRelationForDisplay(cond.relation) }}</span>
+                          <span class="board-card font-mono rounded px-1 py-0.5">{{ formatRecommendedSpecConditionValue(cond) }}</span>
+                        </li>
+                      </ul>
+                    </div>
+                    <div v-if="rec.ifConditions && rec.ifConditions.length">
+                      <div class="mb-1 font-semibold board-text-danger">{{ t('app.ifConditions') }}:</div>
+                      <ul class="space-y-1">
+                        <li v-for="(cond, condIndex) in rec.ifConditions" :key="condIndex" class="text-xs">
+                          <span class="board-card font-mono rounded px-1 py-0.5">
+                            {{ formatRecommendedSpecConditionTarget(cond) }}
+                          </span>
+                          <span class="mx-1">{{ formatRelationForDisplay(cond.relation) }}</span>
+                          <span class="board-card font-mono rounded px-1 py-0.5">{{ formatRecommendedSpecConditionValue(cond) }}</span>
+                        </li>
+                      </ul>
+                    </div>
+                    <div v-if="rec.thenConditions && rec.thenConditions.length">
+                      <div class="mb-1 font-semibold board-text-danger">{{ t('app.thenConditions') }}:</div>
+                      <ul class="space-y-1">
+                        <li v-for="(cond, condIndex) in rec.thenConditions" :key="condIndex" class="text-xs">
+                          <span class="board-card font-mono rounded px-1 py-0.5">
+                            {{ formatRecommendedSpecConditionTarget(cond) }}
+                          </span>
+                          <span class="mx-1">{{ formatRelationForDisplay(cond.relation) }}</span>
+                          <span class="board-card font-mono rounded px-1 py-0.5">{{ formatRecommendedSpecConditionValue(cond) }}</span>
+                        </li>
+                      </ul>
+                    </div>
+                  </div>
+                </details>
+              </div>
+
+              <!-- Action Button -->
+              <div class="px-3 pb-3">
+                <div v-if="recommendationApplyFailures.spec[index]" :data-testid="`spec-recommendation-apply-failure-${index}`" role="alert" class="mb-2 text-sm">
+                  <p class="font-semibold board-text-danger">{{ recommendationApplyFailures.spec[index].message }}</p>
+                  <FailureDetails v-bind="recommendationApplyFailures.spec[index]" />
+                </div>
+                <button
+                  @click="applySpecRecommendation(rec, index)"
+                  :disabled="isSceneReplacementInProgress || isRecommendationBatchLocked('spec') || appliedSpecRecommendations.has(index) || applyingSpecRecommendations.has(index) || recommendationApplyFailures.spec[index]?.outcomeUnknown"
+                  :aria-busy="applyingSpecRecommendations.has(index)"
+                  :class="[
+                    'w-full py-2 px-4 text-white text-sm font-medium rounded-lg transition-colors flex items-center justify-center gap-2',
+                    appliedSpecRecommendations.has(index)
+                      ? 'bg-[color:var(--success-fill)] cursor-default'
+                      : applyingSpecRecommendations.has(index)
+                        ? 'bg-[color:var(--accent-fill-disabled)] cursor-wait'
+                        : 'bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)]'
+                  ]"
+                >
+                  <span
+                    class="material-symbols-outlined text-sm"
+                    :class="{ 'animate-spin': applyingSpecRecommendations.has(index) }"
+                  >
+                    {{ appliedSpecRecommendations.has(index) ? 'check' : applyingSpecRecommendations.has(index) ? 'progress_activity' : 'add' }}
+                  </span>
+                  {{ appliedSpecRecommendations.has(index)
+                    ? t('app.addedToBoard')
+                    : applyingSpecRecommendations.has(index)
+                      ? t('app.applyingRecommendation')
+                      : t('app.addThisSpecification') }}
+                </button>
+              </div>
+            </div>
+          </div>
+          <details
+            v-if="specRecommendationMessage && !isRecommendingSpecs && !specRecommendationIsAppliedConfirmation"
+            data-testid="spec-candidate-accounting"
+            class="board-card rounded-lg border board-border-subtle px-3 py-2 text-xs leading-relaxed board-text-muted"
+          >
+            <summary class="cursor-pointer py-2 font-semibold">{{ t('app.recommendationGenerationDetails') }}</summary>
+            <p class="mt-1">{{ specRecommendationMessage }}</p>
+            {{ t('app.recommendationCandidateSummary', {
+              raw: specRecommendationRawCandidateCount,
+              inspected: specRecommendationInspectedCount,
+              kept: specRecommendations.length,
+              filtered: specRecommendationFilteredCount,
+              truncated: specRecommendationTruncatedCount
+            }) }}
+          </details>
+        </div>
+      </template>
+    </ControlCenter>
 
     <!-- Right Sidebar - System Inspector -->
     <SystemInspector
@@ -15633,11 +15896,11 @@ const attackSelectionSummary = (
             <button
               type="button"
               class="board-action-inline-subtle"
-              data-testid="empty-state-generate-scenario"
-              @click="openScenarioRecommendationPanel"
+              data-testid="empty-state-open-assistant"
+              @click="toggleChat"
             >
               <span class="material-symbols-outlined text-lg" aria-hidden="true">auto_awesome</span>
-              {{ t('app.openScenarioRecommendations') }}
+              {{ t('app.aiAssistant') }}
             </button>
             <button
               type="button"
@@ -15820,101 +16083,7 @@ const attackSelectionSummary = (
           </HintTooltip>
         </div>
       </div>
-
-      <div class="board-tool-separator" aria-hidden="true"></div>
-
-      <div class="board-tool-group" data-testid="ai-tool-group" role="group" :aria-label="t('app.aiTools')">
-        <span class="board-tool-group-label">{{ t('app.aiTools') }}</span>
-
-        <div class="board-tool-wrapper group">
-          <div
-            v-if="isRecommendingScenario"
-            class="board-tool-status"
-          ></div>
-          <HintTooltip :content="scenarioTooltipContent">
-            <button
-              type="button"
-              @click="openScenarioRecommendationsFromActionDock"
-              data-testid="open-scenario-recommendations"
-              :disabled="isSceneReplacementInProgress || traceAnimationState.visible || simulationAnimationState.visible || isAnimationLocked || isRecommendationRunningForAnother('scenario')"
-              :aria-label="t('app.openScenarioRecommendations')"
-              :aria-pressed="showScenarioRecommendationPanel || isRecommendingScenario"
-              class="board-tool-button transition-colors"
-            >
-              <span v-if="isRecommendingScenario" class="material-symbols-outlined animate-spin" aria-hidden="true">sync</span>
-              <span v-else class="material-symbols-outlined" aria-hidden="true">account_tree</span>
-              <span class="board-tool-label">{{ t('app.scenarioTool') }}</span>
-            </button>
-          </HintTooltip>
-        </div>
-
-        <div class="board-tool-wrapper group">
-          <div
-            v-if="isRecommendingRules"
-            class="board-tool-status board-tool-status--warning"
-          ></div>
-          <HintTooltip :content="ruleTooltipContent">
-            <button
-              type="button"
-              @click="openRuleRecommendationsFromActionDock"
-              data-testid="open-rule-recommendations"
-              :disabled="isSceneReplacementInProgress || traceAnimationState.visible || simulationAnimationState.visible || isAnimationLocked || isRecommendationRunningForAnother('rule')"
-              :aria-label="t('app.openRuleRecommendations')"
-              :aria-pressed="showRecommendationPanel || isRecommendingRules"
-              class="board-tool-button transition-colors"
-            >
-              <span v-if="isRecommendingRules" class="material-symbols-outlined animate-spin" aria-hidden="true">sync</span>
-              <span v-else class="material-symbols-outlined" aria-hidden="true">rule_settings</span>
-              <span class="board-tool-label">{{ t('app.rulesTool') }}</span>
-            </button>
-          </HintTooltip>
-        </div>
-
-        <div class="board-tool-wrapper group">
-          <div
-            v-if="isRecommendingDevices"
-            class="board-tool-status"
-          ></div>
-          <HintTooltip :content="deviceTooltipContent">
-            <button
-              type="button"
-              @click="openDeviceRecommendationsFromActionDock"
-              data-testid="open-device-recommendations"
-              :disabled="isSceneReplacementInProgress || traceAnimationState.visible || simulationAnimationState.visible || isAnimationLocked || isRecommendationRunningForAnother('device')"
-              :aria-label="t('app.openDeviceRecommendations')"
-              :aria-pressed="showDeviceRecommendationPanel || isRecommendingDevices"
-              class="board-tool-button transition-colors"
-            >
-              <span v-if="isRecommendingDevices" class="material-symbols-outlined animate-spin" aria-hidden="true">sync</span>
-              <span v-else class="material-symbols-outlined" aria-hidden="true">devices_other</span>
-              <span class="board-tool-label">{{ t('app.devicesTool') }}</span>
-            </button>
-          </HintTooltip>
-        </div>
-
-        <div class="board-tool-wrapper group">
-          <div
-            v-if="isRecommendingSpecs"
-            class="board-tool-status board-tool-status--danger"
-          ></div>
-          <HintTooltip :content="specTooltipContent">
-            <button
-              type="button"
-              @click="openSpecRecommendationsFromActionDock"
-              data-testid="open-spec-recommendations"
-              :disabled="isSceneReplacementInProgress || traceAnimationState.visible || simulationAnimationState.visible || isAnimationLocked || isRecommendationRunningForAnother('spec')"
-              :aria-label="t('app.openSpecificationRecommendations')"
-              :aria-pressed="showSpecRecommendationPanel || isRecommendingSpecs"
-              class="board-tool-button transition-colors"
-            >
-              <span v-if="isRecommendingSpecs" class="material-symbols-outlined animate-spin" aria-hidden="true">sync</span>
-              <span v-else class="material-symbols-outlined" aria-hidden="true">playlist_add_check</span>
-              <span class="board-tool-label">{{ t('app.specificationsTool') }}</span>
-            </button>
-          </HintTooltip>
-        </div>
-        </div>
-      </div>
+</div>
     </div>
 
     <KeepAlive :key="currentAuthUserId ?? undefined">
@@ -16080,7 +16249,7 @@ const attackSelectionSummary = (
     />
 
     <!-- Verification Panel -->
-    <div 
+    <div
       v-if="showVerificationPanel"
       :ref="setVerificationPanelRef"
       data-testid="verification-panel"
@@ -16419,1347 +16588,8 @@ const attackSelectionSummary = (
       </div>
     </div>
 
-    <!-- Scenario Recommendation Panel -->
-    <div
-      v-if="showScenarioRecommendationPanel"
-      :ref="setScenarioRecommendationPanelRef"
-      data-testid="scenario-recommendation-panel"
-      class="board-floating-panel board-recommendation-panel board-surface-panel fixed top-20 z-30 w-[28rem] max-w-[calc(100vw-2rem)] rounded-2xl shadow-2xl border overflow-hidden"
-      role="region"
-      aria-labelledby="scenario-recommendation-panel-title"
-      tabindex="-1"
-      autofocus
-      @keydown="handleScenarioRecommendationPanelKeydown"
-    >
-      <div class="relative overflow-hidden">
-        <div class="board-panel-banner absolute inset-0"></div>
-        <div class="board-tool-header relative">
-          <div class="flex items-center gap-3">
-            <div class="board-section-icon board-section-icon--lg">
-              <span class="material-symbols-outlined text-xl">account_tree</span>
-            </div>
-            <div>
-              <h3 id="scenario-recommendation-panel-title" class="board-panel-title">{{ t('app.scenarioRecommendations') }}</h3>
-            </div>
-          </div>
-          <HintTooltip :content="t('app.close')">
-            <button
-              type="button"
-              @click="closeScenarioRecommendationPanel"
-              data-testid="close-scenario-recommendations"
-              :aria-label="t('app.close')"
-              class="board-panel-close"
-            >
-              <span class="material-symbols-outlined" aria-hidden="true">close</span>
-            </button>
-          </HintTooltip>
-        </div>
-      </div>
 
-      <div class="board-recommendation-panel__body iot-scroll-region p-3 space-y-3">
-        <div class="board-card grid grid-cols-1 gap-2 rounded-lg border board-border-subtle p-2 sm:grid-cols-3">
-          <fieldset class="min-w-0">
-            <legend class="text-xs font-semibold board-text-strong">{{ t('app.devicesTool') }}</legend>
-            <div class="mt-1 grid grid-cols-2 gap-1">
-              <label class="board-form-label min-w-0">
-                {{ t('app.scenarioMinimum') }}
-                <input
-                  v-model.number="scenarioRecommendationFilters.minDevices"
-                  :disabled="isRecommendingScenario"
-                  data-testid="scenario-min-devices"
-                  :aria-invalid="scenarioRecommendationInput.invalidFields.includes('minDevices') || undefined"
-                  :aria-describedby="scenarioRecommendationInput.invalidFields.includes('minDevices') ? 'scenario-count-error' : undefined"
-                  type="number"
-                  min="1"
-                  max="10"
-                  class="board-field mt-0.5"
-                />
-              </label>
-              <label class="board-form-label min-w-0">
-                {{ t('app.scenarioMaximum') }}
-                <input
-                  v-model.number="scenarioRecommendationFilters.maxDevices"
-                  :disabled="isRecommendingScenario"
-                  data-testid="scenario-max-devices"
-                  :aria-invalid="scenarioRecommendationInput.invalidFields.includes('maxDevices') || undefined"
-                  :aria-describedby="scenarioRecommendationInput.invalidFields.includes('maxDevices') ? 'scenario-count-error' : undefined"
-                  type="number"
-                  min="1"
-                  max="10"
-                  class="board-field mt-0.5"
-                />
-              </label>
-            </div>
-          </fieldset>
-          <fieldset class="min-w-0">
-            <legend class="text-xs font-semibold board-text-strong">{{ t('app.rulesTool') }}</legend>
-            <div class="mt-1 grid grid-cols-2 gap-1">
-              <label class="board-form-label min-w-0">
-                {{ t('app.scenarioMinimum') }}
-                <input
-                  v-model.number="scenarioRecommendationFilters.minRules"
-                  :disabled="isRecommendingScenario"
-                  data-testid="scenario-min-rules"
-                  :aria-invalid="scenarioRecommendationInput.invalidFields.includes('minRules') || undefined"
-                  :aria-describedby="scenarioRecommendationInput.invalidFields.includes('minRules') ? 'scenario-count-error' : undefined"
-                  type="number"
-                  min="1"
-                  max="10"
-                  class="board-field mt-0.5"
-                />
-              </label>
-              <label class="board-form-label min-w-0">
-                {{ t('app.scenarioMaximum') }}
-                <input
-                  v-model.number="scenarioRecommendationFilters.maxRules"
-                  :disabled="isRecommendingScenario"
-                  data-testid="scenario-max-rules"
-                  :aria-invalid="scenarioRecommendationInput.invalidFields.includes('maxRules') || undefined"
-                  :aria-describedby="scenarioRecommendationInput.invalidFields.includes('maxRules') ? 'scenario-count-error' : undefined"
-                  type="number"
-                  min="1"
-                  max="10"
-                  class="board-field mt-0.5"
-                />
-              </label>
-            </div>
-          </fieldset>
-          <fieldset class="min-w-0">
-            <legend class="text-xs font-semibold board-text-strong">{{ t('app.specificationsTool') }}</legend>
-            <div class="mt-1 grid grid-cols-2 gap-1">
-              <label class="board-form-label min-w-0">
-                {{ t('app.scenarioMinimum') }}
-                <input
-                  v-model.number="scenarioRecommendationFilters.minSpecs"
-                  :disabled="isRecommendingScenario"
-                  data-testid="scenario-min-specs"
-                  :aria-invalid="scenarioRecommendationInput.invalidFields.includes('minSpecs') || undefined"
-                  :aria-describedby="scenarioRecommendationInput.invalidFields.includes('minSpecs') ? 'scenario-count-error' : undefined"
-                  type="number"
-                  min="1"
-                  max="10"
-                  class="board-field mt-0.5"
-                />
-              </label>
-              <label class="board-form-label min-w-0">
-                {{ t('app.scenarioMaximum') }}
-                <input
-                  v-model.number="scenarioRecommendationFilters.maxSpecs"
-                  :disabled="isRecommendingScenario"
-                  data-testid="scenario-max-specs"
-                  :aria-invalid="scenarioRecommendationInput.invalidFields.includes('maxSpecs') || undefined"
-                  :aria-describedby="scenarioRecommendationInput.invalidFields.includes('maxSpecs') ? 'scenario-count-error' : undefined"
-                  type="number"
-                  min="1"
-                  max="10"
-                  class="board-field mt-0.5"
-                />
-              </label>
-            </div>
-          </fieldset>
-        </div>
 
-        <p v-if="scenarioRecommendationInput.error" id="scenario-count-error" data-testid="scenario-count-error"
-          role="status" class="text-xs board-text-danger">{{ scenarioRecommendationInput.error }}</p>
-
-        <div class="board-form-label board-card rounded-lg border board-border-subtle p-2 block">
-          <div class="flex items-center justify-between gap-3">
-            <label for="scenario-recommendation-requirement" class="board-form-label">{{ t('app.recommendationScenario') }}</label>
-            <InfoTooltip :text="t('app.scenarioRecommendationBasisHint')" :label="t('app.showHelpFor', { topic: t('app.recommendationScenario') })" test-id="scenario-recommendation-help" />
-          </div>
-          <textarea
-            id="scenario-recommendation-requirement"
-            v-model.trim="scenarioRecommendationFilters.userRequirement"
-            :disabled="isRecommendingScenario"
-            rows="3"
-            :maxlength="AI_RECOMMENDATION_REQUIREMENT_MAX_LENGTH"
-            :placeholder="t('app.scenarioRecommendationPlaceholder')"
-            class="board-field mt-1 resize-none leading-relaxed"
-          ></textarea>
-        </div>
-
-        <button
-          type="button"
-          data-testid="generate-scenario-recommendation"
-          :aria-describedby="scenarioRecommendationInput.error ? 'scenario-count-error' : undefined"
-          @click="fetchScenarioRecommendation"
-          :disabled="isSceneReplacementInProgress || isRecommendationRunningForAnother('scenario') || (!isRecommendingScenario && Boolean(scenarioRecommendationInput.error))"
-          :class="[
-            'board-panel-submit board-action-disarmed',
-                isRecommendingScenario ? 'bg-[color:var(--danger-fill)] hover:bg-[color:var(--danger-fill-hover)]' : 'bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)]'
-          ]"
-        >
-          <span class="material-symbols-outlined text-base">
-            {{ isRecommendingScenario ? 'stop' : 'auto_awesome' }}
-          </span>
-          {{ isRecommendingScenario ? t('app.stopScenarioRecommendation') : t('app.generateScenarioRecommendation') }}
-        </button>
-
-        <RecommendationProgressStatus
-          v-if="isRecommendingScenario"
-          :elapsed-seconds="recommendationProgressElapsed"
-          :stage="recommendationProgressStage"
-          :template-count="deviceTemplates.length"
-          :device-count="nodes.length"
-          :rule-count="rules.length"
-          :spec-count="specifications.length"
-        />
-
-        <div v-if="recommendationFailures.scenario" data-testid="scenario-recommendation-error"
-          role="alert" class="rounded-lg board-surface-danger px-3 py-2 text-xs leading-5 board-text-danger">
-          <p class="font-semibold">{{ recommendationFailures.scenario.message }}</p>
-          <FailureDetails v-bind="recommendationFailures.scenario" />
-        </div>
-
-        <div
-          v-if="scenarioRecommendationResult?.filteredCount && scenarioRecommendationResult.filteredCount > 0 && !isRecommendingScenario"
-          class="rounded-lg border board-border-subtle board-bg-muted px-3 py-2 text-xs font-medium board-text-muted"
-        >
-          <p>{{ t('app.recommendationFilteredNotice', { count: scenarioRecommendationResult.filteredCount }) }}</p>
-          <ul
-            v-if="scenarioRecommendationResult.filteredItems?.length"
-            class="iot-scroll-region mt-1 max-h-32 list-disc space-y-0.5 pl-4 pr-1 font-normal leading-relaxed"
-          >
-            <li
-              v-for="(item, index) in scenarioRecommendationResult.filteredItems"
-              :key="`${item.type || 'item'}-${item.index || index}-${item.reasonCode || item.reason}`"
-            >
-              {{ formatRecommendationFilteredItem(item) }}
-            </li>
-          </ul>
-          <p v-else class="mt-1 font-normal board-text-muted">
-            {{ t('app.recommendationFilteredNoDetails') }}
-          </p>
-        </div>
-        <div
-          v-if="scenarioRecommendationResult?.adjustedCount && scenarioRecommendationResult.adjustedCount > 0 && !isRecommendingScenario"
-          data-testid="scenario-adjusted-items"
-          class="rounded-lg board-surface-warning px-3 py-2 text-xs font-medium board-text-warning"
-        >
-          <p>{{ t('app.recommendationAdjustedNotice', { count: scenarioRecommendationResult.adjustedCount }) }}</p>
-          <ul class="iot-scroll-region mt-1 max-h-36 list-disc space-y-0.5 pl-4 pr-1 font-normal leading-relaxed">
-            <li
-              v-for="(item, index) in scenarioRecommendationResult.adjustedItems || []"
-              :key="`${item.type || 'item'}-${item.index || index}-${item.reasonCode || item.reason}`"
-            >
-              {{ formatRecommendationAdjustmentItem(item, 'scenario') }}
-            </li>
-          </ul>
-        </div>
-
-        <div v-if="!isRecommendingScenario && scenarioRecommendationRequested && !recommendedScenarioScene && !recommendationFailures.scenario" class="flex flex-col items-center justify-center py-10">
-          <div class="w-16 h-16 board-bg-control rounded-full flex items-center justify-center mb-3">
-            <span class="material-symbols-outlined board-text-muted text-3xl">account_tree</span>
-          </div>
-          <p class="board-text-muted text-sm font-medium mt-2">{{ t('app.noRecommendationsAvailable') }}</p>
-          <p class="board-text-muted text-xs mt-1 text-center px-4">{{ t('app.recommendationEmptyGuidance') }}</p>
-          <ScenarioObjectiveIssues
-            v-if="scenarioRecommendationResult"
-            :status="scenarioRecommendationResult.objectiveStatus"
-            :issues="scenarioRecommendationResult.objectiveIssues"
-            :title="t('app.scenarioObjectiveIncompleteTitle')"
-            :format-issue="formatScenarioObjectiveIssue"
-          />
-        </div>
-
-        <div v-else-if="!isRecommendingScenario && scenarioRecommendationRequested && recommendedScenarioScene" class="space-y-3">
-          <div class="board-card board-card--raised rounded-xl border board-border-subtle p-3">
-            <div class="flex items-start justify-between gap-3">
-              <div class="min-w-0">
-                <h4 class="board-section-title truncate">
-                  {{ localizedRecommendationText(scenarioRecommendationResult?.scenarioName, t('app.scenarioRecommendations')) }}
-                </h4>
-                <p v-if="scenarioRecommendationResult?.rationale" class="mt-1 text-xs leading-relaxed board-text-muted">
-                  {{ localizedRecommendationText(scenarioRecommendationResult.rationale, t('app.recommendedBasedOnCurrentDevices')) }}
-                </p>
-              </div>
-              <div class="shrink-0 rounded-full board-chip-info px-2 py-1 text-xs font-semibold board-text-info">
-                {{ t('app.scenarioSummaryCount', { count: scenarioRecommendationResult?.count || 0 }) }}
-              </div>
-            </div>
-
-            <div class="mt-3 grid grid-cols-4 gap-2 text-center">
-              <div class="rounded-lg board-bg-muted px-2 py-2">
-                <div class="board-metric board-text-strong">{{ recommendedScenarioScene.devices.length }}</div>
-                <div class="text-xs board-text-muted">{{ t('app.devicesTool') }}</div>
-              </div>
-              <div class="rounded-lg board-bg-muted px-2 py-2">
-                <div class="board-metric board-text-strong">{{ recommendedScenarioScene.environmentVariables.length }}</div>
-                <div class="text-xs board-text-muted">{{ t('app.environmentPool') }}</div>
-              </div>
-              <div class="rounded-lg board-bg-muted px-2 py-2">
-                <div class="board-metric board-text-strong">{{ recommendedScenarioScene.rules.length }}</div>
-                <div class="text-xs board-text-muted">{{ t('app.rulesTool') }}</div>
-              </div>
-              <div class="rounded-lg board-bg-muted px-2 py-2">
-                <div class="board-metric board-text-strong">{{ recommendedScenarioScene.specs.length }}</div>
-                <div class="text-xs board-text-muted">{{ t('app.specificationsTool') }}</div>
-              </div>
-            </div>
-
-            <ScenarioObjectiveIssues
-              v-if="scenarioRecommendationResult"
-              :status="scenarioRecommendationResult.objectiveStatus"
-              :issues="scenarioRecommendationResult.objectiveIssues"
-              :title="t('app.scenarioObjectiveIncompleteTitle')"
-              :format-issue="formatScenarioObjectiveIssue"
-            />
-
-            <p data-testid="scenario-recommendations-unverified" class="mt-3 text-xs board-text-muted">{{ t('app.recommendationsNotVerified') }}</p>
-            <div
-              class="mt-3 flex items-start gap-2 rounded-lg border px-2.5 py-2 text-xs"
-              :class="scenarioRecommendationResult?.verificationReady
-                ? 'board-surface-info board-text-info'
-                : 'board-surface-warning board-text-warning'"
-            >
-              <span class="material-symbols-outlined text-base" aria-hidden="true">
-                {{ scenarioRecommendationResult?.verificationReady ? 'rule' : 'info' }}
-              </span>
-              <div>
-                <div class="font-semibold">
-                  {{ scenarioRecommendationResult?.verificationReady
-                    ? t('app.scenarioVerificationReady')
-                    : t('app.scenarioVerificationNotReady') }}
-                </div>
-                <ul v-if="scenarioRecommendationResult?.readinessIssues.length" class="mt-1 list-disc pl-4">
-                  <li v-for="issue in scenarioRecommendationResult.readinessIssues" :key="issue.code">
-                    {{ t(`app.scenarioReadiness.${issue.code}`) }}
-                  </li>
-                </ul>
-              </div>
-            </div>
-            <div
-              v-if="scenarioRecommendationResult?.semanticWarnings.length"
-              data-testid="scenario-semantic-warnings"
-              class="mt-2 flex items-start gap-2 rounded-lg board-surface-warning px-2.5 py-2 text-xs board-text-warning"
-            >
-              <span class="material-symbols-outlined text-base" aria-hidden="true">warning</span>
-              <div>
-                <div class="font-semibold">{{ t('app.scenarioSemanticWarningsTitle') }}</div>
-                <ul class="mt-1 list-disc space-y-0.5 pl-4">
-                  <li v-for="warning in scenarioRecommendationResult.semanticWarnings" :key="warning.code">
-                    {{ localizedRecommendationText(
-                      warning.message,
-                      t(`app.scenarioSemanticWarnings.${warning.code}`)
-                    ) }}
-                  </li>
-                </ul>
-              </div>
-            </div>
-          </div>
-
-          <details class="board-card rounded-xl border board-border-subtle p-3 text-xs">
-            <summary class="flex cursor-pointer items-center gap-1 font-semibold board-text-info">
-              <span class="material-symbols-outlined text-sm">visibility</span>
-              {{ t('app.viewScenarioDetails') }}
-            </summary>
-            <div class="mt-3 space-y-3 board-text-muted">
-              <div>
-                <div class="mb-1 font-semibold board-text-strong">{{ t('app.deviceList') }}</div>
-                <div class="space-y-1">
-                  <div
-                    v-for="device in recommendedScenarioScene.devices"
-                    :key="device.id"
-                    class="rounded board-bg-muted px-2 py-1.5"
-                  >
-                    <div class="font-medium board-text-strong">{{ device.label }} · {{ device.templateName }}</div>
-                    <div v-if="scenarioDeviceHasStateMachine(device)" class="mt-0.5 text-xs board-text-muted">
-                      {{ t('app.scenarioDeviceRuntime', {
-                        state: formatScenarioDeviceModelToken(device, device.state),
-                        trust: t(`app.${scenarioDeviceStateTrust(device)}`),
-                        privacy: t(`app.${scenarioDeviceStatePrivacy(device)}`)
-                      }) }}
-                    </div>
-                    <div v-else class="mt-0.5 text-xs board-text-muted">
-                      {{ t('app.scenarioStatelessDeviceRuntime') }}
-                    </div>
-                    <div v-if="device.variables?.length" class="mt-0.5 text-xs board-text-muted">
-                      {{ t('app.scenarioLocalVariables', {
-                        values: device.variables.map(variable => `${formatScenarioDeviceModelToken(device, variable.name)}=${formatScenarioDeviceModelToken(device, variable.value)} (${t(`app.${scenarioDeviceVariableTrust(device, variable)}`)})`).join(t('app.listSeparator'))
-                      }) }}
-                    </div>
-                    <div v-if="device.privacies?.length" class="mt-0.5 text-xs board-text-muted">
-                      {{ t('app.scenarioLocalSensitivities', {
-                        values: device.privacies.map(item => `${formatScenarioDeviceModelToken(device, item.name)}=${t(`app.${item.privacy}`)}`).join(t('app.listSeparator'))
-                      }) }}
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div v-if="recommendedScenarioScene.environmentVariables.length">
-                <div class="mb-1 font-semibold board-text-strong">{{ t('app.environmentPool') }}</div>
-                <ul class="space-y-1">
-                  <li
-                    v-for="variable in recommendedScenarioScene.environmentVariables"
-                    :key="variable.name"
-                    class="rounded board-bg-muted px-2 py-1"
-                  >
-                    {{ t('app.scenarioEnvironmentRuntime', {
-                      name: formatScenarioEnvironmentModelToken(variable.name, variable.name),
-                      value: variable.value == null
-                        ? t('app.empty')
-                        : formatScenarioEnvironmentModelToken(variable.name, variable.value),
-                      trust: t(`app.${variable.trust}`),
-                      privacy: t(`app.${variable.privacy}`)
-                    }) }}
-                  </li>
-                </ul>
-              </div>
-              <div v-if="recommendedScenarioScene.rules.length">
-                <div class="mb-1 font-semibold board-text-strong">{{ t('app.globalRules') }}</div>
-                <div class="mb-2 flex items-start gap-1.5 rounded board-surface-warning px-2 py-1.5 text-xs leading-4 board-text-warning">
-                  <span class="material-symbols-outlined text-sm" aria-hidden="true">low_priority</span>
-                  <span>{{ t('app.ruleExecutionOrderHint') }}</span>
-                </div>
-                <ul class="space-y-1">
-                  <li v-for="(rule, index) in recommendedScenarioScene.rules" :key="index" class="rounded board-bg-muted px-2 py-1.5">
-                    <div class="flex items-center gap-1.5 font-medium board-text-strong">
-                      <span class="rounded board-chip-warning px-1 py-0.5 text-xs font-semibold board-text-warning">#{{ index + 1 }}</span>
-                      <span>{{ rule.name || t('app.ruleNumber', { number: index + 1 }) }}</span>
-                    </div>
-                    <div class="mt-0.5 text-xs board-text-muted">
-                      {{ t('app.scenarioRuleSemantics', {
-                        triggers: rule.sources.map(formatScenarioRuleSource).join(` ${t('app.and')} `),
-                        action: formatScenarioRuleAction(rule)
-                      }) }}
-                    </div>
-                  </li>
-                </ul>
-              </div>
-              <div v-if="recommendedScenarioScene.specs.length">
-                <div class="mb-1 font-semibold board-text-strong">{{ t('app.specificationsTool') }}</div>
-                <ul class="space-y-1">
-                  <li v-for="(spec, index) in recommendedScenarioScene.specs" :key="spec.id" class="rounded board-bg-muted px-2 py-1.5">
-                    <div class="font-medium board-text-strong">{{ getSpecResultDisplayTitle(spec, index) }}</div>
-                    <div class="mt-0.5 break-all font-mono text-xs board-text-muted">
-                      {{ t('app.formulaPreview') }}: {{ formatScenarioSpecFormula(spec) }}
-                    </div>
-                  </li>
-                </ul>
-              </div>
-            </div>
-          </details>
-
-          <div class="grid grid-cols-2 gap-2">
-            <button
-              type="button"
-              data-testid="export-recommended-scenario"
-              class="board-card flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold board-text-info transition hover:board-chip-info"
-              @click="exportRecommendedScenario"
-            >
-              <span class="material-symbols-outlined text-base">download</span>
-              {{ t('app.exportScenarioJson') }}
-            </button>
-            <button
-              type="button"
-              data-testid="apply-recommended-scenario"
-              class="flex items-center justify-center gap-2 rounded-lg bg-[color:var(--accent-fill)] px-3 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-[color:var(--accent-fill-hover)]"
-              :disabled="isSceneReplacementInProgress"
-              @click="applyRecommendedScenario"
-            >
-              <span class="material-symbols-outlined text-base">playlist_add_check</span>
-              {{ t('app.replaceCurrentScene') }}
-            </button>
-          </div>
-
-          <p class="px-1 text-xs leading-relaxed board-text-muted">
-            {{ t('app.applyScenarioHint') }}
-          </p>
-        </div>
-        <details
-          v-if="scenarioRecommendationResult && !isRecommendingScenario"
-          data-testid="scenario-candidate-accounting"
-          class="board-card rounded-lg border board-border-subtle px-3 py-2 text-xs leading-relaxed board-text-muted"
-        >
-          <summary class="cursor-pointer py-2 font-semibold">{{ t('app.recommendationGenerationDetails') }}</summary>
-          <p v-if="scenarioRecommendationMessage" class="mt-1">{{ scenarioRecommendationMessage }}</p>
-          {{ t('app.recommendationCandidateSummary', {
-            raw: scenarioRecommendationResult.rawCandidateCount,
-            inspected: scenarioRecommendationResult.inspectedCount,
-            kept: scenarioRecommendationResult.validatedCount,
-            filtered: scenarioRecommendationResult.filteredCount,
-            truncated: scenarioRecommendationResult.truncatedCount
-          }) }}
-        </details>
-      </div>
-    </div>
-
-    <!-- Rule Recommendation Panel -->
-    <div 
-      v-if="showRecommendationPanel"
-      :ref="setRuleRecommendationPanelRef"
-      data-testid="rule-recommendation-panel"
-      class="board-floating-panel board-recommendation-panel board-surface-panel fixed top-20 z-30 w-96 max-w-[calc(100vw-2rem)] rounded-2xl shadow-2xl border overflow-hidden"
-      role="region"
-      aria-labelledby="rule-recommendation-panel-title"
-      tabindex="-1"
-      autofocus
-      @keydown="handleRuleRecommendationPanelKeydown"
-    >
-      <div class="relative overflow-hidden">
-        <div class="board-panel-banner absolute inset-0"></div>
-        <div class="board-tool-header relative">
-          <div class="flex items-center gap-3">
-            <div class="board-section-icon board-section-icon--lg">
-              <span class="material-symbols-outlined text-xl">auto_awesome</span>
-            </div>
-            <div>
-              <h3 id="rule-recommendation-panel-title" class="board-panel-title">{{ t('app.ruleRecommendations') }}</h3>
-            </div>
-          </div>
-          <HintTooltip :content="t('app.close')">
-            <button 
-              type="button"
-              @click="closeRecommendationPanel"
-              data-testid="close-rule-recommendations"
-              :aria-label="t('app.close')"
-              class="board-panel-close"
-            >
-              <span class="material-symbols-outlined" aria-hidden="true">close</span>
-            </button>
-          </HintTooltip>
-        </div>
-      </div>
-
-      <!-- Recommendation Content -->
-      <div class="board-recommendation-panel__body iot-scroll-region p-3 space-y-3">
-        <div class="rounded-lg border board-border-subtle board-bg-elevated p-2">
-          <label class="board-form-label">
-            {{ t('app.count') }}
-            <input
-              v-model.number="ruleRecommendationFilters.maxRecommendations"
-              :disabled="isRecommendingRules"
-              type="number"
-              min="1"
-              max="10"
-              class="board-field mt-1"
-            />
-          </label>
-        </div>
-
-        <div class="board-form-label rounded-lg border board-border-subtle board-bg-elevated p-2 block">
-          <div class="flex items-center justify-between gap-3">
-            <label for="rule-recommendation-requirement" class="board-form-label">{{ t('app.recommendationScenario') }}</label>
-            <InfoTooltip :text="t('app.recommendationBasisHint')" :label="t('app.showHelpFor', { topic: t('app.recommendationScenario') })" test-id="rule-recommendation-help" />
-          </div>
-          <textarea
-            id="rule-recommendation-requirement"
-            v-model.trim="ruleRecommendationFilters.userRequirement"
-            :disabled="isRecommendingRules"
-            rows="3"
-            :maxlength="AI_RECOMMENDATION_REQUIREMENT_MAX_LENGTH"
-            :placeholder="t('app.recommendationScenarioPlaceholder')"
-            class="board-field mt-1 resize-none leading-relaxed"
-          ></textarea>
-        </div>
-
-        <button
-          type="button"
-          data-testid="generate-rule-recommendations"
-          @click="fetchRuleRecommendations"
-          :disabled="isSceneReplacementInProgress || isRecommendationRunningForAnother('rule')"
-          :class="[
-            'board-panel-submit board-action-disarmed',
-            isRecommendingRules ? 'bg-[color:var(--danger-fill)] hover:bg-[color:var(--danger-fill-hover)]' : 'bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)]'
-          ]"
-        >
-          <span class="material-symbols-outlined text-base">
-            {{ isRecommendingRules ? 'stop' : 'auto_awesome' }}
-          </span>
-          {{ isRecommendingRules ? t('app.stopRuleRecommendations') : t('app.generateRecommendations') }}
-        </button>
-
-        <RecommendationProgressStatus
-          v-if="isRecommendingRules"
-          :elapsed-seconds="recommendationProgressElapsed"
-          :stage="recommendationProgressStage"
-          :template-count="deviceTemplates.length"
-          :device-count="nodes.length"
-          :rule-count="rules.length"
-          :spec-count="specifications.length"
-        />
-
-        <div v-if="recommendationFailures.rule" data-testid="rule-recommendation-error"
-          role="alert" class="rounded-lg board-surface-danger px-3 py-2 text-xs leading-5 board-text-danger">
-          <p class="font-semibold">{{ recommendationFailures.rule.message }}</p>
-          <FailureDetails v-bind="recommendationFailures.rule" />
-        </div>
-        <p v-if="ruleRecommendationMessage && !isRecommendingRules && ruleRecommendationIsAppliedConfirmation" class="text-xs board-text-muted">
-          {{ ruleRecommendationMessage }}
-        </p>
-        <div
-          v-if="ruleRecommendationFilteredCount > 0 && !isRecommendingRules"
-          class="rounded-lg border board-border-subtle board-bg-muted px-3 py-2 text-xs font-medium board-text-muted"
-        >
-          <p>{{ t('app.recommendationFilteredNotice', { count: ruleRecommendationFilteredCount }) }}</p>
-          <ul
-            v-if="ruleRecommendationFilteredItems.length"
-            class="iot-scroll-region mt-1 max-h-32 list-disc space-y-0.5 pl-4 pr-1 font-normal leading-relaxed"
-          >
-            <li
-              v-for="(item, index) in ruleRecommendationFilteredItems"
-              :key="`${item.type || 'item'}-${item.index || index}-${item.reasonCode || item.reason}`"
-            >
-              {{ formatRecommendationFilteredItem(item) }}
-            </li>
-          </ul>
-          <p v-else class="mt-1 font-normal board-text-muted">
-            {{ t('app.recommendationFilteredNoDetails') }}
-          </p>
-        </div>
-        <div
-          v-if="ruleRecommendationAdjustedItems.length > 0 && !isRecommendingRules"
-          data-testid="rule-adjusted-items"
-          class="rounded-lg board-surface-warning px-3 py-2 text-xs font-medium board-text-warning"
-        >
-          <p>{{ t('app.recommendationAdjustedNotice', { count: ruleRecommendationAdjustedItems.length }) }}</p>
-          <ul class="iot-scroll-region mt-1 max-h-36 list-disc space-y-0.5 pl-4 pr-1 font-normal leading-relaxed">
-            <li
-              v-for="(item, index) in ruleRecommendationAdjustedItems"
-              :key="`${item.type || 'item'}-${item.index || index}-${item.reasonCode || item.reason}`"
-            >
-              {{ formatRecommendationAdjustmentItem(item, 'rule') }}
-            </li>
-          </ul>
-        </div>
-
-        <div v-if="!isRecommendingRules && ruleRecommendationRequested && ruleRecommendations.length === 0 && !recommendationFailures.rule" class="flex flex-col items-center justify-center py-10">
-          <div class="w-16 h-16 board-bg-control rounded-full flex items-center justify-center mb-3">
-            <span class="material-symbols-outlined board-text-muted text-3xl">psychology</span>
-          </div>
-          <p class="board-text-muted text-sm font-medium mt-2">{{ t('app.noRecommendationsAvailable') }}</p>
-          <p class="board-text-muted text-xs mt-1 text-center px-4">{{ t('app.recommendationEmptyGuidance') }}</p>
-        </div>
-
-        <p v-if="!isRecommendingRules && ruleRecommendations.length" data-testid="rule-recommendations-unverified" class="text-xs board-text-muted">
-          {{ t('app.recommendationsNotVerified') }}
-        </p>
-
-        <!-- Recommendations List -->
-        <div v-if="!isRecommendingRules && ruleRecommendations.length && !recommendationFailures.rule" class="space-y-3">
-          <!-- Header with count -->
-          <div class="flex items-center justify-between px-1">
-            <span class="text-xs font-medium board-text-muted">{{ t('app.recommendationsFound', { count: ruleRecommendations.length }) }}</span>
-            <button 
-              @click="fetchRuleRecommendations"
-              :disabled="isSceneReplacementInProgress"
-              class="text-xs board-text-warning hover:font-medium flex items-center gap-1"
-            >
-              <span class="material-symbols-outlined text-sm">refresh</span>
-              {{ t('app.regenerateRecommendations') }}
-            </button>
-          </div>
-
-          <div 
-            v-for="(rec, index) in ruleRecommendations" 
-            :key="index"
-            class="board-card board-card--raised rounded-xl border board-border-subtle hover:transition-all overflow-hidden group"
-          >
-            <!-- Card Header -->
-            <div class="p-3 pb-2">
-              <div class="flex items-start justify-between gap-2">
-                <div class="flex min-w-0 items-center gap-2">
-                  <!-- Rule Icon -->
-                  <div class="board-section-icon board-section-icon--lg">
-                    <span class="material-symbols-outlined">smart_toy</span>
-                  </div>
-                  <div class="min-w-0">
-                    <h4 class="board-section-title break-words">{{ rec.name }}</h4>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <!-- Reason -->
-            <div class="px-3 pb-2">
-              <p class="board-copy break-words board-text-strong" data-testid="rule-recommendation-description">{{ presentedRuleRecommendations[index].description }}</p>
-              <p v-if="presentedRuleRecommendations[index].contentSource" class="mt-1 text-xs board-text-muted">{{ t('app.copyFrom') }} {{ presentedRuleRecommendations[index].contentSource }}</p>
-              <details v-if="localizedRecommendationText(rec.reason)" class="mt-2 text-xs board-text-muted">
-                <summary class="cursor-pointer py-2 font-semibold">{{ t('app.recommendationRationale') }}</summary>
-                <p class="break-words">{{ localizedRecommendationText(rec.reason) }}</p>
-              </details>
-            </div>
-
-            <!-- Details -->
-            <div class="px-3 pb-2">
-              <details class="text-xs">
-                <summary class="flex cursor-pointer items-center gap-1 font-medium board-text-warning hover:board-text-strong">
-                  <span class="material-symbols-outlined text-sm">info</span>
-                  {{ t('app.viewDetails') }}
-                </summary>
-                <div class="mt-2 space-y-2 rounded-lg board-bg-muted p-2 board-text-strong">
-                  <div v-if="rec.conditions && rec.conditions.length">
-                    <div class="mb-1 font-semibold board-text-warning">{{ t('app.trigger') }}:</div>
-                    <ul class="space-y-1">
-                      <li v-for="(cond, condIndex) in rec.conditions" :key="condIndex" class="text-xs">
-                        <span class="board-card font-mono rounded px-1 py-0.5">
-                          {{ formatRecommendedRuleConditionDevice(cond) }}.{{ formatRecommendedRuleConditionAttribute(cond) }}
-                        </span>
-                        <template v-if="isValueBasedRuleRecommendationCondition(cond.targetType)">
-                          <span class="mx-1">{{ formatRelationForDisplay(cond.relation) }}</span>
-                          <span class="board-card font-mono rounded px-1 py-0.5">{{ formatRecommendedRuleConditionValue(cond) }}</span>
-                        </template>
-                        <span v-else class="ml-1 board-text-muted">{{ t('app.apiSignalFires') }}</span>
-                      </li>
-                    </ul>
-                  </div>
-                  <div v-if="rec.command">
-                    <div class="mb-1 font-semibold board-text-warning">{{ t('app.action') }}:</div>
-                    <div class="text-xs">
-                      <span class="board-card font-mono rounded px-1 py-0.5">
-                        {{ formatRecommendedRuleCommandDevice(rec.command) }}.{{ formatRecommendedRuleCommandAction(rec.command) }}
-                      </span>
-                      <span v-if="rec.command.contentDevice && rec.command.content" class="ml-2 board-text-muted">
-                        ({{ t('app.copyFrom') }} {{ formatRecommendedRuleContentDevice(rec.command) }}<template v-if="rec.command.content">.{{ formatRecommendedRuleCommandContent(rec.command) }}<template v-if="rec.command.contentPrivacy"> ({{ t(`app.${rec.command.contentPrivacy}`) }})</template></template>)
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </details>
-            </div>
-
-            <!-- Action Button -->
-            <div class="px-3 pb-3">
-              <div v-if="recommendationApplyFailures.rule[index]" :data-testid="`rule-recommendation-apply-failure-${index}`" role="alert" class="mb-2 text-sm">
-                <p class="font-semibold board-text-danger">{{ recommendationApplyFailures.rule[index].message }}</p>
-                <FailureDetails v-bind="recommendationApplyFailures.rule[index]" />
-              </div>
-              <button 
-                @click="applyRecommendation(rec, index)"
-                :disabled="isSceneReplacementInProgress || appliedRuleRecommendations.has(index) || applyingRuleRecommendations.has(index) || recommendationApplyFailures.rule[index]?.outcomeUnknown"
-                :aria-busy="applyingRuleRecommendations.has(index)"
-                :class="[
-                  'w-full py-2 px-4 text-white text-sm font-medium rounded-lg transition-colors flex items-center justify-center gap-2',
-                  appliedRuleRecommendations.has(index)
-                    ? 'bg-[color:var(--success-fill)] cursor-default'
-                    : applyingRuleRecommendations.has(index)
-                      ? 'bg-[color:var(--accent-fill-disabled)] cursor-wait'
-                      : 'bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)]'
-                ]"
-              >
-                <span
-                  class="material-symbols-outlined text-sm"
-                  :class="{ 'animate-spin': applyingRuleRecommendations.has(index) }"
-                >
-                  {{ appliedRuleRecommendations.has(index) ? 'check' : applyingRuleRecommendations.has(index) ? 'progress_activity' : 'add' }}
-                </span>
-                {{ appliedRuleRecommendations.has(index)
-                  ? t('app.addedToBoard')
-                  : applyingRuleRecommendations.has(index)
-                    ? t('app.applyingRecommendation')
-                    : t('app.applyThisRule') }}
-              </button>
-            </div>
-          </div>
-        </div>
-        <details
-          v-if="ruleRecommendationMessage && !isRecommendingRules && !ruleRecommendationIsAppliedConfirmation"
-          data-testid="rule-candidate-accounting"
-          class="board-card rounded-lg border board-border-subtle px-3 py-2 text-xs leading-relaxed board-text-muted"
-        >
-          <summary class="cursor-pointer py-2 font-semibold">{{ t('app.recommendationGenerationDetails') }}</summary>
-          <p class="mt-1">{{ ruleRecommendationMessage }}</p>
-          {{ t('app.recommendationCandidateSummary', {
-            raw: ruleRecommendationRawCandidateCount,
-            inspected: ruleRecommendationInspectedCount,
-            kept: ruleRecommendations.length,
-            filtered: ruleRecommendationFilteredCount,
-            truncated: ruleRecommendationTruncatedCount
-          }) }}
-        </details>
-      </div>
-    </div>
-
-    <!-- Device Recommendation Panel -->
-    <div
-      v-if="showDeviceRecommendationPanel"
-      :ref="setDeviceRecommendationPanelRef"
-      data-testid="device-recommendation-panel"
-      class="board-floating-panel board-recommendation-panel board-surface-panel fixed top-20 z-30 w-96 max-w-[calc(100vw-2rem)] rounded-2xl shadow-2xl border overflow-hidden"
-      role="region"
-      aria-labelledby="device-recommendation-panel-title"
-      tabindex="-1"
-      autofocus
-      @keydown="handleDeviceRecommendationPanelKeydown"
-    >
-      <div class="relative overflow-hidden">
-        <div class="board-panel-banner absolute inset-0"></div>
-        <div class="board-tool-header relative">
-          <div class="flex items-center gap-3">
-            <div class="board-section-icon board-section-icon--lg">
-              <span class="material-symbols-outlined text-xl">devices</span>
-            </div>
-            <div>
-              <h3 id="device-recommendation-panel-title" class="board-panel-title">{{ t('app.deviceRecommendations') }}</h3>
-            </div>
-          </div>
-          <HintTooltip :content="t('app.close')">
-            <button 
-              type="button"
-              @click="closeDeviceRecommendationPanel"
-              data-testid="close-device-recommendations"
-              :aria-label="t('app.close')"
-              class="board-panel-close"
-            >
-              <span class="material-symbols-outlined" aria-hidden="true">close</span>
-            </button>
-          </HintTooltip>
-        </div>
-      </div>
-
-      <!-- Recommendation Content -->
-      <div class="board-recommendation-panel__body iot-scroll-region p-3 space-y-3">
-        <div class="rounded-lg border board-border-subtle board-bg-elevated p-2">
-          <label class="board-form-label">
-            {{ t('app.count') }}
-            <input
-              v-model.number="deviceRecommendationFilters.maxRecommendations"
-              :disabled="isRecommendingDevices"
-              type="number"
-              min="1"
-              max="10"
-              class="board-field mt-1"
-            />
-          </label>
-        </div>
-
-        <div class="board-form-label rounded-lg border board-border-subtle board-bg-elevated p-2 block">
-          <div class="flex items-center justify-between gap-3">
-            <label for="device-recommendation-requirement" class="board-form-label">{{ t('app.recommendationScenario') }}</label>
-            <InfoTooltip :text="t('app.recommendationBasisHint')" :label="t('app.showHelpFor', { topic: t('app.recommendationScenario') })" test-id="device-recommendation-help" />
-          </div>
-          <textarea
-            id="device-recommendation-requirement"
-            v-model.trim="deviceRecommendationFilters.userRequirement"
-            :disabled="isRecommendingDevices"
-            rows="3"
-            :maxlength="AI_RECOMMENDATION_REQUIREMENT_MAX_LENGTH"
-            :placeholder="t('app.recommendationScenarioPlaceholder')"
-            class="board-field mt-1 resize-none leading-relaxed"
-          ></textarea>
-        </div>
-
-        <button
-          type="button"
-          data-testid="generate-device-recommendations"
-          @click="fetchDeviceRecommendations"
-          :disabled="isSceneReplacementInProgress || isRecommendationRunningForAnother('device')"
-          :class="[
-            'board-panel-submit board-action-disarmed',
-            isRecommendingDevices ? 'bg-[color:var(--danger-fill)] hover:bg-[color:var(--danger-fill-hover)]' : 'bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)]'
-          ]"
-        >
-          <span class="material-symbols-outlined text-base">
-            {{ isRecommendingDevices ? 'stop' : 'auto_awesome' }}
-          </span>
-          {{ isRecommendingDevices ? t('app.stopDeviceRecommendations') : t('app.generateRecommendations') }}
-        </button>
-
-        <RecommendationProgressStatus
-          v-if="isRecommendingDevices"
-          :elapsed-seconds="recommendationProgressElapsed"
-          :stage="recommendationProgressStage"
-          :template-count="deviceTemplates.length"
-          :device-count="nodes.length"
-          :rule-count="rules.length"
-          :spec-count="specifications.length"
-        />
-
-        <div v-if="recommendationFailures.device" data-testid="device-recommendation-error"
-          role="alert" class="rounded-lg board-surface-danger px-3 py-2 text-xs leading-5 board-text-danger">
-          <p class="font-semibold">{{ recommendationFailures.device.message }}</p>
-          <FailureDetails v-bind="recommendationFailures.device" />
-        </div>
-        <p v-if="deviceRecommendationMessage && !isRecommendingDevices && deviceRecommendationIsAppliedConfirmation" class="text-xs board-text-muted">
-          {{ deviceRecommendationMessage }}
-        </p>
-        <div
-          v-if="deviceRecommendationFilteredCount > 0 && !isRecommendingDevices"
-          class="rounded-lg border board-border-subtle board-bg-muted px-3 py-2 text-xs font-medium board-text-muted"
-        >
-          <p>{{ t('app.recommendationFilteredNotice', { count: deviceRecommendationFilteredCount }) }}</p>
-          <ul
-            v-if="deviceRecommendationFilteredItems.length"
-            class="iot-scroll-region mt-1 max-h-32 list-disc space-y-0.5 pl-4 pr-1 font-normal leading-relaxed"
-          >
-            <li
-              v-for="(item, index) in deviceRecommendationFilteredItems"
-              :key="`${item.type || 'item'}-${item.index || index}-${item.reasonCode || item.reason}`"
-            >
-              {{ formatRecommendationFilteredItem(item) }}
-            </li>
-          </ul>
-          <p v-else class="mt-1 font-normal board-text-muted">
-            {{ t('app.recommendationFilteredNoDetails') }}
-          </p>
-        </div>
-        <div
-          v-if="deviceRecommendationAdjustedItems.length > 0 && !isRecommendingDevices"
-          data-testid="device-adjusted-items"
-          class="rounded-lg board-surface-warning px-3 py-2 text-xs font-medium board-text-warning"
-        >
-          <p>{{ t('app.deviceRecommendationAdjustedNotice', { count: deviceRecommendationAdjustedItems.length }) }}</p>
-          <ul class="iot-scroll-region mt-1 max-h-36 list-disc space-y-0.5 pl-4 pr-1 font-normal leading-relaxed">
-            <li
-              v-for="(item, index) in deviceRecommendationAdjustedItems"
-              :key="`${item.type || 'device'}-${item.index || index}-${item.reasonCode || item.reason}`"
-            >
-              {{ formatRecommendationAdjustmentItem(item, 'device') }}
-            </li>
-          </ul>
-        </div>
-
-        <div v-if="!isRecommendingDevices && deviceRecommendationRequested && deviceRecommendations.length === 0 && !recommendationFailures.device" class="flex flex-col items-center justify-center py-10">
-          <div class="w-16 h-16 board-bg-control rounded-full flex items-center justify-center mb-3">
-            <span class="material-symbols-outlined board-text-muted text-3xl">devices</span>
-          </div>
-          <p class="board-text-muted text-sm font-medium mt-2">{{ t('app.noRecommendationsAvailable') }}</p>
-          <p class="board-text-muted text-xs mt-1 text-center px-4">{{ t('app.recommendationEmptyGuidance') }}</p>
-        </div>
-
-        <p v-if="!isRecommendingDevices && deviceRecommendations.length" data-testid="device-recommendations-unverified" class="text-xs board-text-muted">
-          {{ t('app.recommendationsNotVerified') }}
-        </p>
-
-        <!-- Recommendations List -->
-        <div v-if="!isRecommendingDevices && deviceRecommendations.length && !recommendationFailures.device" class="space-y-3">
-          <!-- Header with count -->
-          <div class="flex items-center justify-between px-1">
-            <span class="text-xs font-medium board-text-muted">{{ t('app.devicesRecommended', { count: deviceRecommendations.length }) }}</span>
-            <button 
-              @click="fetchDeviceRecommendations"
-              :disabled="isSceneReplacementInProgress"
-              class="text-xs board-text-info hover:font-medium flex items-center gap-1"
-            >
-              <span class="material-symbols-outlined text-sm">refresh</span>
-              {{ t('app.regenerateRecommendations') }}
-            </button>
-          </div>
-
-          <div
-            v-for="(rec, index) in deviceRecommendations"
-            :key="index"
-            class="board-card board-card--raised rounded-xl border board-border-subtle hover:transition-all overflow-hidden group"
-          >
-            <!-- Card Header -->
-            <div class="p-3 pb-2">
-              <div class="flex items-start justify-between gap-2">
-                <div class="flex min-w-0 items-center gap-2">
-                  <!-- Device Icon -->
-                  <div class="board-section-icon board-section-icon--lg">
-                    <span class="material-symbols-outlined">device_hub</span>
-                  </div>
-                  <div class="min-w-0">
-                    <h4 class="board-section-title truncate" :title="rec.suggestedLabel || rec.templateName">
-                      {{ rec.suggestedLabel || rec.templateName }}
-                    </h4>
-                    <p class="text-xs font-medium board-text-info truncate" :title="rec.templateName">{{ rec.templateName }}</p>
-                    <p v-if="rec.description?.trim()" class="text-xs board-text-muted break-words">{{ rec.description }}</p>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <!-- Reason -->
-            <div class="px-3 pb-2">
-              <div v-if="rec.intendedUse || rec.suggestedPlacement || rec.initialState || rec.currentStateTrust || rec.currentStatePrivacy" class="mb-2 flex flex-wrap gap-1">
-                <span v-if="rec.intendedUse" class="rounded-full board-chip-info px-2 py-1 text-xs font-medium board-text-info">
-                  {{ t('app.deviceRecommendationIntendedUse', { value: localizedRecommendationText(rec.intendedUse, t('app.recommendedBasedOnCurrentDevices')) }) }}
-                </span>
-                <span v-if="rec.suggestedPlacement" class="rounded-full board-bg-muted px-2 py-1 text-xs font-medium board-text-muted">
-                  {{ t('app.deviceRecommendationSuggestedPlacement', { value: localizedRecommendationText(rec.suggestedPlacement, t('app.recommendedBasedOnCurrentDevices')) }) }}
-                </span>
-                <span v-if="rec.initialState" class="rounded-full board-bg-muted px-2 py-1 text-xs font-medium board-text-muted">
-                  {{ t('app.deviceRecommendationInitialState', { value: formatRecommendedDeviceModelToken(rec, rec.initialState) }) }}
-                </span>
-                <span v-if="rec.currentStateTrust" class="rounded-full board-chip-success px-2 py-1 text-xs font-medium board-text-success">
-                  {{ t('app.deviceRecommendationStateTrust', { value: t(`app.${rec.currentStateTrust}`) }) }}
-                </span>
-                <span v-if="rec.currentStatePrivacy" class="rounded-full board-chip-info px-2 py-1 text-xs font-medium board-text-info">
-                  {{ t('app.deviceRecommendationStatePrivacy', { value: t(`app.${rec.currentStatePrivacy}`) }) }}
-                </span>
-              </div>
-              <p v-if="rec.intendedUse || rec.suggestedPlacement" class="mb-2 text-xs leading-relaxed board-text-muted">
-                {{ t('app.deviceRecommendationContextAdvisory') }}
-              </p>
-              <p
-                v-if="recommendedDeviceEnvironmentAdditions(rec).length > 0"
-                class="mb-2 rounded-lg board-surface-info px-2 py-1.5 text-xs leading-relaxed board-text-info"
-              >
-                {{ t('app.deviceCreationEnvironmentAdditionsPreview', { names: formatRecommendedDeviceEnvironmentAdditions(rec) }) }}
-              </p>
-              <div v-if="rec.initialVariables?.length || rec.initialPrivacies?.length" class="mb-2 space-y-1 text-xs board-text-muted">
-                <div v-for="variable in rec.initialVariables || []" :key="`value-${variable.name}`" class="break-words">
-                  {{ t('app.deviceRecommendationInitialVariable', {
-                    name: formatRecommendedDeviceModelToken(rec, variable.name),
-                    value: formatRecommendedDeviceModelToken(rec, variable.value),
-                    trust: variable.trust ? t(`app.${variable.trust}`) : t('app.useTemplateDefault')
-                  }) }}
-                </div>
-                <div v-for="privacy in rec.initialPrivacies || []" :key="`privacy-${privacy.name}`" class="break-words">
-                  {{ t('app.deviceRecommendationInitialPrivacy', {
-                    name: formatRecommendedDeviceModelToken(rec, privacy.name),
-                    privacy: t(`app.${privacy.privacy}`)
-                  }) }}
-                </div>
-              </div>
-              <p class="text-xs board-text-muted break-words">{{ localizedRecommendationText(rec.reason, t('app.recommendedBasedOnCurrentDevices')) }}</p>
-            </div>
-
-            <!-- Action Button -->
-            <div class="px-3 pb-3">
-              <div v-if="recommendationApplyFailures.device[index]" :data-testid="`device-recommendation-apply-failure-${index}`" role="alert" class="mb-2 text-sm">
-                <p class="font-semibold board-text-danger">{{ recommendationApplyFailures.device[index].message }}</p>
-                <FailureDetails v-bind="recommendationApplyFailures.device[index]" />
-              </div>
-              <button 
-                @click="applyDeviceRecommendation(rec, index)"
-                :disabled="isSceneReplacementInProgress || appliedDeviceRecommendations.has(index) || applyingDeviceRecommendations.has(index) || recommendationApplyFailures.device[index]?.outcomeUnknown"
-                :aria-busy="applyingDeviceRecommendations.has(index)"
-                :class="[
-                  'w-full py-2 px-4 text-white text-sm font-medium rounded-lg transition-colors flex items-center justify-center gap-2',
-                  appliedDeviceRecommendations.has(index)
-                    ? 'bg-[color:var(--success-fill)] cursor-default'
-                    : applyingDeviceRecommendations.has(index)
-                      ? 'bg-[color:var(--accent-fill-disabled)] cursor-wait'
-                      : 'bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)]'
-                ]"
-              >
-                <span
-                  class="material-symbols-outlined text-sm"
-                  :class="{ 'animate-spin': applyingDeviceRecommendations.has(index) }"
-                >
-                  {{ appliedDeviceRecommendations.has(index) ? 'check' : applyingDeviceRecommendations.has(index) ? 'progress_activity' : 'add' }}
-                </span>
-                {{ appliedDeviceRecommendations.has(index)
-                  ? t('app.addedToBoard')
-                  : applyingDeviceRecommendations.has(index)
-                    ? t('app.applyingRecommendation')
-                    : t('app.addThisDevice') }}
-              </button>
-            </div>
-          </div>
-        </div>
-        <details
-          v-if="deviceRecommendationMessage && !isRecommendingDevices && !deviceRecommendationIsAppliedConfirmation"
-          data-testid="device-candidate-accounting"
-          class="board-card rounded-lg border board-border-subtle px-3 py-2 text-xs leading-relaxed board-text-muted"
-        >
-          <summary class="cursor-pointer py-2 font-semibold">{{ t('app.recommendationGenerationDetails') }}</summary>
-          <p class="mt-1">{{ deviceRecommendationMessage }}</p>
-          {{ t('app.recommendationCandidateSummary', {
-            raw: deviceRecommendationRawCandidateCount,
-            inspected: deviceRecommendationInspectedCount,
-            kept: deviceRecommendations.length,
-            filtered: deviceRecommendationFilteredCount,
-            truncated: deviceRecommendationTruncatedCount
-          }) }}
-        </details>
-      </div>
-    </div>
-
-    <!-- Specification Recommendation Panel -->
-    <div 
-      v-if="showSpecRecommendationPanel"
-      :ref="setSpecRecommendationPanelRef"
-      data-testid="spec-recommendation-panel"
-      class="board-floating-panel board-recommendation-panel board-surface-panel fixed top-20 z-30 w-96 max-w-[calc(100vw-2rem)] rounded-2xl shadow-2xl border overflow-hidden"
-      role="region"
-      aria-labelledby="spec-recommendation-panel-title"
-      tabindex="-1"
-      autofocus
-      @keydown="handleSpecRecommendationPanelKeydown"
-    >
-      <div class="relative overflow-hidden">
-        <div class="board-panel-banner absolute inset-0"></div>
-        <div class="board-tool-header relative">
-          <div class="flex items-center gap-3">
-            <div class="board-section-icon board-section-icon--lg">
-              <span class="material-symbols-outlined text-xl">policy</span>
-            </div>
-            <div>
-              <h3 id="spec-recommendation-panel-title" class="board-panel-title">{{ t('app.specificationRecommendations') }}</h3>
-            </div>
-          </div>
-          <HintTooltip :content="t('app.close')">
-            <button 
-              type="button"
-              @click="closeSpecRecommendationPanel"
-              data-testid="close-spec-recommendations"
-              :aria-label="t('app.close')"
-              class="board-panel-close"
-            >
-              <span class="material-symbols-outlined" aria-hidden="true">close</span>
-            </button>
-          </HintTooltip>
-        </div>
-      </div>
-
-      <!-- Recommendation Content -->
-      <div class="board-recommendation-panel__body iot-scroll-region p-3 space-y-3">
-        <div class="rounded-lg border board-border-subtle board-bg-elevated p-2">
-          <label class="board-form-label">
-            {{ t('app.count') }}
-            <input
-              v-model.number="specRecommendationFilters.maxRecommendations"
-              :disabled="isRecommendingSpecs"
-              type="number"
-              min="1"
-              max="10"
-              class="board-field mt-1"
-            />
-          </label>
-        </div>
-
-        <div class="board-form-label rounded-lg border board-border-subtle board-bg-elevated p-2 block">
-          <div class="flex items-center justify-between gap-3">
-            <label for="spec-recommendation-requirement" class="board-form-label">{{ t('app.recommendationScenario') }}</label>
-            <InfoTooltip :text="t('app.recommendationBasisHint')" :label="t('app.showHelpFor', { topic: t('app.recommendationScenario') })" test-id="spec-recommendation-help" />
-          </div>
-          <textarea
-            id="spec-recommendation-requirement"
-            v-model.trim="specRecommendationFilters.userRequirement"
-            :disabled="isRecommendingSpecs"
-            rows="3"
-            :maxlength="AI_RECOMMENDATION_REQUIREMENT_MAX_LENGTH"
-            :placeholder="t('app.recommendationScenarioPlaceholder')"
-            class="board-field mt-1 resize-none leading-relaxed"
-          ></textarea>
-        </div>
-
-        <button
-          type="button"
-          data-testid="generate-spec-recommendations"
-          @click="fetchSpecRecommendations"
-          :disabled="isSceneReplacementInProgress || isRecommendationRunningForAnother('spec')"
-          :class="[
-            'board-panel-submit board-action-disarmed',
-            isRecommendingSpecs ? 'bg-[color:var(--danger-fill)] hover:bg-[color:var(--danger-fill-hover)]' : 'bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)]'
-          ]"
-        >
-          <span class="material-symbols-outlined text-base">
-            {{ isRecommendingSpecs ? 'stop' : 'auto_awesome' }}
-          </span>
-          {{ isRecommendingSpecs ? t('app.stopSpecificationRecommendations') : t('app.generateRecommendations') }}
-        </button>
-
-        <RecommendationProgressStatus
-          v-if="isRecommendingSpecs"
-          :elapsed-seconds="recommendationProgressElapsed"
-          :stage="recommendationProgressStage"
-          :template-count="deviceTemplates.length"
-          :device-count="nodes.length"
-          :rule-count="rules.length"
-          :spec-count="specifications.length"
-        />
-
-        <div v-if="recommendationFailures.spec" data-testid="spec-recommendation-error"
-          role="alert" class="rounded-lg board-surface-danger px-3 py-2 text-xs leading-5 board-text-danger">
-          <p class="font-semibold">{{ recommendationFailures.spec.message }}</p>
-          <FailureDetails v-bind="recommendationFailures.spec" />
-        </div>
-        <p v-if="specRecommendationMessage && !isRecommendingSpecs && specRecommendationIsAppliedConfirmation" class="text-xs board-text-muted">
-          {{ specRecommendationMessage }}
-        </p>
-        <!--
-          The server-completed values, which this panel used to discard.
-          Rule, device and scenario all show this notice; spec did not read the field at all. It is the panel that
-          most needs it: `BoardStorageController:535` passes `requireAdjustments=false` for specifications alone, so
-          this is exactly the case where the recommender may adjust a candidate silently. Applying a value the
-          system completed for you, without being told it did, is the outcome the other three panels prevent.
-        -->
-        <div
-          v-if="specRecommendationAdjustedItems.length > 0 && !isRecommendingSpecs"
-          data-testid="spec-adjusted-items"
-          class="rounded-lg board-surface-warning px-3 py-2 text-xs font-medium board-text-warning"
-        >
-          <p>{{ t('app.recommendationAdjustedNotice', { count: specRecommendationAdjustedItems.length }) }}</p>
-          <ul class="iot-scroll-region mt-1 max-h-36 list-disc space-y-0.5 pl-4 pr-1 font-normal leading-relaxed">
-            <li
-              v-for="(item, index) in specRecommendationAdjustedItems"
-              :key="`${item.type || 'item'}-${item.index || index}-${item.reasonCode || item.reason}`"
-            >
-              {{ formatRecommendationAdjustmentItem(item, 'spec') }}
-            </li>
-          </ul>
-        </div>
-        <div
-          v-if="specRecommendationFilteredCount > 0 && !isRecommendingSpecs"
-          class="rounded-lg border board-border-subtle board-bg-muted px-3 py-2 text-xs font-medium board-text-muted"
-        >
-          <p>{{ t('app.recommendationFilteredNotice', { count: specRecommendationFilteredCount }) }}</p>
-          <ul
-            v-if="specRecommendationFilteredItems.length"
-            class="iot-scroll-region mt-1 max-h-32 list-disc space-y-0.5 pl-4 pr-1 font-normal leading-relaxed"
-          >
-            <li
-              v-for="(item, index) in specRecommendationFilteredItems"
-              :key="`${item.type || 'item'}-${item.index || index}-${item.reasonCode || item.reason}`"
-            >
-              {{ formatRecommendationFilteredItem(item) }}
-            </li>
-          </ul>
-          <p v-else class="mt-1 font-normal board-text-muted">
-            {{ t('app.recommendationFilteredNoDetails') }}
-          </p>
-        </div>
-
-        <div v-if="!isRecommendingSpecs && specRecommendationRequested && specRecommendations.length === 0 && !recommendationFailures.spec" class="flex flex-col items-center justify-center py-10">
-          <div class="w-16 h-16 board-bg-control rounded-full flex items-center justify-center mb-3">
-            <span class="material-symbols-outlined board-text-muted text-3xl">policy</span>
-          </div>
-          <p class="board-text-muted text-sm font-medium mt-2">{{ t('app.noRecommendationsAvailable') }}</p>
-          <p class="board-text-muted text-xs mt-1 text-center px-4">{{ t('app.recommendationEmptyGuidance') }}</p>
-        </div>
-
-        <p v-if="!isRecommendingSpecs && specRecommendations.length" data-testid="spec-recommendations-unverified" class="text-xs board-text-muted">
-          {{ t('app.recommendationsNotVerified') }}
-        </p>
-
-        <!-- Recommendations List -->
-        <div v-if="!isRecommendingSpecs && specRecommendations.length && !recommendationFailures.spec" class="space-y-3">
-          <!-- Header with count -->
-          <div class="flex items-center justify-between px-1">
-            <span class="text-xs font-medium board-text-muted">{{ t('app.specificationsRecommended', { count: specRecommendations.length }) }}</span>
-            <button 
-              @click="fetchSpecRecommendations"
-              :disabled="isSceneReplacementInProgress"
-              class="text-xs board-text-danger hover:font-medium flex items-center gap-1"
-            >
-              <span class="material-symbols-outlined text-sm">refresh</span>
-              {{ t('app.regenerateRecommendations') }}
-            </button>
-          </div>
-
-          <div 
-            v-for="(rec, index) in specRecommendations" 
-            :key="index"
-            class="board-card board-card--raised rounded-xl border board-border-subtle hover:transition-all overflow-hidden group"
-          >
-            <!-- Card Header -->
-            <div class="p-3 pb-2">
-              <div class="flex items-start justify-between gap-2">
-                <div class="flex min-w-0 items-center gap-2">
-                  <!-- Specification Icon -->
-                  <div class="board-section-icon board-section-icon--lg">
-                    <span class="material-symbols-outlined">policy</span>
-                  </div>
-                  <div class="min-w-0">
-                    <h4 class="board-section-title break-words">
-                      {{ recommendedSpecTemplateLabel(rec.templateId) }}
-                    </h4>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div class="px-3 pb-2">
-              <p class="board-copy break-words board-text-strong" data-testid="spec-recommendation-description">{{ presentedSpecRecommendations[index] }}</p>
-              <details v-if="localizedRecommendationText(rec.rationale)" class="mt-2 text-xs board-text-muted">
-                <summary class="cursor-pointer py-2 font-semibold">{{ t('app.recommendationRationale') }}</summary>
-                <p class="break-words">{{ localizedRecommendationText(rec.rationale) }}</p>
-              </details>
-            </div>
-
-            <!-- Details -->
-            <div class="px-3 pb-2">
-              <details class="text-xs">
-                <summary class="flex cursor-pointer items-center gap-1 font-medium board-text-danger hover:board-text-strong">
-                  <span class="material-symbols-outlined text-sm">info</span>
-                  {{ t('app.viewDetails') }}
-                </summary>
-                <div class="mt-2 space-y-2 rounded-lg board-bg-muted p-2 board-text-strong">
-                  <div v-if="rec.aConditions && rec.aConditions.length">
-                    <div class="mb-1 font-semibold board-text-danger">{{ t('app.alwaysConditions') }}:</div>
-                    <ul class="space-y-1">
-                      <li v-for="(cond, condIndex) in rec.aConditions" :key="condIndex" class="text-xs">
-                        <span class="board-card font-mono rounded px-1 py-0.5">
-                          {{ formatRecommendedSpecConditionTarget(cond) }}
-                        </span>
-                        <span class="mx-1">{{ formatRelationForDisplay(cond.relation) }}</span>
-                        <span class="board-card font-mono rounded px-1 py-0.5">{{ formatRecommendedSpecConditionValue(cond) }}</span>
-                      </li>
-                    </ul>
-                  </div>
-                  <div v-if="rec.ifConditions && rec.ifConditions.length">
-                    <div class="mb-1 font-semibold board-text-danger">{{ t('app.ifConditions') }}:</div>
-                    <ul class="space-y-1">
-                      <li v-for="(cond, condIndex) in rec.ifConditions" :key="condIndex" class="text-xs">
-                        <span class="board-card font-mono rounded px-1 py-0.5">
-                          {{ formatRecommendedSpecConditionTarget(cond) }}
-                        </span>
-                        <span class="mx-1">{{ formatRelationForDisplay(cond.relation) }}</span>
-                        <span class="board-card font-mono rounded px-1 py-0.5">{{ formatRecommendedSpecConditionValue(cond) }}</span>
-                      </li>
-                    </ul>
-                  </div>
-                  <div v-if="rec.thenConditions && rec.thenConditions.length">
-                    <div class="mb-1 font-semibold board-text-danger">{{ t('app.thenConditions') }}:</div>
-                    <ul class="space-y-1">
-                      <li v-for="(cond, condIndex) in rec.thenConditions" :key="condIndex" class="text-xs">
-                        <span class="board-card font-mono rounded px-1 py-0.5">
-                          {{ formatRecommendedSpecConditionTarget(cond) }}
-                        </span>
-                        <span class="mx-1">{{ formatRelationForDisplay(cond.relation) }}</span>
-                        <span class="board-card font-mono rounded px-1 py-0.5">{{ formatRecommendedSpecConditionValue(cond) }}</span>
-                      </li>
-                    </ul>
-                  </div>
-                </div>
-              </details>
-            </div>
-
-            <!-- Action Button -->
-            <div class="px-3 pb-3">
-              <div v-if="recommendationApplyFailures.spec[index]" :data-testid="`spec-recommendation-apply-failure-${index}`" role="alert" class="mb-2 text-sm">
-                <p class="font-semibold board-text-danger">{{ recommendationApplyFailures.spec[index].message }}</p>
-                <FailureDetails v-bind="recommendationApplyFailures.spec[index]" />
-              </div>
-              <button 
-                @click="applySpecRecommendation(rec, index)"
-                :disabled="isSceneReplacementInProgress || appliedSpecRecommendations.has(index) || applyingSpecRecommendations.has(index) || recommendationApplyFailures.spec[index]?.outcomeUnknown"
-                :aria-busy="applyingSpecRecommendations.has(index)"
-                :class="[
-                  'w-full py-2 px-4 text-white text-sm font-medium rounded-lg transition-colors flex items-center justify-center gap-2',
-                  appliedSpecRecommendations.has(index)
-                    ? 'bg-[color:var(--success-fill)] cursor-default'
-                    : applyingSpecRecommendations.has(index)
-                      ? 'bg-[color:var(--accent-fill-disabled)] cursor-wait'
-                      : 'bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)]'
-                ]"
-              >
-                <span
-                  class="material-symbols-outlined text-sm"
-                  :class="{ 'animate-spin': applyingSpecRecommendations.has(index) }"
-                >
-                  {{ appliedSpecRecommendations.has(index) ? 'check' : applyingSpecRecommendations.has(index) ? 'progress_activity' : 'add' }}
-                </span>
-                {{ appliedSpecRecommendations.has(index)
-                  ? t('app.addedToBoard')
-                  : applyingSpecRecommendations.has(index)
-                    ? t('app.applyingRecommendation')
-                    : t('app.addThisSpecification') }}
-              </button>
-            </div>
-          </div>
-        </div>
-        <details
-          v-if="specRecommendationMessage && !isRecommendingSpecs && !specRecommendationIsAppliedConfirmation"
-          data-testid="spec-candidate-accounting"
-          class="board-card rounded-lg border board-border-subtle px-3 py-2 text-xs leading-relaxed board-text-muted"
-        >
-          <summary class="cursor-pointer py-2 font-semibold">{{ t('app.recommendationGenerationDetails') }}</summary>
-          <p class="mt-1">{{ specRecommendationMessage }}</p>
-          {{ t('app.recommendationCandidateSummary', {
-            raw: specRecommendationRawCandidateCount,
-            inspected: specRecommendationInspectedCount,
-            kept: specRecommendations.length,
-            filtered: specRecommendationFilteredCount,
-            truncated: specRecommendationTruncatedCount
-          }) }}
-        </details>
-      </div>
-    </div>
 
     <!-- Simulation Panel (Appears when clicking simulation button) -->
     <div 
@@ -18378,7 +17208,7 @@ const attackSelectionSummary = (
   >
     <div
       :ref="setVerificationResultDialogRef"
-      class="iot-dialog iot-dialog--md"
+      class="iot-dialog iot-dialog--lg"
       :class="verificationResultStatus.dialogToneClass"
       role="dialog"
       aria-modal="true"
@@ -18460,184 +17290,131 @@ const attackSelectionSummary = (
           <section aria-labelledby="verification-summary-title">
             <h4 id="verification-summary-title" class="sr-only">{{ t('app.verificationSummary') }}</h4>
             <div class="verification-summary grid grid-cols-3 gap-px overflow-hidden rounded-lg border board-border-subtle board-bg-control">
-              <div class="board-card p-4">
+              <div class="board-card flex flex-wrap items-center justify-between gap-2 px-3 py-2">
                 <div class="board-form-label">{{ t('app.satisfied') }}</div>
-                <div class="mt-1 text-2xl font-semibold board-text-success">{{ verificationSpecResultSummary.satisfied }}</div>
+                <div class="text-lg font-semibold board-text-success">{{ verificationSpecResultSummary.satisfied }}</div>
               </div>
-              <div class="board-card p-4">
+              <div class="board-card flex flex-wrap items-center justify-between gap-2 px-3 py-2">
                 <div class="board-form-label">{{ t('app.violated') }}</div>
-                <div class="mt-1 text-2xl font-semibold board-text-danger">{{ verificationSpecResultSummary.violated }}</div>
+                <div class="text-lg font-semibold board-text-danger">{{ verificationSpecResultSummary.violated }}</div>
               </div>
-              <div class="board-card p-4">
+              <div class="board-card flex flex-wrap items-center justify-between gap-2 px-3 py-2">
                 <div class="board-form-label">{{ t('app.inconclusive') }}</div>
-                <div class="mt-1 text-2xl font-semibold board-text-warning">{{ verificationSpecResultSummary.inconclusive }}</div>
+                <div class="text-lg font-semibold board-text-warning">{{ verificationSpecResultSummary.inconclusive }}</div>
               </div>
             </div>
           </section>
 
 
-          <!--
-            Counterexamples, promoted above the per-specification verdicts: this is the evidence the
-            reader acts on, and the verdict list is the reference behind it.
-
-            One list, not two. This section and a second, near-identical one below the run context both
-            rendered `verificationResult.traces`, so every violation appeared twice with two different
-            replay handlers — and the promoted copy passed the *array index* to
-            `selectAndPlayVerificationTrace`, which takes a trace id, so its "view" button fetched
-            trace 0, 1, 2… The surviving list keeps `selectAndPlayTrace(index)`, which indexes
-            `verificationResult.traces` directly, and the `data-testid`s the E2E flow addresses.
-          -->
-          <!--
-            Outside the counterexample section, not inside it. That section is
-            `v-if="traces?.length"`, so with no parseable counterexample it does not render at all — and
-            that is precisely the case where the summary grid's violation count needs accounting for.
-            A notice placed inside would vanish exactly when it is needed.
-          -->
-          <p
-            v-if="verificationEvidenceShortfall > 0"
+          <p v-if="verificationEvidenceShortfall > 0"
             class="board-run-notice board-surface-warning board-text-warning"
-            data-testid="verification-evidence-shortfall"
-          >
+            data-testid="verification-evidence-shortfall">
             {{ t('app.someViolationsHaveNoReplayableCounterexample') }}
           </p>
+          <p v-if="getVerificationOutcome(verificationResult) === 'INCONCLUSIVE' && verificationResult.traces.length"
+            class="board-run-notice board-surface-warning board-text-warning">
+            {{ t('app.inconclusiveEvidenceSummary', { counterexamples: verificationResult.traces.length }) }}
+          </p>
 
-          <section v-if="verificationResult?.traces?.length" aria-labelledby="violations-title">
-            <h4 id="violations-title" class="board-section-title mb-2">
-              {{ getVerificationOutcome(verificationResult) === 'VIOLATED'
-                ? t('app.violationsTitle')
-                : t('app.inconclusiveEvidenceTitle') }} ({{ verificationResult.traces.length }})
-            </h4>
-            <p
-              v-if="getVerificationOutcome(verificationResult) === 'INCONCLUSIVE'"
-              class="board-run-notice mb-2 board-surface-warning board-text-warning"
-            >
-              {{ t('app.inconclusiveEvidenceSummary', { counterexamples: verificationResult.traces.length }) }}
-            </p>
-            <div class="space-y-2">
-              <div v-for="(trace, i) in verificationResult.traces" :key="i" class="border board-border-subtle rounded-lg p-3">
-                <div class="verification-trace__header">
-                  <div
-                    class="text-xs font-semibold"
-                    :class="getVerificationOutcome(verificationResult) === 'VIOLATED'
-                      ? 'board-text-danger'
-                      : 'board-text-warning'"
-                  >{{ t('app.violationNumber', { index: Number(i) + 1 }) }}</div>
-                  <div class="verification-trace__actions">
-                    <button
-                      v-if="canFixVerificationResultTrace(trace)"
-                      type="button"
-                      data-testid="verification-trace-fix"
-                      class="iot-dialog-btn iot-dialog-btn--ghost"
-                      :disabled="simulationAnimationState.visible"
-                      @click="openFixForVerificationResultTrace(trace)"
-                    >
-                      <!-- aria-hidden, or the ligature text joins the accessible name: this button
-                           announced as "build Fix Rules" and its sibling as "play_arrow View", which
-                           is what a name-based query (or a screen reader) actually receives. -->
-                      <span class="material-symbols-outlined text-xs" aria-hidden="true">build</span>
-                      {{ t('app.fixRules') }}
-                    </button>
-                    <button
-                      type="button"
-                      @click="selectAndPlayTrace(Number(i))"
-                      :disabled="simulationAnimationState.visible"
-                      data-testid="verification-trace-replay"
-                      class="iot-dialog-btn iot-dialog-btn--primary"
-                    >
-                      <span class="material-symbols-outlined text-xs" aria-hidden="true">play_arrow</span>
-                      {{ t('app.replay') }}
-                      <span v-if="simulationAnimationState.visible" class="text-xs">({{ t('app.active') }})</span>
-                    </button>
-                  </div>
-                </div>
-                <!-- Why Fix is withheld. Without this the button simply vanished, which reads as a bug. -->
-                <p
-                  v-if="!canFixVerificationResultTrace(trace) && !verificationResultStale"
-                  data-testid="verification-trace-fix-unavailable"
-                  class="board-run-notice mb-2 board-surface-warning board-text-warning"
-                >
-                  {{ !hasPersistedVerificationTrace(verificationResult, trace)
-                    ? t(verificationResult.historyPersistence.status === 'OUTCOME_UNKNOWN'
-                      ? 'app.verificationTracePersistenceUnknownFixUnavailable'
-                      : 'app.verificationTraceNotPersistedFixUnavailable')
-                    : verificationFixBlockedReason }}
-                </p>
-                <div class="text-xs board-text-muted">
-                  <span class="font-medium">{{ getTraceSpecDisplayTitle(trace) }}</span>
-                  <span class="board-text-muted"> · {{ t('app.statesCount', { count: trace.states?.length || 0 }) }}</span>
-                </div>
-                <details v-if="trace.violatedSpecId" class="verification-result-disclosure mt-1 text-xs board-text-muted">
-                  <summary class="cursor-pointer font-semibold">{{ t('app.technicalDetails') }}</summary>
-                  <div class="mt-1 grid gap-1 sm:grid-cols-[9rem_minmax(0,1fr)]">
-                    <span class="font-medium">{{ t('app.specificationTechnicalId') }}</span>
-                    <code class="break-all rounded board-bg-muted px-2 py-1 text-xs board-text-strong">{{ trace.violatedSpecId }}</code>
-                  </div>
-                </details>
-              </div>
-            </div>
-          </section>
-
-          <details
-            v-if="verificationSpecResultSummary.total > 0"
-            class="verification-result-disclosure group border-t board-border-subtle pt-3"
-            open
-            data-testid="spec-results-section"
-          >
-            <summary class="flex cursor-pointer list-none items-center justify-between text-sm font-semibold board-text-strong hover:board-text-strong">
-              <span class="inline-flex items-center gap-2">
-                <span class="material-symbols-outlined text-lg board-text-muted" aria-hidden="true">rule</span>
-                {{ t('app.specResults') }} ({{ verificationSpecResultSummary.total }})
-              </span>
-              <span class="material-symbols-outlined transition-transform group-open:rotate-180" aria-hidden="true">expand_more</span>
-            </summary>
-            <div class="iot-scroll-region mt-3 space-y-2 max-h-72 pr-1" data-testid="spec-results-list">
-              <article
-                v-for="(result, index) in verificationSpecResultSummary.results"
-                :key="`${result.specId}-${index}`"
-                :data-spec-id="result.specId"
-                class="board-card rounded-lg border p-3"
-                :class="result.presentation.borderClass"
-              >
-                <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
-                  <span class="font-semibold board-text-muted">{{ t('app.specificationNumber', { number: Number(index) + 1 }) }}</span>
-                  <span class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-semibold" :class="result.presentation.badgeClass">
-                    <span class="material-symbols-outlined text-sm" aria-hidden="true">{{ result.presentation.icon }}</span>
-                    {{ result.presentation.label }}
+          <section v-if="verificationEvidenceGroups.length" data-testid="spec-results-section" aria-labelledby="spec-results-title">
+            <h4 id="spec-results-title" class="board-section-title mb-3">{{ t('app.specResults') }}</h4>
+            <div class="space-y-3" data-testid="spec-results-list">
+              <article v-for="(group, groupIndex) in verificationEvidenceGroups" :key="group.result?.specId || `trace-${groupIndex}`"
+                :data-spec-id="group.result?.specId || group.traces[0]?.trace.violatedSpecId" class="iot-result-item">
+                <div class="iot-result-item__heading">
+                  <h4 class="iot-result-item__title" data-testid="spec-result-name">
+                    {{ group.result?.specificationLabel || group.traces[0]?.trace.violatedSpec?.name || t('app.unknownSpecification') }}
+                  </h4>
+                  <span v-if="group.result" class="iot-result-item__badge" :class="group.result.presentation.badgeClass">
+                    <span class="material-symbols-outlined text-sm" aria-hidden="true">{{ group.result.presentation.icon }}</span>
+                    {{ group.result.presentation.label }}
                   </span>
                 </div>
-                <h4 class="board-copy my-2 break-words" data-testid="spec-result-description">
-                  {{ result.description || result.displayTitle }}
-                </h4>
-                <p v-if="result.triggerDetail" class="mb-2 text-xs leading-relaxed"
-                  :class="result.triggerWarning ? 'board-text-warning' : 'board-text-muted'"
-                  data-testid="spec-result-trigger-evidence">{{ result.triggerDetail }}</p>
-                <p v-if="!result.description" class="mb-2 text-xs board-text-muted" data-testid="spec-result-snapshot-unavailable">{{ t('app.specificationSnapshotUnavailable') }}</p>
-                <details class="spec-formula-disclosure" data-testid="spec-result-formula-details">
-                  <summary class="text-xs font-medium board-text-muted">
-                    <span class="material-symbols-outlined spec-formula-disclosure__chevron" aria-hidden="true">chevron_right</span>
-                    <span>{{ t('app.formulaPreview') }}</span>
-                    <span class="rounded board-card board-card--muted px-1.5 py-0.5 font-mono" data-testid="spec-result-formula-kind">{{ result.formulaKind }}</span>
-                  </summary>
-                  <p class="mt-2 whitespace-pre-wrap break-all rounded board-card board-card--muted p-2 font-mono text-xs leading-relaxed board-text-muted" data-testid="spec-result-formula">{{ result.formula }}</p>
-                </details>
-                <div v-if="result.variableSourceLabels.length" class="mt-2 flex flex-wrap gap-1">
-                  <span v-for="entry in result.variableSourceLabels" :key="entry.key"
-                    class="rounded border px-1.5 py-0.5 text-xs font-semibold"
-                    :class="entry.unresolved ? 'board-chip-danger board-text-danger border-[color:var(--danger-border)]' : 'board-border-subtle board-bg-control board-text-muted'"
-                    data-testid="spec-result-variable-source">{{ entry.label }}</span>
+                <p class="board-copy mt-2 break-words" data-testid="spec-result-description">
+                  {{ group.result?.description || getTraceSpecDisplayTitle(group.traces[0]?.trace) }}
+                </p>
+                <p v-if="group.result?.triggerDetail" class="mt-2 text-xs leading-relaxed"
+                  :class="group.result.triggerWarning ? 'board-text-warning' : 'board-text-muted'"
+                  data-testid="spec-result-trigger-evidence">{{ group.result.triggerDetail }}</p>
+                <div v-for="({ trace, index }) in group.traces" :key="index" class="mt-3">
+                  <div class="verification-trace__header">
+                    <span class="text-xs board-text-muted">{{ t('app.violationNumber', { index: index + 1 }) }} · {{ t('app.statesCount', { count: trace.states.length }) }}</span>
+                    <div class="verification-trace__actions">
+                      <button
+                        v-if="canFixVerificationResultTrace(trace)"
+                        type="button"
+                        data-testid="verification-trace-fix"
+                        class="iot-dialog-btn iot-dialog-btn--ghost"
+                        :disabled="simulationAnimationState.visible"
+                        @click="openFixForVerificationResultTrace(trace)"
+                      >
+                        <!-- aria-hidden, or the ligature text joins the accessible name: this button
+                             announced as "build Fix Rules" and its sibling as "play_arrow View", which
+                             is what a name-based query (or a screen reader) actually receives. -->
+                        <span class="material-symbols-outlined text-xs" aria-hidden="true">build</span>
+                        {{ t('app.fixRules') }}
+                      </button>
+                      <button
+                        type="button"
+                        @click="selectAndPlayTrace(index)"
+                        :disabled="simulationAnimationState.visible"
+                        data-testid="verification-trace-replay"
+                        class="iot-dialog-btn iot-dialog-btn--primary"
+                      >
+                        <span class="material-symbols-outlined text-xs" aria-hidden="true">play_arrow</span>
+                        {{ t('app.replay') }}
+                        <span v-if="simulationAnimationState.visible" class="text-xs">({{ t('app.active') }})</span>
+                      </button>
+                    </div>
+                  </div>
+                  <!-- Why Fix is withheld. Without this the button simply vanished, which reads as a bug. -->
+                  <p
+                    v-if="!canFixVerificationResultTrace(trace) && !verificationResultStale"
+                    data-testid="verification-trace-fix-unavailable"
+                    class="board-run-notice mb-2 board-surface-warning board-text-warning"
+                  >
+                    {{ !hasPersistedVerificationTrace(verificationResult, trace)
+                      ? t(verificationResult.historyPersistence.status === 'OUTCOME_UNKNOWN'
+                        ? 'app.verificationTracePersistenceUnknownFixUnavailable'
+                        : 'app.verificationTraceNotPersistedFixUnavailable')
+                      : verificationFixBlockedReason }}
+                  </p>
                 </div>
-                <details v-if="result.specId || result.expression" class="verification-result-disclosure mt-2 text-xs board-text-muted">
+                <template v-if="group.result">
+                  <details class="spec-formula-disclosure" data-testid="spec-result-formula-details">
+                    <summary class="text-xs font-medium board-text-muted">
+                      <span class="material-symbols-outlined spec-formula-disclosure__chevron" aria-hidden="true">chevron_right</span>
+                      <span>{{ t('app.formulaPreview') }}</span>
+                      <span class="rounded board-card board-card--muted px-1.5 py-0.5 font-mono" data-testid="spec-result-formula-kind">{{ group.result.formulaKind }}</span>
+                    </summary>
+                    <p class="mt-2 whitespace-pre-wrap break-all rounded board-card board-card--muted p-2 font-mono text-xs leading-relaxed board-text-muted" data-testid="spec-result-formula">{{ group.result.formula }}</p>
+                  </details>
+                  <div v-if="group.result.variableSourceLabels.length" class="mt-2 flex flex-wrap gap-1">
+                    <span v-for="entry in group.result.variableSourceLabels" :key="entry.key"
+                      class="rounded border px-1.5 py-0.5 text-xs font-semibold"
+                      :class="entry.unresolved ? 'board-chip-danger board-text-danger border-[color:var(--danger-border)]' : 'board-border-subtle board-bg-control board-text-muted'"
+                      data-testid="spec-result-variable-source">{{ entry.label }}</span>
+                  </div>
+                  <details v-if="group.result.specId || group.result.expression" class="verification-result-disclosure mt-2 text-xs board-text-muted">
+                    <summary class="cursor-pointer font-semibold">{{ t('app.technicalDetails') }}</summary>
+                    <div class="mt-1 grid gap-1 sm:grid-cols-[9rem_minmax(0,1fr)]">
+                      <span class="font-medium">{{ t('app.actualCheckedExpression') }}</span>
+                      <code class="break-all rounded board-bg-muted px-2 py-1 board-text-strong">{{ group.result.expression }}</code>
+                      <span class="font-medium">{{ t('app.specificationTechnicalId') }}</span>
+                      <code class="break-all rounded board-bg-muted px-2 py-1 board-text-strong">{{ group.result.specId }}</code>
+                    </div>
+                  </details>
+                </template>
+                <details v-else-if="group.traces[0]?.trace.violatedSpecId" class="verification-result-disclosure mt-2 text-xs board-text-muted">
                   <summary class="cursor-pointer font-semibold">{{ t('app.technicalDetails') }}</summary>
                   <div class="mt-1 grid gap-1 sm:grid-cols-[9rem_minmax(0,1fr)]">
-                    <span class="font-medium">{{ t('app.actualCheckedExpression') }}</span>
-                    <code class="break-all rounded board-bg-muted px-2 py-1 board-text-strong">{{ result.expression }}</code>
                     <span class="font-medium">{{ t('app.specificationTechnicalId') }}</span>
-                    <code class="break-all rounded board-bg-muted px-2 py-1 board-text-strong">{{ result.specId }}</code>
+                    <code class="break-all rounded board-bg-muted px-2 py-1 board-text-strong">{{ group.traces[0].trace.violatedSpecId }}</code>
                   </div>
                 </details>
               </article>
             </div>
-          </details>
+          </section>
 
           <!--
             The checked model, as a named scene-level artifact.
@@ -19073,6 +17850,7 @@ const attackSelectionSummary = (
     :visible="showFixDialog"
     :trace-id="fixTraceId || 0"
     :violated-spec-id="fixViolatedSpecId"
+    :violated-spec-name="fixViolatedSpecName"
     @update:visible="showFixDialog = $event"
     @applied="handleFixApplied"
     @outcome-uncertain="handleFixOutcomeUncertain"

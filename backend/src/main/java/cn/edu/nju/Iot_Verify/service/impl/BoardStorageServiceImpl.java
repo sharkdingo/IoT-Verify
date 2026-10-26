@@ -179,13 +179,13 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         return userWriteLocks[stripe];
     }
 
-    private void requireActiveUserForWrite(Long userId) {
-        if (userId == null || userRepository.findByIdForUpdate(userId).isEmpty()) {
-            throw UnauthorizedException.invalidToken();
-        }
+    private cn.edu.nju.Iot_Verify.po.UserPo requireActiveUserForWrite(Long userId) {
+        if (userId == null) throw UnauthorizedException.invalidToken();
+        var owner = userRepository.findByIdForUpdate(userId).orElseThrow(UnauthorizedException::invalidToken);
         if (chatExecutionLeaseGuard != null) {
             chatExecutionLeaseGuard.requireCurrentExecutionLease();
         }
+        return owner;
     }
 
     @Override
@@ -1272,7 +1272,12 @@ public class BoardStorageServiceImpl implements BoardStorageService {
     private boolean sameSpecificationDeletionSnapshot(
             SpecificationDto expected, SpecificationDto current) {
         return Objects.equals(expected.getId(), current.getId())
+                && Objects.equals(expected.getName().trim(), current.getName().trim())
                 && SpecificationSemanticSignature.exactlyMatches(expected, current);
+    }
+
+    private boolean hasValidSpecificationName(SpecificationDto spec) {
+        return spec != null && hasText(spec.getName()) && spec.getName().length() <= 100;
     }
 
     /** Internal save without re-acquiring the lock. */
@@ -1457,6 +1462,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         Map<String, String> labelsById = previewContext.labelsById();
         SpecificationDto target = new SpecificationDto();
         target.setId(source.getId());
+        target.setName(source.getName().trim());
         target.setTemplateId(source.getTemplateId());
         target.setTemplateLabel(SpecificationFormulaPreview.templateLabel(source.getTemplateId()));
         target.setAConditions(canonicalizeSpecConditionsForStorage(source.getAConditions(), labelsById));
@@ -1534,6 +1540,9 @@ public class BoardStorageServiceImpl implements BoardStorageService {
             return;
         }
         Map<String, String> errors = new LinkedHashMap<>();
+        if (spec.getName() == null || spec.getName().isBlank() || spec.getName().trim().length() > 100) {
+            errors.put("name", "A specification name of 1 to 100 characters is required.");
+        }
         requireSpecConditionCount(errors, "aConditions", spec.getAConditions());
         requireSpecConditionCount(errors, "ifConditions", spec.getIfConditions());
         requireSpecConditionCount(errors, "thenConditions", spec.getThenConditions());
@@ -1700,7 +1709,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         // Scene import depends on this so a new topology cannot be persisted with an old environment pool.
         synchronized (getUserWriteLock(userId)) {
             return transactionTemplate.execute(status -> {
-                requireActiveUserForWrite(userId);
+                var owner = requireActiveUserForWrite(userId);
                 validateCompleteSceneBatch(batch);
                 BoardReplacementPreviewDto currentPreview = currentBoardReplacementPreview(userId);
                 if (!hasText(batch.getImpactToken()) || !MessageDigest.isEqual(
@@ -1711,6 +1720,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                 List<DeviceTemplateDto> createdTemplates = batch.getTemplateSnapshots() != null
                         ? resolveSceneTemplateSnapshots(userId, batch.getTemplateSnapshots(), batch.getNodes())
                         : List.of();
+                validateAuthoredSceneVariableValues(batch.getNodes(), loadTemplateManifestMap(userId));
                 List<DeviceNodeDto> nextNodes = canonicalizeNodes(userId, batch.getNodes());
                 List<RuleDto> nextRules = batch.getRules();
                 List<SpecificationDto> nextSpecs = batch.getSpecs();
@@ -1740,6 +1750,8 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                 // recorded before it still describes a reachable state. Dropping the journal is
                 // safer than leaving entries that would "restore" a rule into a different scene.
                 editJournal.clear(userId);
+                // Ordinary edits retain task intent; only explicit full-scene replacement changes its scope.
+                owner.setSceneRevision(Math.incrementExact(owner.getSceneRevision()));
                 // A confirmed AI draft is consumed with its scene, so cleanup failure cannot
                 // turn a committed replacement into an ordinary tool failure.
                 afterReplacement.run();
@@ -1788,13 +1800,24 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         List<SpecificationDto> specifications = getSpecsInternal(userId);
         BoardEditHistoryState editHistory = editJournal.historyState(userId);
 
+        List<DeviceTemplateDto> templates = new ArrayList<>(getDeviceTemplatesInternal(userId));
+        templates.sort(Comparator.comparing(DeviceTemplateDto::getName, String.CASE_INSENSITIVE_ORDER));
+        Map<String, Integer> templateDeviceCounts = new HashMap<>();
+        for (DeviceNodeDto node : nodes) {
+            if (node != null && hasText(node.getTemplateName())) {
+                templateDeviceCounts.merge(templateAliasKey(node.getTemplateName()), 1, Integer::sum);
+            }
+        }
+
         Map<String, Object> impact = new LinkedHashMap<>();
-        impact.put("contract", "board-replacement-v2");
+        impact.put("contract", "board-replacement-v3");
         impact.put("nodes", nodes);
         impact.put("environmentVariables", environmentVariables);
         impact.put("rules", rules);
         impact.put("specifications", specifications);
         impact.put("editHistoryImpactToken", editHistory.impactToken());
+        // Confirmation includes retained library contents and import provenance, even on an empty board.
+        impact.put("templates", templates);
         String source = JsonUtils.toJson(impact);
         try {
             String impactToken = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
@@ -1806,6 +1829,9 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                     .ruleCount(rules.size())
                     .specificationCount(specifications.size())
                     .editHistoryEntryCount(editHistory.entryCount())
+                    .templates(templates.stream().map(template -> new BoardReplacementPreviewDto.TemplateUsage(
+                            template.getName(), template.getDefaultTemplate(),
+                            templateDeviceCounts.getOrDefault(templateAliasKey(template.getName()), 0))).toList())
                     .build();
         } catch (NoSuchAlgorithmException e) {
             throw new InternalServerException("Unable to create board-replacement impact token", e);
@@ -1881,6 +1907,28 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         return created;
     }
 
+    private void validateAuthoredSceneVariableValues(List<DeviceNodeDto> nodes, Map<String, DeviceManifest> templates) {
+        Map<String, String> errors = new LinkedHashMap<>();
+        for (int nodeIndex = 0; nodeIndex < nodes.size(); nodeIndex++) {
+            DeviceNodeDto node = nodes.get(nodeIndex);
+            if (node == null) continue;
+            DeviceManifest manifest = manifestForTemplateName(node.getTemplateName(), templates);
+            List<VariableStateDto> variables = safeList(node.getVariables());
+            for (int variableIndex = 0; variableIndex < variables.size(); variableIndex++) {
+                VariableStateDto variable = variables.get(variableIndex);
+                if (variable == null) continue;
+                String declared = DeviceManifestModes.stateDeclaredValue(manifest, node.getState(), trimToNull(variable.getName()));
+                if (declared != null && !Objects.equals(declared, trimToNull(variable.getValue()))) {
+                    errors.put("nodes[" + nodeIndex + "].variables[" + variableIndex + "].value",
+                            "State '" + node.getState() + "' requires " + variable.getName() + " = '" + declared
+                                    + "'. Review this value before importing the complete scene.");
+                }
+            }
+        }
+        // Ordinary device edits derive these values; a complete scene must not silently rewrite authored input.
+        if (!errors.isEmpty()) throw new ValidationException(errors);
+    }
+
     private Map<String, DeviceTemplateDto> sceneTemplateSnapshotsByAlias(List<DeviceTemplateDto> snapshots) {
         Map<String, DeviceTemplateDto> byAlias = new LinkedHashMap<>();
         for (DeviceTemplateDto snapshot : snapshots == null ? List.<DeviceTemplateDto>of() : snapshots) {
@@ -1898,6 +1946,9 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                         + "' must exactly match manifest.Name '" + manifestName
                         + "'. Portable scenes cannot rename a template while importing it.");
             }
+            // Creation trims both names; reuse must compare the same canonical manifest.
+            snapshot.setName(name);
+            snapshot.getManifest().setName(name);
             addSceneTemplateSnapshotAlias(byAlias, name, snapshot);
         }
         return byAlias;
@@ -4511,7 +4562,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         appendSpecificationConditionDescriptions(descriptions, "A", spec.getAConditions(), labelsById);
         appendSpecificationConditionDescriptions(descriptions, "IF", spec.getIfConditions(), labelsById);
         appendSpecificationConditionDescriptions(descriptions, "THEN", spec.getThenConditions(), labelsById);
-        String template = hasText(spec.getTemplateLabel()) ? spec.getTemplateLabel().trim() : "Formal specification";
+        String template = spec.getName();
         return descriptions.isEmpty() ? template : template + " [" + String.join("; ", descriptions) + "]";
     }
 
@@ -5014,8 +5065,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         for (int index = 0; index < before.getSpecs().size(); index++) {
             SpecificationDto previousSpec = before.getSpecs().get(index).getSpec();
             SpecificationDto currentSpec = after.getSpecs().get(index).getSpec();
-            if (!Objects.equals(previousSpec.getId(), currentSpec.getId())
-                    || !SpecificationSemanticSignature.exactlyMatches(previousSpec, currentSpec)) {
+            if (!sameSpecificationDeletionSnapshot(previousSpec, currentSpec)) {
                 return false;
             }
         }
@@ -5069,7 +5119,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         Set<String> specIds = new HashSet<>();
         Set<Integer> specPositions = new HashSet<>();
         for (DeviceJournalSnapshot.SpecWithPosition item : snapshot.getSpecs()) {
-            if (item == null || item.getSpec() == null || !hasText(item.getSpec().getId())
+            if (item == null || !hasValidSpecificationName(item.getSpec()) || !hasText(item.getSpec().getId())
                     || item.getPosition() < 0 || !specIds.add(item.getSpec().getId())
                     || !specPositions.add(item.getPosition())) return false;
         }
@@ -5412,6 +5462,10 @@ public class BoardStorageServiceImpl implements BoardStorageService {
             Long userId, BoardEditJournalPo entry, String targetJson, String expectedJson) {
         SpecificationDto target = editJournal.readJson(targetJson, SpecificationDto.class);
         SpecificationDto expected = editJournal.readJson(expectedJson, SpecificationDto.class);
+        if ((target != null && !hasValidSpecificationName(target))
+                || (expected != null && !hasValidSpecificationName(expected))) {
+            throw new ConflictException(UNREADABLE_JOURNAL_ENTRY_MESSAGE);
+        }
         // See applyRuleJournalEntry: an unreadable `expected` is an unknown prior state, and must not
         // pass for the legal "record already gone" case that skips the drift check.
         if (!validSingleRecordJournalTransition(entry)
@@ -6094,7 +6148,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                     ? "Rule: " + firstText(rules.get(index).getRuleString(), "Rule " + (index + 1))
                     : "Rule " + (index + 1);
             case "specs" -> index < specs.size() && specs.get(index) != null
-                    ? "Specification: " + firstText(specs.get(index).getTemplateLabel(), specs.get(index).getId())
+                    ? "Specification: " + specs.get(index).getName()
                     : "Specification " + (index + 1);
             default -> "Board model";
         };

@@ -413,6 +413,7 @@ class AiPromptContractTest {
         RULE_WARNINGS.put("unreachableConditionGroup", "经 capabilities 的 Transitions 与已声明 API 到达");
         RULE_WARNINGS.put("unknownCandidateField", "自行发明的字段");
 
+        SPEC_WARNINGS.put("invalidSpecificationName", "简短、具体的规约名称（必填，1到100字符）");
         SPEC_WARNINGS.put("parseFailed", null);
         SPEC_WARNINGS.put("invalidTemplateId", "templateId 必须严格枚举为 \"1\" 到 \"7\"");
         SPEC_WARNINGS.put("missingSpecificationRationale", "在 rationale 中解释建议依据");
@@ -437,6 +438,7 @@ class AiPromptContractTest {
         DEVICE_WARNINGS.put("invalidInitialRuntime",
                 "initialVariables/initialPrivacies 只能使用模板中 IsInside=true 的本地变量");
 
+        SCENARIO_WARNINGS.put("invalidSpecName", "简短、具体的规约名称（必填，1到100字符）");
         SCENARIO_WARNINGS.put("deviceDefaultsApplied", null);
         SCENARIO_WARNINGS.put("environmentDefaultsApplied", null);
         SCENARIO_WARNINGS.put("missingEnvironmentAdded", null);

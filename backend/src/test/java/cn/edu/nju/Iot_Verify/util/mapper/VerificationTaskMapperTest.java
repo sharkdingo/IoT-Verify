@@ -23,6 +23,14 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class VerificationTaskMapperTest {
+    @Test
+    void rejectsResultsWithoutFrozenRequirements() {
+        VerificationTaskPo task = VerificationTaskPo.builder().id(7L)
+                .specResultsJson("[{\"specId\":\"s1\",\"templateId\":\"1\",\"antecedentReachability\":\"NOT_APPLICABLE\"}]")
+                .build();
+        assertThrows(PersistedDataIntegrityException.class, () ->
+                org.springframework.test.util.ReflectionTestUtils.invokeMethod(new VerificationTaskMapper(), "readSpecResults", task));
+    }
 
     private final VerificationTaskMapper mapper = new VerificationTaskMapper();
     private static final LocalDateTime CREATED_AT = LocalDateTime.of(2026, 7, 12, 9, 30);
@@ -90,8 +98,41 @@ class VerificationTaskMapperTest {
                 .violatedSpecCount(1)
                 .disabledRuleCount(1)
                 .skippedSpecCount(0)
-                .specResultsJson("[{\"specId\":\"s1\",\"templateId\":\"1\",\"outcome\":\"SATISFIED\","
-                        + "\"antecedentReachability\":\"NOT_APPLICABLE\",\"expression\":\"CTLSPEC AG(light.on)\"}]")
+                .specResultsJson("""
+                        [
+                          {
+                            "specId": "s1",
+                            "templateId": "1",
+                            "outcome": "SATISFIED",
+                            "antecedentReachability": "NOT_APPLICABLE",
+                            "expression": "CTLSPEC AG(light.on)",
+                            "specificationLabel": "Keep lamp off",
+                            "specificationSnapshot": {
+                              "id": "s1",
+                              "name": "Keep lamp off",
+                              "templateId": "1",
+                              "aConditions": [
+                                {
+                                  "deviceId": "lamp",
+                                  "targetType": "state",
+                                  "key": "state",
+                                  "relation": "=",
+                                  "value": "off"
+                                }
+                              ],
+                              "ifConditions": [],
+                              "thenConditions": [],
+                              "devices": {
+                                "lamp": {
+                                  "label": "Lamp",
+                                  "modelTokenSource": "BUNDLED",
+                                  "modeCount": 1
+                                }
+                              }
+                            }
+                          }
+                        ]
+                        """)
                 .generationIssuesJson("[{\"issueType\":\"RULE_DISABLED\",\"itemLabel\":\"Hall automation\","
                         + "\"reasonCode\":\"RULE_UNRESOLVABLE_TRIGGER_CONDITION\",\"reason\":\"Unsupported action\"}]")
                 .checkLogsJson("[\"generated\",\"checked\"]")
@@ -137,9 +178,12 @@ class VerificationTaskMapperTest {
                 "{\"templateId\":\"4\"}",
                 "{\"templateId\":\"4\",\"antecedentReachability\":\"NOT_APPLICABLE\"}",
                 "{\"templateId\":\"1\",\"antecedentReachability\":\"REACHABLE\"}")) {
-            po.setSpecResultsJson("[" + invalid + "]");
-            assertThrows(PersistedDataIntegrityException.class, () -> mapper.toDto(po));
-            assertThrows(PersistedDataIntegrityException.class, () -> mapper.toRunDto(po, 1));
+            po.setSpecResultsJson("[" + invalid.substring(0, invalid.length() - 1)
+                    + ",\"specificationSnapshot\":{\"id\":\"s1\",\"name\":\"Keep lamp off\",\"templateId\":\"1\"},\"specificationLabel\":\"Keep lamp off\"}]");
+            assertEquals("Missing or inconsistent response-trigger reachability evidence",
+                    assertThrows(PersistedDataIntegrityException.class, () -> mapper.toDto(po)).getCause().getMessage());
+            assertEquals("Missing or inconsistent response-trigger reachability evidence",
+                    assertThrows(PersistedDataIntegrityException.class, () -> mapper.toRunDto(po, 1)).getCause().getMessage());
         }
     }
 

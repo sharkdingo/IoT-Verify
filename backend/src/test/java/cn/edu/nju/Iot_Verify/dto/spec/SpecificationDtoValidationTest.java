@@ -200,9 +200,20 @@ class SpecificationDtoValidationTest {
                 "Frozen specification references exceed the model device limit"));
     }
 
+    @Test
+    void missingNameIsRejectedForAuthoredAndFrozenSpecifications() {
+        SpecificationDto spec = validSpec();
+        spec.setName(null);
+        assertTrue(validator.validate(spec).stream()
+                .anyMatch(v -> v.getPropertyPath().toString().equals("name")));
+        assertTrue(validator.validate(spec, SpecificationDto.FrozenModel.class).stream()
+                .anyMatch(v -> v.getPropertyPath().toString().equals("name")));
+    }
+
     private SpecificationDto validSpec() {
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec_1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setTemplateLabel("Always");
         return spec;

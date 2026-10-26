@@ -99,6 +99,8 @@ public final class AiToolResultContract {
             case "manage_spec" -> operation(root, "created", "preview", "deleted")
                     || (operation(root, "updated", "unchanged")
                         && hasNonBlankText(root.path("specification"), "specId")
+                        && hasNonBlankText(root.path("specification"), "name")
+                        && root.path("specification").path("name").textValue().length() <= 100
                         && enumText(root.path("specification"), "templateId", Set.of("1", "2", "3", "4", "5", "6", "7"))
                         && root.path("specification").path("aConditions").isArray()
                         && root.path("specification").path("ifConditions").isArray()

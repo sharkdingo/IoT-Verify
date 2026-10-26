@@ -256,6 +256,13 @@ describe('toast placement', () => {
 })
 
 describe('confirmDestructive', () => {
+  it('retires earlier completion notices before opening the confirmation, preserving warnings and errors', async () => {
+    elementPlus.box.confirm.mockImplementationOnce(async () => {
+      expect(elementPlus.message.closeAll.mock.calls).toEqual([['success'], ['info']])
+    })
+    await expect(confirmDestructive({ title: 'Clear scene', message: 'Review contents' })).resolves.toBe(true)
+  })
+
   it('reports confirmation as true and cancellation as false, never throwing', async () => {
     elementPlus.box.confirm.mockResolvedValueOnce('confirm')
     await expect(confirmDestructive({ title: 'Delete', message: 'Sure?' })).resolves.toBe(true)

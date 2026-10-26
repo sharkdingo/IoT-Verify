@@ -1,6 +1,6 @@
 {
   "schema": "iot-verify.board-scene",
-  "version": 5,
+  "version": 6,
   "templates": [
     {
       "name": "Dynamic Motion Sensor",
@@ -909,6 +909,7 @@
   ],
   "specs": [
     {
+      "name": "Keep camera power off",
       "templateId": "3",
       "aConditions": [
         {
@@ -923,6 +924,7 @@
       "thenConditions": []
     },
     {
+      "name": "Light the entrance when motion is detected",
       "templateId": "4",
       "aConditions": [],
       "ifConditions": [
@@ -946,6 +948,7 @@
       ]
     },
     {
+      "name": "Light path 1 when motion is detected",
       "templateId": "4",
       "aConditions": [],
       "ifConditions": [
@@ -969,6 +972,7 @@
       ]
     },
     {
+      "name": "Light path 2 when motion is detected",
       "templateId": "4",
       "aConditions": [],
       "ifConditions": [
@@ -992,6 +996,7 @@
       ]
     },
     {
+      "name": "Light path 3 when motion is detected",
       "templateId": "4",
       "aConditions": [],
       "ifConditions": [
@@ -1015,6 +1020,7 @@
       ]
     },
     {
+      "name": "Light path 4 when motion is detected",
       "templateId": "4",
       "aConditions": [],
       "ifConditions": [
@@ -1038,6 +1044,7 @@
       ]
     },
     {
+      "name": "Light path 5 when motion is detected",
       "templateId": "4",
       "aConditions": [],
       "ifConditions": [
@@ -1061,6 +1068,7 @@
       ]
     },
     {
+      "name": "Light path 6 when motion is detected",
       "templateId": "4",
       "aConditions": [],
       "ifConditions": [
@@ -1084,6 +1092,7 @@
       ]
     },
     {
+      "name": "Light path 7 when motion is detected",
       "templateId": "4",
       "aConditions": [],
       "ifConditions": [
@@ -1107,6 +1116,7 @@
       ]
     },
     {
+      "name": "Light path 8 when motion is detected",
       "templateId": "4",
       "aConditions": [],
       "ifConditions": [
@@ -1130,6 +1140,7 @@
       ]
     },
     {
+      "name": "Sound the kitchen alarm for smoke",
       "templateId": "4",
       "aConditions": [],
       "ifConditions": [
@@ -1153,6 +1164,7 @@
       ]
     },
     {
+      "name": "Relay the kitchen alarm to the hall",
       "templateId": "4",
       "aConditions": [],
       "ifConditions": [
@@ -1175,6 +1187,7 @@
       ]
     },
     {
+      "name": "Light the exit when the hall alarm is on",
       "templateId": "4",
       "aConditions": [],
       "ifConditions": [
@@ -1197,6 +1210,7 @@
       ]
     },
     {
+      "name": "Keep carbon dioxide at or below 1000",
       "templateId": "3",
       "aConditions": [
         {
@@ -1212,6 +1226,7 @@
       "thenConditions": []
     },
     {
+      "name": "Eventually run the fan when carbon dioxide is high",
       "templateId": "5",
       "aConditions": [],
       "ifConditions": [

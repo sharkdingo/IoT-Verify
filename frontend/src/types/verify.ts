@@ -22,7 +22,7 @@ export interface SpecResult {
   templateId: string;
   specificationLabel: string;
   formulaPreview: string;
-  specificationSnapshot?: SpecificationSnapshot | null;
+  specificationSnapshot: SpecificationSnapshot;
   formulaKind: 'CTL' | 'LTL';
   outcome: VerificationOutcome;
   antecedentReachability: 'NOT_APPLICABLE' | 'REACHABLE' | 'UNREACHABLE' | 'INCONCLUSIVE';
@@ -31,6 +31,7 @@ export interface SpecResult {
 
 /** The checked conditions and display identities, never resolved from the current board. */
 export interface SpecificationSnapshot {
+  name: string;
   id: string;
   templateId: Specification['templateId'];
   aConditions: SpecCondition[];

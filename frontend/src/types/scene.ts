@@ -58,6 +58,7 @@ export interface PortableSceneCondition {
 }
 
 export interface PortableSceneSpecification {
+  name: string;
   templateId: SpecTemplateId
   aConditions: PortableSceneCondition[]
   ifConditions: PortableSceneCondition[]
@@ -66,7 +67,7 @@ export interface PortableSceneSpecification {
 
 export interface PortableSceneFile {
   schema: 'iot-verify.board-scene'
-  version: 5
+  version: 6
   templates: PortableSceneTemplate[]
   devices: PortableSceneDevice[]
   environmentVariables: PortableSceneEnvironmentVariable[]

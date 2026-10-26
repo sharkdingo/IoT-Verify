@@ -72,8 +72,7 @@ const outcome = computed(() => {
 })
 
 const findingTitle = (finding: FuzzingFindingSummary | FuzzingFinding) => {
-  const formatted = finding.violatedSpec ? formatTraceSpec(finding.violatedSpec, t, props.run?.modelTokenSourcesByDeviceId) : ''
-  return formatted
+  return finding.violatedSpec?.name
     || ('specificationLabel' in finding ? finding.specificationLabel : '')
     || finding.violatedSpecId
     || t('app.unknownSpecification')
@@ -122,7 +121,8 @@ const findingBySpecification = computed(() => new Map(
 
 const targetResults = computed(() => (props.run?.eligibility.eligibleSpecIds || []).map(specId => ({
   specId,
-  label: props.run?.eligibleSpecifications?.[specId]
+  label: props.run?.eligibleSpecifications[specId]?.name || props.run?.eligibility.eligibleSpecLabels[specId] || specId,
+  description: props.run?.eligibleSpecifications?.[specId]
     ? formatTraceSpec(props.run.eligibleSpecifications[specId], t, props.run.modelTokenSourcesByDeviceId)
     : props.run?.eligibility.eligibleSpecLabels[specId] || specId,
   finding: findingBySpecification.value.get(specId)
@@ -197,7 +197,7 @@ const targetScopeText = computed(() => requestedTargetIds.value.length > 0
                 <span class="material-symbols-outlined text-xl">{{ outcome.icon }}</span>
               </span>
               <div class="min-w-0">
-                <div class="text-sm font-semibold">{{ outcome.label }}</div>
+                <div class="iot-result-item__title">{{ outcome.label }}</div>
                 <p class="mt-1 text-xs leading-5 opacity-90">{{ outcome.detail }}</p>
               </div>
             </div>
@@ -212,41 +212,22 @@ const targetScopeText = computed(() => requestedTargetIds.value.length > 0
             {{ t(boardComparison === 'CHANGED' ? 'app.fuzzBoardScopeChanged'
               : boardComparison === 'UNAVAILABLE' ? 'app.runBoardComparisonUnavailable' : 'app.runBoardNotCompared') }}
           </p>
-          <p v-else class="board-caption leading-5 board-text-muted">{{ t('app.fuzzBoardScopeCurrent') }}</p>
-
-          <section data-testid="fuzzing-result-mode" class="flex flex-wrap items-center gap-3" :aria-label="t('app.fuzzExplorationMode')">
-            <span class="board-form-label">{{ t('app.fuzzExplorationMode') }}</span>
-            <span class="board-caption board-text-strong">{{ explorationModeLabel }}</span>
-            <InfoTooltip
-              :text="explorationModeDescription"
-              :label="t('app.showHelpFor', { topic: t('app.fuzzExplorationMode') })"
-              test-id="fuzz-result-mode-help"
-            />
-          </section>
-
           <p v-if="timeLimitReached" data-testid="fuzz-time-limit-warning"
             class="board-surface-warning rounded-lg px-3 py-2 text-xs leading-5 board-text-warning" role="alert">
             {{ t('app.fuzzLimitationTimeBudgetExhausted') }}
           </p>
 
-          <div
+          <details
             v-if="run.eligibility.ineligibleSpecs.length > 0"
             class="board-surface-warning rounded-lg px-3 py-2 text-xs leading-5"
           >
-            <div class="font-semibold">{{ t('app.fuzzIneligibleSpecifications', { count: run.eligibility.ineligibleSpecs.length }) }}</div>
+            <summary class="cursor-pointer py-1 font-semibold">{{ t('app.fuzzIneligibleSpecifications', { count: run.eligibility.ineligibleSpecs.length }) }}</summary>
             <ul class="mt-1 list-disc space-y-1 pl-4">
               <li v-for="(issue, index) in run.eligibility.ineligibleSpecs" :key="`${issue.specId || index}-${issue.reasonCode}`">
                 <span>{{ issue.specificationLabel || issue.specId || t('app.unknownSpecification') }}: {{ eligibilityReason(issue.reasonCode) }}</span>
               </li>
             </ul>
-          </div>
-
-          <p
-            data-testid="fuzz-formal-verification-current-board-notice"
-            class="board-note rounded-lg px-3 py-2 text-xs leading-5"
-          >
-            {{ t('app.fuzzFormalVerificationCurrentBoardNotice') }}
-          </p>
+          </details>
 
           <section v-if="run.findings.length > 0" aria-labelledby="fuzz-findings-title">
             <div class="flex items-center justify-between gap-3">
@@ -258,7 +239,8 @@ const targetScopeText = computed(() => requestedTargetIds.value.length > 0
               <article v-for="finding in run.findings" :key="finding.id" class="board-bg-elevated p-3">
                 <div class="flex flex-col items-start gap-3 sm:flex-row sm:justify-between">
                   <div class="min-w-0 w-full sm:flex-1">
-                    <p class="break-words text-xs font-semibold board-text-strong">{{ findingTitle(finding) }}</p>
+                    <h5 class="iot-result-item__title" data-testid="fuzz-finding-name">{{ findingTitle(finding) }}</h5>
+                    <p v-if="finding.violatedSpec" class="board-copy mt-2 break-words">{{ formatTraceSpec(finding.violatedSpec, t, run.modelTokenSourcesByDeviceId) }}</p>
                     <p v-if="'dataAvailable' in finding && finding.dataAvailable === false" class="board-caption mt-1 board-text-warning" :data-testid="`fuzz-finding-unavailable-${finding.id}`">
                       {{ t('app.historyFindingUnavailableDetail') }}
                     </p>
@@ -305,12 +287,30 @@ const targetScopeText = computed(() => requestedTargetIds.value.length > 0
               <li v-for="target in targetsWithoutCandidate" :key="target.specId" class="flex items-start gap-2 board-bg-elevated px-3 py-2.5">
                 <span class="material-symbols-outlined mt-0.5 text-base board-text-info" aria-hidden="true">search_off</span>
                 <div class="min-w-0 flex-1">
-                  <p class="break-words text-xs font-semibold board-text-strong">
+                  <p class="iot-result-item__title">
                     {{ target.label }}
                   </p>
+                  <p class="board-copy mt-2 break-words">{{ target.description }}</p>
                 </div>
               </li>
             </ul>
+          </section>
+
+          <p
+            data-testid="fuzz-formal-verification-current-board-notice"
+            class="board-note rounded-lg px-3 py-2 text-xs leading-5"
+          >
+            {{ t('app.fuzzFormalVerificationCurrentBoardNotice') }}
+          </p>
+
+          <section data-testid="fuzzing-result-mode" class="flex flex-wrap items-center gap-3" :aria-label="t('app.fuzzExplorationMode')">
+            <span class="board-form-label">{{ t('app.fuzzExplorationMode') }}</span>
+            <span class="board-caption board-text-strong">{{ explorationModeLabel }}</span>
+            <InfoTooltip
+              :text="explorationModeDescription"
+              :label="t('app.showHelpFor', { topic: t('app.fuzzExplorationMode') })"
+              test-id="fuzz-result-mode-help"
+            />
           </section>
 
           <section aria-labelledby="fuzz-run-summary-title">
@@ -373,6 +373,7 @@ const targetScopeText = computed(() => requestedTargetIds.value.length > 0
 
           <details data-testid="fuzz-snapshot-details" class="rounded-lg border board-border-subtle px-3 py-2">
             <summary id="fuzz-snapshot-title" class="board-section-title cursor-pointer py-3">{{ t('app.runScopeAndSnapshot') }}</summary>
+            <p v-if="boardComparison === 'UNCHANGED'" class="board-caption board-text-muted">{{ t('app.fuzzBoardScopeCurrent') }}</p>
             <p class="board-caption mt-1 leading-5 board-text-muted">
               {{ t('app.modelRunSnapshotSummary', {
                 time: formatDate(run.modelSnapshot.capturedAt),

@@ -133,6 +133,8 @@ describe('ControlCenter read-only mode', () => {
       global: { plugins: [i18n] }
     })
 
+    await wrapper.get('[data-testid="spec-name"]').setValue('Keep the light on')
+
     await wrapper.get('[data-testid="spec-template-select"]').setValue('1')
     await wrapper.get('[data-testid="spec-add-condition-a"]').trigger('click')
     expect(wrapper.find('[data-testid="spec-condition-dialog"]').exists()).toBe(true)

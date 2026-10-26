@@ -1,6 +1,6 @@
 {
   "schema": "iot-verify.board-scene",
-  "version": 5,
+  "version": 6,
   "templates": [
     {
       "name": "Salus Ventilation Fan",
@@ -148,6 +148,7 @@
   ],
   "specs": [
     {
+      "name": "Keep carbon dioxide at or below 1000",
       "templateId": "3",
       "aConditions": [
         {
@@ -163,6 +164,7 @@
       "thenConditions": []
     },
     {
+      "name": "Eventually run the fan when carbon dioxide is high",
       "templateId": "5",
       "aConditions": [],
       "ifConditions": [

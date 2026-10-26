@@ -229,6 +229,8 @@ export const stateDeclaredVariableValue = (
 ): string | null => {
   const wanted = String(stateName ?? '').trim()
   if (!wanted || !variableName) return null
+  if ((template?.manifest?.Transitions || []).some(transition =>
+    (transition?.Assignments || []).some(assignment => assignment.Attribute === variableName))) return null
   // The complete tuple names one state: matching a single segment of `heating;ready` would pick a sibling.
   const state = (template?.manifest?.WorkingStates || [])
     .find(candidate => String(candidate?.Name ?? '').trim() === wanted)

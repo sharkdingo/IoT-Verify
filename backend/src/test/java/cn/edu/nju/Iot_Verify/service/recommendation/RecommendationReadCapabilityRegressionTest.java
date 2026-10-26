@@ -73,7 +73,7 @@ class RecommendationReadCapabilityRegressionTest {
         PromptCompletionService provider = mock(PromptCompletionService.class);
         when(provider.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
-                        {"recommendations":[{"templateId":"3","rationale":"Avoid excessive humidity",
+                        {"recommendations":[{"name": "Safety requirement", "templateId":"3","rationale":"Avoid excessive humidity",
                         "aConditions":[{"deviceId":"ac_1","targetType":"variable","key":"humidity",
                         "variableSource":"environment","relation":">=","value":"60"}]}]}
                         """);
@@ -122,7 +122,7 @@ class RecommendationReadCapabilityRegressionTest {
         else condition.put("propertyScope", "variable");
         when(provider.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn(mapper.writeValueAsString(Map.of("recommendations", List.of(Map.of(
-                        "templateId", "3", "rationale", "Humidity safety", "aConditions", List.of(condition))))));
+                        "name", "Humidity stays safe", "templateId", "3", "rationale", "Humidity safety", "aConditions", List.of(condition))))));
         when(board.getSemanticSnapshot(37L)).thenReturn(snapshot(deviceLocal, reads));
 
         var result = new SpecificationRecommendationService(devices, board, provider, mapper, parser)

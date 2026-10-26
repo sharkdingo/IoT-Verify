@@ -808,13 +808,7 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
 
     private String specificationLabel(SpecificationDto specification) {
         if (specification == null) return null;
-        if (specification.getTemplateLabel() != null && !specification.getTemplateLabel().isBlank()) {
-            return specification.getTemplateLabel();
-        }
-        if (specification.getFormula() != null && !specification.getFormula().isBlank()) {
-            return specification.getFormula();
-        }
-        return specification.getId();
+        return specification.getName();
     }
 
     private FuzzOutcome toOutcome(FuzzEngineOutcome outcome) {

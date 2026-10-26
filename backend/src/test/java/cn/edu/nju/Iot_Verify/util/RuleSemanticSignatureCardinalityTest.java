@@ -86,6 +86,7 @@ class RuleSemanticSignatureCardinalityTest {
 
     private static SpecificationDto spec(List<SpecConditionDto> aConditions) {
         SpecificationDto specification = new SpecificationDto();
+        specification.setName("Safety requirement");
         specification.setTemplateId("1");
         specification.setAConditions(aConditions);
         return specification;

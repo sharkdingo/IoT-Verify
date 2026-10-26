@@ -336,7 +336,7 @@ describe('spec formula preview', () => {
   it('treats variableSource as part of specification condition identity', () => {
     // The same key with the other source is a different claim, so the two specifications must not
     // be deduplicated into one.
-    const spec = (variableSource: 'environment' | 'reported'): Specification => ({
+    const spec = (variableSource: 'environment' | 'reported'): Specification => ({ name: 'Safety requirement',
       id: 'spec-1',
       templateId: '1',
       templateLabel: 'Always',
@@ -362,7 +362,7 @@ describe('spec formula preview', () => {
   })
 
   it('treats targetType as part of specification condition identity', () => {
-    const base = {
+    const base = { name: 'Safety requirement',
       id: 'spec-1',
       templateId: '1',
       templateLabel: 'Always',
@@ -422,7 +422,7 @@ describe('spec formula preview', () => {
   })
 
   it('treats condition order, display caches, and relation aliases as the same specification', () => {
-    const first: Specification = {
+    const first: Specification = { name: 'Safety requirement',
       id: 'spec-1',
       templateId: '1',
       templateLabel: 'Always',

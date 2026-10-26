@@ -96,14 +96,14 @@ class PortableSceneAdmissionRegressionTest {
         ObjectMapper mapper = new ObjectMapper();
         ObjectNode scene = (ObjectNode) mapper.readTree("""
                 {
-                  "schema":"iot-verify.board-scene","version":5,"templates":[],
+                  "schema":"iot-verify.board-scene","version":6,"templates":[],
                   "devices":[{
                     "id":"camera_1","templateName":"Camera","label":"Camera",
                     "position":{"x":0,"y":0},"state":"on","width":176,"height":128
                   }],
                   "environmentVariables":[],
                   "specs":[{
-                    "templateId":"1","aConditions":[{
+                    "name": "Safety requirement", "templateId":"1","aConditions":[{
                       "deviceId":"camera_1","targetType":"state","key":"state",
                       "relation":"=","value":"on"
                     }],"ifConditions":[],"thenConditions":[]

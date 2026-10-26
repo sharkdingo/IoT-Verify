@@ -123,11 +123,12 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                     + "|(?:工具|函数|接口)(?:调用|执行)?(?:已返回|返回了|已报告))");
     private static final String PLATFORM_ACTION_VERBS =
             "(?:添加|创建|删除|移除|重命名|更新|修改|应用|运行|启动|停止|取消|验证|模拟|保存|重置|替换|导入)";
+    // A completed verb and its platform object must not span separate semicolon clauses.
     private static final Pattern UNSUPPORTED_PLATFORM_MUTATION_CLAIM = Pattern.compile(
             "(?is)(?:\\b(?:I|we)(?:'ve|\\s+have)?\\s+(?:already\\s+|successfully\\s+)*"
                     + "(?:added|created|deleted|removed|renamed|updated|modified|changed|applied|ran|started|"
                     + "stopped|cancelled|canceled|verified|simulated|saved|reset|replaced|imported|completed|"
-                    + "finished)\\b[^.!?。！？]{0,160}?\\b(?:devices?|rules?|specs?|specifications?|board|scene|"
+                    + "finished)\\b[^.!?。！？;；]{0,160}?\\b(?:devices?|rules?|specs?|specifications?|board|scene|"
                     + "simulation|verification|traces?|templates?|environment\\s+variables?|model)\\b"
                     + "|\\b(?:added|created|deleted|removed|renamed|updated|modified|changed|applied|ran|started|"
                     + "stopped|cancelled|canceled|verified|simulated|saved|reset|replaced|imported|completed|"
@@ -141,31 +142,31 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                     + "replaced|imported)\\b"
                     + "|\\b(?:the|all|every|your|current|these|those|our)?\\s*"
                     + "(?:devices?|rules?|specs?|specifications?|board|scene|simulation|verification|traces?|"
-                    + "templates?|environment\\s+variables?|model)\\b[^.!?。！？]{0,80}"
+                    + "templates?|environment\\s+variables?|model)\\b[^.!?。！？;；]{0,80}"
                     + "\\b(?:was|were|has\\s+been|have\\s+been|is\\s+now|are\\s+now)\\s+"
                     + "(?:successfully\\s+)?"
                     + "(?:added|created|deleted|removed|renamed|updated|modified|changed|applied|saved|reset|"
                     + "replaced|imported)\\b"
-                    + "|\\b(?:the|your|current|our)?\\s*(?:simulation|verification)\\b[^.!?。！？]{0,80}"
+                    + "|\\b(?:the|your|current|our)?\\s*(?:simulation|verification)\\b[^.!?。！？;；]{0,80}"
                     + "\\b(?:was|has\\s+been|is\\s+now)\\s+(?:successfully\\s+)?"
                     + "(?:started|stopped|cancelled|canceled|verified|simulated|completed|finished)\\b"
                     + "|\\b(?:the|all|every|your|current|these|those|our)?\\s*"
-                    + "(?:simulation|verification|model)\\b[^.!?。！？]{0,40}\\b"
+                    + "(?:simulation|verification|model)\\b[^.!?。！？;；]{0,40}\\b"
                     + "(?:is|was|has\\s+been)\\s+(?:now\\s+)?(?:complete|completed|successful|finished)\\b"
                     + "|(?:(?:我|本助手|我们)(?:已经|已)?(?:成功)?|(?:已经|已)(?:成功)?)"
-                    + "(?:" + PLATFORM_ACTION_VERBS + "|完成)(?!的)(?:了)?[^.!?。！？]{0,160}?"
+                    + "(?:" + PLATFORM_ACTION_VERBS + "|完成)(?!的)(?:了)?[^.!?。！？;；]{0,160}?"
                     + "(?:设备|规则|规约|画布|场景|仿真|模拟|验证|轨迹|模板|环境变量)"
-                    + "|(?:并且|而且|同时|并|且)" + PLATFORM_ACTION_VERBS + "了[^.!?。！？]{0,160}?"
+                    + "|(?:并且|而且|同时|并|且)" + PLATFORM_ACTION_VERBS + "了[^.!?。！？;；]{0,160}?"
                     + "(?:设备|规则|规约|画布|场景|仿真|模拟|验证|轨迹|模板|环境变量)"
                     + "|(?:全部|所有|你的|您的|当前|这些|该)?"
                     + "(?:设备|规则|规约|画布|场景|仿真|模拟|验证|轨迹|模板|环境变量)"
-                    + "[^.!?。！？]{0,80}(?:已经|已)(?:成功)?(?:被)?"
+                    + "[^.!?。！？;；]{0,80}(?:已经|已)(?:成功)?(?:被)?"
                     + "(?:添加|创建|删除|移除|重命名|更新|修改|应用|保存|重置|替换|导入)(?!的)"
                     + "|(?:(?:我|本助手|我们)(?:已经|已)?(?:成功)?)"
                     + "(?:更新|修改|重置|替换)(?:了)?(?:当前|你的|您的)?模型"
-                    + "|(?:当前|你的|您的)模型[^.!?。！？]{0,40}(?:已经|已)(?:成功)?(?:被)?"
+                    + "|(?:当前|你的|您的)模型[^.!?。！？;；]{0,40}(?:已经|已)(?:成功)?(?:被)?"
                     + "(?:更新|修改|重置|替换)"
-                    + "|(?:当前|该)?(?:仿真|模拟|验证)[^.!?。！？]{0,80}?(?:已经|已)(?:成功)?(?:被)?"
+                    + "|(?:当前|该)?(?:仿真|模拟|验证)[^.!?。！？;；]{0,80}?(?:已经|已)(?:成功)?(?:被)?"
                     + "(?:运行|启动|停止|取消|验证|模拟|完成))");
     private static final Pattern NON_OPERATIONAL_PLATFORM_CONTENT = Pattern.compile(
             "(?is)(?:\\b(?:created|drafted|wrote|generated|proposed)\\b[^.!?。！？]{0,48}"
@@ -267,6 +268,7 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
     private final AiDestructiveActionGuard destructiveActionGuard;
     private final AiScenarioDraftStore scenarioDraftStore;
     private final AiTaskContinuationStore taskContinuationStore;
+    private final cn.edu.nju.Iot_Verify.service.AiTaskMemoryService taskMemoryService;
     private final ObjectMapper objectMapper;
     private final ChatToolProgressPresenter toolProgressPresenter;
     private final ChatMapper chatMapper;
@@ -1070,11 +1072,15 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                 return;
             }
 
-            List<ChatMessagePo> historyPO = getSmartHistory(
-                    sessionId, chatExecutionConfig.getHistoryCharLimit());
+            LlmMessage taskMemoryContext = taskMemoryService.context(taskMemoryService.refresh(userId, sessionId),
+                    chatExecutionConfig.getHistoryCharLimit() / 2);
+            if (shouldStop.getAsBoolean()) return;
+            List<ChatMessagePo> historyPO = getSmartHistory(sessionId,
+                    Math.max(0, chatExecutionConfig.getHistoryCharLimit() - taskMemoryContext.content().length()));
             List<LlmMessage> messages = new ArrayList<>();
             messages.add(LlmMessage.system(buildToolPlanningSystemPrompt().content() + "\n"
                     + buildVisibleReplySystemPrompt(true).content()));
+            messages.add(taskMemoryContext);
             messages.addAll(messageCodec.toMessages(historyPO));
             LlmMessage pendingTaskContext = buildPendingTaskSystemPrompt(
                     destructivePending,
@@ -1804,6 +1810,7 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
 
         Available tools:
         - Prepare complete action schemas: prepare_tools
+        - Original user requirements and corrections: read_user_messages (quote exact sources; paginate for a full audit)
         - Saved conversation operation history: read_conversation_activity
         - Device: add_device, edit_device, delete_device, search_devices, recommend_related_devices
         - Environment: manage_environment
@@ -2361,6 +2368,8 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                     : tools;
             while (true) {
                 try {
+                    new cn.edu.nju.Iot_Verify.component.ai.ChatContextCompressor(objectMapper, toolProgressPresenter)
+                            .compact(messages, chatExecutionConfig.getHistoryCharLimit());
                     response = llmChatService.chatWithTools(messages, planningTools, delta -> {
                         if (replyStream == null) return;
                         if (textStarted.compareAndSet(false, true) && !sendSseProgress(emitter, "WRITING_RESPONSE",

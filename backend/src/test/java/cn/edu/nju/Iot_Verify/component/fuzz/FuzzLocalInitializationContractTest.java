@@ -166,6 +166,7 @@ class FuzzLocalInitializationContractTest {
         condition.setValue("open,closed");
         SpecificationDto specification = new SpecificationDto();
         specification.setId("legal-states");
+        specification.setName("Safety requirement");
         specification.setTemplateId("1");
         specification.setTemplateLabel("Always");
         specification.setAConditions(List.of(condition));

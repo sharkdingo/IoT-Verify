@@ -196,6 +196,7 @@ class RecommendationApplicationContractTest {
 
     private ObjectNode specificationCandidate(String templateId) {
         ObjectNode candidate = mapper.createObjectNode();
+        candidate.put("name", "Safety requirement");
         candidate.put("templateId", templateId).put("rationale", "Check the alarm's declared off state");
         ObjectNode condition = mapper.createObjectNode();
         condition.put("deviceId", "alarm").put("targetType", "state").put("key", "state")

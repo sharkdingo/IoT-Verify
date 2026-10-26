@@ -117,7 +117,7 @@ class BoardTargetedEditControllerTest {
                 {"id":1,"conditions":[{"deviceName":"light-1","targetType":"state","attribute":"state",
                 "relation":"=","value":"on"}],"command":{"deviceName":"light-1","action":"off"}}
                 """ : """
-                {"id":"spec-1","templateId":"1","aConditions":[{"deviceId":"light-1","targetType":"state",
+                {"id":"spec-1","name": "Safety requirement", "templateId":"1","aConditions":[{"deviceId":"light-1","targetType":"state",
                 "key":"state","relation":"=","value":"on","side":"a"}]}
                 """;
     }

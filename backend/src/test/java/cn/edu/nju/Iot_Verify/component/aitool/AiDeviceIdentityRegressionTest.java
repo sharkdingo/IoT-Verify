@@ -281,7 +281,7 @@ class AiDeviceIdentityRegressionTest {
     }
 
     private ObjectNode specArgs(String id, String side) {
-        ObjectNode args = mapper.createObjectNode().put("action", "add").put("templateId", "a".equals(side) ? "1" : "4");
+        ObjectNode args = mapper.createObjectNode().put("action", "add").put("name", "Safety requirement").put("templateId", "a".equals(side) ? "1" : "4");
         for (String current : "a".equals(side) ? List.of("a") : List.of("if", "then")) {
             args.putArray(current + "Conditions").addObject().put("deviceId", id).put("targetType", "mode")
                     .put("key", "SwitchState").put("relation", "=").put("value", "on");

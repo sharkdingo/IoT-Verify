@@ -4,10 +4,14 @@ import { VueMarkdownRenderer } from 'vue-mdr';
 import CodeBlock from '@/components/CodeBlock.vue';
 import 'katex/dist/katex.min.css';
 import remarkMath from 'remark-math';
+import remarkCjkFriendly from 'remark-cjk-friendly/parseOnly';
+import remarkCjkFriendlyStrikethrough from 'remark-cjk-friendly-gfm-strikethrough/parseOnly';
 import rehypeKatex from 'rehype-katex';
 import java from '@shikijs/langs/java';
 import { useTheme } from '@/composables/useTheme';
 import { safeMarkdownPlugin } from '@/utils/safeMarkdown';
+import { remarkLatexMath } from '@/utils/remarkLatexMath';
+import { remarkLiteralCode } from '@/utils/remarkLiteralCode';
 
 defineProps<{
   source: string;
@@ -16,7 +20,7 @@ defineProps<{
 const { theme } = useTheme();
 const currentTheme = computed((): 'light' | 'dark' => theme.value);
 const extraLangs = [java];
-const remarkPlugins = [remarkMath];
+const remarkPlugins = [remarkMath, remarkLatexMath, remarkLiteralCode, remarkCjkFriendly, remarkCjkFriendlyStrikethrough];
 const rehypePlugins = [rehypeKatex as any, safeMarkdownPlugin];
 const remarkRehypeOptions = { allowDangerousHtml: false };
 </script>

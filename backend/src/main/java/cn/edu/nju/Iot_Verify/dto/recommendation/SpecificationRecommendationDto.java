@@ -13,7 +13,8 @@ import java.util.List;
         isGetterVisibility = JsonAutoDetect.Visibility.NONE,
         fieldVisibility = JsonAutoDetect.Visibility.ANY)
 public class SpecificationRecommendationDto {
-    /** Advisory explanation only; the persisted specification is templateId plus conditions. */
+    private String name;
+    /** Advisory explanation only; not part of the persisted requirement. */
     private String rationale;
     private String templateId;
     @JsonProperty("aConditions")

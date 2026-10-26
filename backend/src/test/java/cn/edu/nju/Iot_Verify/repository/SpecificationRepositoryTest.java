@@ -39,7 +39,7 @@ class SpecificationRepositoryTest {
     }
 
     private SpecificationPo specification(String id, Long userId, String label) {
-        return SpecificationPo.builder()
+        return SpecificationPo.builder().name("Safety requirement")
                 .id(id)
                 .userId(userId)
                 .listOrder(0)

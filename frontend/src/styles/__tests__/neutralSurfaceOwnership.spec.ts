@@ -187,9 +187,9 @@ describe.each(modes)('$palette $theme nested surfaces', ({ palette, theme }) => 
 
   it('keeps the disabled counterexample replay label readable', () => {
     const source = readFileSync(join(src, 'views/Board.vue'), 'utf8')
-    const at = source.indexOf('@click="selectAndPlayTrace(Number(i))"')
+    const at = source.indexOf('data-testid="verification-trace-replay"')
     expect(at).toBeGreaterThan(-1)
-    const button = source.slice(at, source.indexOf('</button>', at))
+    const button = source.slice(source.lastIndexOf('<button', at), source.indexOf('</button>', at))
     expect(button).toContain(':disabled="simulationAnimationState.visible"')
     expect(button).toContain('iot-dialog-btn iot-dialog-btn--primary')
     const dialog = postcss.parse(readFileSync(join(src, 'styles/dialog.css'), 'utf8'))

@@ -227,39 +227,41 @@ const validateSpecResults = (result: Record<string, any>, context: string): Spec
     requireString(row, 'templateId', context, false)
     requireString(row, 'specificationLabel', context, false)
     requireString(row, 'formulaPreview', context, false)
-    if (row.specificationSnapshot !== null && row.specificationSnapshot !== undefined) {
-      const snapshot = requireRecord(row.specificationSnapshot, context, 'specificationSnapshot')
-      if (snapshot.id !== row.specId || snapshot.templateId !== row.templateId || !/^[1-7]$/.test(snapshot.templateId)) {
-        throw new RunResponseContractError(context, 'specificationSnapshot identity must match its verdict')
+    const snapshot = requireRecord(row.specificationSnapshot, context, 'specificationSnapshot')
+    requireString(snapshot, 'name', context, false)
+    if (!snapshot.name.trim() || snapshot.name.length > 100 || snapshot.name !== row.specificationLabel) {
+      throw new RunResponseContractError(context, 'specification name must match its frozen label')
+    }
+    if (snapshot.id !== row.specId || snapshot.templateId !== row.templateId || !/^[1-7]$/.test(snapshot.templateId)) {
+      throw new RunResponseContractError(context, 'specificationSnapshot identity must match its verdict')
+    }
+    const devices = requireRecord(snapshot.devices, context, 'specificationSnapshot.devices')
+    Object.entries(devices).forEach(([id, item]) => {
+      const device = requireRecord(item, context, `specificationSnapshot.devices.${id}`)
+      requireString(device, 'label', context, false)
+      if (!id.trim() || !MODEL_TOKEN_SOURCE_SET.has(device.modelTokenSource)) {
+        throw new RunResponseContractError(context, 'specificationSnapshot device identity or provenance is invalid')
       }
-      const devices = requireRecord(snapshot.devices, context, 'specificationSnapshot.devices')
-      Object.entries(devices).forEach(([id, item]) => {
-        const device = requireRecord(item, context, `specificationSnapshot.devices.${id}`)
-        requireString(device, 'label', context, false)
-        if (!id.trim() || !MODEL_TOKEN_SOURCE_SET.has(device.modelTokenSource)) {
-          throw new RunResponseContractError(context, 'specificationSnapshot device identity or provenance is invalid')
+      if (device.modeCount !== null) requireInteger(device, 'modeCount', context)
+    })
+    for (const [field, side] of [['aConditions', 'a'], ['ifConditions', 'if'], ['thenConditions', 'then']]) {
+      requireArray(snapshot, field, context).forEach(item => {
+        const condition = requireRecord(item, context, `specificationSnapshot.${field}`)
+        for (const key of ['deviceId', 'targetType', 'key', 'relation', 'value']) requireString(condition, key, context, false)
+        if (!Object.prototype.hasOwnProperty.call(devices, condition.deviceId)
+            || !['state', 'mode', 'api', 'variable', 'trust', 'privacy'].includes(condition.targetType)
+            || !normalizeModelRelation(condition.relation)
+            || (condition.side != null && condition.side !== side)
+            || (condition.targetType === 'variable' && !['environment', 'reported'].includes(condition.variableSource))
+            || (['trust', 'privacy'].includes(condition.targetType) && !['state', 'variable'].includes(condition.propertyScope))) {
+          throw new RunResponseContractError(context, `specificationSnapshot.${field} contains an invalid condition`)
         }
-        if (device.modeCount !== null) requireInteger(device, 'modeCount', context)
       })
-      for (const [field, side] of [['aConditions', 'a'], ['ifConditions', 'if'], ['thenConditions', 'then']]) {
-        requireArray(snapshot, field, context).forEach(item => {
-          const condition = requireRecord(item, context, `specificationSnapshot.${field}`)
-          for (const key of ['deviceId', 'targetType', 'key', 'relation', 'value']) requireString(condition, key, context, false)
-          if (!Object.prototype.hasOwnProperty.call(devices, condition.deviceId)
-              || !['state', 'mode', 'api', 'variable', 'trust', 'privacy'].includes(condition.targetType)
-              || !normalizeModelRelation(condition.relation)
-              || (condition.side != null && condition.side !== side)
-              || (condition.targetType === 'variable' && !['environment', 'reported'].includes(condition.variableSource))
-              || (['trust', 'privacy'].includes(condition.targetType) && !['state', 'variable'].includes(condition.propertyScope))) {
-            throw new RunResponseContractError(context, `specificationSnapshot.${field} contains an invalid condition`)
-          }
-        })
-      }
-      const singleSide = ['1', '2', '3', '7'].includes(snapshot.templateId)
-      if (singleSide ? snapshot.aConditions.length === 0 || snapshot.ifConditions.length !== 0 || snapshot.thenConditions.length !== 0
-          : snapshot.aConditions.length !== 0 || snapshot.ifConditions.length === 0 || snapshot.thenConditions.length === 0) {
-        throw new RunResponseContractError(context, 'specificationSnapshot conditions must match its template')
-      }
+    }
+    const singleSide = ['1', '2', '3', '7'].includes(snapshot.templateId)
+    if (singleSide ? snapshot.aConditions.length === 0 || snapshot.ifConditions.length !== 0 || snapshot.thenConditions.length !== 0
+        : snapshot.aConditions.length !== 0 || snapshot.ifConditions.length === 0 || snapshot.thenConditions.length === 0) {
+      throw new RunResponseContractError(context, 'specificationSnapshot conditions must match its template')
     }
     if (row.formulaKind !== 'CTL' && row.formulaKind !== 'LTL') {
       throw new RunResponseContractError(context, `specResults[${index}].formulaKind is invalid`)
@@ -492,12 +494,20 @@ export const validateTaskCancellationResult = (
   return result as TaskCancellationResult
 }
 
+const requireFrozenSpecificationName = (value: unknown, context: string): void => {
+  const spec = requireRecord(value, context, 'violatedSpec')
+  if (typeof spec.name !== 'string' || !spec.name.trim() || spec.name.length > 100) {
+    throw new RunResponseContractError(context, 'frozen specification name is required')
+  }
+}
+
 const validateVerificationTraceShape = (
   value: unknown,
   context: string
 ): Record<string, any> => {
   const trace = requireRecord(value, context)
   requireString(trace, 'violatedSpecId', context, false)
+  requireFrozenSpecificationName(trace.violatedSpec, context)
   /*
    * Nullable, and the server has always been free to send it so.
    *
@@ -721,7 +731,7 @@ const validateTraceSummary = (value: unknown, context: string): TraceSummary => 
     return trace as TraceSummary
   }
   requireString(trace, 'violatedSpecId', context, false)
-  requireRecord(trace.violatedSpec, context, 'violatedSpec')
+  requireFrozenSpecificationName(trace.violatedSpec, context)
   const sources = requireRecord(trace.modelTokenSourcesByDeviceId, context, 'modelTokenSourcesByDeviceId')
   if (Object.keys(sources).length > 100
     || Object.entries(sources).some(([id, source]) => !id.trim() || !MODEL_TOKEN_SOURCE_SET.has(String(source)))) {

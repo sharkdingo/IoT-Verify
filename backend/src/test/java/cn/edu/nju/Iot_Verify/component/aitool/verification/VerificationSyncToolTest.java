@@ -87,7 +87,8 @@ class VerificationSyncToolTest {
     void verifyModel_violationReportsFrozenScopeAndReadableTraceContext() throws Exception {
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
-        spec.setTemplateLabel("Kitchen light must stay off");
+        spec.setName("Kitchen light must stay off");
+        spec.setTemplateLabel("Never");
         spec.setFormula("AG(kitchen_light.off)");
 
         TraceDto trace = TraceDto.builder()

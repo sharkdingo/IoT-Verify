@@ -66,7 +66,9 @@ describe('readBoardReplacementStalePreview', () => {
     deviceCount: 2,
     environmentVariableCount: 1,
     ruleCount: 3,
-    specificationCount: 0
+    specificationCount: 0,
+    editHistoryEntryCount: 0,
+    templates: [{ name: 'Light', defaultTemplate: true, deviceCount: 2 }]
   }
 
   it('accepts a complete stale-replacement preview', () => {
@@ -94,7 +96,10 @@ describe('readBoardReplacementStalePreview', () => {
       { ...preview, deviceCount: -1 },
       { ...preview, ruleCount: 1.5 },
       { ...preview, specificationCount: undefined },
-      { ...preview, environmentVariableCount: 'many' }
+      { ...preview, environmentVariableCount: 'many' },
+      { ...preview, editHistoryEntryCount: undefined },
+      { ...preview, templates: undefined },
+      { ...preview, templates: [{ name: 'Light', defaultTemplate: true, deviceCount: 0 }] }
     ]
     for (const currentPreview of bad) {
       expect(readBoardReplacementStalePreview(rejection({

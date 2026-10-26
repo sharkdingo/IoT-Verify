@@ -33,7 +33,7 @@ class AiToolResultContractTest {
     void specificationUpdateNeedsTheSavedIdentityConditionsAndUnverifiedStatus() throws Exception {
         String valid = """
                 {"operation":"updated","verificationStatus":"NOT_VERIFIED","totalSpecs":1,
-                 "specification":{"specId":"spec-1","templateId":"3","aConditions":[{}],
+                 "specification":{"specId":"spec-1","name":"Keep the door locked","templateId":"3","aConditions":[{}],
                  "ifConditions":[],"thenConditions":[]}}
                 """;
         assertTrue(AiToolResultContract.hasValidKnownToolPayload("manage_spec", objectMapper.readTree(valid)));
@@ -44,10 +44,33 @@ class AiToolResultContractTest {
             incomplete.remove(field);
             assertFalse(AiToolResultContract.hasValidKnownToolPayload("manage_spec", incomplete), field);
         }
-        for (String field : java.util.List.of("specId", "templateId", "aConditions", "ifConditions", "thenConditions")) {
+        for (String field : java.util.List.of("specId", "name", "templateId", "aConditions", "ifConditions", "thenConditions")) {
             var incomplete = (com.fasterxml.jackson.databind.node.ObjectNode) objectMapper.readTree(valid);
             ((com.fasterxml.jackson.databind.node.ObjectNode) incomplete.path("specification")).remove(field);
             assertFalse(AiToolResultContract.hasValidKnownToolPayload("manage_spec", incomplete), field);
+        }
+    }
+
+    @Test
+    void specificationUpdateAndUnchangedResultsNeedABoundedTextName() throws Exception {
+        var result = (com.fasterxml.jackson.databind.node.ObjectNode) objectMapper.readTree("""
+                {"verificationStatus":"NOT_VERIFIED","totalSpecs":1,
+                 "specification":{"specId":"spec-1","templateId":"3","aConditions":[{}],
+                 "ifConditions":[],"thenConditions":[]}}
+                """);
+        var specification = (com.fasterxml.jackson.databind.node.ObjectNode) result.path("specification");
+        for (String operation : java.util.List.of("updated", "unchanged")) {
+            result.put("operation", operation);
+            for (String name : java.util.List.of("", "   ", "a".repeat(101))) {
+                specification.put("name", name);
+                assertFalse(AiToolResultContract.hasValidKnownToolPayload("manage_spec", result), operation + ": " + name);
+            }
+            specification.putNull("name");
+            assertFalse(AiToolResultContract.hasValidKnownToolPayload("manage_spec", result));
+            specification.put("name", 123);
+            assertFalse(AiToolResultContract.hasValidKnownToolPayload("manage_spec", result));
+            specification.put("name", "a".repeat(100));
+            assertTrue(AiToolResultContract.hasValidKnownToolPayload("manage_spec", result));
         }
     }
 

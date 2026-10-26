@@ -111,6 +111,7 @@ class ManageSpecToolTest {
     void updateRefusesAnExpectedSnapshotThatNoLongerMatchesTheRead() throws Exception {
         SpecificationDto before = prepareSpecificationUpdate();
         String args = specificationUpdateArgs(before);
+        before.setName("Safety requirement");
         before.setTemplateId("2");
 
         JsonNode result = new ObjectMapper().readTree(tool.execute(args));
@@ -211,6 +212,7 @@ class ManageSpecToolTest {
         condition.setSide("a");
         SpecificationDto before = new SpecificationDto();
         before.setId("spec-1");
+        before.setName("Safety requirement");
         before.setTemplateId("1");
         before.setAConditions(List.of(condition));
         return new BoardSemanticSnapshotDto(
@@ -222,6 +224,7 @@ class ManageSpecToolTest {
         var args = mapper.createObjectNode();
         args.put("action", "update");
         args.put("specId", before.getId());
+        args.put("name", "Safety requirement");
         args.put("templateId", "3");
         args.put("readRef", reads.read(1L, "spec-test-session", "list_specs",
                 mapper.writeValueAsString(java.util.Map.of("specs", List.of(java.util.Map.of(
@@ -238,7 +241,7 @@ class ManageSpecToolTest {
         String argsJson = """
                 {
                   "action":"add",
-                  "templateId":"99",
+                  "name": "Safety requirement", "templateId":"99",
                   "aConditions":[
                     {
                       "deviceId":"dev_1",
@@ -261,7 +264,7 @@ class ManageSpecToolTest {
     void add_withoutTemplateId_shouldRejectInsteadOfDefaultingToAlways() {
         String argsJson = """
                 {
-                  "action":"add",
+                  "action":"add", "name":"Safety requirement",
                   "aConditions":[
                     {
                       "deviceId":"dev_1",
@@ -298,7 +301,7 @@ class ManageSpecToolTest {
         String argsJson = """
                 {
                   "action":"add",
-                  "templateId":"1",
+                  "name": "Safety requirement", "templateId":"1",
                   "aConditions":[
                     {
                       "deviceLabel":"LivingRoomAC",
@@ -332,7 +335,7 @@ class ManageSpecToolTest {
         String argsJson = """
                 {
                   "action":"add",
-                  "templateId":"1",
+                  "name": "Safety requirement", "templateId":"1",
                   "aConditions":[
                     {
                       "deviceId":"ac_1",
@@ -380,7 +383,7 @@ class ManageSpecToolTest {
         String argsJson = """
                 {
                   "action":"add",
-                  "templateId":"1",
+                  "name": "Safety requirement", "templateId":"1",
                   "aConditions":[
                     {
                       "deviceId":"ac_1",
@@ -427,7 +430,7 @@ class ManageSpecToolTest {
         String result = tool.execute("""
                 {
                   "action":"add",
-                  "templateId":"1",
+                  "name": "Safety requirement", "templateId":"1",
                   "aConditions":[
                     {
                       "deviceId":"sensor_1",
@@ -457,7 +460,7 @@ class ManageSpecToolTest {
         String result = tool.execute("""
                 {
                   "action":"add",
-                  "templateId":"1",
+                  "name": "Safety requirement", "templateId":"1",
                   "aConditions":[
                     {
                       "deviceId":"sensor_1",
@@ -488,7 +491,7 @@ class ManageSpecToolTest {
         String argsJson = """
                 {
                   "action":"add",
-                  "templateId":"1",
+                  "name": "Safety requirement", "templateId":"1",
                   "aConditions":[
                     {
                       "deviceId":"sensor_1",
@@ -523,7 +526,7 @@ class ManageSpecToolTest {
         String argsJson = """
                 {
                   "action":"add",
-                  "templateId":"1",
+                  "name": "Safety requirement", "templateId":"1",
                   "aConditions":[
                     {
                       "deviceId":"sensor_1",
@@ -563,7 +566,7 @@ class ManageSpecToolTest {
         String argsJson = """
                 {
                   "action":"add",
-                  "templateId":"1",
+                  "name": "Safety requirement", "templateId":"1",
                   "aConditions":[
                     {
                       "deviceId":"sensor_1",
@@ -599,7 +602,7 @@ class ManageSpecToolTest {
         String argsJson = """
                 {
                   "action":"add",
-                  "templateId":"1",
+                  "name": "Safety requirement", "templateId":"1",
                   "aConditions":[
                     {
                       "deviceId":"sensor_1",
@@ -620,6 +623,27 @@ class ManageSpecToolTest {
     }
 
     @Test
+    void missingTrustOrPrivacyScopeIsAnActionableValidationError() throws Exception {
+        ObjectMapper objectMapper = new ObjectMapper();
+        DeviceNodeDto node = new DeviceNodeDto();
+        node.setId("sensor_1");
+        when(boardStorageService.getNodes(1L)).thenReturn(List.of(node));
+        for (String target : List.of("trust", "privacy")) {
+            for (String scope : List.of("", ",\"propertyScope\":null", ",\"propertyScope\":\" \"")) {
+                JsonNode result = objectMapper.readTree(tool.execute("""
+                        {"action":"add","name":"Source check","templateId":"1",
+                        "aConditions":[{"deviceId":"sensor_1","targetType":"%s",
+                        "key":"temperature","relation":"=","value":"trusted"%s}]}
+                        """.formatted(target, scope)));
+                assertEquals("VALIDATION_ERROR", result.path("errorCode").asText());
+                assertEquals(400, result.path("status").asInt());
+                assertTrue(result.path("error").asText().contains("propertyScope"));
+            }
+        }
+        verify(boardStorageService, never()).addSpec(anyLong(), any());
+    }
+
+    @Test
     void add_withGeneratedTrustAlias_shouldRejectWhenNoLiteralVariableExists() {
         DeviceNodeDto node = new DeviceNodeDto();
         node.setId("sensor_1");
@@ -631,7 +655,7 @@ class ManageSpecToolTest {
         String argsJson = """
                 {
                   "action":"add",
-                  "templateId":"1",
+                  "name": "Safety requirement", "templateId":"1",
                   "aConditions":[
                     {
                       "deviceId":"sensor_1",
@@ -664,7 +688,7 @@ class ManageSpecToolTest {
         String argsJson = """
                 {
                   "action":"add",
-                  "templateId":"1",
+                  "name": "Safety requirement", "templateId":"1",
                   "aConditions":[
                     {
                       "deviceId":"sensor_1",
@@ -703,7 +727,7 @@ class ManageSpecToolTest {
         String result = tool.execute("""
                 {
                   "action":"add",
-                  "templateId":"1",
+                  "name": "Safety requirement", "templateId":"1",
                   "aConditions":[{
                     "deviceId":"sensor_1",
                     "targetType":"trust",
@@ -739,7 +763,7 @@ class ManageSpecToolTest {
         String result = tool.execute("""
                 {
                   "action":"add",
-                  "templateId":"7",
+                  "name": "Safety requirement", "templateId":"7",
                   "aConditions":[{
                     "deviceId":"ac_1",
                     "targetType":"state",
@@ -771,7 +795,7 @@ class ManageSpecToolTest {
         String argsJson = """
                 {
                   "action":"add",
-                  "templateId":"1",
+                  "name": "Safety requirement", "templateId":"1",
                   "aConditions":[
                     {
                       "deviceId":"ac_1",
@@ -823,7 +847,7 @@ class ManageSpecToolTest {
         String argsJson = """
                 {
                   "action":"add",
-                  "templateId":"1",
+                  "name": "Safety requirement", "templateId":"1",
                   "aConditions":[
                     {
                       "deviceId":"ac_1",
@@ -848,7 +872,8 @@ class ManageSpecToolTest {
     void delete_requiresPreviewAndExplicitLaterConfirmation() throws Exception {
         SpecificationDto target = new SpecificationDto();
         target.setId("spec-9");
-        target.setTemplateLabel("Smoke alarm must eventually sound");
+        target.setName("Smoke alarm must eventually sound");
+        target.setTemplateLabel("Eventually");
         when(boardStorageService.getSpecs(1L)).thenReturn(List.of(target));
         when(boardStorageService.removeSpecIfUnchanged(1L, "spec-9", target))
                 .thenReturn(CollectionMutationResultDto.of("deleted", target, List.of()));
@@ -870,11 +895,44 @@ class ManageSpecToolTest {
     }
 
     @Test
+    void delete_keepsCommittedResultWhenPresentationReadsBecomeUnavailable() throws Exception {
+        SpecificationDto target = new SpecificationDto();
+        target.setId("spec-9");
+        target.setName("Smoke alarm must eventually sound");
+        target.setTemplateLabel("Eventually");
+        when(boardStorageService.getSpecs(1L)).thenReturn(List.of(target));
+        when(boardStorageService.removeSpecIfUnchanged(1L, "spec-9", target))
+                .thenAnswer(invocation -> {
+                    org.mockito.Mockito.lenient().doThrow(new IllegalStateException("Read unavailable after commit"))
+                            .when(boardStorageService).getNodes(1L);
+                    org.mockito.Mockito.lenient().doThrow(new IllegalStateException("Template read unavailable after commit"))
+                            .when(boardStorageService).getDeviceTemplates(1L);
+                    return CollectionMutationResultDto.of("deleted", target, List.of());
+                });
+
+        String preview = tool.execute("{\"action\":\"delete\",\"specId\":\"spec-9\",\"confirmed\":true}");
+        JsonNode previewJson = new ObjectMapper().readTree(preview);
+        assertTrue(previewJson.path("requiresUserConfirmation").asBoolean());
+        assertEquals(previewJson.path("specification").path("description").asText(),
+                destructiveActionGuard.pendingContext(1L, "spec-test-session")
+                        .orElseThrow().displayTarget());
+        verify(boardStorageService, never()).removeSpecIfUnchanged(anyLong(), any(), any());
+
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", previewJson.path("impactToken").asText());
+        String result = tool.execute("{\"action\":\"delete\",\"specId\":\"spec-9\",\"confirmed\":true,\"impactToken\":\""
+                + previewJson.path("impactToken").asText() + "\"}");
+        JsonNode resultJson = new ObjectMapper().readTree(result);
+        assertEquals("deleted", resultJson.path("operation").asText());
+        verify(boardStorageService).removeSpecIfUnchanged(1L, "spec-9", target);
+    }
+
+
+    @Test
     void add_rejectsMalformedConditionCollectionsInsteadOfSilentlyTreatingThemAsEmpty() throws Exception {
         JsonNode result = new ObjectMapper().readTree(tool.execute("""
                 {
                   "action":"add",
-                  "templateId":"4",
+                  "name": "Safety requirement", "templateId":"4",
                   "aConditions":"not-an-array",
                   "ifConditions":[{
                     "deviceId":"ac_1","targetType":"state","key":"state","relation":"=","value":"On"
@@ -900,7 +958,7 @@ class ManageSpecToolTest {
         JsonNode result = new ObjectMapper().readTree(tool.execute("""
                 {
                   "action":"add",
-                  "templateId":"1",
+                  "name": "Safety requirement", "templateId":"1",
                   "aConditions":[{
                     "deviceId":"ac_1","targetType":"state","key":"state","value":"On"
                   }]
@@ -917,7 +975,7 @@ class ManageSpecToolTest {
         JsonNode result = new ObjectMapper().readTree(tool.execute("""
                 {
                   "action":"add",
-                  "templateId":1,
+                  "name": "Safety requirement", "templateId":1,
                   "aConditions":[]
                 }
                 """));

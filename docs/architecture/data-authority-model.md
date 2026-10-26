@@ -4,7 +4,7 @@ This document is the project authority for board data contracts. The project is
 in active development: invalid legacy shapes should be fixed at the source or by
 clearing development data, not by adding fallback branches.
 
-Verified against code on 2026-10-23. Source: board/fuzz DTOs and services,
+Verified against code on 2026-10-26. Source: board/fuzz DTOs and services,
 `BoardDataConverter`, `modelRequest.ts`, scene import/export, fuzzing, and NuSMV generation
 (including `SmvDeviceModuleBuilder.appendInitialValues`).
 
@@ -16,6 +16,9 @@ Verified against code on 2026-10-23. Source: board/fuzz DTOs and services,
   reference is the NuSMV-safe `varName` produced from `DeviceNode.id`.
 - Display labels never resolve identity. `label`, `deviceLabel`, and
   `deviceName` labels are readable snapshots only.
+- AI task memory describes sourced user intent. It cannot establish current Board facts,
+  completed operations, verification outcomes or permission to write. Its scene scope,
+  coverage and retrieval contract belong to [chat memory](../api/chat-sse.md#task-memory-and-original-requirements).
 - Verification-result requirements use the checked conditions and token provenance captured
   with that result. Current Board specifications and template definitions cannot supply missing
   historical interpretation; see [the result snapshot contract](../api/verification.md#specificationsnapshotdto).
@@ -124,7 +127,7 @@ mode-based devices must provide a legal current state, no-mode devices may use t
 canvas placeholder `Working`, and unknown variables, out-of-range variable values, and
 invalid trust/privacy values are rejected with `422`.
 
-The portable `iot-verify.board-scene` v5 shape does not expose the no-mode canvas
+The portable `iot-verify.board-scene` v6 shape does not expose the no-mode canvas
 placeholder. Stateful templates require `devices[].state` and may carry current-state
 source/sensitivity overrides; stateless templates omit `state`, `currentStateTrust`, and
 `currentStatePrivacy`. The frontend restores `Working` only in its canvas DTO and removes
@@ -316,6 +319,7 @@ Frontend type: `Specification`. Backend DTO: `SpecificationDto`.
 | Field | Authority | Purpose | Downstream |
 | --- | --- | --- | --- |
 | `id` | Frontend/AI UUID, scoped to the authenticated user | Stable spec identity within one account | Save/delete, trace `violatedSpecId`, fix |
+| `name` | User/AI | User-facing requirement name | Editor, inspector, AI search, and frozen result interpretation |
 | `templateId` | Spec template config | P1-P7 property shape | NuSMV CTL/LTL generation |
 | `templateLabel` | Backend/UI derived from `templateId` | Localized/display label cache | Response/inspector only; ignored as write authority |
 | `aConditions` | User/AI | A-side condition list | Spec formula generation |
@@ -330,13 +334,14 @@ Frontend type: `Specification`. Backend DTO: `SpecificationDto`.
 
 | Field | Authority | Purpose | Downstream |
 | --- | --- | --- | --- |
-| `id` | Frontend/AI | Condition UI key | UI only |
+| `id` | Editor/backend generated | Condition UI key | UI only |
 | `side` | Containing collection | `a`, `if`, or `then` | Backend mapper normalizes side |
 | `deviceId` | Board storage: raw `DeviceNode.id`; model boundary: normalized `varName` | Device reference | NuSMV spec builder |
 | `deviceLabel` | Backend derived from the current node label | Readable UI | Response/display only; never identity |
 | `targetType` | User/AI | `state`, `mode`, `variable`, `api`, `trust`, `privacy` | NuSMV expression semantics |
 | `key` | Template key or `state` | Attribute being checked | NuSMV expression; API keys must be `Signal=true`; trust/privacy keys must be a variable or state-property key |
 | `propertyScope` | User/AI for trust/privacy only | Distinguishes an active state label from a literal variable label without generated `Mode_state` keys | Trust/privacy expression resolution |
+| `variableSource` | User/AI for variable conditions only | Selects the real environment value or the device-reported value | [Shared-value semantics](shared-value-semantics.md) |
 | `relation` | User/AI; derived `=` for API helpers when omitted | Comparator | NuSMV relation |
 | `value` | User/AI; derived `TRUE` for API helpers when omitted | Expected value | NuSMV expression |
 
@@ -353,19 +358,20 @@ scene into different accounts cannot overwrite or transfer another user's specif
 Board storage writes specification array positions to the internal
 `specification.list_order` column and orders every read by it (then by id only as a
 deterministic tie-breaker). This persistence detail is not exported.
-Portable scene v4 stores only `templateId` and structured conditions for each
-specification. It excludes `templateLabel`, `formula`, `devices[]`, condition ids/sides,
-and condition display labels, so a display cache cannot contradict the semantic model.
+The [portable scene contract](../api/board.md) stores each specification's authored name,
+template and conditions. It excludes display caches and condition UI keys so those
+fields cannot contradict the semantic model.
 
 `formula` is not an authored source of truth. Targeted and batch specification writes
-send only `id`, `templateId`, and the structured condition semantics. Board storage
+send only `id`, `name`, `templateId`, and the structured condition semantics. Board storage
 rebuilds `templateLabel`, condition labels, `devices[]`, and a user-domain formula
 preview from the accepted current board; AI views and the frontend likewise rebuild
 their previews instead of displaying a persisted formula verbatim. Backend validation
 and NuSMV generation ignore every preview and rebuild the actual checked expression from
 `templateId` plus the structured condition arrays. Each emitted `SpecResultDto` captures
-the submitted `templateId`, user-facing template label, a newly rebuilt user-domain
-`formulaPreview`, `formulaKind`, and the actual technical `expression`. Result UIs do not
+the submitted `templateId`, user-authored name as `specificationLabel`, frozen
+`specificationSnapshot`, newly rebuilt user-domain `formulaPreview`, `formulaKind`,
+and the actual technical `expression`. Result UIs do not
 join `specId` back to the mutable current Board to explain an earlier run.
 
 ## Edge

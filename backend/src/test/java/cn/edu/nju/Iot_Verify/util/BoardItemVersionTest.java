@@ -89,6 +89,17 @@ class BoardItemVersionTest {
         assertNotEquals(BoardItemVersion.specification(1L, first), BoardItemVersion.specification(1L, reordered));
     }
 
+    @Test
+    void renamingChangesTheEditVersionButNotTheLogicalDuplicateKey() {
+        SpecificationDto before = specification();
+        SpecificationDto renamed = specification();
+        renamed.setName("Keep the home cool");
+        assertNotEquals(BoardItemVersion.specification(1L, before), BoardItemVersion.specification(1L, renamed));
+        assertEquals(SpecificationSemanticSignature.from(before), SpecificationSemanticSignature.from(renamed));
+        renamed.setName("  Safety requirement  ");
+        assertEquals(BoardItemVersion.specification(1L, before), BoardItemVersion.specification(1L, renamed));
+    }
+
     private RuleDto rule() {
         return RuleDto.builder().id(1L).userId(1L).createdAt(LocalDateTime.of(2026, 10, 23, 1, 2, 3))
                 .ruleString("Cooling threshold")
@@ -101,6 +112,7 @@ class BoardItemVersionTest {
     private SpecificationDto specification() {
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec-1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         SpecConditionDto condition = new SpecConditionDto();
         condition.setDeviceId("sensor");

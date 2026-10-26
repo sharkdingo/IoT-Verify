@@ -64,6 +64,7 @@ class ParameterAdjustStrategyTest {
         deviceMap.put("ac_1", actuator);
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         FixContext context = FixContext.builder()
                 .faultRules(List.of(FaultRuleDto.builder().ruleIndex(0).build()))
@@ -286,6 +287,7 @@ class ParameterAdjustStrategyTest {
     private FixContext twoThresholdContext(int maxAttempts) {
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         return FixContext.builder()
                 .faultRules(List.of(FaultRuleDto.builder().ruleIndex(0).build()))
@@ -423,6 +425,7 @@ class ParameterAdjustStrategyTest {
                 .build();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
                 any(), anyBoolean(), any(ParameterizationConfig.class), any(SmvGenerator.TempModelContext.class)))
@@ -675,6 +678,7 @@ class ParameterAdjustStrategyTest {
         FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
 
         FixContext context = ctx(List.of(fault), List.of(rule), List.of(spec), buildDeviceMap());
@@ -699,6 +703,7 @@ class ParameterAdjustStrategyTest {
         FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
 
         when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
@@ -747,6 +752,7 @@ class ParameterAdjustStrategyTest {
         FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
 
         when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
@@ -781,6 +787,7 @@ class ParameterAdjustStrategyTest {
         FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
 
         // generateParameterized: called for initial discovery AND refinement NuSMV solves
@@ -857,6 +864,7 @@ class ParameterAdjustStrategyTest {
         FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
 
         when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
@@ -901,6 +909,7 @@ class ParameterAdjustStrategyTest {
         FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
 
         when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
@@ -957,6 +966,7 @@ class ParameterAdjustStrategyTest {
         FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
 
         when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
@@ -1012,6 +1022,7 @@ class ParameterAdjustStrategyTest {
         FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
 
         when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
@@ -1050,6 +1061,7 @@ class ParameterAdjustStrategyTest {
         FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
 
         when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
@@ -1115,6 +1127,7 @@ class ParameterAdjustStrategyTest {
         FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
 
         when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
@@ -1192,6 +1205,7 @@ class ParameterAdjustStrategyTest {
         FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
 
         when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
@@ -1324,6 +1338,7 @@ class ParameterAdjustStrategyTest {
         when(nusmvExecutor.executeRepairSearch(any(File.class), anyLong())).thenAnswer(sequence(executions));
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         FixContext context = FixContext.builder()
                 .faultRules(List.of(FaultRuleDto.builder().ruleIndex(0).build()))
@@ -1361,6 +1376,7 @@ class ParameterAdjustStrategyTest {
         FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
 
         // Capture the ParameterizationConfig to verify bounds
@@ -1436,6 +1452,7 @@ class ParameterAdjustStrategyTest {
         FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
 
         FixContext context = FixContext.builder()
@@ -1471,6 +1488,7 @@ class ParameterAdjustStrategyTest {
         FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         long traceId = 77L;
         String disjointTarget = PreferredRangeSelection.targetIdFor(traceId, 0, 0);

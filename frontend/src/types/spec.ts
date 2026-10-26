@@ -59,6 +59,7 @@ export interface SpecTemplateDetail extends SpecTemplate {
 
 export interface Specification {
     id: string
+    name: string
     templateId: SpecTemplateId
     templateLabel: string
     aConditions: SpecCondition[]

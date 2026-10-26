@@ -1,6 +1,6 @@
 {
 	"schema": "iot-verify.board-scene",
-	"version": 5,
+	"version": 6,
 	"templates": [
 		{
 			"name": "Alarm",
@@ -382,6 +382,7 @@
 	],
 	"specs": [
 		{
+			"name": "Enable the alarm when away",
 			"templateId": "4",
 			"aConditions": [],
 			"ifConditions": [
@@ -405,6 +406,7 @@
 			]
 		},
 		{
+			"name": "Light the room when motion is detected",
 			"templateId": "4",
 			"aConditions": [],
 			"ifConditions": [
@@ -428,6 +430,7 @@
 			]
 		},
 		{
+			"name": "Never leave the door unlocked while away",
 			"templateId": "3",
 			"aConditions": [
 				{
@@ -450,6 +453,7 @@
 			"thenConditions": []
 		},
 		{
+			"name": "Relock the door after leaving",
 			"templateId": "5",
 			"aConditions": [],
 			"ifConditions": [
@@ -480,6 +484,7 @@
 			]
 		},
 		{
+			"name": "Require trusted door control",
 			"templateId": "7",
 			"aConditions": [
 				{
@@ -494,6 +499,7 @@
 			"thenConditions": []
 		},
 		{
+			"name": "Keep door status private",
 			"templateId": "1",
 			"aConditions": [
 				{

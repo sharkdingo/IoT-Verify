@@ -1007,6 +1007,9 @@ public class FuzzMapper {
             if (!isSupportedFiniteSpecification(specification)) {
                 throw invalidProjectedRun(task, "specificationPresentation", "eligible frozen specification is missing or unsupported");
             }
+            if (!Objects.equals(eligibility.getEligibleSpecLabels().get(id), specificationLabel(specification))) {
+                throw invalidProjectedRun(task, "eligibility", "requirement name differs from its frozen specification");
+            }
             eligible.put(id, specification);
         }
         return Map.copyOf(eligible);
@@ -1580,9 +1583,7 @@ public class FuzzMapper {
 
     private String specificationLabel(SpecificationDto specification) {
         if (specification == null) return null;
-        String raw = hasText(specification.getTemplateLabel())
-                ? specification.getTemplateLabel()
-                : hasText(specification.getFormula()) ? specification.getFormula() : specification.getId();
+        String raw = specification.getName();
         return FuzzMetadataPolicy.boundedSingleLine(
                 raw, specification.getId(), MAX_ELIGIBILITY_LABEL_CHARS);
     }

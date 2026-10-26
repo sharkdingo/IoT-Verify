@@ -138,7 +138,7 @@ single owner of the "session gone → login" location.
   inputs as arguments (including `t`/`locale`) and land in `views/board/` or `utils/` with tests:
   boundary parsing, wording, decision tables, freshness predicates. Do **not** extract code needing
   many injected reactive getters — that trades size for indirection, the pass-through layer the root
-  CLAUDE.md forbids. Two things that look extractable but are not: the four recommendation panels
+  CLAUDE.md forbids. Two things that look extractable but are not: the three recommendation sections
   diverge in most of their markup (a shared component would need more slots than it saves), and the
   fuzzing refs are interleaved with simulation and task-inbox state rather than contiguous.
 - **Every ordinary targeted device/Environment Pool/rule/spec mutation commits through
@@ -148,7 +148,7 @@ single owner of the "session gone → login" location.
   those follow-ups at a call site: that is what let reorder skip undo availability and undo skip
   the canvas edges, each hidden by a later refresh that happened to repair the state. An undo is
   itself a semantic mutation, so it uses this path and must match `isBoardMutationRequest`. Pass
-  `semanticChanged: false` only for an explicit server-confirmed no-op; it still reconciles state and
+  `semanticChanged: false` only for a confirmed unchanged model (including a requirement rename); it still reconciles state and
   availability without making a current verdict stale. Authoritative partial/full refreshes are not
   mutations, but they must reuse `reconcileBoardFocus` so removed items cannot remain selected.
 - **A path that changes the undo journal must re-read it.** Scene replace/clear calls
@@ -193,7 +193,7 @@ single owner of the "session gone → login" location.
   any hand-written breakpoint that must not overlap a Tailwind prefix — `sm:` starts at
   640px, so its compact counterpart ends at 639.98px.
 - **`role="dialog"` implies a focus trap.** The board's floating tool panels
-  (verification, simulation, the four recommendation panels, fuzzing, run history) are
+  (verification, simulation, fuzzing, run history) are
   non-modal on purpose: the canvas stays live and `useModalAccessibility` is given
   `trapFocus: false`. Those are `role="region"`. Anything that claims
   `role="dialog"` + `aria-modal="true"` must keep the trap — and therefore also gets the

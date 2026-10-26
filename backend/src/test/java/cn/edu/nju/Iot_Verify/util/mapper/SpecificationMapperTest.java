@@ -6,6 +6,9 @@ import cn.edu.nju.Iot_Verify.po.SpecificationPo;
 import cn.edu.nju.Iot_Verify.exception.PersistedDataIntegrityException;
 import cn.edu.nju.Iot_Verify.util.JsonUtils;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 
@@ -35,6 +38,7 @@ class SpecificationMapperTest {
         SpecificationPo po = new SpecificationPo();
         po.setId("spec_1");
         po.setUserId(1L);
+        po.setName("Safety requirement");
         po.setTemplateId("1");
         po.setTemplateLabel("Always");
         po.setAConditionsJson(JsonUtils.toJsonOrEmpty(List.of(validCondition("then"))));
@@ -94,6 +98,7 @@ class SpecificationMapperTest {
     void blankPersistedConditionColumnFailsClosedInsteadOfBecomingEmpty() {
         SpecificationPo po = new SpecificationPo();
         po.setId("spec_bad");
+        po.setName("Safety requirement");
         po.setAConditionsJson(" ");
         po.setIfConditionsJson("[]");
         po.setThenConditionsJson("[]");
@@ -105,9 +110,35 @@ class SpecificationMapperTest {
         assertEquals("aConditionsJson", error.getField());
     }
 
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {"   ", "\t\n"})
+    void toDto_rejectsMissingPersistedRequirementNames(String name) {
+        SpecificationPo po = mapper.toEntity(validSpec(), 1L);
+        po.setName(name);
+
+        PersistedDataIntegrityException error = assertThrows(
+                PersistedDataIntegrityException.class, () -> mapper.toDto(po));
+
+        assertEquals("name", error.getField());
+        assertEquals("spec_1", error.getRecordId());
+    }
+
+    @Test
+    void toDto_rejectsOverlongPersistedRequirementNames() {
+        SpecificationPo po = mapper.toEntity(validSpec(), 1L);
+        po.setName("x".repeat(101));
+
+        PersistedDataIntegrityException error = assertThrows(
+                PersistedDataIntegrityException.class, () -> mapper.toDto(po));
+
+        assertEquals("name", error.getField());
+    }
+
     private SpecificationDto validSpec() {
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec_1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setTemplateLabel("Always");
         return spec;

@@ -5,8 +5,30 @@ colour roles, type scale, depth, CSS precedence, and replay. These are **rules, 
 when code and this document disagree, one of them is a bug. Keep them short; they exist to stop the
 same argument being re-litigated per PR, and each carries the measurement that settled it.
 
-Verified against code on 2026-10-22. Source: `frontend/src/styles/`, `frontend/src/composables/`,
+Verified against code on 2026-10-26. Source: `frontend/src/styles/`, `frontend/src/composables/`,
 `frontend/src/utils/feedback.ts`, and the spec files each rule names.
+
+## Template library and scene operations
+
+The template panel distinguishes the reusable account library from the current scene.
+Its summary counts distinct templates, including custom templates, independently of search.
+The scope control filters all available templates or only those referenced by current devices;
+used template cards show their device count. An empty scene has zero templates in use even
+when the library is populated. Scene import compares template usage alongside devices,
+environment variables, rules and specifications, and states the custom templates retained
+and added to the library. Clear states the transition to zero usage and retained custom count;
+export reports only included dependencies. The server-owned preview and concurrency rules
+are defined in [the Board API](../api/board.md#boardbatchdto-scene-import-fields).
+
+An import failure must provide a usable next step. When a repair is unambiguous, show it
+in the replacement preview: conflicting template definitions get distinct names, and
+state-fixed variable corrections show the device, old/new values and reason. Use an
+explicit "Apply changes and replace" action; never silently change authored meaning or
+ask users to delete a referenced template to bypass a conflict. Cancelling preserves the
+scene, library and edit history. Capacity and unrecoverable validation errors remain
+blocking and explain what the user needs to correct before retrying.
+For incomplete or malformed files, the primary recovery is to re-export the source scene
+or request a complete file from its sender; field paths remain available as technical details.
 
 ## 1. What belongs in the URL
 
@@ -31,9 +53,28 @@ link stays meaningful for anyone with access to that run.
   `canvasPan` / `canvasZoom`. These are already persisted **server-side per user** via
   `BoardLayoutDto` (`boardApi.saveLayout`). Putting them in the URL would create a second
   source of truth for the same value and make every drag write history.
-- **Tool panel visibility** — verification/simulation/exploration/recommendation panels.
-  These are *input forms*, not content. A shared link that reopens someone else's
-  half-filled form is noise, and they are mutually exclusive already.
+- **Tool visibility** — verification/simulation/exploration forms and the three AI
+  recommendation disclosures in Control Center. Recommendations sit beside manual
+  creation in their device/rule/specification tab; switching tabs or collapsing a
+  disclosure preserves its draft and does not cancel a running request. A shared link
+  does not restore these transient input states. Each recommendation form asks only
+  for optional goals or constraints; the current scene and template capabilities are
+  supplied automatically. Candidate quantity uses the API's default upper bound, not
+  a user-entered target. Full-scene generation belongs to the AI assistant.
+  Placeholder examples distinguish missing devices, desired automation, and safety
+  constraints. Multiple candidates offer Apply All alongside individual actions.
+  Apply All uses sequential targeted writes with one undo entry per item; it stops
+  on cancellation, failure, an unconfirmed outcome, or a changed scene/account.
+  Confirmed items remain visible with an applied count. The completed/stopped batch
+  cannot be submitted again; generating fresh recommendations clears its state.
+  Receipts belong to each recommendation kind; starting or cancelling another kind
+  cannot unlock an earlier batch. External board notifications invalidate an active
+  batch immediately, even when snapshot refresh is queued or deferred in a hidden tab.
+  Rule and specification writes recheck the initiating session before dispatch,
+  including after asynchronous confirmation and time spent in the mutation queue.
+  Batch rule creation keeps the recommendation panel open instead of moving focus
+  to the inspector and hiding progress on narrow screens.
+  Device batches share a fixed canvas origin and space new nodes apart.
 - **Dialog intent** — rename, delete confirmation, device details, rule builder, logout.
   Restoring a destructive confirmation from a URL is actively unsafe.
 - **Transient run state** — in-flight progress, playback frame index, animation state.
@@ -119,7 +160,8 @@ user must act**.
 - **Never `window.alert` / `confirm` / `prompt`.**
 - **One mechanism per outcome.** Never a toast *and* a banner *and* an inline error for the
   same failure.
-- Entering run settings or a repair dialog retires earlier success and informational toasts.
+- Entering run settings, a repair dialog or a destructive confirmation retires earlier
+  success and informational toasts so completion notices cannot obscure the next decision.
   A confirmed undo or redo replaces earlier completion receipts with the latest edit result;
   submitting verification also retires these receipts when settings stayed open during edits.
   Warnings and errors remain. This keeps a rapid repair/apply/undo/redo workflow readable.
@@ -388,7 +430,11 @@ ends up destroying work.
 ## 4. Dialogs are one surface with three sizes and four tones
 
 Control Center creation tools share the panel's scroll region. Rule creation lives in
-its Rules tab as an inline `RuleBuilder`: trigger conditions, target action, optional
+its Rules tab as an inline `RuleBuilder`. All top-level creation, template-library and
+AI recommendation disclosures start closed; switching tabs preserves the user's choices.
+Inspector Add/Edit actions explicitly open and focus the corresponding creation section.
+The rule editor provides
+trigger conditions, target action, optional
 content, preview, and creation actions. It leaves the canvas available, retains drafts
 when switching tabs or collapsing the panel, and clears them after a confirmed save or
 an explicit Reset draft. Save failures stay beside the unchanged draft and receive
@@ -1278,17 +1324,29 @@ leaving focus or clicking outside closes it, and scroll/resize updates its posit
 
 `TopologyShowcase.vue` presents the same device artwork, node palette helpers, state chips, directed
 rule connections and canvas grid as the workspace, with a shallow perspective rather than floating
-nodes detached from their connections. Its three-device illustration projects the porch-motion,
-light and door-lock rules from the [away-mode unlock scene](away-mode-unlock-demo.md).
-R1/R2 labels correspond to the two displayed automations. Nobody-home context and a preset three-step
-path show how motion can unlock the door despite the occupancy safety specification. This is an
-illustration, not a live verification or the scene's exact recorded trace.
+nodes detached from their connections. Its three-node illustration projects the request input,
+porch light and door from the [household entry scene](default-template-scenarios.md#household-entry),
+with resident presence represented by the nobody-home context. R1 lights the porch for a visitor;
+R2 links that light to an unsafe unlock; R3 independently admits an externally authenticated owner.
+Three reader-selected stages share this diagram: risk, rule repair and recheck. The risk stage's
+four-state visitor path separates the request, lighting and subsequent unlock. The repair stage
+shows the verified suggestion to remove R2 and the need to confirm application; the recheck stage compares the same three requirements
+before and after that change, with a trigger-reachability note. Both later stages show visitor lighting
+with the door locked and R2 removed; R3 remains inactive throughout this visitor illustration.
+Full rules and requirements expand on demand. R2's expanded definition follows the selected stage,
+while the other rules and all requirements remain unchanged. This is a labeled preset illustration,
+not a live verification or an exact recorded trace; it retains the external-authentication assumption.
+The [household entry scene](default-template-scenarios.md#household-entry) owns the model and outcome
+semantics. These stage interactions were verified against code on 2026-10-24.
 
 The preset opens on its counterexample. Replay first restores the initial readings and artwork, then
-advances the motion reading and the delivered light/unlock actions. Device changes, rule flow, selected
+advances the request reading, then the light and unlock actions separately. Device changes, rule flow, selected
 step and violation feedback follow one selected step. Playback is finite and can be paused, resumed or
-sought with previous/next controls or step buttons. The compact view retains state controls and the
-illustration disclaimer. Reduced motion removes tilt and flow animation while retaining every step.
+sought with previous/next controls or step buttons. Stage changes stop playback; returning to risk
+opens its final counterexample without restarting playback. Stages never advance automatically.
+The compact view retains all stages, risk state controls and the illustration disclaimer, while omitting
+the expanded model details and individual trace buttons. Reduced motion removes tilt and flow
+animation while retaining every step.
 Node positions and rule endpoints share one layout. A resize observer measures the world before its
 perspective transform, so bends and arrowheads keep their proportions across container sizes. Node cards
 reserve space for two-line labels and readings; replay does not change their footprint.
@@ -1305,6 +1363,17 @@ Authentication progress retains a slowed spinner under reduced motion.
 Public copy uses the workspace's terminology for safety specifications and workspace entry.
 The AI assistant uses the shared body font, opaque panel surface and elevation roles;
 warning text and filled recovery actions follow the same semantic color tokens.
+`ChatMarkdown` owns rendering for streamed and persisted assistant messages. Its
+`remark-cjk-friendly` parsing plugins handle emphasis and strikethrough beside CJK
+punctuation, including nested code and links; escaped delimiters remain literal.
+LaTeX `\(...\)` and `\[...\]` are parsed as inline and display math, alongside dollar
+delimiters. Do not rewrite message strings to normalize markup: code fences (including
+unfinished streams), code spans, escapes and link destinations must retain their contents.
+There is no cross-message cache of streaming text prefixes. The renderer's reserved
+`component-json` and `echarts` fences display as JSON code, because the assistant does not
+provide interactive renderers for them. Raw HTML stays disabled; executable link targets
+and automatic remote images remain blocked by `safeMarkdown`. Regression coverage lives
+in `ChatMarkdown.spec.ts` and `chat-assistant.spec.ts`.
 Escape within its non-modal panel closes it and restores the opener's focus; hiding the
 panel does not stop an active response. Escape outside it does not dismiss it.
 The bottom composer grows upward from a handle above its text field, rather than downward from
@@ -1312,7 +1381,11 @@ a native bottom-corner resize grip. Up/Down arrows adjust its height; Home/End c
 minimum/maximum. The handle exposes its current height and instructions in the active language.
 Resizing preserves the draft and does not submit a request; viewport changes clamp the height.
 Opening the assistant remains available when Board data is loading or failed; sending stays locked
-until authoritative Board data and any pending reconciliation are ready. A descendant component
+until authoritative Board data and any pending reconciliation are ready. Failed reconciliation shows
+its explanation and retry beside the composer, outside the scrolling message history, and describes
+the disabled input through `aria-describedby`. Retrying reads authoritative state without replaying
+the AI action; a failed retry keeps the guard and recovery control available. The composer area scrolls
+when a short panel cannot fit both recovery and the draft, instead of clipping its controls. A descendant component
 failure uses `AssistantRecoveryPanel` above the canvas rather than a fallback below the full-height
 Board. It can be hidden, reopened, or retried without clearing persisted conversations. Remounting
 requires authoritative reconciliation before further assistant work; retry alone cannot clear that
@@ -1440,9 +1513,15 @@ and history identify targets by their frozen structured conditions, and use reco
 provenance for localization.
 
 Verification results share the inspector's requirement wording, formula disclosure, source chips,
-and CTL/LTL badge. Their presentation comes from the recorded result snapshot rather than current
+and CTL/LTL badge. Each named requirement groups its verdict, evidence, replay and repair actions;
+violations and unconfirmed outcomes precede satisfied requirements. Historical traces without a
+matching per-requirement result remain available. The dialog body owns scrolling, with no nested
+result-list scroll region. Verification, exploration and repair use the same name-heading tier;
+repair identifies the frozen requirement before strategy selection and folds supporting rule
+localization below the proposed changes. Their presentation comes from the recorded result snapshot rather than current
 Board entities; [the verification contract](../api/verification.md#specificationsnapshotdto) owns
-its fields and the explicit missing-interpretation state for older records.
+its required fields. Missing or inconsistent frozen interpretation data is rejected;
+current canvas data must not substitute for it.
 
 Translation checks walk production source, both locale catalogs, and finite dynamic key families.
 Tests cannot make an unused message necessary. Catalogs must have equal keys and interpolation
@@ -1601,7 +1680,9 @@ empty findings section or finding-specific repair advice. Element Plus built-in 
 locale from the same Vue I18n state as application copy. The Board heading names the product; its
 logo button separately names the view-reset action.
 Exploration results put candidate evidence and per-target outcomes before counts and run configuration.
-Model comparison failures or changes and omitted-target reasons stay inline before the evidence.
+Model comparison failures or changes and the omitted-target count stay inline before the evidence;
+omitted-target reasons expand beneath that count. Candidate titles use frozen requirement names,
+with the condition description below. Run configuration follows the results.
 Reproduction parameters, snapshot counts, and detailed capability boundaries use native disclosures;
 the settings-reuse action remains outside the disclosure, and the run seed appears only with its
 configuration. Requirement labels wrap rather than rely on native title hints to reveal truncated
@@ -1646,7 +1727,13 @@ warnings. Its result filters use the short noun “Exploration” while retainin
 exploration name for assistive technology. Its machine-readable dates match the displayed run timestamp. Failed-task settings actions
 open settings for review; they do not submit a run. Candidate-history verification names the current
 board and explains that it neither imports the historical scene nor verifies only the selected finding.
-Assistant presets focus their populated draft without creating a conversation or sending a request.
+The assistant's empty screen has one short introduction, a compact list of contextual tasks,
+and an optional “Describe your needs step by step” disclosure. The message composer remains the
+primary input. Tasks use two columns when the panel has room and stack at narrower widths.
+The disclosure keeps unsent fields when collapsed; changing account or conversation resets it
+and its fields. The requirement form separates desired behavior, risks and preserved functions
+without competing with the primary input on first open. Assistant presets focus their populated
+draft without creating a conversation or sending a request.
 Confirmation copy names the authorized write and presents its target separately; decision messages
 retain both so the conversation records what was confirmed or cancelled. Preview-capable tool names
 must not make a write confirmation sound like another preview.

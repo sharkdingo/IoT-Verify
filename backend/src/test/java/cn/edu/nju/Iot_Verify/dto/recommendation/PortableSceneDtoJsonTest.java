@@ -24,6 +24,7 @@ class PortableSceneDtoJsonTest {
 
         PortableSceneDto.PortableSpecificationDto specification =
                 new PortableSceneDto.PortableSpecificationDto();
+        specification.setName("Safety requirement");
         specification.setTemplateId("3");
         specification.setAConditions(List.of(condition));
         specification.setIfConditions(List.of());

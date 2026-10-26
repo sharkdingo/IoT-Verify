@@ -14,7 +14,7 @@ const condition = (overrides: Partial<SpecCondition>): SpecCondition => ({
     ...overrides
 } as SpecCondition)
 
-const spec = (conditions: SpecCondition[]): Specification => ({
+const spec = (conditions: SpecCondition[]): Specification => ({ name: 'Safety requirement',
     id: 'spec-1',
     templateId: '3',
     templateLabel: 'Never',

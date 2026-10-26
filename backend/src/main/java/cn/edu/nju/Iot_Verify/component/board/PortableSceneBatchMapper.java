@@ -178,6 +178,7 @@ public class PortableSceneBatchMapper {
             }
             ObjectNode spec = objectMapper.createObjectNode();
             spec.put("id", prefix + index++);
+            spec.put("name", requiredText(portable, "name", path + ".name"));
             spec.put("templateId", requiredText(portable, "templateId", path + ".templateId"));
             for (String side : new String[]{"aConditions", "ifConditions", "thenConditions"}) {
                 spec.set(side, mapConditions(requiredArray(portable, side, path + "." + side), path + "." + side));

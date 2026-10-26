@@ -21,6 +21,7 @@ import cn.edu.nju.Iot_Verify.dto.trace.TraceDto;
 import cn.edu.nju.Iot_Verify.dto.trace.TraceStateDto;
 import cn.edu.nju.Iot_Verify.dto.trace.TraceSummaryDto;
 import cn.edu.nju.Iot_Verify.dto.verification.SpecResultDto;
+import cn.edu.nju.Iot_Verify.dto.verification.SpecificationSnapshotDto;
 import cn.edu.nju.Iot_Verify.dto.verification.VerificationRequestDto;
 import cn.edu.nju.Iot_Verify.dto.verification.VerificationResultDto;
 import cn.edu.nju.Iot_Verify.dto.verification.VerificationRunDto;
@@ -106,6 +107,7 @@ class VerificationServiceImplBuildResultTest {
     @Test
     void satisfiedResponseReportsUnreachableTriggerWithoutCreatingAnAuxiliaryViolation() throws Exception {
         SpecificationDto spec = makeEffectiveSpec("response");
+        spec.setName("Safety requirement");
         spec.setTemplateId("4");
         var emitted = new SmvGenerationContext.EmittedSpec(spec, "response", "CTLSPEC AG(a -> AX b)", "CTLSPEC !EF(a)");
         var result = invoke(NusmvResult.success("", List.of(
@@ -122,6 +124,7 @@ class VerificationServiceImplBuildResultTest {
     @Test
     void missingResponseDiagnosticMakesTheRunInconclusive() throws Exception {
         SpecificationDto spec = makeEffectiveSpec("response");
+        spec.setName("Safety requirement");
         spec.setTemplateId("6");
         var emitted = new SmvGenerationContext.EmittedSpec(spec, "response", "LTLSPEC G(a -> F G b)", "CTLSPEC !EF(a)");
         var result = invoke(NusmvResult.success("", List.of(new SpecCheckResult("G(a -> F G b)", true, null))),
@@ -512,7 +515,7 @@ class VerificationServiceImplBuildResultTest {
         assertEquals(1, dto.getSpecResults().size());
         assertSpecResult(dto.getSpecResults().get(0), "s1", VerificationOutcome.INCONCLUSIVE, "");
         assertEquals("1", dto.getSpecResults().get(0).getTemplateId());
-        assertEquals("Always", dto.getSpecResults().get(0).getSpecificationLabel());
+        assertEquals("Safety requirement", dto.getSpecResults().get(0).getSpecificationLabel());
         assertEquals("CTL", dto.getSpecResults().get(0).getFormulaKind());
         assertTrue(dto.getSpecResults().get(0).getFormulaPreview().contains("Hall sensor"));
         assertFalse(dto.getSpecResults().get(0).getFormulaPreview().contains("testdevice"));
@@ -598,6 +601,7 @@ class VerificationServiceImplBuildResultTest {
         condition.setValue("30");
         SpecificationDto spec = new SpecificationDto();
         spec.setId("captured_spec");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setAConditions(List.of(condition));
         DeviceSmvData device = new DeviceSmvData();
@@ -995,6 +999,7 @@ class VerificationServiceImplBuildResultTest {
     @Test
     void submitVerification_invalidNestedSpec_rejectsBeforeCreatingTask() throws Exception {
         SpecificationDto invalidSpec = makeEffectiveSpec("s1");
+        invalidSpec.setName("Safety requirement");
         invalidSpec.setTemplateId("8");
 
         ValidationException ex = assertThrows(ValidationException.class,
@@ -2023,6 +2028,7 @@ class VerificationServiceImplBuildResultTest {
     private SpecificationDto makeEffectiveSpec(String id) {
         SpecificationDto spec = new SpecificationDto();
         spec.setId(id);
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setTemplateLabel("Always");
         SpecConditionDto cond = new SpecConditionDto();
@@ -2106,6 +2112,12 @@ class VerificationServiceImplBuildResultTest {
 
     @Test
     void completeTask_skipsWhenAlreadyCancelledInDb() throws Exception {
+        SpecConditionDto condition = new SpecConditionDto();
+        condition.setDeviceId("sensor");
+        condition.setTargetType("state");
+        condition.setKey("state");
+        condition.setRelation("=");
+        condition.setValue("active");
         VerificationTaskPo task = VerificationTaskPo.builder()
                 .id(70L).userId(1L).status(VerificationTaskPo.TaskStatus.RUNNING)
                 .startedAt(LocalDateTime.now()).createdAt(LocalDateTime.now()).build();
@@ -2128,6 +2140,10 @@ class VerificationServiceImplBuildResultTest {
                         .specId("s1")
                         .templateId("1")
                         .specificationLabel("Always")
+                        .specificationSnapshot(new SpecificationSnapshotDto("s1", "Always", "1",
+                                List.of(condition),
+                                List.of(), List.of(), Map.of("sensor", new SpecificationSnapshotDto.Device(
+                                        "Hall sensor", ModelTokenSource.BUNDLED, 1))))
                         .formulaPreview("CTL AG(\"Hall sensor\".state = \"active\")")
                         .formulaKind("CTL")
                         .outcome(VerificationOutcome.SATISFIED)
@@ -2142,7 +2158,12 @@ class VerificationServiceImplBuildResultTest {
                 eq(1), eq(2), eq("[{\"specId\":\"s1\",\"templateId\":\"1\","
                         + "\"specificationLabel\":\"Always\","
                         + "\"formulaPreview\":\"CTL AG(\\\"Hall sensor\\\".state = \\\"active\\\")\","
-                        + "\"specificationSnapshot\":null,"
+                        + "\"specificationSnapshot\":{\"id\":\"s1\",\"name\":\"Always\",\"templateId\":\"1\","
+                        + "\"aConditions\":[{\"id\":null,\"side\":null,\"deviceId\":\"sensor\",\"deviceLabel\":null,"
+                        + "\"targetType\":\"state\",\"key\":\"state\",\"propertyScope\":null,\"variableSource\":null,"
+                        + "\"relation\":\"=\",\"value\":\"active\"}],"
+                        + "\"ifConditions\":[],\"thenConditions\":[],\"devices\":{\"sensor\":{"
+                        + "\"label\":\"Hall sensor\",\"modelTokenSource\":\"BUNDLED\",\"modeCount\":1}}},"
                         + "\"formulaKind\":\"CTL\",\"outcome\":\"SATISFIED\","
                         + "\"antecedentReachability\":\"NOT_APPLICABLE\",\"expression\":\"expr\"}]"),
                 // checkLogsJson, generationIssuesJson, nusmvOutput, then the model, then errorMessage,

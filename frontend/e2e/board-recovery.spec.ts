@@ -1,3 +1,4 @@
+import { openRecommendation } from './support/recommendations'
 import { type Page } from '@playwright/test'
 import { apiBaseURL, createAuthenticatedUser, expect, test, type AuthUser } from './support/auth'
 
@@ -182,7 +183,7 @@ test('a rejected recommendation stop converges when status becomes terminal', as
 
   try {
     await openWorkspace(page, auth)
-    await page.getByTestId('open-rule-recommendations').click()
+    await openRecommendation(page, 'rule')
     const action = page.getByTestId('generate-rule-recommendations')
     await action.click()
     await recommendationStarted

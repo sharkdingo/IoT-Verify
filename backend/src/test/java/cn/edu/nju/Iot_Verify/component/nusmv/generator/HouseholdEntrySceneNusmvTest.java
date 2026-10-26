@@ -51,6 +51,7 @@ class HouseholdEntrySceneNusmvTest {
         condition.setValue("active");
         var spec = new SpecificationDto();
         spec.setId("response");
+        spec.setName("Safety requirement");
         spec.setTemplateId("4");
         spec.setIfConditions(List.of(condition));
         spec.setThenConditions(List.of(condition));

@@ -1,6 +1,6 @@
 {
 	"schema": "iot-verify.board-scene",
-	"version": 5,
+	"version": 6,
 	"templates": [
 		{
 			"name": "Air Conditioner",
@@ -317,6 +317,7 @@
 	],
 	"specs": [
 		{
+			"name": "Cool the home when it is hot",
 			"templateId": "4",
 			"aConditions": [],
 			"ifConditions": [
@@ -340,6 +341,7 @@
 			]
 		},
 		{
+			"name": "Never heat an already hot home",
 			"templateId": "3",
 			"aConditions": [
 				{
@@ -362,6 +364,7 @@
 			"thenConditions": []
 		},
 		{
+			"name": "Keep climate settings private",
 			"templateId": "1",
 			"aConditions": [
 				{
@@ -377,6 +380,7 @@
 			"thenConditions": []
 		},
 		{
+			"name": "Require trusted heating control",
 			"templateId": "7",
 			"aConditions": [
 				{

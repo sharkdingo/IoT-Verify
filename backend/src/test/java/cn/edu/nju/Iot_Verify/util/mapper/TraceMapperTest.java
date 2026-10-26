@@ -98,7 +98,7 @@ class TraceMapperTest {
         po.setId(1L);
         po.setUserId(1L);
         po.setViolatedSpecId("s0");
-        po.setViolatedSpecJson("{\"id\":\"s0\",\"templateId\":\"3\",\"templateLabel\":\"Never\","
+        po.setViolatedSpecJson("{\"id\":\"s0\",\"name\": \"Safety requirement\", \"templateId\":\"3\",\"templateLabel\":\"Never\","
                 + "\"aConditions\":[],\"ifConditions\":[],\"thenConditions\":[],\"devices\":[]}");
         po.setStatesJson("[" + VALID_STATE_JSON + "]");
         po.setStateCount(1);
@@ -285,7 +285,7 @@ class TraceMapperTest {
     @Test
     void mapsPersistedSpecJsonToStructuredApiSnapshot() {
         TracePo po = baseTrace(null);
-        po.setViolatedSpecJson("{\"id\":\"s0\",\"templateId\":\"3\",\"templateLabel\":\"Never\","
+        po.setViolatedSpecJson("{\"id\":\"s0\",\"name\": \"Safety requirement\", \"templateId\":\"3\",\"templateLabel\":\"Never\","
                 + "\"aConditions\":[],\"ifConditions\":[],\"thenConditions\":[],\"devices\":[]}");
 
         TraceDto dto = mapper.toDto(po, runContext());
@@ -316,6 +316,7 @@ class TraceMapperTest {
         cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto violatedSpec =
                 new cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto();
         violatedSpec.setId("s0");
+        violatedSpec.setName("Safety requirement");
         violatedSpec.setTemplateId("3");
         dto.setViolatedSpec(violatedSpec);
         dto.setStates(java.util.List.of(new cn.edu.nju.Iot_Verify.dto.trace.TraceStateDto()));
@@ -492,7 +493,7 @@ class TraceMapperTest {
         when(projection.getVerificationTaskId()).thenReturn(4L);
         when(projection.getViolatedSpecId()).thenReturn("s0");
         when(projection.getViolatedSpecJson()).thenReturn(
-                "{\"id\":\"s0\",\"templateId\":\"3\",\"aConditions\":[],"
+                "{\"id\":\"s0\",\"name\": \"Safety requirement\", \"templateId\":\"3\",\"aConditions\":[],"
                         + "\"ifConditions\":[],\"thenConditions\":[],\"devices\":[]}");
         when(projection.getStateCount()).thenReturn(2);
         return projection;

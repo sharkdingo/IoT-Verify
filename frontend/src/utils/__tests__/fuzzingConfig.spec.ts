@@ -34,7 +34,7 @@ describe('fuzzing configuration limits', () => {
   })
 
   it('keeps typed trust and privacy conditions outside the finite explorer', () => {
-    const specification: Specification = {
+    const specification: Specification = { name: 'Safety requirement',
       id: 'security-spec',
       templateId: '1',
       templateLabel: 'Security',
@@ -214,7 +214,7 @@ describe('fuzzing bounds mirror the backend', () => {
      * `REPORTED_READING_UNSUPPORTED`; this rule exists so the panel does not offer a run that will be
      * refused, and must stay in step with it.
      */
-    const spec = (variableSource?: string) => ({
+    const spec = (variableSource?: string) => ({ name: 'Safety requirement',
       templateId: '1',
       aConditions: [{
         deviceId: 'd1',

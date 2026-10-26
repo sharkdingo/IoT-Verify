@@ -15,6 +15,9 @@ public interface UserRepository extends JpaRepository<UserPo, Long> {
     boolean existsByPhone(String phone);
     boolean existsByUsername(String username);
 
+    @Query("select u.sceneRevision from UserPo u where u.id = :id")
+    Optional<Long> findSceneRevision(@Param("id") Long id);
+
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select u from UserPo u where u.id = :id")
     Optional<UserPo> findByIdForUpdate(@Param("id") Long id);

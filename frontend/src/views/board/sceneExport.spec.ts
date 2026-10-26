@@ -5,7 +5,8 @@ import { ref } from 'vue'
 import { createI18n } from 'vue-i18n'
 import { describe, expect, it, vi } from 'vitest'
 import actualI18n from '@/assets/i18n'
-import { createSceneCodec, normalizeTemplateLookupName, SCENE_FILE_SCHEMA, SCENE_FILE_VERSION } from './portableScene'
+import { createSceneCodec, SCENE_FILE_SCHEMA, SCENE_FILE_VERSION } from './portableScene'
+import { getTemplateUsage, normalizeTemplateLookupName, summarizeTemplateUsage } from '@/utils/templateUsage'
 
 const board = readFileSync(join(process.cwd(), 'src/views/Board.vue'), 'utf8')
 const start = board.indexOf('<script setup')
@@ -31,11 +32,12 @@ describe('scene export workflow', () => {
     const scene = codec.normalizeSceneFile(JSON.parse(readFileSync(join(process.cwd(),
       '../docs/examples/default-climate-conflict-scene.json'), 'utf8')))
     const ports: Record<string, any> = {
-      ...codec, t, SCENE_FILE_SCHEMA, SCENE_FILE_VERSION, normalizeTemplateLookupName,
+      ...codec, t, SCENE_FILE_SCHEMA, SCENE_FILE_VERSION, normalizeTemplateLookupName, getTemplateUsage, summarizeTemplateUsage,
       nodes: ref(scene.devices), environmentVariables: ref(scene.environmentVariables),
       rules: ref(scene.rules.map((rule, index) => ({ ...rule, id: String(index + 71) }))),
       specifications: ref(scene.specs),
-      deviceTemplates: ref([...scene.templates, { name: 'Unused', manifest: { Name: 'Unused' } }]),
+      deviceTemplates: ref([...scene.templates.map((template, index) => ({ ...template, defaultTemplate: index === 0 })),
+        { name: 'Unused', defaultTemplate: false, manifest: { Name: 'Unused' } }]),
       ensureBoardDataReady: () => true, MAX_SCENE_IMPORT_BYTES: 64 * 1024 * 1024,
       downloadJsonFile: vi.fn(), notifySuccess: vi.fn(), notifyError: vi.fn(),
       getSceneErrorMessage: (error: Error) => error.message
@@ -54,8 +56,10 @@ describe('scene export workflow', () => {
     expect(exported.rules.every((rule: any) => rule.id === undefined)).toBe(true)
     expect(codec.canonicalizeSceneFile(codec.normalizeSceneFile(exported))).toEqual(exported)
     expect(ports.notifySuccess).toHaveBeenCalledExactlyOnceWith(t('app.sceneExportStarted', {
-      devices: 2, variables: 2, rules: 2, specs: 4
+      devices: 2, variables: 2, rules: 2, specs: 4, templates: 2, customTemplates: 1
     }))
+    expect(ports.notifySuccess.mock.calls[0][0]).toContain(locale === 'en'
+      ? '2 templates (1 custom)' : '2 个模板（自定义 1 个）')
     expect(JSON.stringify([ports.nodes.value, ports.rules.value, ports.specifications.value])).toBe(before)
   })
 })

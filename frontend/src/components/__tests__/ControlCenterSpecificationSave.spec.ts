@@ -39,6 +39,7 @@ describe('ControlCenter specification save', () => {
     })
     try {
       const vm = wrapper.vm as any
+      await wrapper.get('[data-testid="spec-name"]').setValue('Keep the light on')
       await wrapper.get('[data-testid="spec-template-select"]').setValue('1')
       const condition = { id: 'condition-1', side: 'a', deviceId: 'device-1', deviceLabel: 'Device 1',
         targetType: 'state', key: 'state', relation: '=', value: 'on' }
@@ -86,6 +87,7 @@ describe('ControlCenter specification save', () => {
     })
     try {
       const vm = wrapper.vm as any
+      await wrapper.get('[data-testid="spec-name"]').setValue('Keep the light on')
       await wrapper.get('[data-testid="spec-template-select"]').setValue('1')
       const condition = { id: 'condition-1', side: 'a', deviceId: 'device-1', deviceLabel: 'Device 1',
         targetType: 'variable', key: 'temperature', variableSource: 'reported', relation: '=', value }
@@ -136,6 +138,7 @@ describe('ControlCenter specification save', () => {
     })
     try {
       const vm = wrapper.vm as any
+      await wrapper.get('[data-testid="spec-name"]').setValue('Keep the light on')
       await wrapper.get('[data-testid="spec-template-select"]').setValue('1')
       vm.specForm.aConditions.push({ id: 'condition-1', side: 'a', deviceId: 'device-1', deviceLabel: 'Device 1',
         targetType: 'state', key: 'state', relation: '=', value: 'on' })
@@ -166,6 +169,7 @@ describe('ControlCenter specification save', () => {
       global: { plugins: [i18n] }
     })
     const vm = wrapper.vm as any
+    await wrapper.get('[data-testid="spec-name"]').setValue('Keep the light on')
     await wrapper.get('[data-testid="spec-template-select"]').setValue('1')
     vm.specForm.aConditions.push({
       id: 'condition-1',
@@ -211,6 +215,7 @@ describe('ControlCenter specification save', () => {
       global: { plugins: [i18n] }
     })
     const vm = wrapper.vm as any
+    await wrapper.get('[data-testid="spec-name"]').setValue('Keep the light on')
     await wrapper.get('[data-testid="spec-template-select"]').setValue('1')
     vm.specForm.aConditions.push({
       id: 'condition-1',
@@ -257,6 +262,7 @@ describe('ControlCenter specification save', () => {
 
     // Template 1 (always, `AG(A)`) is CTL; template 6 (persistence, `G(IF -> F G(THEN))`) is the
     // only LTL one. Both are asserted so a constant would fail rather than half-pass.
+    await wrapper.get('[data-testid="spec-name"]').setValue('Keep the light on')
     await wrapper.get('[data-testid="spec-template-select"]').setValue('1')
     expect(wrapper.find('[data-testid="spec-formula-kind"]').exists()).toBe(false)
     const draft = (wrapper.vm as any).specForm

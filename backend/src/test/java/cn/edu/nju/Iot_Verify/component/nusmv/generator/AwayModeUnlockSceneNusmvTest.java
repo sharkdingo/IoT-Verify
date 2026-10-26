@@ -85,7 +85,7 @@ class AwayModeUnlockSceneNusmvTest {
         ObjectMapper objectMapper = new ObjectMapper();
         JsonNode scene = objectMapper.readTree(Files.readString(SCENE_PATH));
         assertEquals("iot-verify.board-scene", scene.path("schema").asText());
-        assertEquals(5, scene.path("version").asInt());
+        assertEquals(6, scene.path("version").asInt());
         assertEquals(5, scene.path("devices").size());
         assertEquals(3, scene.path("rules").size());
         assertEquals(6, scene.path("specs").size());

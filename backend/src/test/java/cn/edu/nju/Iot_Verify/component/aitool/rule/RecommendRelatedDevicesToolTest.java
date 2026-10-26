@@ -98,6 +98,35 @@ class RecommendRelatedDevicesToolTest {
         verify(promptCompletionService, never()).complete(anyString(), anyString(), anyDouble(), anyInt());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"", "garage", "away"})
+    void initialVariablesMustAgreeWithTheRecommendedState(String explicitLocation) throws Exception {
+        DeviceTemplateDto car = new DeviceTemplateDto();
+        car.setName("Car");
+        try (var source = getClass().getResourceAsStream("/deviceTemplate/Car.json")) {
+            car.setManifest(objectMapper.readValue(source, DeviceTemplateDto.DeviceManifest.class));
+        }
+        snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of(car));
+        when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of());
+        when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
+                .thenReturn("{\"recommendations\":[{\"templateName\":\"Car\",\"suggestedLabel\":\"Garage car\",\"initialState\":\"garage\""
+                        + (explicitLocation.isEmpty() ? "" : ",\"initialVariables\":[{\"name\":\"location\",\"value\":\"" + explicitLocation + "\"}]")
+                        + "}]}");
+
+        JsonNode result = objectMapper.readTree(tool.execute("{}"));
+
+        if ("away".equals(explicitLocation)) {
+            assertEquals(0, result.path("count").asInt(), result.toString());
+            assertEquals("invalidInitialRuntime", result.path("filteredItems").get(0).path("reasonCode").asText());
+            return;
+        }
+        assertEquals(1, result.path("count").asInt(), result.toString());
+        assertEquals("garage", result.path("recommendations").get(0).path("initialVariables").get(0).path("value").asText());
+        if (explicitLocation.isEmpty()) {
+            assertEquals("garage", result.path("adjustedItems").get(0).path("appliedValues").path("variables.location.value").asText());
+        }
+    }
+
     @Test
     void execute_withUnparseableAiResponse_returnsUpstreamError() throws Exception {
         when(deviceInfoHelper.getDevicesWithTemplateInfo(any(BoardSemanticSnapshotDto.class))).thenReturn(List.of());
@@ -537,8 +566,9 @@ class RecommendRelatedDevicesToolTest {
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {"recommendations":[{"templateName":"CaseSensor","suggestedLabel":"Case sensor",
+                          "initialState":"%s",
                           "initialVariables":[{"name":"level","value":"%s"}]}]}
-                        """.formatted(value));
+                        """.formatted("On".equals(value) ? "active" : "idle", value));
         return objectMapper.readTree(tool.execute("{}"));
     }
 

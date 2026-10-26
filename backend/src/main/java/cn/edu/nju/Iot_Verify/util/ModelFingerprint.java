@@ -75,7 +75,8 @@ public final class ModelFingerprint {
         semanticModel.put("environmentVariables", sorted(
                 snapshot.environmentVariables(), variable -> variable.getName()));
         semanticModel.put("rules", snapshot.rules());
-        semanticModel.put("specifications", includeSpecifications ? snapshot.specifications() : List.of());
+        semanticModel.put("specifications", includeSpecifications ? snapshot.specifications().stream()
+                .map(spec -> new SpecificationModel(spec.getId(), SpecificationSemanticSignature.from(spec))).toList() : List.of());
         semanticModel.put("templateManifests", snapshot.templateManifests());
         if (pathLength != null) semanticModel.put("pathLength", pathLength);
         ObjectNode canonicalModel = mapper.valueToTree(semanticModel);
@@ -89,6 +90,9 @@ public final class ModelFingerprint {
         });
         return canonicalModel;
     }
+
+    // Reuse logical identity so editor condition ids and rebuilt presentation caches cannot stale a run.
+    private record SpecificationModel(String id, SpecificationSemanticSignature.Signature logic) {}
 
     private String hash(JsonNode canonicalModel) {
         try {

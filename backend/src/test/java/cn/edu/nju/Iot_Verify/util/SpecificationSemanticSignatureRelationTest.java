@@ -34,6 +34,7 @@ class SpecificationSemanticSignatureRelationTest {
         condition.setValue("30");
 
         SpecificationDto spec = new SpecificationDto();
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         spec.setAConditions(List.of(condition));
         return spec;

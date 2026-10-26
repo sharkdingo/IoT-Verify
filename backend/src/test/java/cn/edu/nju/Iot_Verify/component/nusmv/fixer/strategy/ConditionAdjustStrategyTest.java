@@ -123,6 +123,7 @@ class ConditionAdjustStrategyTest {
         clause.setValue("0");
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("3");
         SpecConditionDto targetClause = new SpecConditionDto();
         targetClause.setDeviceId("ac_" + (targetRule / 3 + 1));
@@ -212,6 +213,7 @@ class ConditionAdjustStrategyTest {
             actuator.setValue("1");
             SpecificationDto spec = new SpecificationDto();
             spec.setId(index == 0 ? "s1" : "protected");
+            spec.setName("Safety requirement");
             spec.setTemplateId("3");
             spec.setAConditions(List.of(occupied, actuator));
             specs.add(spec);
@@ -336,6 +338,7 @@ class ConditionAdjustStrategyTest {
         FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
 
         when(smvGenerator.generateParameterizedWithResolvedDeviceModel(
@@ -382,6 +385,7 @@ class ConditionAdjustStrategyTest {
         FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
 
         // Parameterized model generation
@@ -448,6 +452,7 @@ class ConditionAdjustStrategyTest {
         FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
 
         when(smvGenerator.generateParameterizedWithResolvedDeviceModel(
@@ -503,6 +508,7 @@ class ConditionAdjustStrategyTest {
         FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         when(smvGenerator.generateParameterizedWithResolvedDeviceModel(
                 anyLong(), anyList(), anyList(), anyList(), anyList(),
@@ -541,6 +547,7 @@ class ConditionAdjustStrategyTest {
         FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
 
         when(smvGenerator.generateParameterizedWithResolvedDeviceModel(
@@ -589,6 +596,7 @@ class ConditionAdjustStrategyTest {
         FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
 
         when(smvGenerator.generateParameterizedWithResolvedDeviceModel(
@@ -669,6 +677,7 @@ class ConditionAdjustStrategyTest {
         FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
 
         when(smvGenerator.generateParameterizedWithResolvedDeviceModel(
@@ -715,6 +724,7 @@ class ConditionAdjustStrategyTest {
         FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
 
         ArgumentCaptor<ParameterizationConfig> configCaptor =
@@ -781,6 +791,7 @@ class ConditionAdjustStrategyTest {
         FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
 
         ArgumentCaptor<ParameterizationConfig> configCaptor =
@@ -1029,6 +1040,7 @@ class ConditionAdjustStrategyTest {
     private FixContext twoConditionCtx(RuleDto rule, int maxAttempts) {
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
+        spec.setName("Safety requirement");
         spec.setTemplateId("1");
         FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
         return FixContext.builder()

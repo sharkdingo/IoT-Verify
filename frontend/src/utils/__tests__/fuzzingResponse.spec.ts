@@ -69,7 +69,7 @@ const run = {
     requestedSpecCount: 1,
     eligibleSpecCount: 1
   },
-  eligibleSpecifications: { 'spec-1': { id: 'spec-1', templateId: '1' as const, templateLabel: 'Always',
+  eligibleSpecifications: { 'spec-1': { name: 'Door remains closed', id: 'spec-1', templateId: '1' as const, templateLabel: 'Always',
     aConditions: [{ id: 'c1', side: 'a' as const, deviceId: 'sensor_1', deviceLabel: 'Sensor', targetType: 'state' as const, key: 'state', relation: '=', value: 'on' }],
     ifConditions: [], thenConditions: [] } },
   modelTokenSourcesByDeviceId: { sensor_1: 'BUNDLED' as const, alarm_1: 'CUSTOM' as const },

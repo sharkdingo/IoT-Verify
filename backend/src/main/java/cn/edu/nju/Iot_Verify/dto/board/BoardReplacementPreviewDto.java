@@ -4,6 +4,8 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.ToString;
 
+import java.util.List;
+
 /** Authoritative current-board impact shown before an explicit full-scene replacement. */
 @Data
 @Builder
@@ -15,4 +17,7 @@ public class BoardReplacementPreviewDto {
     private int ruleCount;
     private int specificationCount;
     private int editHistoryEntryCount;
+    private List<TemplateUsage> templates;
+
+    public record TemplateUsage(String name, boolean defaultTemplate, int deviceCount) {}
 }

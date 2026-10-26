@@ -5,7 +5,7 @@ module. The endpoint index lives in [rest-endpoints.md](rest-endpoints.md); glob
 authentication, `Result<T>`, and error conventions live in
 [overview.md](overview.md).
 
-Verified against code on 2026-10-22. Source: `controller/FuzzController.java`,
+Verified against code on 2026-10-25. Source: `controller/FuzzController.java`,
 `service/impl/FuzzServiceImpl.java`, and `dto/fuzz/`.
 
 ---
@@ -422,7 +422,7 @@ before extracting both fields, rather than repeatedly parsing its LONGTEXT repre
 Malformed or unsupported envelopes still produce unavailable presentation metadata. The mapper
 validates specification shapes/counts, eligible membership,
 and condition device references, and populates each finding's `violatedSpec` from that array.
-It also returns `violatedSpecId`, the frozen `specificationLabel`, and `stateCount`, and validates run
+It also returns `violatedSpecId`, the frozen requirement name as `specificationLabel`, and `stateCount`, and validates run
 metadata, finding ownership/counts, seed, timestamps, and bounded state-count/violation-step
 metadata, including `stateCount <= pathLength`. A finding summary intentionally has no
 `dataAvailable` field: the list projection has not loaded enough evidence to make that
@@ -467,6 +467,8 @@ See [fuzzing-flow.md](../architecture/fuzzing-flow.md) for the exact boundary.
   `eligibility.ineligibleSpecs[]` and `limitations[]` before changing the model or retrying.
 
 Each ineligible item is `{ specId, specificationLabel, reasonCode, reason }`.
+Specification labels are captured user-authored names, not template labels; the name
+contract is owned by [SpecificationDto](verification.md#specificationdto).
 `reasonCode` is a stable category and is one of `UNSUPPORTED_TEMPLATE`,
 `TRUST_PRIVACY_UNSUPPORTED`, `REPORTED_READING_UNSUPPORTED`,
 `CONTENT_COMMAND_UNSUPPORTED`, `MODEL_INVALID`, or `INVALID_SPECIFICATION` —

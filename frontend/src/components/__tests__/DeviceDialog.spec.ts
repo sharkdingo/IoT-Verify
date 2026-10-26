@@ -1471,7 +1471,7 @@ describe('DeviceDialog template authority', () => {
       ]
     } as never
     // One specification referencing this device, so the specs section renders too.
-    const wrapper = mountWithManifest(manifest, 'Door RFID', 'idle', [{
+    const wrapper = mountWithManifest(manifest, 'Door RFID', 'idle', [{ name: 'Safety requirement',
       id: 'spec-1',
       templateId: '3',
       aConditions: [{ deviceId: 'transition-node', deviceLabel: 'Door RFID 1', targetType: 'state', key: 'ScanState', relation: '=', value: 'idle' }],

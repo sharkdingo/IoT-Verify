@@ -37,7 +37,7 @@ describe('result-dialog counterexample replay', () => {
           : status === 'NOT_REQUESTED' ? { status } : { status, reasonCode: 'HISTORY_SAVE_FAILED' }, traces
       } },
       simulationAnimationState: { value: { visible: false } },
-      isAnyRecommendationPanelVisible: vi.fn(() => false),
+      isAnyRecommendationRunning: vi.fn(() => false),
       ensureLiveBoardEditorClosedForPlayback: vi.fn(() => true),
       hasPersistedVerificationTrace, verificationRuns: { value: [] },
       staleDeepLink: { value: true }, navigateToRunTarget: vi.fn(), applyDeepLinkTarget: vi.fn(),

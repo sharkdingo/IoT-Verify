@@ -8,6 +8,7 @@ import cn.edu.nju.Iot_Verify.security.UserContextHolder;
 import cn.edu.nju.Iot_Verify.util.DeviceNameNormalizer;
 import cn.edu.nju.Iot_Verify.util.RecommendationInputs;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 
@@ -77,7 +78,10 @@ public abstract class AbstractAiTool implements AiTool {
      */
     protected final JsonNode parseArgs(String argsJson) throws ArgParseException {
         try {
-            return objectMapper.readTree(
+            return objectMapper.reader()
+                    .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS,
+                            DeserializationFeature.FAIL_ON_READING_DUP_TREE_KEY)
+                    .readTree(
                     argsJson == null || argsJson.isBlank() ? "{}" : argsJson);
         } catch (Exception e) {
             throw new ArgParseException(

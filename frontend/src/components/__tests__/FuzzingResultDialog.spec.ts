@@ -103,8 +103,8 @@ const run: AvailableFuzzingRunSummary & { targetSpecIds: string[] } = {
   elapsedMs: 900,
   modelSnapshot: snapshot,
   eligibleSpecifications: {
-    'spec-1': { id: 'spec-1', templateId: '1', templateLabel: 'Door remains closed', aConditions: [], ifConditions: [], thenConditions: [] },
-    'spec-3': { id: 'spec-3', templateId: '1', templateLabel: 'Window remains closed', aConditions: [], ifConditions: [], thenConditions: [] }
+    'spec-1': { name: 'Door remains closed', id: 'spec-1', templateId: '1', templateLabel: 'Always', aConditions: [], ifConditions: [], thenConditions: [] },
+    'spec-3': { name: 'Window remains closed', id: 'spec-3', templateId: '1', templateLabel: 'Always', aConditions: [], ifConditions: [], thenConditions: [] }
   },
   modelTokenSourcesByDeviceId: {},
   eligibility: {
@@ -148,7 +148,7 @@ const run: AvailableFuzzingRunSummary & { targetSpecIds: string[] } = {
     id: 11,
     fuzzTaskId: 10,
     violatedSpecId: 'spec-1',
-    violatedSpec: {
+    violatedSpec: { name: 'Safety requirement',
       id: 'spec-1',
       templateId: '1',
       templateLabel: 'Door remains closed',
@@ -164,6 +164,14 @@ const run: AvailableFuzzingRunSummary & { targetSpecIds: string[] } = {
 }
 
 describe('FuzzingResultDialog', () => {
+  it('leads with frozen requirement names instead of template formulas', () => {
+    const wrapper = mount(FuzzingResultDialog, { props: { visible: true, run }, global: { plugins: [i18n] } })
+    try {
+      expect(wrapper.get('[data-testid="fuzz-finding-name"]').text()).toBe('Safety requirement')
+      expect(wrapper.get('[aria-labelledby="fuzz-target-results-title"] .iot-result-item__title').text()).toBe('Window remains closed')
+    } finally { wrapper.unmount() }
+  })
+
   it('retains a history opener through a cold lazy mount and conditional close', async () => {
     let resolveDialog!: (component: typeof FuzzingResultDialog) => void
     const LazyDialog = defineAsyncComponent(() => new Promise<typeof FuzzingResultDialog>(resolve => { resolveDialog = resolve }))
@@ -219,7 +227,7 @@ describe('FuzzingResultDialog', () => {
       expect(targets.findAll('li')).toHaveLength(1)
       expect(targets.text()).toContain('Window remains closed')
       expect(targets.text()).not.toContain('Door remains closed')
-      expect(targets.findAll('li p')).toHaveLength(1)
+      expect(targets.findAll('li .iot-result-item__title')).toHaveLength(1)
       await wrapper.setProps({ run: {
         ...run, eligibility: { ...run.eligibility, eligibleSpecIds: ['spec-1'] }
       } })
@@ -294,7 +302,7 @@ describe('FuzzingResultDialog', () => {
     wrapper.unmount()
   })
   it('distinguishes same-template targets with frozen conditions and localizes only bundled tokens', async () => {
-    const heating: Specification = { id: 'spec-1', templateId: '3', templateLabel: 'Never',
+    const heating: Specification = { name: 'Safety requirement', id: 'spec-1', templateId: '3', templateLabel: 'Never',
       aConditions: [{ id: 'c1', side: 'a', deviceId: 'ac_1', deviceLabel: '测试空调',
         targetType: 'mode', key: 'HvacMode', relation: '=', value: 'heat' }],
       ifConditions: [], thenConditions: [] }

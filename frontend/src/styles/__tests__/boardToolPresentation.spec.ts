@@ -56,7 +56,7 @@ describe.each(combinations)('$palette $theme workspace tools', ({ palette, theme
     host.innerHTML = templates.join('\n')
     document.body.append(host)
     const headers = host.querySelectorAll<HTMLElement>('.board-tool-header')
-    expect(headers.length).toBeGreaterThanOrEqual(8)
+    expect(headers.length).toBeGreaterThanOrEqual(4)
     const ground = paint(declarations('.iot-board .board-tool-header').background)
     for (const header of headers) {
       const heading = header.querySelector('h3')
@@ -66,11 +66,6 @@ describe.each(combinations)('$palette $theme workspace tools', ({ palette, theme
         const caveat = header.querySelector('[test-id="fuzz-intro-help"]')
         expect(caveat?.getAttribute(':text'), 'candidate exploration semantics').toBe("t('app.fuzzSearchSubtitle')")
         expect(caveat?.getAttribute(':label'), 'accessible exploration help').toContain('app.showHelpFor')
-      }
-      if (heading!.id === 'scenario-recommendation-panel-title') {
-        const caveat = header.closest('[data-testid="scenario-recommendation-panel"]')!
-          .querySelector('[data-testid="scenario-recommendations-unverified"]')
-        expect(caveat?.textContent, 'unverified status belongs with the candidates').toContain('app.recommendationsNotVerified')
       }
       for (const element of [heading!, ...(subtitle ? [subtitle] : [])]) {
         const inks: string[] = []
@@ -118,7 +113,7 @@ it('uses one quiet surface and a separate open-state marker for every toolbar en
   const host = document.createElement('div')
   host.innerHTML = templates[0]
   const buttons = host.querySelectorAll('.board-action-dock .board-tool-button')
-  expect(buttons).toHaveLength(8)
+  expect(buttons).toHaveLength(4)
   for (const button of buttons) {
     expect(button.className).not.toMatch(/board-tool-button--|\bbg-|\bshadow-/)
     expect(button.hasAttribute('style') || button.hasAttribute(':style')).toBe(false)

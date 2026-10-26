@@ -178,6 +178,7 @@ class RemoveRulesFixStrategyTest {
         condition.setValue("heat");
         SpecificationDto spec = new SpecificationDto();
         spec.setId("safety");
+        spec.setName("Safety requirement");
         spec.setTemplateId("3");
         spec.setAConditions(List.of(condition));
         spec.setIfConditions(List.of());
@@ -224,6 +225,7 @@ class RemoveRulesFixStrategyTest {
         }
         SpecificationDto target = new SpecificationDto();
         target.setId("target");
+        target.setName("Safety requirement");
         target.setTemplateId("3");
         SpecConditionDto condition = new SpecConditionDto();
         condition.setDeviceId("heater_" + (targetRule / 4 + 1));
@@ -495,6 +497,7 @@ class RemoveRulesFixStrategyTest {
     private FixContext targetedCtx(List<RuleDto> allRules, int maxAttempts) {
         SpecificationDto target = new SpecificationDto();
         target.setId("target");
+        target.setName("Safety requirement");
         target.setTemplateId("1");
         return FixContext.builder()
                 .faultRules(List.of(FaultRuleDto.builder().ruleIndex(0).build()))

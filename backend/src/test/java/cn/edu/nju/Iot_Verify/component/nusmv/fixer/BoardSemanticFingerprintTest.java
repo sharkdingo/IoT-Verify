@@ -27,6 +27,7 @@ class BoardSemanticFingerprintTest {
     private SpecificationDto spec(String id, String value) {
         SpecificationDto s = new SpecificationDto();
         s.setId(id);
+        s.setName("Safety requirement");
         s.setTemplateId("1");
         SpecConditionDto c = new SpecConditionDto();
         c.setDeviceId("sensor");

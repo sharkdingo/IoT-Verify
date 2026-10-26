@@ -82,6 +82,7 @@ class DeleteTraceToolTest {
         UserContextHolder.setUserId(1L);
         SpecificationDto specification = new SpecificationDto();
         specification.setId("spec_2");
+        specification.setName("Door must remain closed");
         specification.setTemplateId("3");
         specification.setTemplateLabel("Door must remain closed");
         TraceDto trace = TraceDto.builder()

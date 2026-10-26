@@ -477,6 +477,33 @@ class ManageRuleToolTest {
     }
 
     @Test
+    void delete_keepsCommittedResultWhenPresentationReadsBecomeUnavailable() throws Exception {
+        RuleDto target = RuleDto.builder().id(9L).ruleString("When smoke is detected, sound alarm").build();
+        when(boardStorageService.getRules(1L)).thenReturn(List.of(target));
+        when(boardStorageService.removeRuleIfUnchanged(1L, 9L, target))
+                .thenAnswer(invocation -> {
+                    org.mockito.Mockito.lenient().doThrow(new IllegalStateException("Read unavailable after commit"))
+                            .when(boardStorageService).getNodes(1L);
+                    return CollectionMutationResultDto.of("deleted", target, List.of());
+                });
+
+        String preview = tool.execute("{\"action\":\"delete\",\"ruleId\":9,\"confirmed\":true}");
+        JsonNode previewJson = new ObjectMapper().readTree(preview);
+        assertTrue(previewJson.path("requiresUserConfirmation").asBoolean());
+        assertEquals("When smoke is detected, sound alarm", destructiveActionGuard
+                .pendingContext(1L, "rule-test-session").orElseThrow().displayTarget());
+        verify(boardStorageService, never()).removeRuleIfUnchanged(anyLong(), anyLong(), any());
+
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", previewJson.path("impactToken").asText());
+        String result = tool.execute("{\"action\":\"delete\",\"ruleId\":9,\"confirmed\":true,\"impactToken\":\""
+                + previewJson.path("impactToken").asText() + "\"}");
+        JsonNode resultJson = new ObjectMapper().readTree(result);
+        assertEquals("deleted", resultJson.path("operation").asText());
+        verify(boardStorageService).removeRuleIfUnchanged(1L, 9L, target);
+    }
+
+
+    @Test
     void add_rejectsWrongScalarTypesAndActionIrrelevantFieldsBeforeStorage() throws Exception {
         JsonNode numericValue = new ObjectMapper().readTree(tool.execute("""
                 {
@@ -532,6 +559,30 @@ class ManageRuleToolTest {
         assertEquals(1L, json.path("rules").get(1).path("ruleId").asLong());
         verify(boardStorageService).reorderRules(1L, List.of(1L, 2L), List.of(2L, 1L));
     }
+
+    @Test
+    void reorder_keepsCommittedResultWhenPresentationReadsBecomeUnavailable() throws Exception {
+        when(boardStorageService.getNodes(1L)).thenReturn(List.of(node("Light_1", "Light")));
+        RuleDto first = RuleDto.builder().id(2L).ruleString("Rule two").build();
+        RuleDto second = RuleDto.builder().id(1L).ruleString("Rule one").build();
+        when(boardStorageService.reorderRules(1L, List.of(1L, 2L), List.of(2L, 1L)))
+                .thenAnswer(invocation -> {
+                    org.mockito.Mockito.lenient().doThrow(new IllegalStateException("Read unavailable after commit"))
+                            .when(boardStorageService).getNodes(1L);
+                    return CollectionMutationResultDto.of("reordered", null, List.of(first, second));
+                });
+
+        JsonNode json = objectMapper().readTree(tool.execute(
+                "{\"action\":\"reorder\",\"expectedRuleIds\":[1,2],\"ruleIds\":[2,1]}"));
+
+        assertEquals("reordered", json.path("operation").asText());
+        assertEquals("NOT_VERIFIED", json.path("verificationStatus").asText());
+        assertEquals(2, json.path("totalRules").asInt());
+        assertEquals(2L, json.path("rules").get(0).path("ruleId").asLong());
+        assertEquals(1L, json.path("rules").get(1).path("ruleId").asLong());
+        verify(boardStorageService).reorderRules(1L, List.of(1L, 2L), List.of(2L, 1L));
+    }
+
 
     @Test
     void reorder_withMissingRuleIds_shouldReject() throws Exception {

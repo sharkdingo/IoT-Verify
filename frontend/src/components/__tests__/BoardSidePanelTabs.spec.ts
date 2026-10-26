@@ -48,10 +48,15 @@ describe('board side panel tab semantics', () => {
 
   it('owns rule creation inside the panel and preserves its draft across navigation and collapse', async () => {
     const wrapper = mount(ControlCenter, {
+      attachTo: document.body,
       props: { activeSection: 'rules', collapsed: false },
       global: { plugins: [i18n] }
     })
     try {
+      const creation = wrapper.get<HTMLDetailsElement>('[data-testid="rule-creation-card"]')
+      expect(creation.element.open).toBe(false)
+      creation.element.open = true
+      await creation.trigger('toggle')
       const editor = wrapper.get('[data-testid="control-section-rules"] [data-testid="rule-builder"]')
       expect(editor.isVisible()).toBe(true)
       expect(wrapper.find('[aria-modal="true"]').exists()).toBe(false)

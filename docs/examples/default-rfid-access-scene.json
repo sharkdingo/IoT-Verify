@@ -1,6 +1,6 @@
 {
 	"schema": "iot-verify.board-scene",
-	"version": 5,
+	"version": 6,
 	"templates": [
 		{
 			"name": "Alarm",
@@ -323,6 +323,7 @@
 	],
 	"specs": [
 		{
+			"name": "Unlock for an authorized card",
 			"templateId": "4",
 			"aConditions": [],
 			"ifConditions": [
@@ -346,6 +347,7 @@
 			]
 		},
 		{
+			"name": "Sound the alarm for an unauthorized card",
 			"templateId": "4",
 			"aConditions": [],
 			"ifConditions": [
@@ -369,6 +371,7 @@
 			]
 		},
 		{
+			"name": "Never unlock for an unauthorized card",
 			"templateId": "3",
 			"aConditions": [
 				{
@@ -391,6 +394,7 @@
 			"thenConditions": []
 		},
 		{
+			"name": "Require trusted door control",
 			"templateId": "7",
 			"aConditions": [
 				{
@@ -405,6 +409,7 @@
 			"thenConditions": []
 		},
 		{
+			"name": "Keep card data private",
 			"templateId": "1",
 			"aConditions": [
 				{

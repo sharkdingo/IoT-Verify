@@ -95,6 +95,26 @@ class AiCapabilityClosureToolsTest {
     }
 
     @Test
+    void listAsyncTasks_findsOlderFuzzTaskAfterFilteringFirstPage() throws Exception {
+        var firstPage = java.util.stream.LongStream.rangeClosed(1, 100)
+                .mapToObj(id -> FuzzTaskSummaryDto.builder().id(id).status("RUNNING")
+                        .initiator(RunInitiator.USER)
+                        .createdAt(LocalDateTime.of(2026, 7, 30, 11, 0).minusMinutes(id)).build())
+                .toList();
+        when(fuzzService.getTasks(7L, List.of(), 0, 100)).thenReturn(firstPage);
+        when(fuzzService.getTasks(7L, List.of(), 1, 100)).thenReturn(List.of(
+                FuzzTaskSummaryDto.builder().id(101L).status("FAILED")
+                        .initiator(RunInitiator.USER).createdAt(LocalDateTime.of(2026, 7, 29, 9, 0)).build()));
+
+        JsonNode result = objectMapper.readTree(new ListAsyncTasksTool(
+                verificationService, simulationService, fuzzService, objectMapper)
+                .execute("{\"kind\":\"counterexample_search\",\"status\":\"FAILED\",\"limit\":1}"));
+
+        assertEquals(1, result.path("count").asInt());
+        assertEquals(101L, result.path("tasks").get(0).path("taskId").asLong());
+    }
+
+    @Test
     void verificationRunTools_includeSatisfiedRunsAndPerSpecDetailsWithoutRawOutput() throws Exception {
         VerificationRunSummaryDto summary = VerificationRunSummaryDto.builder()
                 .id(21L).initiator(RunInitiator.USER).outcome(

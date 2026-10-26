@@ -897,6 +897,7 @@ class FuzzEngineTest {
     void paperRulePredecessorsAccountForEarlierOverlappingActions() {
         SpecificationDto neverZulu = new SpecificationDto();
         neverZulu.setId("never-zulu");
+        neverZulu.setName("Safety requirement");
         neverZulu.setTemplateId("3");
         neverZulu.setAConditions(List.of(conditionForDevice(
                 "multi_1", "mode", "ModeB", "=", "zulu")));
@@ -1675,6 +1676,7 @@ class FuzzEngineTest {
     @Test
     void classifiesNullSpecificationAndManifestFieldsWithoutThrowing() {
         SpecificationDto missingTemplate = specification("missing-template", "1", stateCondition("off"));
+        missingTemplate.setName("Safety requirement");
         missingTemplate.setTemplateId(null);
         FuzzEngineResult specificationResult = engine.run(
                 new FuzzEngineInput(
@@ -2603,6 +2605,7 @@ class FuzzEngineTest {
     private static SpecificationDto specification(String id, String templateId, SpecConditionDto condition) {
         SpecificationDto specification = new SpecificationDto();
         specification.setId(id);
+        specification.setName("Safety requirement");
         specification.setTemplateId(templateId);
         specification.setAConditions(List.of(condition));
         specification.setIfConditions(List.of());
@@ -2629,6 +2632,7 @@ class FuzzEngineTest {
         consequent.setSide("then");
         SpecificationDto specification = new SpecificationDto();
         specification.setId(id);
+        specification.setName("Safety requirement");
         specification.setTemplateId("4");
         specification.setAConditions(List.of());
         specification.setIfConditions(List.of(antecedent));

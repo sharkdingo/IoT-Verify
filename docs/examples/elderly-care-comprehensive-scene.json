@@ -1,6 +1,6 @@
 {
 	"schema": "iot-verify.board-scene",
-	"version": 5,
+	"version": 6,
 	"templates": [
 		{
 			"name": "Illuminance Sensor",
@@ -1387,6 +1387,7 @@
 	],
 	"specs": [
 		{
+			"name": "Light the room after a night-time bed exit",
 			"templateId": "4",
 			"aConditions": [],
 			"ifConditions": [
@@ -1418,6 +1419,7 @@
 			]
 		},
 		{
+			"name": "Eventually sound the alarm for a medical emergency",
 			"templateId": "5",
 			"aConditions": [],
 			"ifConditions": [
@@ -1440,6 +1442,7 @@
 			]
 		},
 		{
+			"name": "Eventually unlock for emergency access",
 			"templateId": "5",
 			"aConditions": [],
 			"ifConditions": [
@@ -1462,6 +1465,7 @@
 			]
 		},
 		{
+			"name": "Unlock immediately when the care hub alerts",
 			"templateId": "4",
 			"aConditions": [],
 			"ifConditions": [
@@ -1484,6 +1488,7 @@
 			]
 		},
 		{
+			"name": "Require trusted window control",
 			"templateId": "7",
 			"aConditions": [
 				{
@@ -1498,6 +1503,7 @@
 			"thenConditions": []
 		},
 		{
+			"name": "Ventilate when carbon dioxide is high",
 			"templateId": "4",
 			"aConditions": [],
 			"ifConditions": [
@@ -1521,6 +1527,7 @@
 			]
 		},
 		{
+			"name": "Eventually restore safe carbon dioxide levels",
 			"templateId": "5",
 			"aConditions": [],
 			"ifConditions": [
@@ -1545,6 +1552,7 @@
 			]
 		},
 		{
+			"name": "Return the care hub to idle after sending a photo",
 			"templateId": "5",
 			"aConditions": [],
 			"ifConditions": [
@@ -1567,6 +1575,7 @@
 			]
 		},
 		{
+			"name": "Never report a high heart rate as normal",
 			"templateId": "3",
 			"aConditions": [
 				{
@@ -1589,6 +1598,7 @@
 			"thenConditions": []
 		},
 		{
+			"name": "Never accept untrusted door control",
 			"templateId": "3",
 			"aConditions": [
 				{
@@ -1604,6 +1614,7 @@
 			"thenConditions": []
 		},
 		{
+			"name": "Keep care messages private",
 			"templateId": "3",
 			"aConditions": [
 				{
@@ -1619,6 +1630,7 @@
 			"thenConditions": []
 		},
 		{
+			"name": "Never photograph an occupied bed at night",
 			"templateId": "3",
 			"aConditions": [
 				{

@@ -257,6 +257,7 @@ class ComplexApartmentScenarioNusmvTest {
                                          List<SpecConditionDto> thenConditions) {
         SpecificationDto dto = new SpecificationDto();
         dto.setId(id);
+        dto.setName("Safety requirement");
         dto.setTemplateId(templateId);
         dto.setTemplateLabel(label);
         dto.setAConditions(aConditions);

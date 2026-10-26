@@ -407,8 +407,8 @@ public class ManageRuleTool extends AbstractAiTool {
             return errorJson("Rule not found: " + ruleId, "NOT_FOUND", 404);
         }
 
-        Map<String, Object> presentedRule = RuleToolPresenter.present(userId,
-                target, safeList(boardStorageService.getNodes(userId)));
+        List<DeviceNodeDto> nodes = safeList(boardStorageService.getNodes(userId));
+        Map<String, Object> presentedRule = RuleToolPresenter.present(userId, target, nodes);
         Map<String, Object> bindingSnapshot = Map.of("rule", presentedRule);
         boolean confirmed = booleanArg(args, "confirmed", false);
         if (!confirmed || !UserContextHolder.isDestructiveActionConfirmed()) {
@@ -468,7 +468,7 @@ public class ManageRuleTool extends AbstractAiTool {
         response.put("message", "Rule deleted successfully.");
         response.put("operation", "deleted");
         response.put("deletedRule", RuleToolPresenter.present(userId,
-                mutation.getAffectedItem(), safeList(boardStorageService.getNodes(userId))));
+                mutation.getAffectedItem(), nodes));
         response.put("totalRules", mutation.getCurrentCount());
         return successJson(response, "Rule deleted successfully.");
     }
@@ -478,10 +478,10 @@ public class ManageRuleTool extends AbstractAiTool {
         List<Long> expectedRuleIds = positiveRuleIdsArg(args, "expectedRuleIds");
         List<Long> ruleIds = positiveRuleIdsArg(args, "ruleIds");
 
+        List<DeviceNodeDto> nodes = safeList(boardStorageService.getNodes(userId));
         List<RuleDto> reordered = boardStorageService
                 .reorderRules(userId, expectedRuleIds, ruleIds)
                 .getCurrentItems();
-        List<DeviceNodeDto> nodes = safeList(boardStorageService.getNodes(userId));
         List<Object> presented = new ArrayList<>();
         for (RuleDto rule : safeList(reordered)) {
             presented.add(RuleToolPresenter.present(userId, rule, nodes));

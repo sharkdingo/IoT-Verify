@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
 import {
   BoardMutationAdmissionCancelledError,
   collectBundledEnvironmentNames,
@@ -24,7 +23,6 @@ import {
   prepareBoardChatInteraction,
   revalidateHistoricalPlaybackAdmission,
   retainSessionUnavailableHistoryItems,
-  buildScenarioRecommendationTargetRequest,
   runAdmittedBoardMutation,
   runTrackedBoardMutation,
   resolveCurrentBoardNode,
@@ -49,31 +47,6 @@ import {
   requestIdAfterTerminalSettlement
 } from '@/utils/recommendationRequestRecovery'
 import { sceneTemplatesCoveredByCatalog } from '@/utils/sceneTemplateCoverage'
-import ScenarioObjectiveIssues from '@/components/ScenarioObjectiveIssues.vue'
-
-describe('Board empty scenario objective feedback', () => {
-  it('shows every explicit problem for a 0/0/0 partial result', () => {
-    const issues = [
-      { code: 'NO_DEVICES' as const, message: 'No devices were generated.' },
-      { code: 'NO_AUTOMATION_RULES' as const, message: 'No rules were generated.' },
-      { code: 'NO_SPECIFICATIONS' as const, message: 'No specifications were generated.' }
-    ]
-    const wrapper = mount(ScenarioObjectiveIssues, {
-      props: {
-        status: 'PARTIAL',
-        issues,
-        title: 'Minimum targets were not met',
-        formatIssue: (issue: { message: string }) => issue.message
-      }
-    })
-
-    expect(wrapper.get('[data-testid="scenario-objective-issues"]').text())
-      .toContain('Minimum targets were not met')
-    expect(wrapper.text()).toContain('No devices were generated.')
-    expect(wrapper.text()).toContain('No rules were generated.')
-    expect(wrapper.text()).toContain('No specifications were generated.')
-  })
-})
 
 describe('Board formal-run readiness', () => {
   const ready = {
@@ -438,6 +411,20 @@ describe('Board recommendation scene ownership', () => {
     expect(requestGuard.isCurrent(requestEpoch)).toBe(false)
   })
 
+  it('preserves the checked model for requirement renames but detects condition edits', () => {
+    const named = { ...scene, specifications: scene.specifications.map(spec => ({ ...spec, name: 'Door safety' })) }
+    const renamed = { ...named, specifications: named.specifications.map(spec => ({ ...spec, name: 'Prevent unexpected unlock' })) }
+    expect(hasRecommendationSceneChanged(named, renamed)).toBe(false)
+    const condition = { id: 'editor-only', side: 'a', deviceId: 'door', targetType: 'state', key: 'state', relation: '=', value: 'locked' }
+    const saved = { ...named, specifications: [{ ...named.specifications[0], aConditions: [condition] }] }
+    expect(hasRecommendationSceneChanged(saved, { ...saved, specifications: [{ ...saved.specifications[0],
+      aConditions: [{ ...condition, id: null }]
+    }] })).toBe(false)
+    expect(hasRecommendationSceneChanged(named, { ...renamed, specifications: [
+      { ...renamed.specifications[0], aConditions: [{ key: 'state', value: 'unlocked' }] }
+    ] })).toBe(true)
+  })
+
   it('treats rule execution-order changes as semantic changes', () => {
     expect(hasRecommendationSceneChanged(scene, {
       ...scene,
@@ -638,60 +625,6 @@ describe('Board recommendation request recovery', () => {
     })
     expect(lastPlan.retryDelayMs).toBeGreaterThan(firstRetryDelay)
     expect(isRecommendationRequestActive(true, 'still-owned-request')).toBe(true)
-  })
-})
-
-describe('Board scenario recommendation targets', () => {
-  const validateCount = (value: unknown): number => {
-    if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 10) {
-      throw new Error('invalid count')
-    }
-    return value
-  }
-
-  it('builds every explicit minimum and maximum target for the recommendation API', () => {
-    const request = buildScenarioRecommendationTargetRequest(
-      {
-        minDevices: 2,
-        minRules: 1,
-        minSpecs: 1,
-        maxDevices: 6,
-        maxRules: 4,
-        maxSpecs: 3,
-        language: 'en',
-        userRequirement: 'Night safety'
-      },
-      validateCount,
-      field => new Error(`invalid ${field} range`)
-    )
-
-    expect(request).toEqual({
-      minDevices: 2,
-      minRules: 1,
-      minSpecs: 1,
-      maxDevices: 6,
-      maxRules: 4,
-      maxSpecs: 3,
-      language: 'en',
-      userRequirement: 'Night safety'
-    })
-  })
-
-  it('rejects a minimum above its maximum before calling the API', () => {
-    expect(() => buildScenarioRecommendationTargetRequest(
-      {
-        minDevices: 7,
-        minRules: 1,
-        minSpecs: 1,
-        maxDevices: 6,
-        maxRules: 4,
-        maxSpecs: 3,
-        language: 'zh-CN',
-        userRequirement: ''
-      },
-      validateCount,
-      field => new Error(`invalid ${field} range`)
-    )).toThrow('invalid devices range')
   })
 })
 
