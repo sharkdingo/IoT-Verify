@@ -6,6 +6,8 @@ NuSMV checks the saved requirements under explicit model assumptions, with count
 replay and verified repair suggestions. Start with the
 [household workflow](docs/guides/household-workflow.md).
 
+Presentation and demo video: [showcase assets](docs/README.md#assets).
+
 ## Features
 
 - **Visual canvas** — drag-and-drop device modeling with 40+ predefined smart-home

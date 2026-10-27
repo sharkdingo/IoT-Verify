@@ -29,6 +29,8 @@ Desktop.ini
 # artifacts) — transient, machine-specific, never committed.
 .codex-review/
 .codex-run/
+# Serena's generated workstation configuration and symbol indexes.
+.serena/
 tmp-run/
 tmp/
 playwright-real-review/

@@ -48,6 +48,7 @@
 # Docs
 *.md     utf8lf
 *.txt    utf8lf
+*.srt    utf8lf
 
 # NuSMV model / verification sources are plain text — keep LF so behavior matches the
 # parser (which depends on NuSMV's line-based output) on every platform.
@@ -72,6 +73,7 @@ gradlew  utf8lf
 *.ico    binary
 *.webp   binary
 *.mp4    binary
+*.wav    binary
 # SVG is XML/text, but treat as binary to avoid line-ending churn across the large
 # asset set under frontend/src/assets/. Switch to `text` if you need to diff them.
 *.svg    binary

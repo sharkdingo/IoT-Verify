@@ -4,7 +4,7 @@ This map assigns each topic to one document. Keep facts in their owner document 
 link there from other pages. Documentation is English; see the
 [language policy](../CONTRIBUTING.md#language-policy). Code takes precedence over docs.
 
-Verified against code on 2026-09-30 for document paths and ownership. Individual
+Verified against code on 2026-10-27 for document paths and ownership. Individual
 verification notes describe each document's code sources; development guides describe
 process and diagnosed incidents.
 
@@ -92,6 +92,21 @@ CI and diagnosed development failures.
 | [CLAUDE.md](../CLAUDE.md), [AGENTS.md](../AGENTS.md), [backend/CLAUDE.md](../backend/CLAUDE.md), [frontend/CLAUDE.md](../frontend/CLAUDE.md) | Root manuals share cross-cutting rules; stack manuals own backend/frontend guidance |
 
 ## Assets
+
+### Presentation and demo
+
+| Asset | Use |
+| :--- | :--- |
+| [PowerPoint presentation](assets/IoT-Verify-presentation.pptx) | 21 slides with embedded media and native animations. Open in PowerPoint Slide Show mode to use the animation sequence. |
+| [PDF handout](assets/IoT-Verify-presentation.pdf) | Static version of the presentation. |
+| [Demo video](assets/IoT-Verify-demo.mp4) | 176.4-second, 1080p demonstration with Chinese Vivian narration. |
+| [Chinese subtitles](assets/IoT-Verify-demo.zh-CN.srt) | Subtitle track for the demo video. |
+| [Narration audio](assets/IoT-Verify-narration.wav) | Standalone Chinese narration used by the video. |
+
+The video records a fixed scene and search run from 2026-10-27. Current exploration
+semantics and limitations are documented in [fuzzing-flow.md](architecture/fuzzing-flow.md).
+
+### Earlier project documents
 
 - `docs/assets/智链未来企划书.docx` — project proposal (binary; see `.gitattributes`).
 - `docs/assets/智护安居.pdf` — project document (binary; see `.gitattributes`).

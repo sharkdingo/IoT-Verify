@@ -15,6 +15,14 @@ history into a technical spec. The spec content itself now lives under
 
 ## [Unreleased]
 
+### 2026-10-27 (presentation assets)
+
+#### Added
+
+- Consolidated the animated presentation, PDF handout, 176.4-second demo video,
+  Chinese subtitles, and narration audio in the existing `docs/assets/` directory,
+  indexed from the documentation hub and project README.
+
 ### 2026-10-27 (HAFuzz implementation review)
 
 #### Fixed
