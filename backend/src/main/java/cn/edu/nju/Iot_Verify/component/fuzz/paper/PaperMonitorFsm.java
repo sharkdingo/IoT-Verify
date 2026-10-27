@@ -3,6 +3,7 @@ package cn.edu.nju.Iot_Verify.component.fuzz.paper;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -129,11 +130,12 @@ public final class PaperMonitorFsm {
                 : predecessorResolver;
         double denominator = Math.scalb(1.0, solverLevels) - 1.0;
         double weightedSatisfaction = 0.0;
+        Map<PaperCondition, Double> satisfactionByIdentity = new IdentityHashMap<>();
         PaperCondition levelCondition = directCondition;
         for (int level = 1; level <= solverLevels; level++) {
             double weight = Math.scalb(1.0, solverLevels - level) / denominator;
             if (levelCondition != null) {
-                weightedSatisfaction += levelCondition.satisfaction(valuation) * weight;
+                weightedSatisfaction += conditionSatisfaction(levelCondition, valuation, satisfactionByIdentity) * weight;
                 if (level < solverLevels) {
                     levelCondition = resolver.previousConditions(levelCondition, level);
                 }
@@ -144,6 +146,35 @@ public final class PaperMonitorFsm {
                 weightedSatisfaction,
                 graphDistance.getAsInt() - weightedSatisfaction,
                 Optional.of(directCondition)));
+    }
+
+    private static double conditionSatisfaction(
+            PaperCondition condition,
+            PaperAtomValuation valuation,
+            Map<PaperCondition, Double> satisfactionByIdentity) {
+        Double cached = satisfactionByIdentity.get(condition);
+        if (cached != null) {
+            return cached;
+        }
+        // Shared subtrees are evaluated once, while every occurrence retains its mean weight.
+        double satisfaction;
+        if (condition instanceof PaperCondition.All all) {
+            satisfaction = all.conditions().stream()
+                    .mapToDouble(child -> conditionSatisfaction(child, valuation, satisfactionByIdentity))
+                    .average()
+                    .orElse(1.0);
+        } else if (condition instanceof PaperCondition.Any any) {
+            satisfaction = any.conditions().stream()
+                    .mapToDouble(child -> conditionSatisfaction(child, valuation, satisfactionByIdentity))
+                    .max()
+                    .orElse(0.0);
+        } else if (condition instanceof PaperCondition.Terminal terminal) {
+            satisfaction = conditionSatisfaction(terminal.condition(), valuation, satisfactionByIdentity);
+        } else {
+            satisfaction = condition.satisfaction(valuation);
+        }
+        satisfactionByIdentity.put(condition, satisfaction);
+        return satisfaction;
     }
 
     private OptionalInt shortestDistanceToViolation(String startStateId) {

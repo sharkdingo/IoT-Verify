@@ -147,8 +147,8 @@ public final class FuzzEngine {
                 wasCancelled = true;
                 break;
             }
-            // Checked at the same points as cancellation, so a long path cannot outrun the deadline by more
-            // than one path. Never conflated with cancellation: see the run() javadoc.
+            // The deadline is cooperative between candidates; cancellation is also polled inside simulation.
+            // Expiration preserves completed findings rather than taking the cancellation path.
             if (deadline.getAsBoolean()) {
                 outOfTime = true;
                 break;

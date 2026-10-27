@@ -1,6 +1,6 @@
 package cn.edu.nju.Iot_Verify.component.fuzz.paper;
 
-import java.util.LinkedHashSet;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
@@ -80,23 +80,24 @@ public interface PaperCondition {
             List<? extends PaperCondition> conditions,
             boolean conjunction) {
         Objects.requireNonNull(conditions, "conditions");
-        LinkedHashSet<PaperCondition> unique = new LinkedHashSet<>();
+        // Repeated conditions retain their occurrence weights in the conjunction mean.
+        List<PaperCondition> flattened = new ArrayList<>();
         for (PaperCondition condition : conditions) {
             if (appendNormalized(
                     Objects.requireNonNull(condition, "condition"),
                     conjunction,
-                    unique)) {
+                    flattened)) {
                 return List.of(conjunction ? FALSE : TRUE);
             }
         }
-        return List.copyOf(unique);
+        return List.copyOf(flattened);
     }
 
     /** Returns true when an absorbing constant was found. Terminal nodes stay opaque. */
     private static boolean appendNormalized(
             PaperCondition condition,
             boolean conjunction,
-            LinkedHashSet<PaperCondition> destination) {
+            List<PaperCondition> destination) {
         if (condition instanceof Constant constant) {
             if (constant.value() != conjunction) {
                 return true;

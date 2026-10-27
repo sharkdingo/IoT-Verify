@@ -4,12 +4,16 @@ import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import org.junit.jupiter.api.Test;
 
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -46,9 +50,27 @@ class PaperMonitorFsmTest {
 
         assertEquals(0.0, PaperCondition.atom(numeric).satisfaction(valuation), EPSILON);
         assertEquals(1.0, PaperCondition.not(PaperCondition.atom(numeric)).satisfaction(valuation), EPSILON);
-        assertEquals(
-                PaperCondition.atom(numeric),
-                PaperCondition.allOf(PaperCondition.atom(numeric), PaperCondition.atom(numeric)));
+        PaperCondition repeated = PaperCondition.allOf(
+                PaperCondition.atom(numeric), PaperCondition.atom(numeric));
+        assertEquals(2, assertInstanceOf(PaperCondition.All.class, repeated).conditions().size());
+    }
+
+    @Test
+    void repeatedConjunctsRetainTheirOccurrenceCountsAndMeanWeights() {
+        PaperCondition a = PaperCondition.atom(atom("a"));
+        PaperCondition b = PaperCondition.atom(atom("b"));
+        PaperCondition c = PaperCondition.atom(atom("c"));
+        PaperCondition.All conjunction = (PaperCondition.All) PaperCondition.allOf(a, a, a, b, c);
+
+        assertEquals(5, conjunction.conditions().size());
+        assertEquals(3, conjunction.conditions().stream().filter(a::equals).count());
+        assertEquals(1, conjunction.conditions().stream().filter(b::equals).count());
+        assertEquals(1, conjunction.conditions().stream().filter(c::equals).count());
+        assertEquals(3.0 / 5.0, conjunction.satisfaction(truths(atom("a"))), EPSILON);
+        assertEquals(2.0 / 5.0, conjunction.satisfaction(truths(atom("b"), atom("c"))), EPSILON);
+        assertFalse(conjunction.test(truths(atom("a"))));
+        assertFalse(conjunction.test(truths(atom("b"), atom("c"))));
+        assertTrue(conjunction.test(truths(atom("a"), atom("b"), atom("c"))));
     }
 
     @Test
@@ -71,7 +93,7 @@ class PaperMonitorFsmTest {
 
         assertEquals(2.0 / 3.0, nestedAll.satisfaction(truths(a, c)), EPSILON);
         assertEquals(3, ((PaperCondition.All) nestedAll).conditions().size());
-        assertEquals(2, ((PaperCondition.Any) nestedAny).conditions().size());
+        assertEquals(3, ((PaperCondition.Any) nestedAny).conditions().size());
         assertEquals(2, ((PaperCondition.All) terminalBoundary).conditions().size());
         assertTrue(((PaperCondition.All) terminalBoundary).conditions().get(0)
                 instanceof PaperCondition.Terminal);
@@ -167,6 +189,64 @@ class PaperMonitorFsmTest {
         assertEquals(5.0 / 3.0, distance.combinedDistance(), EPSILON);
         assertEquals(0.0, distance.nextCondition().orElseThrow().satisfaction(valuation), EPSILON);
         assertFalse(valuation.isTrue(antecedent));
+    }
+
+    @Test
+    void sharedConditionValuesAreComputedOncePerStateWithoutLosingOccurrenceWeights() {
+        PaperAtom a = atom("a");
+        PaperAtom b = atom("b");
+        PaperAtom c = atom("c");
+        PaperCondition shared = PaperCondition.terminal(PaperCondition.allOf(
+                PaperCondition.atom(a), PaperCondition.atom(b)));
+        PaperCondition condition = PaperCondition.allOf(shared, shared, PaperCondition.atom(c));
+        PaperMonitorFsm monitor = PaperMonitorFsm.builder("start")
+                .state("start", PaperTruthValue.INCONCLUSIVE)
+                .state("violation", PaperTruthValue.FALSE)
+                .transition("start", "violation", condition)
+                .transition("start", "start", PaperCondition.not(condition))
+                .transition("violation", "violation", PaperCondition.TRUE)
+                .build();
+        Map<PaperAtom, Integer> reads = new LinkedHashMap<>();
+        Set<PaperAtom> trueAtoms = new HashSet<>(Set.of(c));
+        PaperAtomValuation valuation = candidate -> {
+            reads.merge(candidate, 1, Integer::sum);
+            return trueAtoms.contains(candidate);
+        };
+
+        var firstDistance = monitor.distanceToViolation(valuation, (current, level) -> condition, 3).orElseThrow();
+
+        assertEquals(1.0 / 3.0, firstDistance.weightedConditionSatisfaction(), EPSILON);
+        assertEquals(2.0 / 3.0, firstDistance.combinedDistance(), EPSILON);
+        assertEquals(Map.of(a, 1, b, 1, c, 1), reads,
+                "shared subtrees and solver levels must reuse this state's computed values");
+
+        reads.clear();
+        trueAtoms.clear();
+        trueAtoms.addAll(Set.of(a, b));
+        var secondDistance = monitor.distanceToViolation(valuation, (current, level) -> condition, 3).orElseThrow();
+
+        assertEquals(2.0 / 3.0, secondDistance.weightedConditionSatisfaction(), EPSILON);
+        assertEquals(1.0 / 3.0, secondDistance.combinedDistance(), EPSILON);
+        assertEquals(Map.of(a, 1, b, 1, c, 1), reads,
+                "a new state evaluation must recompute every shared value");
+    }
+
+    @Test
+    void distanceKeepsExplicitCompositeNegationBinary() {
+        PaperAtom a = atom("a");
+        PaperAtom b = atom("b");
+        PaperCondition negated = new PaperCondition.Not(PaperCondition.allOf(
+                PaperCondition.atom(a), PaperCondition.atom(b)));
+        PaperMonitorFsm monitor = PaperMonitorFsm.builder("start")
+                .state("start", PaperTruthValue.INCONCLUSIVE)
+                .state("violation", PaperTruthValue.FALSE)
+                .transition("start", "violation", negated)
+                .build();
+
+        var distance = monitor.distanceToViolation(truths(a), PaperPredecessorResolver.none(), 3).orElseThrow();
+
+        assertEquals(4.0 / 7.0, distance.weightedConditionSatisfaction(), EPSILON);
+        assertEquals(3.0 / 7.0, distance.combinedDistance(), EPSILON);
     }
 
     @Test

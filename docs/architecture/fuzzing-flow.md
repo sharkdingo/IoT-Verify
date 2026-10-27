@@ -4,7 +4,7 @@ Architecture and semantic boundary for the HAFuzz-inspired bounded search module
 API fields and endpoints are owned by [../api/fuzzing.md](../api/fuzzing.md); formal
 model semantics remain owned by [nusmv-model.md](nusmv-model.md).
 
-Verified against code on 2026-10-08. Source: `component/fuzz/`,
+Verified against code on 2026-10-27. Source: `component/fuzz/`,
 `service/impl/FuzzServiceImpl.java`, `po/FuzzTaskPo.java`, and
 `po/FuzzFindingPo.java`.
 
@@ -130,7 +130,42 @@ Canvas coordinates and dimensions do not invalidate a semantic preview.
    for the product's multi-target extension, one candidate continues only until every
    currently unresolved target has reached its violation state or the path bound is met.
 9. In `BOARD_SNAPSHOT`, templates `1`, `3`, and `4` use direct specialized distance
-   monitors. In `PAPER_COMPATIBLE`, those same structured templates compile to explicit
+   monitors. Conjunction matching distance is the arithmetic mean of its atomic distances,
+   so satisfying additional conditions gives intermediate candidates useful
+   feedback. This guides the forbidden conjunction in template `3` and the antecedent
+   in template `4`; exact Boolean checks still determine every violation. Falsifying a
+   conjunction still uses the minimum atomic falsification distance, because any one
+   failed conjunct is enough. Each unresolved target retains a candidate only when its
+   distance strictly improves; equal scores do not replace the incumbent.
+   Before a non-violating window contributes a distance, its required truth values
+   must be possible under conservative per-step bounds. State `0` is the exact captured
+   Board initial state. Later pure natural-change numeric values use the clamped interval
+   from their initial value plus `step * [lowerRate, upperRate]`. Qualification is indexed
+   once per model: local transition assignments or non-zero state dynamics disqualify a
+   local value, and any device's transition assignment or numeric-impact declaration
+   disqualifies a shared value. Such values retain their full declared domain; other
+   discrete conditions remain unknown after state `0`.
+   Template `1` needs a possibly false conjunct, template `3` needs all conjuncts possibly
+   true, and template `4` needs a possibly true antecedent at `t` and a possibly false
+   consequent at `t+1`. Exact Boolean violation detection runs independently before this
+   filtering. Each atomic distance targets only values inside the same per-step support;
+   no target yields positive infinity. Thus an always-true conjunct cannot win the minimum
+   falsification distance and mask progress toward another conjunct's real failure.
+   If no window survives, the internal distance remains positive infinity;
+   this does not create a new public outcome or establish safety.
+   Numeric guidance uses the nearest matching or falsifying integer within that support,
+   normalized by the original declared integer-domain span. For `in` / `not in`, both
+   set members and complement candidates must lie inside the per-step interval;
+   a closer value outside it cannot attract the search. Complement search walks
+   only the containing block of listed integers. If a required set or complement cannot
+   occur in a window, that window supplies no guidance. Both modes compare integer `-0` and
+   `0` equally, consistent with the generated NuSMV model.
+   For example, domain `0..8`, initial value `1`, and rate `[-4,4]` give step-1 support
+   `0..5`. For target `in {0,6}`, the distance from `5` is `5/8` and from `4` is `4/8`:
+   only `0` is a feasible target at that step. The closer but impossible value `6` must
+   not reverse their ranking. This model-aware guidance is a
+   [project extension](theory-sources.md#model-aware-distance-guidance-2026-10-27).
+   In `PAPER_COMPATIBLE`, those same structured templates compile to explicit
    monitor FSMs. The paper-compatible score combines BFS graph distance to a violation
    state with satisfaction of the next shortest-path transition conditions. It recursively
    resolves predecessor rule conditions (`GetPrevConditions`) and weights them by solver
@@ -142,14 +177,24 @@ Canvas coordinates and dimensions do not invalidate a semantic preview.
    and the implementation also clamps the final score to a non-negative distance. Every
    atomic proposition uses the paper's
    explicit binary satisfaction (`1` when true, `0` otherwise), including numeric
-    predicates. Conjunctions average all constituent conditions and disjunctions take
-    their maximum satisfaction. Predecessors are resolved for rule-produced state,
+    predicates. Conjunctions average all flattened constituent occurrences, including
+    repeated conditions, and disjunctions take their maximum satisfaction. Normalization
+    retains multiplicity for the average; it does not silently reweight authored conditions.
+    An API start-state fact added while constructing a rule predecessor is skipped when
+    the rule already contains that exact atom; model-added executability checks do not
+    create extra authored occurrences.
+    Predecessors are resolved for rule-produced state,
     mode, and API outputs; IoT-Verify actions do not currently assign variables, so the
     resolver cannot claim the paper artifact's general variable-producer graph. A
     missing predecessor for a direct transition conjunct contributes binary `0` to the
     first predecessor level, matching the reference artifact's first aggregation; a
     missing branch discovered while descending deeper rule chains is omitted. Resolver
-    memoization is therefore keyed by both condition and solver level. Only a
+    memoization is therefore keyed by both condition and solver level. Within one trace
+    evaluation, repeated literals share their immutable rule-producer condition, including
+    cached absence of a producer; positive and negative literals remain distinct. Each
+    state-distance calculation separately caches shared subtree satisfaction by object
+    identity. All occurrences still contribute to the original average, and no satisfaction
+    value carries across states. Only a
     mode explicitly written by an API `endState` is a mode predecessor; an unchanged mode
    mentioned only by `startState` is not treated as an action output. Ordered-rule
    predecessor guards also include the absence of an enabled earlier overlapping action,
@@ -244,8 +289,17 @@ a full experimental reproduction:
 
 ## Determinism and budgets
 
-A supplied seed plus identical captured input, `explorationMode`, and search
-configuration produces the same search decisions and findings. In paper-compatible mode
+Distances guide search using local condition closeness in windows not ruled out by the
+per-step bounds above. These bounds do not solve correlations between conditions,
+state-machine causality, or general reachability with writers. Remaining windows are
+not guaranteed reachable, so plateaus and budget misses remain possible. Changing the
+distance can also change parent lineages; no scoring update guarantees that every seed
+or budget finds as many violations as an earlier implementation.
+
+A supplied seed plus identical captured input, `explorationMode`, search configuration,
+and search implementation produces the same search decisions and findings. An algorithm
+update can change a rerun's paths and findings; stored evidence remains the result of its
+original execution. In paper-compatible mode
 the seed also determines random legal initial-state materialization, sparse initial-value
 overrides, and the `95/5` offspring strategy. The server-generated seed is always returned so a run can be
 reproduced. Wall-clock `elapsedMs` is observational and is not expected to match across
@@ -269,9 +323,11 @@ It checks the cancellation marker and worker interrupt between population member
 forming each path, and before completion persistence. Progress is execution feedback, not
 coverage.
 
-A wall-clock ceiling is checked at the same points, because the workload guard bounds the *nominal*
-budget from per-step timing measured on one machine and a slower host or a worse-than-estimated board
-can still overrun it. A search the clock ends settles as an ordinary bounded outcome plus the
+The wall-clock budget is checked before each iteration and population member. Unlike cancellation,
+it is not polled inside path simulation; current simulation, evaluation, or population construction
+may finish before an expired budget is observed. The workload guard bounds the *nominal* budget
+from per-step timing measured on one machine, so a slower host or a worse-than-estimated board can
+still overrun it. A search the clock ends settles as an ordinary bounded outcome plus the
 `TIME_BUDGET_EXHAUSTED` limitation — never as a cancellation, which is the user's own action and
 persists no result. Findings already located remain valid. The ceiling and its rationale are in
 [the API document](../api/fuzzing.md#submit-and-task-lifecycle).

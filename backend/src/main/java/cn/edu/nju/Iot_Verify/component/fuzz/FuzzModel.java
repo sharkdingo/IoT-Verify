@@ -56,6 +56,8 @@ final class FuzzModel {
     private final Map<String, List<RuleDto>> rulesByTarget;
     private final ModelState initialState;
     private final int choicesPerTransition;
+    private final Map<String, NumericReachability> environmentReachability;
+    private final Map<String, Map<String, NumericReachability>> localReachability;
 
     private FuzzModel(
             List<DeviceModel> devices,
@@ -74,6 +76,9 @@ final class FuzzModel {
         this.rulesByTarget = rulesByTarget;
         this.initialState = initialState;
         this.choicesPerTransition = choicesPerTransition;
+        this.environmentReachability = new LinkedHashMap<>();
+        this.localReachability = new LinkedHashMap<>();
+        indexNumericReachability();
     }
 
     static FuzzModel from(BoardDataConverter.ModelInputSnapshot snapshot) {
@@ -666,31 +671,117 @@ final class FuzzModel {
         return !monitoredTargets.isEmpty() && violatedTargets.size() == monitoredTargets.size();
     }
 
+    private void indexNumericReachability() {
+        for (Map.Entry<String, ValueDomain> entry : environmentDomains.entrySet()) {
+            String name = entry.getKey();
+            ValueDomain domain = entry.getValue();
+            boolean mayBeWritten = devices.stream().anyMatch(device ->
+                    device.numericImpactedEnvironment.contains(name)
+                            || transitionAssignment(device.transitions, name) != null);
+            if (domain.isNumeric() && !mayBeWritten) {
+                environmentReachability.put(name, rateReachability(domain, initialState.environment.get(name)));
+            }
+        }
+        for (DeviceModel device : devices) {
+            Map<String, NumericReachability> local = new LinkedHashMap<>();
+            for (Map.Entry<String, ValueDomain> entry : device.localDomains.entrySet()) {
+                String name = entry.getKey();
+                ValueDomain domain = entry.getValue();
+                boolean hasDynamic = device.workingStates.stream().anyMatch(state -> {
+                    DynamicEffect effect = dynamicEffect(state, name);
+                    return effect.numericRate() != 0 || hasText(effect.discreteValue());
+                });
+                if (domain.isNumeric() && !hasDynamic && transitionAssignment(device.transitions, name) == null) {
+                    local.put(name, rateReachability(domain, initialState.devices.get(device.id).locals.get(name)));
+                }
+            }
+            localReachability.put(device.id, local);
+        }
+    }
+
+    private static NumericReachability rateReachability(ValueDomain domain, String initial) {
+        return new NumericReachability(parseInteger(initial, "for initial numeric state"),
+                domain.lower, domain.upper, domain.lowerRate, domain.upperRate);
+    }
+
+    private List<TimedCondition> timedConditions(List<SpecConditionDto> conditions, boolean truth) {
+        return safe(conditions).stream()
+                .map(condition -> timedCondition(condition, truth))
+                .toList();
+    }
+
+    private TimedCondition timedCondition(SpecConditionDto condition, boolean truth) {
+        if (!"variable".equals(normalized(condition.getTargetType()))) {
+            return (state, step) -> discreteDistance(condition, truth, state, step);
+        }
+        DeviceModel device = devicesById.get(condition.getDeviceId());
+        String key = conditionKey(condition);
+        ValueDomain domain = device.localDomains.get(key);
+        boolean local = domain != null;
+        if (!local) {
+            domain = environmentDomains.get(key);
+        }
+        if (domain == null || !domain.isNumeric()) {
+            return (state, step) -> discreteDistance(condition, truth, state, step);
+        }
+        NumericReachability reachable = local ? localReachability.get(device.id).get(key)
+                : environmentReachability.get(key);
+        String relation = normalizeRelation(condition.getRelation());
+        Set<Integer> expected = new LinkedHashSet<>();
+        for (String value : splitCandidates(condition.getValue(), relation, false)) {
+            expected.add(parseInteger(value, "for numeric specification condition"));
+        }
+        ValueDomain numericDomain = domain;
+        double span = Math.max(1L, (long) domain.upper - domain.lower);
+        return (state, step) -> {
+            if (step == 0) {
+                return specificationConditionMatches(condition, state) == truth ? 0.0 : Double.POSITIVE_INFINITY;
+            }
+            String actual = resolveConditionValue(device, state.devices.get(device.id), state, condition, "variable");
+            int value = parseInteger(actual, "for numeric specification state");
+            // The nearest target and its feasibility use the same support, including set alternatives.
+            // Unknown writers keep the full declared domain; only a proof may narrow it.
+            double distance = reachable != null ? reachable.distanceAt(step, value, relation, expected, truth)
+                    : NumericReachability.distanceInRange(value, numericDomain.lower, numericDomain.upper,
+                    relation, expected, truth);
+            return distance / span;
+        };
+    }
+
+    private double discreteDistance(SpecConditionDto condition, boolean truth, ModelState state, int step) {
+        if (specificationConditionMatches(condition, state) == truth) {
+            return 0.0;
+        }
+        return step == 0 ? Double.POSITIVE_INFINITY : 1.0;
+    }
+
     SpecEvaluation evaluate(SpecificationDto specification, Simulation simulation) {
         List<ModelState> states = simulation.states();
         if ("1".equals(specification.getTemplateId())) {
+            List<TimedCondition> failures = timedConditions(specification.getAConditions(), false);
             double distance = Double.POSITIVE_INFINITY;
             for (int step = 0; step < states.size(); step++) {
                 if (!groupMatches(specification.getAConditions(), states.get(step))) {
                     return new SpecEvaluation(step, 0.0);
                 }
-                distance = Math.min(distance,
-                        groupFalsificationDistance(specification.getAConditions(), states.get(step)));
+                distance = Math.min(distance, groupFalsificationDistance(failures, states.get(step), step));
             }
             return new SpecEvaluation(-1, finiteDistance(distance));
         }
         if ("3".equals(specification.getTemplateId())) {
+            List<TimedCondition> matches = timedConditions(specification.getAConditions(), true);
             double distance = Double.POSITIVE_INFINITY;
             for (int step = 0; step < states.size(); step++) {
-                double satisfaction = groupSatisfaction(specification.getAConditions(), states.get(step));
                 if (groupMatches(specification.getAConditions(), states.get(step))) {
                     return new SpecEvaluation(step, 0.0);
                 }
-                distance = Math.min(distance, 1.0 - satisfaction);
+                distance = Math.min(distance, groupMatchDistance(matches, states.get(step), step));
             }
             return new SpecEvaluation(-1, finiteDistance(distance));
         }
 
+        List<TimedCondition> antecedents = timedConditions(specification.getIfConditions(), true);
+        List<TimedCondition> failures = timedConditions(specification.getThenConditions(), false);
         double distance = Double.POSITIVE_INFINITY;
         for (int step = 0; step + 1 < states.size(); step++) {
             boolean antecedent = groupMatches(specification.getIfConditions(), states.get(step));
@@ -698,10 +789,9 @@ final class FuzzModel {
             if (antecedent && !consequent) {
                 return new SpecEvaluation(step + 1, 0.0);
             }
-            double antecedentSatisfaction = groupSatisfaction(specification.getIfConditions(), states.get(step));
-            double consequentFalsification = groupFalsificationDistance(
-                    specification.getThenConditions(), states.get(step + 1));
-            distance = Math.min(distance, (1.0 - antecedentSatisfaction) + consequentFalsification);
+            double antecedentDistance = groupMatchDistance(antecedents, states.get(step), step);
+            double consequentFalsification = groupFalsificationDistance(failures, states.get(step + 1), step + 1);
+            distance = Math.min(distance, antecedentDistance + consequentFalsification);
         }
         return new SpecEvaluation(-1, finiteDistance(distance));
     }
@@ -737,10 +827,12 @@ final class FuzzModel {
 
     private PaperPredecessorResolver memoizedPaperPredecessorResolver() {
         Map<PaperPredecessorCacheKey, Optional<PaperCondition>> cache = new LinkedHashMap<>();
+        // Rule producers depend on the literal and model, not the solver level or valuation.
+        Map<PaperCondition, Optional<PaperCondition>> producers = new LinkedHashMap<>();
         return (condition, level) -> cache.computeIfAbsent(
                         new PaperPredecessorCacheKey(condition, level),
                         key -> Optional.ofNullable(previousPaperConditions(
-                                key.condition(), key.level())))
+                                key.condition(), key.level(), producers)))
                 .orElse(null);
     }
 
@@ -768,22 +860,27 @@ final class FuzzModel {
         return compare(actual, atom.relation(), atom.value());
     }
 
-    private PaperCondition previousPaperConditions(PaperCondition condition, int currentLevel) {
+    private PaperCondition previousPaperConditions(
+            PaperCondition condition,
+            int currentLevel,
+            Map<PaperCondition, Optional<PaperCondition>> producers) {
         if (condition instanceof PaperCondition.Terminal
                 || condition instanceof MissingPaperPredecessor) {
             return null;
         }
         if (condition instanceof PaperCondition.Atom atomCondition) {
-            return paperRulePredecessors(atomCondition.atom(), true);
+            return producers.computeIfAbsent(condition, ignored ->
+                    Optional.ofNullable(paperRulePredecessors(atomCondition.atom(), true))).orElse(null);
         }
         if (condition instanceof PaperCondition.Not notCondition
                 && notCondition.condition() instanceof PaperCondition.Atom atomCondition) {
-            return paperRulePredecessors(atomCondition.atom(), false);
+            return producers.computeIfAbsent(condition, ignored ->
+                    Optional.ofNullable(paperRulePredecessors(atomCondition.atom(), false))).orElse(null);
         }
         if (condition instanceof PaperCondition.All all) {
             List<PaperCondition> predecessors = new ArrayList<>();
             for (PaperCondition child : all.conditions()) {
-                PaperCondition predecessor = previousPaperConditions(child, currentLevel);
+                PaperCondition predecessor = previousPaperConditions(child, currentLevel, producers);
                 if (predecessor != null) {
                     predecessors.add(predecessor);
                 } else if (currentLevel == 1) {
@@ -794,7 +891,7 @@ final class FuzzModel {
         }
         if (condition instanceof PaperCondition.Any any) {
             List<PaperCondition> predecessors = any.conditions().stream()
-                    .map(child -> previousPaperConditions(child, currentLevel))
+                    .map(child -> previousPaperConditions(child, currentLevel, producers))
                     .filter(java.util.Objects::nonNull)
                     .toList();
             return predecessors.isEmpty() ? null : PaperCondition.anyOf(predecessors);
@@ -977,13 +1074,17 @@ final class FuzzModel {
         for (int modeIndex = 0; modeIndex < targetDevice.modes.size(); modeIndex++) {
             String requiredStart = stateSegment(action.getStartState(), modeIndex, true);
             if (hasText(requiredStart)) {
-                conditions.add(PaperCondition.atom(new PaperAtom(
+                PaperCondition startCondition = PaperCondition.atom(new PaperAtom(
                         targetDevice.id,
                         "mode",
                         targetDevice.modes.get(modeIndex),
                         null,
                         "=",
-                        requiredStart)));
+                        requiredStart));
+                // Model-added executability checks must not reweight an identical authored condition.
+                if (!conditions.contains(startCondition)) {
+                    conditions.add(startCondition);
+                }
             }
         }
         return PaperCondition.allOf(conditions);
@@ -1347,18 +1448,23 @@ final class FuzzModel {
         return true;
     }
 
-    private double groupSatisfaction(List<SpecConditionDto> conditions, ModelState state) {
-        double satisfaction = 1.0;
-        for (SpecConditionDto condition : safe(conditions)) {
-            satisfaction = Math.min(satisfaction, conditionSatisfaction(condition, state));
+    private static double groupMatchDistance(List<TimedCondition> conditions, ModelState state, int step) {
+        if (conditions.isEmpty()) {
+            return 0.0;
         }
-        return satisfaction;
+        // Averaging preserves partial progress across conjuncts; an impossible atom stays infinite.
+        // groupMatches remains the exact verdict check.
+        double distance = 0.0;
+        for (TimedCondition condition : conditions) {
+            distance += condition.distance(state, step);
+        }
+        return distance / conditions.size();
     }
 
-    private double groupFalsificationDistance(List<SpecConditionDto> conditions, ModelState state) {
-        double distance = 1.0;
-        for (SpecConditionDto condition : safe(conditions)) {
-            distance = Math.min(distance, conditionFalsificationDistance(condition, state));
+    private static double groupFalsificationDistance(List<TimedCondition> conditions, ModelState state, int step) {
+        double distance = Double.POSITIVE_INFINITY;
+        for (TimedCondition condition : conditions) {
+            distance = Math.min(distance, condition.distance(state, step));
         }
         return distance;
     }
@@ -1372,42 +1478,6 @@ final class FuzzModel {
         }
         String actual = resolveConditionValue(device, deviceState, state, condition, type);
         return compare(actual, condition.getRelation(), condition.getValue());
-    }
-
-    private double conditionSatisfaction(SpecConditionDto condition, ModelState state) {
-        if (specificationConditionMatches(condition, state)) {
-            return 1.0;
-        }
-        DeviceModel device = devicesById.get(condition.getDeviceId());
-        DeviceState deviceState = state.devices.get(device.id);
-        String type = normalized(condition.getTargetType());
-        if (!"variable".equals(type)) {
-            return 0.0;
-        }
-        String actual = resolveConditionValue(device, deviceState, state, condition, type);
-        ValueDomain domain = device.localDomains.get(conditionKey(condition));
-        if (domain == null) {
-            domain = environmentDomains.get(conditionKey(condition));
-        }
-        return domain == null ? 0.0 : domain.numericSatisfaction(actual, condition.getRelation(), condition.getValue());
-    }
-
-    private double conditionFalsificationDistance(SpecConditionDto condition, ModelState state) {
-        if (!specificationConditionMatches(condition, state)) {
-            return 0.0;
-        }
-        if (!"variable".equals(normalized(condition.getTargetType()))) {
-            return 1.0;
-        }
-        DeviceModel device = devicesById.get(condition.getDeviceId());
-        DeviceState deviceState = state.devices.get(device.id);
-        String actual = resolveConditionValue(device, deviceState, state, condition, "variable");
-        ValueDomain domain = device.localDomains.get(conditionKey(condition));
-        if (domain == null) {
-            domain = environmentDomains.get(conditionKey(condition));
-        }
-        return domain == null ? 1.0
-                : domain.numericFalsificationDistance(actual, condition.getRelation(), condition.getValue());
     }
 
     /**
@@ -1616,7 +1686,7 @@ final class FuzzModel {
         return manifests.get(templateName.trim().toLowerCase(Locale.ROOT));
     }
 
-    private static String transitionAssignment(Set<DeviceManifest.Transition> transitions, String attribute) {
+    private static String transitionAssignment(Iterable<DeviceManifest.Transition> transitions, String attribute) {
         if (transitions == null) {
             return null;
         }
@@ -1871,19 +1941,9 @@ final class FuzzModel {
         return values == null ? 0 : values.size();
     }
 
-    // A non-finite distance means no violation could be *observed* on this path, so the specification
-    // offers no guidance. It must stay POSITIVE_INFINITY rather than collapsing to 1.0, because the engine
-    // breeds the *minimum*-distance candidate (FuzzEngine.nextPopulation): a finite 1.0 outranked genuinely
-    // informative candidates and took the parent slot. Template 4's own distance is
-    // (1 - antecedentSatisfaction) + consequentFalsification, so it spans [0, 2] — a real, measured 1.5 lost
-    // to a candidate carrying no information at all.
-    // The reachable case is template 4 at pathLength 1 — `step + 1 < states.size()` never holds, so the
-    // scoring loop below never runs and the seed value survives. (The paper monitors cannot reach it:
-    // PaperStructuredMonitorFactory always wires ACTIVE -> VIOLATION directly, and shortestDistanceToViolation
-    // is a BFS over transitions that ignores guard satisfiability, so it is never empty — measured 1 hop for
-    // templates 1/3 and 2 for template 4.) NaN needs no separate branch: it is not finite either, and no
-    // arithmetic path here can produce it (every divisor is `Math.max(1.0, ...)`, so there is no 0/0).
-    // The value never leaves the engine, so no serialization boundary depends on it being finite.
+    // A template 4 path without a successor cannot observe a response violation and supplies no
+    // guidance. Keep that absence distinct from a measured finite distance. This value is internal
+    // to the engine and never crosses the serialization boundary.
     private static double finiteDistance(double distance) {
         return Double.isFinite(distance) ? Math.max(0.0, distance) : Double.POSITIVE_INFINITY;
     }
@@ -1913,8 +1973,13 @@ final class FuzzModel {
     }
 
     private static Double number(String value) {
+        if (value == null) {
+            return null;
+        }
         try {
-            return value == null ? null : Double.valueOf(value.trim());
+            double numeric = Double.parseDouble(value.trim());
+            // Integer literals accept -0; comparisons must agree with integer distances and NuSMV.
+            return numeric == 0.0 ? 0.0 : numeric;
         } catch (NumberFormatException ignored) {
             return null;
         }
@@ -1945,6 +2010,11 @@ final class FuzzModel {
     }
 
     record SpecEvaluation(int violationStep, double distance) {
+    }
+
+    @FunctionalInterface
+    private interface TimedCondition {
+        double distance(ModelState state, int step);
     }
 
     record Simulation(
@@ -2699,52 +2769,6 @@ final class FuzzModel {
                 candidates.add(Long.toString(clamp(currentValue + delta + effectiveImpactRate)));
             }
             return List.copyOf(candidates);
-        }
-
-        private double numericSatisfaction(String actual, String relation, String expected) {
-            if (!isNumeric()) {
-                return 0.0;
-            }
-            Double actualNumber = number(actual);
-            Double expectedNumber = number(expected);
-            if (actualNumber == null || expectedNumber == null) {
-                return 0.0;
-            }
-            double range = Math.max(1.0, (double) ((long) upper - (long) lower));
-            String normalizedRelation = normalizeRelation(relation);
-            double distanceToMatch = switch (normalizedRelation == null ? "" : normalizedRelation) {
-                case ">" -> Math.max(0.0, expectedNumber - actualNumber + 1.0);
-                case ">=" -> Math.max(0.0, expectedNumber - actualNumber);
-                case "<" -> Math.max(0.0, actualNumber - expectedNumber + 1.0);
-                case "<=" -> Math.max(0.0, actualNumber - expectedNumber);
-                case "=" -> Math.abs(actualNumber - expectedNumber);
-                case "!=" -> actualNumber.equals(expectedNumber) ? 1.0 : 0.0;
-                default -> range;
-            };
-            return Math.max(0.0, 1.0 - Math.min(1.0, distanceToMatch / range));
-        }
-
-        private double numericFalsificationDistance(String actual, String relation, String expected) {
-            if (!isNumeric()) {
-                return 1.0;
-            }
-            Double actualNumber = number(actual);
-            Double expectedNumber = number(expected);
-            String normalizedRelation = normalizeRelation(relation);
-            if (actualNumber == null || expectedNumber == null || normalizedRelation == null) {
-                return 1.0;
-            }
-            double distanceToFalse = switch (normalizedRelation) {
-                case ">" -> actualNumber - expectedNumber;
-                case ">=" -> actualNumber - expectedNumber + 1.0;
-                case "<" -> expectedNumber - actualNumber;
-                case "<=" -> expectedNumber - actualNumber + 1.0;
-                case "=" -> 1.0;
-                case "!=" -> Math.abs(actualNumber - expectedNumber);
-                default -> Math.max(1.0, (double) ((long) upper - (long) lower));
-            };
-            double range = Math.max(1.0, (double) ((long) upper - (long) lower));
-            return Math.max(0.0, Math.min(1.0, distanceToFalse / range));
         }
 
         private List<String> paperInitialValues() {

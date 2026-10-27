@@ -837,13 +837,15 @@ class FuzzEngineTest {
     }
 
     @Test
-    void anUnobservableSpecificationNeverOutranksAScoredOneAsAParent() {
-        // A template 4 specification needs a successor state, so at pathLength 1 it cannot be scored at
-        // all. That must not make it look *close*: FuzzEngine.nextPopulation breeds the minimum-distance
-        // candidate, and while this returned a finite 1.0 an unscorable specification outranked a genuinely
-        // close one and took the parent slot, steering the search with a specification carrying no signal.
+    void anUnobservableResponseHasNoFiniteGuidance() {
+        // A response needs a successor state. A one-state path supplies no measured progress.
         SpecificationDto immediate = immediateSpecification("immediate-unobservable");
+        immediate.setIfConditions(List.of(conditionForDevice(
+                "local_1", "variable", "profile", "=", "alpha")));
+        immediate.setThenConditions(List.of(conditionForDevice(
+                "local_1", "variable", "profile", "=", "alpha")));
         FuzzModel model = FuzzModel.from(localOnlySnapshot(List.of(immediate)));
+        model.validateSpecification(immediate);
         FuzzModel.Simulation singleState = model.simulate(new long[0], 1);
         assertEquals(1, singleState.states().size(), "pathLength 1 must yield only the initial state");
 
@@ -852,7 +854,7 @@ class FuzzEngineTest {
         assertEquals(-1, evaluation.violationStep(), "no violation is observable without a successor state");
         assertTrue(Double.isInfinite(evaluation.distance()),
                 "an unobservable specification scored " + evaluation.distance()
-                        + ", which competes for the parent slot against real candidates");
+                        + ", manufacturing guidance without an observable response");
     }
 
     @Test
@@ -1658,19 +1660,170 @@ class FuzzEngineTest {
     }
 
     @Test
+    void numericSetGuidanceApproachesTheNearestMember() {
+        for (String separator : List.of(",", ";", "|")) {
+            String members = "60" + separator + "50" + separator + "60";
+            for (String template : List.of("1", "3")) {
+                String relation = "1".equals(template) ? "not in" : "in";
+                var far = numericScoreAt("0", template, relation, members);
+                var near = numericScoreAt("49", template, relation, members);
+                var otherSide = numericScoreAt("61", template, relation, members);
+                var member = numericScoreAt("50", template, relation, members);
+
+                assertEquals(-1, far.violationStep());
+                assertEquals(-1, near.violationStep());
+                assertEquals(0.5, far.distance(), EPSILON);
+                assertEquals(0.01, near.distance(), EPSILON);
+                assertEquals(near.distance(), otherSide.distance(), EPSILON);
+                assertEquals(0, member.violationStep());
+                assertEquals(0.0, member.distance());
+            }
+        }
+    }
+
+    @Test
+    void numericSetGuidanceApproachesTheNearestLegalNonMember() {
+        for (String template : List.of("1", "3")) {
+            String relation = "1".equals(template) ? "in" : "not in";
+            var middle = numericScoreAt("6", template, relation, "7,5,6,6");
+            var edge = numericScoreAt("5", template, relation, "5,6,7");
+            var outside = numericScoreAt("4", template, relation, "5,6,7");
+            var lowerEdge = numericScoreAt("0", template, relation, "0,1");
+            var upperEdge = numericScoreAt("100", template, relation, "99,100");
+
+            assertEquals(-1, middle.violationStep());
+            assertEquals(-1, edge.violationStep());
+            assertEquals(0.02, middle.distance(), EPSILON);
+            assertEquals(0.01, edge.distance(), EPSILON);
+            assertEquals(0, outside.violationStep());
+            assertEquals(0.0, outside.distance());
+            assertEquals(0.02, lowerEdge.distance(), EPSILON);
+            assertEquals(0.02, upperEdge.distance(), EPSILON);
+        }
+    }
+
+    @Test
+    void numericResponseGuidanceUsesSetDistancesOnBothSides() {
+        var response = immediateSpecification("numeric-response");
+        response.setIfConditions(List.of(conditionForDevice(
+                "counter_1", "variable", "count", "in", "50,60")));
+        response.setThenConditions(List.of(conditionForDevice(
+                "counter_1", "variable", "count", "<", "0")));
+        var farModel = FuzzModel.from(numericLocalSnapshot("0", "[-100,100]"));
+        var nearModel = FuzzModel.from(numericLocalSnapshot("49", "[-100,100]"));
+        farModel.validateSpecification(response);
+        nearModel.validateSpecification(response);
+        var far = farModel.evaluate(response, farModel.simulate(new long[]{0, 0}, 3));
+        var near = nearModel.evaluate(response, nearModel.simulate(new long[]{49, 49}, 3));
+        assertEquals(-1, far.violationStep());
+        assertEquals(-1, near.violationStep());
+        assertTrue(near.distance() < far.distance());
+
+        response.setIfConditions(List.of(conditionForDevice(
+                "counter_1", "variable", "count", ">=", "0")));
+        response.setThenConditions(List.of(conditionForDevice(
+                "counter_1", "variable", "count", "in", "5,6,7")));
+        var middleModel = FuzzModel.from(numericLocalSnapshot("6", "[-100,100]"));
+        var edgeModel = FuzzModel.from(numericLocalSnapshot("5", "[-100,100]"));
+        middleModel.validateSpecification(response);
+        edgeModel.validateSpecification(response);
+        var middle = middleModel.evaluate(response, middleModel.simulate(new long[]{6}, 2));
+        var edge = edgeModel.evaluate(response, edgeModel.simulate(new long[]{5}, 2));
+        assertEquals(-1, middle.violationStep());
+        assertEquals(-1, edge.violationStep());
+        assertEquals(0.02, middle.distance(), EPSILON);
+        assertEquals(0.01, edge.distance(), EPSILON);
+    }
+
+    @Test
+    void numericSignedZeroHasTheSameTruthAndDistanceAsIntegerZero() {
+        for (String relation : List.of("=", "!=", ">", ">=", "<", "<=", "in", "not in")) {
+            boolean matchesZero = List.of("=", ">=", "<=", "in").contains(relation);
+            String expected = relation.contains("in") ? "-0,1" : "-0";
+            var forbidden = numericScoreAt("0", "3", relation, expected);
+            var invariant = numericScoreAt("0", "1", relation, expected);
+            assertEquals(matchesZero ? 0 : -1, forbidden.violationStep(), relation);
+            assertEquals(matchesZero ? -1 : 0, invariant.violationStep(), relation);
+            assertEquals(matchesZero, forbidden.distance() == 0.0, relation);
+            assertEquals(!matchesZero, invariant.distance() == 0.0, relation);
+        }
+    }
+
+    @Test
+    void numericSetGuidanceRespectsClosedIntegerDomains() {
+        for (int boundary : List.of(Integer.MIN_VALUE, Integer.MAX_VALUE)) {
+            var specification = specificationForDevice(
+                    "wide-set", "3", "wide_1", "variable", "wideValue", "not in", Integer.toString(boundary));
+            var snapshot = fullRangeNumericSnapshot(List.of(specification));
+            var domain = snapshot.templateManifests().get("WideNumeric").getInternalVariables().get(0);
+            domain.setLowerBound(Integer.MIN_VALUE);
+            domain.setUpperBound(Integer.MAX_VALUE);
+            domain.setNaturalChangeRate("[-1,1]");
+            snapshot.environmentVariables().get(0).setValue(Integer.toString(boundary));
+            FuzzModel model = FuzzModel.from(snapshot);
+            model.validateSpecification(specification);
+            long holdingChoice = boundary == Integer.MIN_VALUE ? 0L : 1L;
+            var evaluation = model.evaluate(specification, model.simulate(new long[]{holdingChoice}, 2));
+            assertEquals(-1, evaluation.violationStep());
+            assertTrue(evaluation.distance() > 0.0);
+            assertEquals(1.0 / 4_294_967_295.0, evaluation.distance(), 1.0e-15);
+        }
+
+        List<String> members = new ArrayList<>();
+        for (int value = 0; value <= 100; value++) members.add(Integer.toString(value));
+        var covered = numericScoreAt("50", "3", "not in", String.join(",", members));
+        assertEquals(-1, covered.violationStep());
+        assertTrue(Double.isInfinite(covered.distance()), "the set covers every legal integer");
+
+        var specification = specificationForDevice(
+                "single-point-set", "1", "counter_1", "variable", "count", "in", "0");
+        var snapshot = numericLocalSnapshot("0", "0");
+        snapshot.templateManifests().get("Counter").getInternalVariables().get(0).setUpperBound(0);
+        FuzzModel model = FuzzModel.from(snapshot);
+        model.validateSpecification(specification);
+        var singlePoint = model.evaluate(specification, model.simulate(new long[0], 1));
+        assertEquals(-1, singlePoint.violationStep());
+        assertTrue(Double.isInfinite(singlePoint.distance()), "the only legal value cannot falsify membership");
+    }
+
+    @Test
+    void sharedNumericSignedZeroMatchesInBoardAndPaperMonitors() {
+        for (String relation : List.of("=", "!=", ">", ">=", "<", "<=", "in", "not in")) {
+            boolean matchesZero = List.of("=", ">=", "<=", "in").contains(relation);
+            String expected = relation.contains("in") ? "-0,1" : "-0";
+            var specification = specificationForDevice(
+                    "shared-zero", "3", "wide_1", "variable", "wideValue", relation, expected);
+            FuzzModel model = FuzzModel.from(fullRangeNumericSnapshot(List.of(specification)));
+            model.validateSpecification(specification);
+            var simulation = model.simulate(new long[0], 1);
+            var board = model.evaluate(specification, simulation);
+            var paper = model.evaluatePaper(specification, simulation, FuzzEngine.PAPER_SOLVER_LEVELS);
+            assertEquals(matchesZero ? 0 : -1, board.violationStep(), relation);
+            assertEquals(matchesZero ? 0 : -1, paper.violationStep(), relation);
+            assertEquals(matchesZero, board.distance() == 0.0, relation);
+            assertEquals(matchesZero, paper.distance() == 0.0, relation);
+        }
+    }
+
+    @Test
     void numericDistanceDoesNotOverflowAcrossTheFullIntegerDomain() {
         SpecificationDto neverTarget = specificationForDevice(
-                "never-billion",
+                "never-one",
                 "3",
                 "wide_1",
                 "variable",
                 "wideValue",
                 "=",
-                "1000000000");
-        FuzzModel model = FuzzModel.from(fullRangeNumericSnapshot(List.of(neverTarget)));
-        FuzzModel.Simulation simulation = model.simulate(new long[0], 1);
+                "1");
+        var snapshot = fullRangeNumericSnapshot(List.of(neverTarget));
+        snapshot.templateManifests().get("WideNumeric").getInternalVariables().get(0)
+                .setNaturalChangeRate("[-1,1]");
+        FuzzModel model = FuzzModel.from(snapshot);
+        FuzzModel.Simulation simulation = model.simulate(new long[]{1}, 2);
 
-        assertEquals(0.25, model.evaluate(neverTarget, simulation).distance(), EPSILON);
+        double distance = model.evaluate(neverTarget, simulation).distance();
+        assertTrue(distance > 0.0);
+        assertEquals(1.0 / 4_000_000_000.0, distance, 1.0e-15);
     }
 
     @Test
@@ -2561,6 +2714,16 @@ class FuzzEngineTest {
                 List.of(),
                 List.of(),
                 Map.of("Climate", manifest));
+    }
+
+    private static FuzzModel.SpecEvaluation numericScoreAt(
+            String actual, String template, String relation, String expected) {
+        SpecificationDto specification = specificationForDevice(
+                "numeric-guidance", template, "counter_1", "variable", "count", relation, expected);
+        // Every domain value is reachable at step 1; hold the chosen value to test its distance.
+        FuzzModel model = FuzzModel.from(numericLocalSnapshot(actual, "[-100,100]"));
+        model.validateSpecification(specification);
+        return model.evaluate(specification, model.simulate(new long[]{Integer.parseInt(actual)}, 2));
     }
 
     private static BoardDataConverter.ModelInputSnapshot numericLocalSnapshot(

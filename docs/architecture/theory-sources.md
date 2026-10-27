@@ -126,6 +126,38 @@ their own copy; the citations below are precise enough to check against any copy
   `component/fuzz/paper/` monitor FSM; see [fuzzing-flow.md](fuzzing-flow.md). HAFuzz findings are
   candidate evidence, never formal conclusions — budget exhaustion is not satisfaction.
 
+HAFuzz §3.2–§3.4 is the first reference for exploration strategy changes within the supported
+model. Implementation defects are checked against the paper's seed generation, monitor feedback,
+predecessor guidance, selection, and mutation before introducing a different heuristic. The
+reference artifact's incidental choices are not automatically paper requirements. Extensions
+address an identified remaining limitation and retain an explicit comparison with the applicable
+HAFuzz mechanism; comparisons must preserve the search question and distinguish the two
+[initial-state policies](fuzzing-flow.md#relationship-to-the-hafuzz-paper).
+
+The project's flattened form of Algorithm 1's condition average preserves every supplied
+atomic occurrence in the monitor condition, including repeats. Flattening alone does not
+authorize deduplicating operands: Boolean equivalence does not preserve their quantitative
+weights. This is the project's condition-construction contract, not a claim that the paper's
+native LTL-to-FSM tool preserves the original formula's syntax. Exact violation checks remain
+separate from this guidance metric.
+
+### Model-aware distance guidance (2026-10-27)
+
+Board-initial numeric guidance is a project extension, not an additional HAFuzz conformance
+claim. [Lin, Li and Althoff, *Model Predictive Robustness of Signal Temporal Logic
+Predicates*](https://arxiv.org/pdf/2209.07881), §II-C–III, motivates incorporating system
+dynamics into predicate robustness instead of relying only on geometric proximity. Their
+method evaluates predicted trajectories and learns robustness with Gaussian processes;
+IoT-Verify does not implement that probabilistic or learned metric.
+
+[Bogomolov et al., *Falsification of Hybrid Systems using Symbolic Reachability and
+Trajectory Splicing*](https://doi.org/10.1145/3302504.3311813) uses reachability constraints
+to restrict a falsification search. The applicable design principle here is narrower:
+exclude a numeric target only when a conservative bound proves it impossible at that
+step. The project's per-step support and distance rules are defined in
+[fuzzing-flow.md](fuzzing-flow.md#pipeline). A remaining target in an over-approximation
+does not establish a reachable joint trajectory or a formal violation.
+
 ## Reproducing the Salus house experiment
 
 The [Microsoft Research publication page](https://www.microsoft.com/en-us/research/publication/systematically-debugging-iot-control-system-correctness-building-automation/)

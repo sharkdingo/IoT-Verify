@@ -176,22 +176,31 @@ class PaperSeedKernelTest {
 
     @Test
     void deviceMutationNeverAddsAnUnselectedDeviceEvent() {
-        PaperEventDomainSnapshot devicesOnly = new PaperEventDomainSnapshot(
-                5,
-                List.of(
-                        new PaperDeviceDomain("thermostat", "mode", List.of("off", "heat")),
-                        new PaperDeviceDomain("lock", "mode", List.of("locked", "unlocked"))),
-                List.of());
+        PaperEventDomainSnapshot devicesOnly = deviceMutationDomain();
         PaperSeed parent = new PaperSeed(55L, List.of(new PaperEvent(
                 PaperEvent.Type.DEVICE, "thermostat", "off", 1)));
+        int deviceEventMutations = 0;
 
         for (long kernelSeed = 0; kernelSeed < 100; kernelSeed++) {
-            PaperSeed mutated = new PaperSeedKernel(devicesOnly, kernelSeed).mutate(parent);
+            PaperSeedKernel.MutationBatch batch =
+                    new PaperSeedKernel(devicesOnly, kernelSeed).mutateBatch(parent);
+            PaperSeed mutated = batch.seed();
             assertEquals(1, mutated.events().size());
             assertEquals("thermostat", mutated.events().get(0).name());
             assertEquals(PaperEvent.Type.DEVICE, mutated.events().get(0).type());
             assertEquals(1, mutated.events().get(0).position());
+            for (PaperSeedKernel.MutationStep step : batch.steps()) {
+                if (step.selected() != null && !step.selected().initial()) {
+                    deviceEventMutations++;
+                    assertEquals(parent.events().get(0), step.selected().event());
+                    assertEquals(PaperSeedKernel.MutationOperation.MODIFICATION, step.operation());
+                    assertEquals(List.of(new PaperEvent(
+                            PaperEvent.Type.DEVICE, "thermostat", "heat", 1)),
+                            step.seed().events());
+                }
+            }
         }
+        assertTrue(deviceEventMutations > 0, "The fixture must execute an ordinary device Event mutation");
 
         assertTrue(new PaperSeedKernel(devicesOnly, 1L)
                 .mutate(PaperSeed.empty(9L)).events().isEmpty());
@@ -244,7 +253,9 @@ class PaperSeedKernelTest {
     }
 
     @Test
-    void mutationKeepsParentInitialStateWhileRandomSeedsResampleIt() {
+    void mutationKeepsParentNonceWhileRandomSeedsResampleIt() {
+        PaperEventDomainSnapshot mutationDomain = new PaperEventDomainSnapshot(
+                5, deviceMutationDomain().deviceDomains(), domain().environmentDomains());
         PaperInitialValue override = new PaperInitialValue(
                 PaperInitialValue.Type.ENVIRONMENT_VALUE,
                 "environment",
@@ -255,17 +266,24 @@ class PaperSeedKernelTest {
                 List.of(override),
                 List.of(new PaperEvent(
                         PaperEvent.Type.DEVICE, "thermostat", "off", 1)));
-        PaperSeedKernel kernel = new PaperSeedKernel(domain(), 8080L);
-        boolean sawMutation = false;
+        PaperSeedKernel kernel = new PaperSeedKernel(mutationDomain, 8080L);
+        boolean sawDeviceEventMutation = false;
+        boolean sawInitialValueMutation = false;
         boolean sawRandom = false;
 
         for (int iteration = 0; iteration < 500; iteration++) {
             PaperSeedKernel.GeneratedSeed generated = kernel.nextSeed(parent);
             if (generated.strategy() == PaperSeedKernel.NextSeedStrategy.MUTATION) {
-                sawMutation = true;
                 assertEquals(parent.initializationNonce(), generated.seed().initializationNonce());
-                assertTrue(generated.seed().initialOverrides().stream().allMatch(value ->
-                        value.target().equals(override.target())));
+                if (!parent.events().equals(generated.seed().events())) {
+                    sawDeviceEventMutation = true;
+                    assertEquals(List.of(new PaperEvent(
+                            PaperEvent.Type.DEVICE, "thermostat", "heat", 1)),
+                            generated.seed().events());
+                }
+                if (!parent.initialOverrides().equals(generated.seed().initialOverrides())) {
+                    sawInitialValueMutation = true;
+                }
             } else {
                 sawRandom = true;
                 assertNotEquals(parent.initializationNonce(), generated.seed().initializationNonce());
@@ -273,7 +291,8 @@ class PaperSeedKernelTest {
             }
         }
 
-        assertTrue(sawMutation);
+        assertTrue(sawDeviceEventMutation, "The mutation branch must change an ordinary device Event");
+        assertTrue(sawInitialValueMutation, "The mutation branch must change an initial value");
         assertTrue(sawRandom);
     }
 
@@ -441,6 +460,19 @@ class PaperSeedKernelTest {
                 PaperSeedKernel.MAX_POPULATION_SIZE + 1));
         assertThrows(IllegalArgumentException.class, () -> kernel.nextPopulation(
                 PaperSeed.empty(1L), 0));
+    }
+
+    private static PaperEventDomainSnapshot deviceMutationDomain() {
+        return new PaperEventDomainSnapshot(
+                5,
+                List.of(
+                        new PaperDeviceDomain("thermostat", "mode", List.of("off", "heat")),
+                        new PaperDeviceDomain("lock", "mode", List.of("locked", "unlocked")),
+                        new PaperDeviceDomain("lamp", "mode", List.of("off", "on")),
+                        new PaperDeviceDomain("fan", "mode", List.of("off", "on")),
+                        new PaperDeviceDomain("alarm", "mode", List.of("off", "on")),
+                        new PaperDeviceDomain("window", "mode", List.of("closed", "open"))),
+                List.of());
     }
 
     private static PaperEventDomainSnapshot domain() {

@@ -5,7 +5,7 @@ module. The endpoint index lives in [rest-endpoints.md](rest-endpoints.md); glob
 authentication, `Result<T>`, and error conventions live in
 [overview.md](overview.md).
 
-Verified against code on 2026-10-25. Source: `controller/FuzzController.java`,
+Verified against code on 2026-10-27. Source: `controller/FuzzController.java`,
 `service/impl/FuzzServiceImpl.java`, and `dto/fuzz/`.
 
 ---
@@ -190,19 +190,23 @@ The limit is calibrated against measured throughput rather than chosen: a worst-
 `BUDGET_EXHAUSTED` run costs roughly 120-170 µs per state step, and admissible steps are
 `limit / complexity`, which puts a maximal run near a minute.
 
-**A running search also has a hard wall-clock ceiling of five minutes**, independent of that guard.
+**A running search also has a five-minute wall-clock budget**, checked between population members
+and iterations, independently of that guard.
 The guard bounds the *nominal* budget, but its calibration is per-step timing measured on one machine —
 a slower host, a contended worker pool, or a board whose real per-step cost exceeds the estimate can
 all overrun it, and the renewable two-minute task lease is a liveness heartbeat rather than a deadline.
-The ceiling sits at roughly 5x a maximal admitted run, so it never fires on a correctly-estimated
-search and only catches the cases the static estimate got wrong.
+The budget is roughly five times the measured duration of a maximal admitted run. It is a
+cooperative deadline: current simulation, evaluation, or population construction may finish before
+the next deadline check.
 
 A search the clock ends is **not** reported as cancelled: cancellation is the user's own action and
 persists no result, so labelling a timeout that way would misattribute it. It settles exactly as a spent
 iteration budget does — `BUDGET_EXHAUSTED`, or `FOUND_VIOLATION` if candidates were already located,
 which stay valid — and adds the conditional limitation code `TIME_BUDGET_EXHAUSTED` so the reason is
 disclosed instead of being indistinguishable from a completed budget. Its `iterations` count reports what
-actually ran, which will be short of the requested `maxIterations`. The complete frozen input snapshot is also limited to 8 MiB of UTF-8 JSON at both
+actually ran, including a partially evaluated iteration. It can equal `maxIterations` when the
+deadline interrupts the final population; `generatedPaths` records how many paths completed.
+The complete frozen input snapshot is also limited to 8 MiB of UTF-8 JSON at both
 preflight endpoints and submission because it is persisted independently of target selection.
 Explicit target IDs therefore cannot
 bypass structural or persistence limits on the captured Board. A Board with more than
@@ -368,8 +372,8 @@ page when the current page length equals its requested size. Meanwhile,
 | `initiator` | enum | Persisted `USER`, `AI_ASSISTANT`, or `UNKNOWN` origin |
 | `outcome` | enum | `FOUND_VIOLATION`, `BUDGET_EXHAUSTED`, or `INCONCLUSIVE` |
 | `explorationMode` | enum | Persisted `BOARD_SNAPSHOT` or `PAPER_COMPATIBLE` algorithm used for this run |
-| `effectiveSeed` | integer | Exact seed used; submit this value to reproduce the deterministic search |
-| `iterations` | integer | Completed search iterations |
+| `effectiveSeed` | integer | Exact seed used; see the [reproduction conditions](../architecture/fuzzing-flow.md#determinism-and-budgets) |
+| `iterations` | integer | Evaluated iterations, including a partially evaluated final population |
 | `generatedPaths` | integer | Paths evaluated, including every population member evaluated before early completion |
 | `elapsedMs` | integer | Engine elapsed time |
 | `modelSnapshot` | object | Captured counts/time with `templatesFrozen=true` and the canonical `modelFingerprint` used for current-Board drift checks |

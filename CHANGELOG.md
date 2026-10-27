@@ -15,6 +15,42 @@ history into a technical spec. The spec content itself now lives under
 
 ## [Unreleased]
 
+### 2026-10-27 (HAFuzz implementation review)
+
+#### Fixed
+
+- Paper-compatible condition averaging now preserves repeated atomic occurrences instead
+  of silently deduplicating them and reversing candidate priorities. Boolean violation
+  checks remain unchanged. Generated API start guards do not add another score contribution
+  for an identical condition already supplied by a rule. Repeated literals share rule-producer
+  construction, and each state evaluation reuses shared subtree values without changing
+  occurrence weights or carrying satisfaction across states. This avoids repeated expansion
+  and scoring of the same predecessor structure.
+- Mutation regressions now execute real operations rather than passing only through the
+  documented zero-operation branch for small seeds.
+- Exploration documentation now describes cooperative deadline checks and counts partially
+  evaluated final iterations accurately.
+
+### 2026-10-27 (bounded exploration guidance)
+
+#### Fixed
+
+- Board-initial counterexample search now distinguishes partial progress across
+  conjunctive conditions, giving intermediate candidates useful distance feedback.
+  Exact Boolean checks remain authoritative, and the paper-compatible search policy
+  is unchanged. Updated guidance can select different paths when rerunning an older seed.
+- Numeric set conditions now guide Board search toward the nearest matching or
+  non-matching legal integer. Numeric comparisons in both exploration modes treat
+  `-0` and `0` equally, preventing spurious findings and zero-distance non-violations.
+- Board search no longer lets a provably impossible early window dominate its distance.
+  Fixed initial values and conservative per-step natural-change bounds filter guidance
+  for supported safety templates; assignments and device effects retain a conservative
+  full-domain fallback. Atomic distances, including set members and complements, target
+  only values in the same per-step support. Exact violation checks, budgets, and paper-mode search remain
+  unchanged by this temporal filtering.
+  Falsification distances consider only individually possible failures, so an
+  always-true conjunct cannot dominate the score of a breakable requirement.
+
 ### 2026-10-26 (review fixes)
 
 #### Fixed
