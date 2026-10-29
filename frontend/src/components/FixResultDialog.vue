@@ -1485,6 +1485,7 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
                     </div>
                     <div class="flex-1">
                       <p class="text-sm board-text-success">{{ strategyAttemptReasonLabel('VERIFIED') }}</p>
+                      <p class="mt-1 text-xs leading-5 board-text-muted">{{ t('app.fixVerificationScope') }}</p>
                     </div>
                   </div>
                 </div>

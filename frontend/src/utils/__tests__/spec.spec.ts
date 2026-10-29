@@ -454,6 +454,21 @@ describe('spec formula preview', () => {
     expect(isSameSpecification(first, second)).toBe(true)
   })
 
+  it.each(['in', 'not in'])('compares API %s sets independently of case, order and separators', relation => {
+    const spec = (value: string): Specification => ({
+      id: 'event-spec', name: 'Event requirement', templateId: '1', templateLabel: 'Always',
+      aConditions: [{ id: 'event', side: 'a', deviceId: 'light', deviceLabel: 'Light',
+        targetType: 'api', key: 'on', relation, value }], ifConditions: [], thenConditions: []
+    })
+    for (const equivalent of ['false | true', ' TRUE; FALSE ', 'FALSE,TRUE']) {
+      expect(isSameSpecification(spec('TRUE, FALSE'), spec(equivalent)), equivalent).toBe(true)
+    }
+    expect(isSameSpecification(spec('TRUE, FALSE'), spec('FALSE'))).toBe(false)
+    const opposite = spec('TRUE, FALSE')
+    opposite.aConditions[0].relation = relation === 'in' ? 'not in' : 'in'
+    expect(isSameSpecification(spec('TRUE, FALSE'), opposite)).toBe(false)
+  })
+
   it('spells boolean and label literals the way the backend preview does', () => {
     /*
      * The backend renders NuSMV booleans uppercase and trust/privacy labels lowercase

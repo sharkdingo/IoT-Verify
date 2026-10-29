@@ -5,6 +5,7 @@ import type {
 } from '../types/spec'
 import { specTemplateDetails } from '../assets/config/specTemplates'
 import { normalizeModelRelation } from './modelRequest'
+import { splitSpecConditionValues } from './specConditionDomain'
 
 interface SpecFormulaContext {
     nodes?: DeviceNode[]
@@ -90,19 +91,13 @@ const previewScalar = (value: unknown): string => {
 
 const previewConditionValue = (condition: SpecCondition, relation: string): string => {
     if (relation !== 'in' && relation !== 'not in') return previewScalar(condition.value)
-    const delimiter = condition.targetType === 'state' ? /[,|]/ : /[,;|]/
-    const values = String(condition.value || '')
-        .split(delimiter)
-        .map(value => value.trim())
-        .filter(Boolean)
-        .map(previewScalar)
+    const values = splitSpecConditionValues(condition.value, condition.targetType).map(previewScalar)
     return `{${values.join(', ')}}`
 }
 
 const conditionToFormulaTerm = (condition: SpecCondition, context?: SpecFormulaContext): string => {
     if (!condition?.deviceId || !condition.key) return ''
     const target = previewConditionTarget(condition, context)
-    if (condition.targetType === 'api') return target
     const relation = normalizeModelRelation(condition.relation) || '='
     return `${target} ${relation} ${previewConditionValue(condition, relation)}`
 }
@@ -216,11 +211,10 @@ const normalizeSpecificationSetValue = (
     relation: string,
     targetType: string
 ): string => {
-    const normalized = String(value ?? '').trim()
-    if (targetType === 'api') return normalized.toUpperCase()
+    const text = String(value ?? '').trim()
+    const normalized = targetType === 'api' ? text.toUpperCase() : text
     if (relation !== 'in' && relation !== 'not in') return normalized
-    const delimiter = targetType === 'state' ? /[,|]/ : /[,;|]/
-    return normalized.split(delimiter).map(part => part.trim()).filter(Boolean).sort().join(',')
+    return splitSpecConditionValues(normalized, targetType).sort().join(',')
 }
 
 const specificationConditionKeys = (conditions: SpecCondition[] = []): string[] =>

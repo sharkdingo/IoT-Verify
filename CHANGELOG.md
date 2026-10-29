@@ -43,6 +43,30 @@ history into a technical spec. The spec content itself now lives under
 - Recommendation layout E2E waits for the Board's responsive state after resizing, avoiding a
   race where a pending resize collapsed the panel between opening it and clicking its tab.
 
+### 2026-10-30 (requirement semantics)
+
+#### Fixed
+
+- API-event requirements retain boolean comparisons and sets in natural-language
+  explanations and frontend/backend formula previews. Editing no longer replaces an
+  absent-event condition with `TRUE`; the editor exposes occurrence values and preserves
+  template 7's positive-event restriction.
+- Requirement edits distinguish changes to the check target from a name-only edit.
+  Verification and repair explanations state their configured-requirement scope, and
+  device details clarify that API availability does not generate external user inputs.
+- API-set identity now normalizes Boolean case, separators and member order in both
+  frontend and backend comparisons, avoiding false target-change warnings and duplicate misses.
+- Condition editing and whole-requirement submission recheck template property references
+  and value domains, including comparison operators and variable-source capabilities. Stale
+  selections are blocked with a reason while retaining the draft;
+  supported relation aliases and surrounding value whitespace survive editing consistently.
+
+#### Changed
+
+- Extracted frontend specification-condition properties, domains, operator eligibility and
+  validation into `specConditionDomain.ts` with explicit model inputs. The editor keeps
+  presentation and interaction; previews, explanations and identity checks share list parsing.
+
 ### 2026-10-27 (presentation assets)
 
 #### Added

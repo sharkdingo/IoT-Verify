@@ -10,7 +10,7 @@ export type SpecPropertyScope = 'state' | 'variable'
  *
  * - `environment` — the shared pool value, i.e. what actually happened in the home. No device
  *   participates in the formula. Only valid for a shared variable (manifest `IsInside` not true),
- *   but valid regardless of `Reads`, because the pool value exists either way.
+ *   and the selected device must read it (`Reads` not false), matching backend admission.
  * - `reported` — what this device said. Device-level, and the only meaningful answer for a
  *   device-local variable (`IsInside: true`), which has no pool value at all.
  */

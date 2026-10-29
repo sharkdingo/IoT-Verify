@@ -44,7 +44,15 @@ import {
   type DeviceRuntimeConfig
 } from '@/utils/deviceRuntime'
 import { describeSpecification, specConditionPropertyLabel, specConditionValueLabel } from '@/utils/modelPresentation'
-import { buildSpecFormula, buildSpecFormulaPreview, isSpecConditionVariableSourceUnresolved } from '@/utils/spec'
+import { buildSpecFormula, buildSpecFormulaPreview, buildSpecificationSemanticKey, isSpecConditionVariableSourceUnresolved } from '@/utils/spec'
+import {
+  getSpecConditionProperties,
+  getSpecConditionValues,
+  getSpecConditionVariable,
+  isSpecConditionRelationSupported,
+  splitSpecConditionValues,
+  validateSpecConditionDomain
+} from '@/utils/specConditionDomain'
 import {
   mergeSourcedEnvironmentPatches,
   type EnvironmentPatchConflict
@@ -68,6 +76,7 @@ import { useModalAccessibility } from '@/composables/useModalAccessibility'
 import { REQUEST_LIMITS } from '@/constants/requestLimits'
 import { COLLAPSED_PANEL_RAIL_CSS } from '@/constants/boardLayout'
 import { formatBuiltInModelToken } from '@/utils/modelTokenDisplay'
+import { normalizeModelRelation } from '@/utils/modelRequest'
 import { getTemplateUsage, normalizeTemplateLookupName, summarizeTemplateUsage } from '@/utils/templateUsage'
 import { dismissCompletionNotifications, notifyBlocked, notifyError, notifySuccess } from '@/utils/feedback'
 import { useRovingTablist } from '@/composables/useRovingTablist'
@@ -1052,6 +1061,9 @@ const specForm = reactive({
 })
 const specSaveFailure = ref<ApiErrorDetails | null>(null)
 const editingSpecBaseline = ref<Specification | null>(null)
+const specificationTargetChanged = computed(() => editingSpecBaseline.value !== null
+  && buildSpecificationSemanticKey({ ...specForm, templateId: specForm.templateId as SpecTemplateId })
+    !== buildSpecificationSemanticKey(editingSpecBaseline.value))
 let specDraftEpoch = 0
 const hasSpecificationConditions = computed(() =>
   specForm.aConditions.length + specForm.ifConditions.length + specForm.thenConditions.length > 0)
@@ -1152,6 +1164,11 @@ const openConditionDialog = (side: SpecSide, index: number = -1) => {
     const conditions = getConditionsForSide(side)
     const condition = conditions[index]
     Object.assign(editingConditionData, { propertyScope: undefined, variableSource: undefined }, condition)
+    editingConditionData.relation = normalizeModelRelation(condition.relation) || condition.relation
+    editingConditionData.value = String(condition.value ?? '').trim()
+    if (condition.targetType === 'api') {
+      editingConditionData.value = editingConditionData.value.toUpperCase()
+    }
   } else {
     // Add new condition - reset to defaults
     Object.assign(editingConditionData, {
@@ -1191,14 +1208,10 @@ const specConditionBlockedReason = computed<string | null>(() => {
     && draft.variableSource !== 'environment' && draft.variableSource !== 'reported') {
     return t('app.specVariableSourceRequired')
   }
-  // An API condition only records that the API was called, so it carries no value.
-  if (draft.targetType !== 'api' && !draft.value?.trim()) {
+  if (!draft.value?.trim()) {
     return t(conditionValueOptions.value.length ? 'app.selectValue' : 'app.enterValue')
   }
-  if (draft.targetType === 'variable' && selectedConditionVariable.value) {
-    return validateNumericConditionValue(selectedConditionVariable.value, draft.value || '', draft.relation || '=', t) || null
-  }
-  return null
+  return conditionDomainBlockedReason(draft)
 })
 
 // Save condition from dialog
@@ -1218,12 +1231,6 @@ const saveCondition = () => {
 
   const device = deviceNodes.value.find(n => n.id === editingConditionData.deviceId)
 
-  // API 类型使用 'TRUE' 作为默认 value（表示 API 被调用）
-  // 因为后端 @NotBlank 要求 value 不能为空
-  const finalValue = editingConditionData.targetType === 'api'
-    ? 'TRUE'
-    : (editingConditionData.value || '')
-
   const condition: SpecCondition = {
     id: editingConditionData.id || generateConditionId(),
     side: editingConditionSide.value,
@@ -1240,7 +1247,7 @@ const saveCondition = () => {
       ? { variableSource: editingConditionData.variableSource }
       : {}),
     relation: editingConditionData.relation || '=',
-    value: finalValue
+    value: editingConditionData.value || ''
   }
   
   switch (editingConditionSide.value) {
@@ -1343,9 +1350,7 @@ const decodePropertySelection = (value: string): { propertyScope: 'state' | 'var
 const editingConditionVariableIsDeviceLocal = computed(() => {
   if (editingConditionData.targetType !== 'variable' || !editingConditionData.key) return false
   const manifest = getDeviceManifestForCondition(editingConditionData.deviceId || '')
-  const variable = Array.isArray(manifest?.InternalVariables)
-    ? manifest.InternalVariables.find((item: any) => item?.Name === editingConditionData.key)
-    : null
+  const variable = getSpecConditionVariable(editingConditionData, manifest)
   return variable?.IsInside === true
 })
 
@@ -1361,9 +1366,7 @@ const editingConditionVariableIsDeviceLocal = computed(() => {
 const editingConditionVariableIsFalsifiable = computed(() => {
   if (editingConditionData.targetType !== 'variable' || !editingConditionData.key) return false
   const manifest = getDeviceManifestForCondition(editingConditionData.deviceId || '')
-  const variable = Array.isArray(manifest?.InternalVariables)
-    ? manifest.InternalVariables.find((item: any) => item?.Name === editingConditionData.key)
-    : null
+  const variable = getSpecConditionVariable(editingConditionData, manifest)
   return variable?.FalsifiableWhenCompromised === true
 })
 
@@ -1413,75 +1416,18 @@ const conditionKeySelection = computed({
 const getAvailableKeys = (deviceId: string, targetType: string): Array<{label: string, value: string}> => {
   const template = getDeviceTemplate(deviceId)
   if (!template || !template.manifest) return []
-
-  const keys: Array<{label: string, value: string}> = []
-
-  const variableScopeLabel = (variable: any) =>
-    variable?.IsInside === true ? t('app.internalVariable') : t('app.environmentVariable')
-
-  // Template InternalVariables includes both device-local and shared environment variables.
-  // An affect-only shared declaration (Reads=false) is excluded: the generator emits no
-  // `device.name := a_name` mirror for it, so a specification condition on it would compare a value
-  // this device never observes. The backend refuses it at persist time and again before generation;
-  // offering it here would only let the user build something that gets rejected later.
-  if (targetType === 'variable' && template.manifest.InternalVariables) {
-    template.manifest.InternalVariables.forEach((v: any) => {
-      if (v.IsInside !== true && v.Reads === false) return
-      keys.push({ label: `${formatTemplateModelToken(template, v.Name)} (${variableScopeLabel(v)})`, value: v.Name })
-    })
-  }
-
-  if (targetType === 'state' && template.manifest.WorkingStates) {
-    template.manifest.WorkingStates.forEach((s: any) => {
-      keys.push({ label: formatTemplateModelToken(template, s.Name), value: s.Name })
-    })
-  }
-
-  if (targetType === 'mode' && template.manifest.Modes) {
-    template.manifest.Modes.forEach((mode: string) => {
-      keys.push({ label: formatTemplateModelToken(template, mode), value: mode })
-    })
-  }
-
-  if (targetType === 'api' && template.manifest.APIs) {
-    template.manifest.APIs
-      .filter((api: any) => {
-        const isSignal = api.Signal === true || api.signal === true
-        if (!isSignal) return false
-        if (specForm.templateId !== '7') return true
-        return Boolean(String(api.EndState ?? api.endState ?? '').trim())
-      })
-      .forEach((api: any) => {
-      keys.push({ label: formatTemplateModelToken(template, api.Name), value: api.Name })
-    })
-  }
-
-  // Trust/privacy state targets refer to the currently active state in a mode.
-  // Generated mode_state names remain an internal NuSMV detail.
-  if (targetType === 'trust' || targetType === 'privacy') {
-    const seenPropertyKeys = new Set<string>()
-    const addPropertyKey = (label: string, propertyScope: 'state' | 'variable', key: string) => {
-      const value = encodePropertySelection(propertyScope, key)
-      if (!value || seenPropertyKeys.has(value)) return
-      seenPropertyKeys.add(value)
-      keys.push({ label, value })
-    }
-    const modes = Array.isArray(template.manifest.Modes) ? template.manifest.Modes : []
-    modes.forEach((mode: string) => addPropertyKey(
-      modes.length === 1
-        ? t('app.currentStateProperty')
-        : t('app.currentModeStateProperty', { mode: formatTemplateModelToken(template, mode) }),
-      'state',
-      mode
-    ))
-    if (template.manifest.InternalVariables) {
-      template.manifest.InternalVariables.forEach((v: any) => {
-        addPropertyKey(`${formatTemplateModelToken(template, v.Name)} (${variableScopeLabel(v)})`, 'variable', v.Name)
-      })
-    }
-  }
-
-  return keys
+  return getSpecConditionProperties(targetType, template.manifest, specForm.templateId).map(property => {
+    const token = formatTemplateModelToken(template, property.key)
+    const variable = getSpecConditionVariable(property, template.manifest)
+    const label = property.propertyScope === 'state'
+      ? template.manifest.Modes?.length === 1
+        ? t('app.currentStateProperty') : t('app.currentModeStateProperty', { mode: token })
+      : property.propertyScope === 'variable' || targetType === 'variable'
+        ? `${token} (${t(variable?.IsInside === true ? 'app.internalVariable' : 'app.environmentVariable')})`
+        : token
+    return { label, value: property.propertyScope
+      ? encodePropertySelection(property.propertyScope, property.key) : property.key }
+  })
 }
 
 const specificationPresentationContext = () => ({
@@ -1526,35 +1472,13 @@ const handleTargetTypeChange = () => {
   // watcher does currently clear it, but a reset function that resets two of three per-target fields
   // invites the next reader to assume the third is intentionally sticky.
   editingConditionData.variableSource = undefined
-  editingConditionData.value = ''
+  editingConditionData.value = editingConditionData.targetType === 'api' ? 'TRUE' : ''
   // Reset relation to default based on new type
   if (editingConditionData.targetType === 'state') {
     editingConditionData.relation = '='
   } else {
     editingConditionData.relation = '='
   }
-}
-
-// Check if relation and value fields should be shown
-// Show for Variable and State. Hidden for API type.
-// Also, ensure it's shown if key is not selected (handled by disabled state), but here we specifically want Value for State.
-const showRelationAndValue = computed(() => {
-  // Always show relation/value for State type
-  if (editingConditionData.targetType === 'state') return true
-  // Hide for API type
-  return editingConditionData.targetType !== 'api'
-})
-
-const enumRelationValues = ['=', '!=', 'in', 'not in']
-const isSelectedSpecVariableEnum = () => {
-  if (editingConditionData.targetType !== 'variable' || !editingConditionData.deviceId || !editingConditionData.key) {
-    return false
-  }
-  const manifest = getDeviceManifestForCondition(editingConditionData.deviceId)
-  const variable = Array.isArray(manifest?.InternalVariables)
-    ? manifest.InternalVariables.find((item: any) => item?.Name === editingConditionData.key)
-    : null
-  return Array.isArray(variable?.Values) && variable.Values.length > 0
 }
 
 // Preserve canonical operator values while localizing the user-facing set-membership labels.
@@ -1570,71 +1494,12 @@ const localizedRelationOperators = computed(() => relationOperators.map(operator
 })))
 
 // Filter relation operators based on target type
-const filteredRelationOperators = computed(() => {
-  const operators = localizedRelationOperators.value
-  if (specForm.templateId === '7'
-    && (editingConditionData.targetType === 'state' || editingConditionData.targetType === 'mode')) {
-    return operators.filter(op => op.value === '=')
-  }
-  if (editingConditionData.targetType === 'state') {
-    return operators.filter(op => enumRelationValues.includes(op.value))
-  }
-  if (editingConditionData.targetType === 'mode') {
-    return operators.filter(op => enumRelationValues.includes(op.value))
-  }
-  if (editingConditionData.targetType === 'variable' && isSelectedSpecVariableEnum()) {
-    return operators.filter(op => enumRelationValues.includes(op.value))
-  }
-  // trust/privacy are enum-valued — only equality / set membership make sense.
-  // Ordering comparisons (> >= < <=) would generate meaningless NuSMV conditions.
-  if (editingConditionData.targetType === 'trust' || editingConditionData.targetType === 'privacy') {
-    return operators.filter(op => enumRelationValues.includes(op.value))
-  }
-  return operators
-})
+const filteredRelationOperators = computed(() => localizedRelationOperators.value.filter(operator =>
+  isSpecConditionRelationSupported(editingConditionData,
+    getDeviceManifestForCondition(editingConditionData.deviceId || ''), specForm.templateId, operator.value)))
 
-// Computed available states for the selected device (for equality and set-membership selection)
-const availableStates = computed(() => {
-  if (!editingConditionData.deviceId) return []
-  const manifest = getDeviceManifestForCondition(editingConditionData.deviceId)
-  if (!manifest || !manifest.WorkingStates) return []
-  return manifest.WorkingStates.map((s: any) => s.Name)
-})
-
-const getModeValuesFromManifest = (manifest: any, modeName: string): string[] => {
-  if (!manifest || !Array.isArray(manifest.Modes) || !Array.isArray(manifest.WorkingStates)) return []
-  const modeIndex = manifest.Modes.findIndex((mode: string) => mode === modeName)
-  if (modeIndex < 0) return []
-
-  const values = new Set<string>()
-  manifest.WorkingStates.forEach((state: any) => {
-    const rawName = state?.Name
-    if (typeof rawName !== 'string' || rawName.trim() === '') return
-    const parts = rawName.split(';')
-    if (manifest.Modes.length === 1) {
-      values.add(rawName.trim())
-    } else if (parts.length === manifest.Modes.length) {
-      const value = parts[modeIndex]?.trim()
-      if (value) values.add(value)
-    }
-  })
-  return Array.from(values)
-}
-
-const availableModeValues = computed(() => {
-  if (!editingConditionData.deviceId || !editingConditionData.key) return []
-  const manifest = getDeviceManifestForCondition(editingConditionData.deviceId)
-  return getModeValuesFromManifest(manifest, editingConditionData.key)
-})
-
-const selectedConditionVariable = computed<InternalVariable | undefined>(() => {
-  if (!editingConditionData.deviceId || !editingConditionData.key) return undefined
-  const template = getDeviceTemplate(editingConditionData.deviceId)
-  const variables = template?.manifest?.InternalVariables
-  return variables?.find((variable: InternalVariable) => variable.Name === editingConditionData.key)
-})
-
-const availableVariableValues = computed(() => selectedConditionVariable.value?.Values?.map(String) || [])
+const selectedConditionVariable = computed(() => getSpecConditionVariable(editingConditionData,
+  getDeviceManifestForCondition(editingConditionData.deviceId || '')))
 
 const conditionValuePlaceholder = computed(() => {
   const variable = selectedConditionVariable.value
@@ -1651,33 +1516,17 @@ const conditionValueFailure = computed(() => editingConditionData.targetType ===
   ? validateNumericConditionValue(selectedConditionVariable.value, editingConditionData.value, editingConditionData.relation || '=', t)
   : '')
 
-// Allowed values for trust/privacy conditions — must match the backend enum domains
-// (SmvDeviceModuleBuilder: trust ∈ {untrusted, trusted}, privacy ∈ {private, public}).
-const trustPrivacyValues = computed<string[]>(() => {
-  if (editingConditionData.targetType === 'trust') return ['trusted', 'untrusted']
-  if (editingConditionData.targetType === 'privacy') return ['public', 'private']
-  return []
-})
-
-const conditionValueOptions = computed<string[]>(() => {
-  if (editingConditionData.targetType === 'state') return availableStates.value
-  if (editingConditionData.targetType === 'mode') return availableModeValues.value
-  if (editingConditionData.targetType === 'variable') return availableVariableValues.value
-  return trustPrivacyValues.value
-})
+const conditionValueOptions = computed(() => getSpecConditionValues(editingConditionData,
+  getDeviceManifestForCondition(editingConditionData.deviceId || ''), specForm.templateId))
 
 const isSpecSetRelation = computed(() =>
   editingConditionData.relation === 'in' || editingConditionData.relation === 'not in'
 )
 
-const splitConditionValueList = (value: unknown): string[] => {
-  if (value === null || value === undefined || value === '') return []
-  const delimiter = editingConditionData.targetType === 'state' ? /[,|]/ : /[,;|]/
-  return String(value)
-    .split(delimiter)
-    .map(part => part.trim())
-    .filter(Boolean)
-}
+const splitConditionValueList = (value: unknown) => splitSpecConditionValues(value, editingConditionData.targetType)
+
+const conditionDomainBlockedReason = (condition: Partial<SpecCondition>): string | null =>
+  validateSpecConditionDomain(condition, getDeviceManifestForCondition(condition.deviceId || ''), specForm.templateId, t)
 
 const editingConditionValueList = computed<string[]>({
   get: () => splitConditionValueList(editingConditionData.value),
@@ -1829,6 +1678,13 @@ const specificationConditionBlockedReason = computed<string | null>(() => {
     return t('app.specConditionDeviceMissing', {
       count: specConditionsMissingDevices.value.length
     })
+  }
+  for (const side of ['a', 'if', 'then'] as const) {
+    const conditions = getConditionsForSide(side)
+    for (let index = 0; index < conditions.length; index += 1) {
+      const reason = conditionDomainBlockedReason(conditions[index])
+      if (reason) return t('app.specConditionNeedsEdit', { side: side.toUpperCase(), number: index + 1, reason })
+    }
   }
   return null
 })
@@ -4069,6 +3925,11 @@ watch(() => props.readOnly, readOnly => {
               </div>
             </div>
 
+            <p v-if="specificationTargetChanged" id="spec-target-change-notice" role="status"
+              data-testid="spec-target-change-notice" class="text-xs leading-5 board-text-warning">
+              {{ t('app.specificationTargetChangeNotice') }}
+            </p>
+
             <!-- Create Button -->
             <button v-if="editingSpecBaseline" type="button" class="board-action-secondary"
               data-testid="spec-cancel-edit" @click="cancelSpecificationEdit">
@@ -4088,7 +3949,8 @@ watch(() => props.readOnly, readOnly => {
               @click="createSpecification"
               data-testid="spec-create"
               :disabled="Boolean(specificationBlockedReason) || creatingSpecification"
-              :aria-describedby="specificationBlockedReason ? 'spec-create-blocked-reason' : undefined"
+              :aria-describedby="specificationBlockedReason ? 'spec-create-blocked-reason'
+                : specificationTargetChanged ? 'spec-target-change-notice' : undefined"
               class="board-panel-submit board-action-disarmed"
             >
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -4294,7 +4156,7 @@ watch(() => props.readOnly, readOnly => {
         </fieldset>
 
         <!-- Condition Details -->
-        <div class="space-y-2" v-if="editingConditionData.deviceId && showRelationAndValue">
+        <div class="space-y-2" v-if="editingConditionData.deviceId">
           <div class="flex items-center gap-2">
             <svg class="w-5 h-5 board-text-strong" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"/>
@@ -4354,6 +4216,9 @@ watch(() => props.readOnly, readOnly => {
               />
             </div>
           </div>
+          <p v-if="editingConditionData.targetType === 'api'" class="text-xs board-text-muted" data-testid="spec-api-event-hint">
+            {{ t('app.specApiEventHint') }}
+          </p>
         </div>
 
         <!-- Preview -->
@@ -4380,7 +4245,7 @@ watch(() => props.readOnly, readOnly => {
                 data-testid="spec-condition-preview-variable-source"
               >({{ formatConditionVariableSourceLabel(editingConditionData as SpecCondition) }})</span>
             </template>
-            <template v-if="editingConditionData.deviceId && showRelationAndValue">
+            <template v-if="editingConditionData.deviceId">
               <span class="board-text-muted mx-1">{{ getRelationLabel(editingConditionData.relation || '=') }}</span>
               <span class="board-text-strong">"{{ formatEditingConditionValue(editingConditionData.value) }}"</span>
             </template>

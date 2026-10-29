@@ -18,6 +18,29 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class SpecificationFormulaPreviewTest {
 
+    @Test
+    void preservesApiBooleanComparisonsRatherThanAlwaysShowingThePositiveEvent() {
+        String[][] cases = {
+                {"=", "TRUE", "= TRUE"},
+                {"=", "FALSE", "= FALSE"},
+                {"!=", "TRUE", "!= TRUE"},
+                {"!=", "FALSE", "!= FALSE"},
+                {"in", "FALSE|TRUE", "in {FALSE, TRUE}"},
+                {"not in", "TRUE;FALSE", "not in {TRUE, FALSE}"}
+        };
+        for (String[] test : cases) {
+            SpecConditionDto condition = new SpecConditionDto();
+            condition.setDeviceId("sensor_1");
+            condition.setSide("a");
+            condition.setTargetType("api");
+            condition.setKey("Open");
+            condition.setRelation(test[0]);
+            condition.setValue(test[1]);
+            assertEquals("CTL AG(actionEvent(\"Hall sensor\", \"Open\") " + test[2] + ")",
+                    SpecificationFormulaPreview.format(spec("1", condition), context()));
+        }
+    }
+
     private static SpecificationFormulaPreview.Context context() {
         DeviceNodeDto node = new DeviceNodeDto();
         node.setId("sensor_1");

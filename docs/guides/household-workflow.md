@@ -5,7 +5,7 @@ requirements under an explicit device model. Its main task is **describe the int
 behavior, check the saved configuration, understand a failure, revise, and check again**.
 It does not control a real home or certify real hardware.
 
-Verified against code on 2026-10-24. Sources: `HouseholdGoalComposer.vue`, `ChatWelcome.vue`, `ChatView.vue`,
+Verified against code on 2026-10-30 for requirement editing and scope explanations. Sources: `HouseholdGoalComposer.vue`, `ChatWelcome.vue`, `ChatView.vue`,
 `Board.vue`, `ChatServiceImpl`, and the domain implementations linked below.
 
 ## Start with three questions
@@ -51,6 +51,10 @@ One model step has no fixed number of seconds. A time deadline or an authenticat
 guarantee requires an explicit model; naming a sensor "authenticated" does not implement
 authentication. See [data authority](../architecture/data-authority-model.md) for field ownership.
 
+Declaring a device API does not inject external user actions into a run. Card scans,
+home/away changes and similar inputs need explicit modeled causes. Review which inputs
+can change after initialization; a device that can accept a command need not receive it.
+
 ## Choose a question, not an algorithm pipeline
 
 | Board action | Question | Evidence boundary |
@@ -84,7 +88,15 @@ label directs you to open the result before judging whether the functions are pr
 Edit a rule or requirement from the inspector. Editing retains identity and order, checks
 that the record has not changed in another tab, and creates one undoable edit. A stale
 save preserves the draft instead of overwriting newer work. After editing, rerun the check
-and compare the frozen results. Automatic repairs additionally protect the reachable
+and compare the frozen results. Changing a requirement's conditions or template displays an
+inline notice that the check target is changing; renaming it does not. A pass after
+weakening a requirement does not establish the original requirement. Chat requests that
+have not been expressed as specifications are outside a verification conclusion.
+The editor rechecks property references and value domains against available device templates
+both when saving a condition and when submitting the whole requirement. If a device, property
+or template changes, an invalid selection is blocked with a reason and its draft is retained.
+The whole-requirement message identifies the condition group and row that needs editing.
+Automatic repairs additionally protect the reachable
 triggers of response requirements; their precise acceptance rule belongs in
 [auto-fix](../architecture/auto-fix.md).
 

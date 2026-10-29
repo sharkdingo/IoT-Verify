@@ -76,7 +76,7 @@ public final class SpecificationSemanticSignature {
     private static String normalizeValue(String value, String relation, String targetType) {
         String normalized = normalize(value);
         if ("api".equals(targetType)) {
-            return normalized.toUpperCase(Locale.ROOT);
+            normalized = normalized.toUpperCase(Locale.ROOT);
         }
         if (!"in".equals(relation) && !"not in".equals(relation)) {
             return normalized;

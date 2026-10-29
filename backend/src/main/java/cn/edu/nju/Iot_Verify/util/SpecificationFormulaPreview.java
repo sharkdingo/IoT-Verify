@@ -111,9 +111,6 @@ public final class SpecificationFormulaPreview {
 
     private static String condition(SpecConditionDto condition, Context context) {
         String target = target(condition, context);
-        if ("api".equalsIgnoreCase(condition.getTargetType())) {
-            return target;
-        }
         String relation = SmvRelationUtils.normalizeRelation(condition.getRelation());
         if (relation == null || relation.isBlank()) {
             relation = "=";

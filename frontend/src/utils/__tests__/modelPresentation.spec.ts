@@ -27,6 +27,25 @@ const specification = (templateId: Specification['templateId']): Specification =
 afterEach(() => { i18n.global.locale.value = 'en' })
 
 describe('shared model explanations', () => {
+  it.each(['zh-CN', 'en'] as const)('preserves API boolean comparisons in explanations and formulas in %s', locale => {
+    i18n.global.locale.value = locale
+    const cases = [
+      ['=', 'TRUE', '= TRUE', locale === 'en' ? '= “occurred”' : '= “发生”'],
+      ['=', 'FALSE', '= FALSE', locale === 'en' ? '= “did not occur”' : '= “未发生”'],
+      ['!=', 'TRUE', '!= TRUE', locale === 'en' ? '≠ “occurred”' : '≠ “发生”'],
+      ['!=', 'FALSE', '!= FALSE', locale === 'en' ? '≠ “did not occur”' : '≠ “未发生”'],
+      ['in', 'FALSE|TRUE', 'in {FALSE, TRUE}', locale === 'en' ? '∈ “did not occur, occurred”' : '∈ “未发生, 发生”'],
+      ['not in', 'TRUE;FALSE', 'not in {TRUE, FALSE}', locale === 'en' ? '∉ “occurred, did not occur”' : '∉ “发生, 未发生”']
+    ]
+    for (const [relation, value, formulaTerm, descriptionTerm] of cases) {
+      const spec = specification('1')
+      spec.aConditions = [condition({ targetType: 'api', key: 'on', relation, value })]
+      expect(buildSpecFormulaPreview(spec, { nodes: [node] }).expression)
+        .toBe(`AG(actionEvent("Desk light", "on") ${formulaTerm})`)
+      expect(describeSpecification(spec, context())).toContain(descriptionTerm)
+    }
+  })
+
   it.each(['zh-CN', 'en'] as const)('localizes security values independently of template provenance in %s', locale => {
     i18n.global.locale.value = locale
     const spec = specification('1')
@@ -105,7 +124,7 @@ describe('shared model explanations', () => {
     spec.aConditions = [condition({ relation: 'in', value: 'on|off' }), condition({ targetType: 'api', key: 'on', value: 'TRUE' })]
     const description = describeSpecification(spec, context())
     expect(description).toContain('∈ “开启, 关闭”')
-    expect(description).toContain('且 Desk light 执行动作 开启')
+    expect(description).toContain('且 Desk light 的“开启”动作事件 = “发生”')
     expect(description).not.toContain('TRUE')
   })
 

@@ -64,6 +64,34 @@ class SpecificationSemanticSignatureRelationTest {
         return spec;
     }
 
+    private static SpecificationDto specWithApiValue(String relation, String value) {
+        SpecificationDto spec = specWithRelation(relation);
+        SpecConditionDto condition = spec.getAConditions().get(0);
+        condition.setTargetType("api");
+        condition.setKey("on");
+        condition.setValue(value);
+        return spec;
+    }
+
+    @Test
+    void apiSetsIgnoreCaseOrderAndSeparatorsButKeepDifferentPredicatesDistinct() {
+        for (String relation : List.of("in", "not in")) {
+            for (String equivalent : List.of("false | true", " TRUE; FALSE ", "FALSE,TRUE")) {
+                assertTrue(SpecificationSemanticSignature.exactlyMatches(
+                        specWithApiValue(relation, "TRUE, FALSE"), specWithApiValue(relation, equivalent)),
+                        relation + " " + equivalent);
+            }
+            assertFalse(SpecificationSemanticSignature.exactlyMatches(
+                    specWithApiValue(relation, "TRUE, FALSE"), specWithApiValue(relation, "FALSE")));
+        }
+        assertFalse(SpecificationSemanticSignature.exactlyMatches(
+                specWithApiValue("in", "TRUE, FALSE"), specWithApiValue("not in", "TRUE, FALSE")));
+        assertTrue(SpecificationSemanticSignature.exactlyMatches(
+                specWithApiValue("=", " false "), specWithApiValue("=", "FALSE")));
+        assertFalse(SpecificationSemanticSignature.exactlyMatches(
+                specWithApiValue("=", "TRUE"), specWithApiValue("=", "FALSE")));
+    }
+
     @Test
     @DisplayName("variableSource participates in specification identity")
     void variableSourceIsPartOfAuthoredIdentity() {

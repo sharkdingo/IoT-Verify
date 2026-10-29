@@ -29,6 +29,26 @@ const spec: Specification = { name: 'Safety requirement', id: 'spec', templateId
 afterEach(() => { i18n.global.locale.value = 'en' })
 
 describe('specification explanations across both panels', () => {
+  it('distinguishes changing a requirement from renaming it or repairing an automation', async () => {
+    const requirement: Specification = { ...spec, templateId: '1',
+      aConditions: [condition()], ifConditions: [], thenConditions: [] }
+    const editor = mount(ControlCenter, { props: { activeSection: 'specs', nodes: [node], deviceTemplates: [template],
+      editSpecification: requirement }, global: { plugins: [i18n] } })
+    try {
+      expect(editor.find('[data-testid="spec-target-change-notice"]').exists()).toBe(false)
+      await editor.get('[data-testid="spec-name"]').setValue('A clearer requirement name')
+      expect(editor.find('[data-testid="spec-target-change-notice"]').exists()).toBe(false)
+      const draft = (editor.vm as unknown as { specForm: Specification }).specForm
+      draft.aConditions[0].value = 'on'
+      await nextTick()
+      expect(editor.get('[data-testid="spec-target-change-notice"]').text()).toBe(i18n.global.t('app.specificationTargetChangeNotice'))
+      expect(requirement.aConditions[0].value).toBe('off')
+      draft.aConditions[0].value = 'off'
+      await nextTick()
+      expect(editor.find('[data-testid="spec-target-change-notice"]').exists()).toBe(false)
+    } finally { editor.unmount() }
+  })
+
   it('does not present a placeholder formula as a specification before its conditions are complete', async () => {
     const editor = mount(ControlCenter, { props: { activeSection: 'specs', nodes: [node], deviceTemplates: [template] },
       global: { plugins: [i18n] } })
@@ -149,7 +169,7 @@ describe('specification explanations across both panels', () => {
       deviceTemplates: [{ ...template, defaultTemplate: false }], specifications: [apiSpec] }, global: { plugins: [i18n] } })
     try {
       const description = inspector.get('[data-testid="inspector-spec-description"]').text()
-      expect(description).toContain('Desk light 执行动作 on')
+      expect(description).toContain('Desk light 的“on”动作事件 = “发生”')
       expect(description).not.toContain('TRUE')
       expect(description).not.toContain('开启')
       expect(inspector.get('[data-testid="inspector-spec-formula"]').text()).toContain('actionEvent("Desk light", "on")')

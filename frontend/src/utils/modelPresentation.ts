@@ -3,6 +3,7 @@ import type { RuleDto, RuleForm } from '@/types/rule'
 import type { SpecCondition, Specification } from '@/types/spec'
 import { specTemplateDetails } from '@/assets/config/specTemplates'
 import { normalizeModelRelation } from './modelRequest'
+import { splitSpecConditionValues } from './specConditionDomain'
 
 export interface ModelPresentationContext {
   t: (key: string, values?: Record<string, string | number>) => string
@@ -66,6 +67,9 @@ export const specConditionValueLabel = (condition: Pick<SpecCondition,
   'deviceId' | 'targetType' | 'value' | 'relation'>, context: ModelPresentationContext): string => {
   const formatValue = (value: unknown) => {
     const text = String(value ?? '').trim()
+    if (condition.targetType === 'api' && /^(TRUE|FALSE)$/i.test(text)) {
+      return context.t(text.toUpperCase() === 'TRUE' ? 'app.apiEventOccurred' : 'app.apiEventNotOccurred')
+    }
     // Security labels belong to the condition type, including on custom templates.
     if ((condition.targetType === 'privacy' && (text === 'private' || text === 'public'))
       || (condition.targetType === 'trust' && (text === 'trusted' || text === 'untrusted'))) {
@@ -75,8 +79,7 @@ export const specConditionValueLabel = (condition: Pick<SpecCondition,
   }
   const relation = normalizeModelRelation(condition.relation)
   return relation === 'in' || relation === 'not in'
-    ? String(condition.value ?? '').split(condition.targetType === 'state' ? /[,|]/ : /[,;|]/)
-      .map(item => formatValue(item.trim())).filter(Boolean).join(', ')
+    ? splitSpecConditionValues(condition.value, condition.targetType).map(formatValue).filter(Boolean).join(', ')
     : formatValue(condition.value)
 }
 
@@ -94,8 +97,6 @@ export const describeSpecification = (spec: Pick<Specification,
         : condition.variableSource === 'reported' ? 'VariableReported' : 'VariableSourceUnresolved'
       : ({ mode: 'Mode', state: 'State', api: 'Api', trust: 'Trust', privacy: 'Privacy' })[condition.targetType]
     const subject = t(`app.specPreview${subjectKey}Subject`, { device, key })
-    // An API condition is an action event; its stored TRUE is not a state comparison.
-    if (condition.targetType === 'api') return subject
     const relation = normalizeModelRelation(condition.relation) || '='
     const value = specConditionValueLabel(condition, context)
     return `${subject} ${formatRelationGlyph(relation)} “${value}”`

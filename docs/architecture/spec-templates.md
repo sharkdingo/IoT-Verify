@@ -6,10 +6,11 @@ rules run before SMV generation.
 Request field contract for specs → [../api/verification.md](../api/verification.md).
 Modeling pipeline → [nusmv-model.md](nusmv-model.md).
 
-Verified against code on 2026-07-24. Source:
+Verified against code on 2026-10-30 for API-condition authoring and presentation. Source:
 `component/nusmv/generator/module/SmvSpecificationBuilder.java`,
 `component/nusmv/generator/SmvModelValidator.java`,
-`frontend/src/assets/config/specTemplates.ts`.
+`util/SpecificationFormulaPreview.java`, `frontend/src/components/ControlCenter.vue`,
+`frontend/src/utils/{spec,specConditionDomain,modelPresentation}.ts`, and `frontend/src/assets/config/specTemplates.ts`.
 
 ---
 
@@ -134,11 +135,35 @@ variable → decided by the condition's own `variableSource`, never inferred fro
            variableSource=environment → a_varName OP value            (the value in the home; requires a shared declaration)
            variableSource=reported    → deviceVarName.varName OP value (what this device reported)
            absent → the specification is skipped, with a reason (no default: the two differ under compromise)
-api      → deviceVarName.apiName_a OP TRUE/FALSE   (only =, !=, IN, NOT_IN; authoring helpers default omitted value to TRUE)
+api      → deviceVarName.apiName_a OP TRUE/FALSE   (only =, !=, IN, NOT_IN; AI helpers default an omitted relation/value pair to = TRUE)
 trust    → deviceVarName.trust_{key} OP value      (key is literal; no generated-prefix stripping)
 privacy  → deviceVarName.privacy_{key} OP value    (key is literal; no generated-prefix stripping)
 unknown  → InvalidConditionException  (fail-closed; no guessing)
 ```
+
+An API condition compares the action-event pulse, not a command invocation or a lasting
+device state. The editor offers **occurred** (`TRUE`) and **did not occur** (`FALSE`),
+including equality, inequality and set membership. Editing preserves the selected
+comparison and values. Frontend natural-language explanations and both client/server
+formula previews retain that comparison, including negative and two-value set conditions.
+Template `7` still requires API conditions to use `= TRUE`, because it protects the
+event that occurred. Pulse generation is defined in [nusmv-model.md](nusmv-model.md#rule-semantics).
+
+API-set identity ignores Boolean case, list separators and member order in both frontend
+and backend comparisons. Changing only `false | true` to `TRUE, FALSE` therefore does not
+change the check target or create a distinct specification. Different members and operators
+remain distinct; repeated conditions still participate in authored identity.
+
+Frontend property references, value domains, operator eligibility and domain validation belong
+to `specConditionDomain.ts`. Its functions receive a condition, a manifest and a template ID;
+they do not read Vue state, board services or select-value encodings. The editor handles
+labels and interaction, and both the condition dialog and whole-requirement submission use
+the same validator. Formula previews, identity comparisons and natural-language explanations
+also share its tuple-aware list parsing. Backend admission and generation remain authoritative.
+Revalidation includes operator eligibility and variable-source capabilities: a numeric threshold
+cannot retain an ordering operator after its declaration becomes an enum, and a device-local
+variable cannot retain an environment-value condition after a declaration change. Invalid
+saved draft rows block submission without changing the author's selected predicate.
 
 Conditions in a group are joined with `&`. `IN` / `NOT_IN` take a set value: enum-like
 mode/variable/API/trust/privacy values may be comma-, semicolon-, or pipe-separated,
