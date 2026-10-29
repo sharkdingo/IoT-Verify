@@ -26,7 +26,7 @@ This repo just finished eliminating code/doc drift; do not reintroduce it.
 Documentation is never an "afterwards" task. Which doc owns what you changed —
 endpoints, DTO fields, config keys, spec templates, fix strategies, AI tools, paper-derived
 semantics — is the doc-sync checklist in
-[CONTRIBUTING.md](CONTRIBUTING.md#doc-sync-checklist-pr-requirement). Externally visible behaviour
+[CONTRIBUTING.md](CONTRIBUTING.md#doc-sync-checklist-required-for-every-change). Externally visible behaviour
 also gets a dated `CHANGELOG.md` entry.
 
 **One fact, one home.** Endpoints live only in `rest-endpoints.md` (index) plus one domain doc;
@@ -104,7 +104,7 @@ and any decision where the alternatives are equivalent (naming, formatting, defa
 altering an API contract or DB schema, removing a feature or a user-visible behavior, and any
 scope change beyond what was asked.
 
-**Do not do without an explicit request** — commit or push, push to `main`, touch env vars or
+**Do not do without an explicit request** — commit or push, touch env vars or
 production config, run production migrations, or delete files wholesale (prefer narrowing the
 change and saying what you left).
 
@@ -209,11 +209,8 @@ and a session of colour-role work from one component, and `git fsck` could not h
 staged. To undo a temporary edit, copy the file first and restore from the copy. The danger is that this
 command reads as "revert my last thing" while meaning "revert everything since the last commit".
 
-Do not commit or push unless explicitly asked. Direct pushes to `main` are allowed when the user
-explicitly requests them, but only after reviewing the complete change set, running the
-proportional gates, and checking for secret-bearing files. After the push, follow the CI runs to
-completion and address failures before handing off.
-Full git/PR conventions: [CONTRIBUTING.md](CONTRIBUTING.md).
+Default to working directly on `main`; follow the authorization, review and CI requirements in
+[CONTRIBUTING.md](CONTRIBUTING.md#git--pr-conventions).
 
 ## Safety / gotchas that bite across the stack
 

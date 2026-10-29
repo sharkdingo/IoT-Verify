@@ -11,10 +11,10 @@ Documentation lives under `docs/`, indexed by the Doc Map ([docs/README.md](docs
 Before editing, follow the Doc Map's [ownership rules](docs/README.md#ownership-rules-how-duplication-is-prevented).
 Keep each fact in its owner document; replace duplicates with links.
 
-### Doc-sync checklist (PR requirement)
+### Doc-sync checklist (required for every change)
 
 A change that touches any of the following **must** update the owning doc in the same
-PR:
+change:
 
 | If your change touches… | Update… |
 | :--- | :--- |
@@ -29,7 +29,7 @@ PR:
 | An AI tool (add/remove/rename) | `docs/api/ai-tools.md` |
 | Any externally visible behavior change | `CHANGELOG.md` (`Unreleased`, dated entry) |
 
-Include this line in the PR description and tick it:
+If a PR is requested, include this line in its description and tick it:
 `[ ] Docs updated for endpoints/config/DTOs/spec-templates/AI-tools, or N/A.`
 
 ### Recommended CI gates
@@ -70,9 +70,16 @@ under a version heading.
 
 ## Git & PR conventions
 
-- Never commit unless explicitly asked; keep unrelated changes out of a commit.
-- Flag any file that may contain secrets (`.env`, credentials) before committing.
-- Keep PR titles concise; put detail (summary, testing, blocked items) in the body.
+- Work directly on `main` by default. Create a branch, worktree or PR only when the user
+  requests one.
+- Commit and push only when requested. A request to commit or push applies to `main`
+  unless the user names another branch; no separate confirmation for `main` is needed.
+- Preserve unrelated uncommitted work and keep it out of the requested commit.
+- Before committing or pushing, review the complete change set, run proportional checks
+  and check for secret-bearing files such as `.env` or credentials. After pushing, follow
+  CI to completion and address failures before handing off.
+- If a PR is requested, keep its title concise and put summary, testing and blocked items
+  in the body.
 
 ---
 
