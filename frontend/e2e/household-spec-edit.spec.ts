@@ -13,7 +13,7 @@ const readBoard = async (request: APIRequestContext, auth: AuthUser) => {
   return (await response.json()).data
 }
 
-test('revises a household requirement in place and restores it through undo and redo', async ({ page, request }, testInfo) => {
+test('revises a household requirement in place and restores it through undo and redo', { tag: '@smoke' }, async ({ page, request }, testInfo) => {
   await page.setViewportSize({ width: 1440, height: 1000 })
   const auth = await createAuthenticatedUser(request, { usernamePrefix: 'home_spec' })
   await page.addInitScript(auth => {

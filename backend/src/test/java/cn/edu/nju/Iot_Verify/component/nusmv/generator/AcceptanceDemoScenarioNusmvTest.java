@@ -43,7 +43,6 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
-import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -1037,9 +1036,8 @@ class AcceptanceDemoScenarioNusmvTest {
         }
     }
 
-    @ParameterizedTest
-    @ValueSource(ints = {0, 2})
-    void salusHouse_repairsAllSixPoliciesWithoutRegressingEarlierRepairs(int extraLightsPerOriginal) throws Exception {
+    @Test
+    void salusHouse_repairsAllSixPoliciesWithoutRegressingEarlierRepairs() throws Exception {
         String nusmvPath = resolveNusmvPath();
         Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
                 "NuSMV executable is required for the Salus house reconstruction");
@@ -1049,9 +1047,6 @@ class AcceptanceDemoScenarioNusmvTest {
         assertEquals(41, scene.path("devices").size());
         assertEquals(29, scene.path("rules").size());
         assertEquals(6, scene.path("specs").size());
-        expandHouseLighting((ObjectNode) scene, extraLightsPerOriginal);
-        assertEquals(41 + 10 * extraLightsPerOriginal, scene.path("devices").size());
-        assertEquals(29 + 10 * extraLightsPerOriginal, scene.path("rules").size());
         SmvGenerator generator = buildGenerator(objectMapper, scene);
         NusmvExecutor executor = buildExecutor(nusmvPath);
         List<DeviceVerificationDto> devices = readDevices(scene);
@@ -1188,18 +1183,16 @@ class AcceptanceDemoScenarioNusmvTest {
         assertEquals(0, violationCount(activeCheck));
     }
 
-    @ParameterizedTest
-    @ValueSource(ints = {0, 2})
-    void dynamicHome_repairsChangingInputsAndConflictsWithoutBreakingResponses(int copies) throws Exception {
+    @Test
+    void dynamicHome_repairsChangingInputsAndConflictsWithoutBreakingResponses() throws Exception {
         String nusmvPath = resolveNusmvPath();
         Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
                 "NuSMV executable is required for dynamic repair scenarios");
         ObjectMapper mapper = new ObjectMapper();
         JsonNode scene = mapper.readTree(Files.readString(
                 Path.of("..", "docs", "examples", "dynamic-home-repair-scene.json")));
-        expandHouseLighting((ObjectNode) scene, copies);
-        assertEquals(23 + 8 * copies, scene.path("devices").size());
-        assertEquals(33 + 16 * copies, scene.path("rules").size());
+        assertEquals(23, scene.path("devices").size());
+        assertEquals(33, scene.path("rules").size());
         assertEquals(17, scene.path("specs").size());
         SmvGenerator generator = buildGenerator(mapper, scene);
         NusmvExecutor executor = buildExecutor(nusmvPath);
@@ -1256,7 +1249,7 @@ class AcceptanceDemoScenarioNusmvTest {
             Map<String, String> refs = model.deviceSmvMap().keySet().stream()
                     .collect(java.util.stream.Collectors.toMap(ref -> ref, ref -> ref));
             rules = FixStrategyApplier.apply(chosen.getStrategy(), chosen, rules, model.deviceSmvMap(), refs);
-            assertEquals(33 + 16 * copies, rules.size(), "Responses must be repaired without deleting automations");
+            assertEquals(33, rules.size(), "Responses must be repaired without deleting automations");
             SmvGenerator.GenerateResult repairedModel = generator.generateWithEnvironment(
                     USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
                     SmvGenerator.GeneratePurpose.VERIFICATION);
@@ -1459,39 +1452,6 @@ class AcceptanceDemoScenarioNusmvTest {
                     && hasDeviceState(List.of(states.get(i + 1)), target, winner)) return;
         }
         throw new AssertionError("The counterexample must expose opposing matches and the actual first-match winner");
-    }
-
-    private void expandHouseLighting(ObjectNode scene, int copies) {
-        JsonNode originalDevices = scene.path("devices").deepCopy();
-        JsonNode originalRules = scene.path("rules").deepCopy();
-        for (JsonNode device : originalDevices) {
-            String originalId = device.path("id").asText();
-            if (!originalId.contains("_light")) continue;
-            List<JsonNode> deviceRules = java.util.stream.StreamSupport.stream(originalRules.spliterator(), false)
-                    .filter(rule -> originalId.equals(rule.path("toId").asText())).toList();
-            assertFalse(deviceRules.isEmpty());
-            for (int copy = 1; copy <= copies; copy++) {
-                String id = originalId + "_extra_" + copy;
-                ObjectNode extraDevice = device.deepCopy();
-                extraDevice.put("id", id).put("label", device.path("label").asText() + " " + (copy + 1));
-                ((ObjectNode) extraDevice.path("position")).put("y", device.path("position").path("y").asInt() + copy * 150);
-                scene.withArray("devices").add(extraDevice);
-                for (JsonNode originalRule : deviceRules) {
-                    ObjectNode extraRule = originalRule.deepCopy();
-                    extraRule.put("name", originalRule.path("name").asText() + " " + (copy + 1)).put("toId", id);
-                    scene.withArray("rules").add(extraRule);
-                }
-                for (JsonNode spec : scene.path("specs")) {
-                    for (JsonNode condition : spec.path("thenConditions").deepCopy()) {
-                        if (originalId.equals(condition.path("deviceId").asText())) {
-                            ObjectNode extraCondition = condition.deepCopy();
-                            extraCondition.put("deviceId", id);
-                            ((ObjectNode) spec).withArray("thenConditions").add(extraCondition);
-                        }
-                    }
-                }
-            }
-        }
     }
 
     @Test

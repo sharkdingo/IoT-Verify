@@ -55,7 +55,7 @@ test('saved layout restoration does not wait for background task summaries', asy
   }
 })
 
-test('a failed saved-layout read remains recoverable without replacing the saved view', async ({ page, request }) => {
+test('a failed saved-layout read remains recoverable without replacing the saved view', { tag: '@smoke' }, async ({ page, request }) => {
   const auth = await createAuthenticatedUser(request, { usernamePrefix: 'layoutretry' })
   const headers = { Authorization: `Bearer ${auth.token}` }
   const saved = await request.post(`${apiBaseURL}/api/board/layout`, { headers, data: savedLayout })

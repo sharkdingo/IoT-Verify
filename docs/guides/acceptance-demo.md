@@ -4,7 +4,7 @@ This runbook exercises authoring, observation, verification and repair rejection
 deliberately conflicting night-watch scene. For a successful household repair that retains
 useful functions, start with the [household workflow](household-workflow.md#run-the-entrance-demo).
 
-Verified against code on 2026-10-25. Sources:
+Verified against code on 2026-10-29 for regression scene coverage. Sources:
 [`../examples/acceptance-demo-scene.json`](../examples/acceptance-demo-scene.json), the additional
 scenes linked below, and `AcceptanceDemoScenarioNusmvTest`.
 
@@ -347,9 +347,7 @@ alarm chain, smoke-triggered supply closure, and alarm clearing. Every successiv
 preserve all requirements that passed before it, including earlier repairs. All listed choices are
 individually reapplied and verified; no automation is deleted to obtain the parameter/condition repairs.
 
-The owning regression also triples the eight lights and their paired on/off rules, producing
-39 devices and 65 rules. Every extra actuator participates in both away and occupied-lighting
-requirements. Original counterexamples must include numeric environment changes, changing smoke
+Original counterexamples must include numeric environment changes, changing smoke
 input, alarm state transitions, and overlapping rules with opposing commands. Such rules do
 not both execute: the recorded branch must be the earlier winning command, while the blocked
 command is absent from execution evidence.

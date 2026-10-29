@@ -5,6 +5,7 @@ import {
   type APIResponse
 } from '@playwright/test'
 import { randomBytes, randomInt } from 'node:crypto'
+import { budgetAdviceMessage } from './authBudget'
 
 export const apiBaseURL = process.env.E2E_API_BASE_URL || 'http://127.0.0.1:8080'
 
@@ -108,6 +109,10 @@ export const createAuthenticatedUser = async (
   const registerResponse = await request.post(`${apiBaseURL}/api/auth/register`, {
     data: { phone, username, password }
   })
+  if (registerResponse.status() === 429) {
+    const body = await readJson(registerResponse)
+    throw new Error(`${responseDetail(registerResponse, body)}\n${budgetAdviceMessage(body?.data?.retryAfterSeconds)}`)
+  }
   expect(registerResponse.ok(), await registerResponse.text()).toBeTruthy()
 
   const loginResponse = await request.post(`${apiBaseURL}/api/auth/login`, {

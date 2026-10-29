@@ -499,12 +499,16 @@ test('recommendation review stays readable in the control center at short and wi
   }))
   for (const kind of ['rule', 'device', 'spec'] as const) {
     await page.setViewportSize({ width: 1920, height: 1080 })
+    await expect(page.getByTestId('board-root')).not.toHaveClass(/is-narrow-layout/)
     await openRecommendation(page, kind)
     const panel = page.getByTestId(`${kind}-recommendation-panel`)
     await panel.getByTestId(`generate-${kind}-recommendations`).click()
     await expect(panel.getByTestId(`${kind}-recommendation-error`)).toBeVisible()
     for (const size of [{ width: 1920, height: 1080 }, { width: 375, height: 480 }]) {
       await page.setViewportSize(size)
+      // Resize delivery can precede the Board listener that collapses/restores its panels.
+      if (size.width < 1024) await expect(page.getByTestId('board-root')).toHaveClass(/is-narrow-layout/)
+      else await expect(page.getByTestId('board-root')).not.toHaveClass(/is-narrow-layout/)
       await openRecommendation(page, kind)
       expect(await panel.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
       expect(await panel.evaluate(element => getComputedStyle(element).overflowY)).toBe('visible')

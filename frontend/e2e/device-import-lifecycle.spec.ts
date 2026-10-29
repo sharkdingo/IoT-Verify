@@ -103,7 +103,8 @@ const addReferences = async (page: Page, firstId: string, secondId: string, loca
   }
 }
 
-for (const locale of ['en', 'zh-CN']) for (const format of ['json', 'utf-8', 'gb18030']) {
+const locale = 'zh-CN'
+for (const format of ['json', 'utf-8', 'gb18030']) {
   test(`imported ${format} devices retain references and runtime through edits, deletion, undo and scene round trip in ${locale}`, async ({ page, request }, testInfo) => {
     test.setTimeout(120_000)
     const auth = await createAuthenticatedUser(request, { usernamePrefix: 'importlife' })

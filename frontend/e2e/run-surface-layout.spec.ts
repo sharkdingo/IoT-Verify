@@ -68,12 +68,8 @@ const expectStablePanelEnds = async (page: Page, kind: string, soft = false) => 
 
 for (const variant of [
   { width: 1920, height: 1080, theme: 'light', locale: 'en' },
-  { width: 1920, height: 1080, theme: 'dark', locale: 'zh-CN' },
-  { width: 1280, height: 900, theme: 'light', locale: 'en' },
-  { width: 1280, height: 900, theme: 'dark', locale: 'en' },
   { width: 320, height: 380, theme: 'light', locale: 'zh-CN' },
-  { width: 320, height: 380, theme: 'dark', locale: 'en' },
-  { width: 375, height: 500, theme: 'dark', locale: 'en' }
+  { width: 320, height: 380, theme: 'dark', locale: 'en' }
 ]) {
   test(`keeps run settings, results and history usable at ${variant.width}x${variant.height} in ${variant.theme}`, async ({ page, request }, testInfo) => {
     test.setTimeout(120_000)

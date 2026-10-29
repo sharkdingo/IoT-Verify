@@ -2,9 +2,9 @@
 
 Two E2E tiers selected by affected code, plus a separate live-AI gate.
 
-Verified against code on 2026-10-21. Sources: `.github/workflows/`,
+Verified against code on 2026-10-29 for test selection and local execution. Sources: `.github/workflows/`,
 `.github/ci-risk-router.mjs`, `.github/scripts/run-e2e.sh`, `frontend/playwright.config.ts`,
-and `frontend/e2e/live-ai-no-mock.spec.ts`.
+`frontend/scripts/run-e2e.mjs`, and `frontend/e2e/live-ai-no-mock.spec.ts`.
 
 ## Why it is split
 
@@ -27,14 +27,110 @@ Runs on every push and pull request; the router selects which jobs execute.
 3. **Backend** — `mvn package` (tests plus the jar), with NuSMV and a dedicated MySQL test database.
 4. **E2E smoke** — a browser-driven barrier against real MySQL, Redis, and the packaged jar.
 
-The smoke subset is selected in [run-e2e.sh](../../.github/scripts/run-e2e.sh):
+The smoke subset is tagged **per test** with `@smoke`, selected by
+[`playwright.config.ts`](../../frontend/playwright.config.ts), and used by both local and CI runners.
+The initial 2026-10-29 discovery found 330 cases: 312 ordinary cases and 18 live-AI cases.
+After retiring cosmetic tours and redundant matrix combinations, the ordinary suite has
+263 cases; the 18 live-AI cases remain separate. Smoke is included in the ordinary suite.
+The former four-file smoke selection had grown to 61 cases; it now selects 10 critical cases
+(seven browser journeys and three HTTP integration checks):
 
 | Spec | Protects |
 | :--- | :--- |
 | `error-contract` | REST error envelopes |
-| `board-recovery` | Recovery after failed operations |
-| `canvas-runtime-environment` | Canvas and shared environment values |
-| `ui-contracts` | Cross-page UI contracts |
+| `board-recovery` | Failed layout-read recovery |
+| `canvas-runtime-environment` | One shared environment value across readers |
+| `ui-contracts` | Login returns to a private deep link |
+| `theme-layout` | Real UI registration reaches the workspace |
+| `cross-tab-board-sync` | A persisted edit reaches another browser tab |
+| `household-spec-edit` | Requirement editing, undo and redo preserve state |
+| `smv-model-download` | Real verification delivers the checked model |
+
+These are **selection counts**, not a measured wall-clock speedup. Smoke should grow only for a new cross-layer risk, not for
+another viewport, translation, colour, or error-message spelling.
+The verification/download journey asserts a complete response with five conclusive property
+results as well as valid downloaded model bytes. A visible dialog or generated file alone does
+not prove that verification ran successfully.
+
+### Retired coverage and retained responsibilities
+
+The broad `editor-copy`, `global-copy-review` and `panel-opening-tooltips` tours were removed
+(12 cases). They repeatedly provisioned real accounts/scenes to check wording, exact button
+heights, header gaps, or unsolicited close hints. Form validation and localized feedback belong
+to the component tests; shared dialog rules belong to the style contracts. `ui-contracts`
+retains actual browser checks for loading-strip placement, tooltip dismissal and focus recovery.
+Exact per-dialog pixel/copy sweeps are intentionally no longer E2E obligations.
+
+The four workspace-typography tours were also retired: each visited editors, recommendations,
+chat and account settings, then waited for two export toasts to disappear just to assert exact
+font sizes, weights, padding and radii. Readability floors, focus indicators, target sizes and
+toast pointer transparency retain their source-contract checks; representative layout and
+keyboard journeys remain in the browser suite. Registration validation stays in `Landing.spec.ts`,
+and the duplicate dark registration-card check is covered by the shared auth layout's login checks
+and the real registration journey. Single-heading assertions now share existing login/404 journeys.
+
+Thirty repeated matrix cases were also retired. Layout checks keep representative desktop,
+narrow and short viewports, with real dark-theme and Chinese-text coverage. Composer resizing
+still covers mouse/keyboard interaction on narrow Chinese and wide English layouts.
+Each parameter/condition repair strategy runs once, and one full keyboard repair journey
+retains cancellation, confirmation, undo, redo and re-verification. Import integration keeps
+JSON, UTF-8 CSV and GB18030 lifecycle coverage; parser/encoding component tests cover input
+combinations without repeating the whole persisted workflow for each UI language.
+
+A new browser case must identify a browser-only or cross-layer failure it detects. A second
+language or viewport should require a specific layout or interaction risk; it is not an
+automatic multiplier for an existing persistence/solver case.
+
+The backend retains the original 41-device Salus house and 23-device dynamic-home repair
+regressions, including every successive repair, protected response and initial-transient check.
+Their two enlarged variants only cloned existing lights, rules and specification conditions;
+they repeated the same assertions with 61 and 39 devices and were retired with the unused
+expansion helper. The original scenarios continue to exercise changing inputs and repair
+preservation. A future scale benchmark should have an explicit performance requirement.
+
+## Choose the smallest useful check
+
+| Change or assertion | Appropriate check |
+| :--- | :--- |
+| Domain parsing, formula semantics, serialization | Owning unit tests and backend model tests |
+| Component state, validation messages, request payloads | Vue component tests |
+| CSS/source conventions | Node source-contract tests; these do not prove rendered behaviour |
+| Layout geometry, focus, pointer interaction, multiple tabs | Targeted browser tests; jsdom cannot prove these |
+| Login, persistence, verification, download across layers | Tagged smoke journeys |
+| Viewport/theme/language matrices and broad scene/repair audits | Affected E2E cases or Full CI |
+| External provider/tool behaviour | Explicit live-AI suite |
+
+The 32 source-only style test files declare the Node environment. The two style tests that
+actually use the DOM retain jsdom. Assertions and coverage are retained while avoiding a DOM
+environment for text parsing. The auth-budget advice tests were removed: they asserted diagnostic
+prose, environment-variable spellings and a hardcoded registration estimate rather than harness
+behaviour. Actual auth fixture failures still include the backend response and setup advice.
+
+During local iteration, run affected files first. Avoid rerunning the whole frontend, building
+production assets, or starting the full browser stack after every wording or metadata edit.
+Broaden verification for changed contracts, unresolved failures, or a release decision.
+`test:changed` follows Vitest's import graph. Tests that read source files through `fs` are not
+ordinary import dependencies; run `test:contracts` explicitly for CSS/template convention changes.
+
+`npm run test:e2e` defaults to smoke, with no automatic retries and a one-failure stop.
+Full runs stop after five final failures; use `--max-failures=0` explicitly when every failure
+is needed. CI retains its explicit retry and flaky-test policy. Failed or interrupted cases
+are not a passing complete regression run.
+The explicit live-AI runner enables `RUN_LIVE_AI_E2E=1`; it requires a backend configured
+for an external provider. This avoids a green run made entirely of disabled live-AI cases.
+Listing remains offline and never calls the provider.
+
+The local runner probes an unauthenticated board read before building the frontend. An
+unreachable backend or a response other than 401 stops immediately. CI uses the same read
+for readiness. The former registration-budget probe was removed: it spent rate-limit budget,
+could create an account, and depended on an obsolete fixed registration count. Actual 429
+registration failures now report the backend diagnostics and rate-limit setup advice.
+
+Normal runs write `frontend/test-results/e2e-results.json` with per-case timings. CI uploads
+this alongside its existing diagnostics. Use those timings and actual assertions when deciding
+what to split or retire; screenshot capture alone is not a visual-regression assertion.
+Viewport-changing recommendation checks wait for the Board's responsive layout state before
+opening a panel, so the resize handler cannot collapse it between the opener and the next click.
 
 ## Tier 2 — Full CI (`full-ci.yml`)
 
@@ -190,7 +286,19 @@ node --test .github/docs-link-check.test.mjs  # the docs checker's own logic
 node .github/docs-link-check-cli.mjs .        # documentation links and anchors
 cd backend  && mvn test                       # backend suite
 cd frontend && npm run test:unit -- --run     # frontend unit
-cd frontend && npm run test:e2e               # full E2E (needs MySQL + Redis + NuSMV)
+cd frontend && npm run test:changed           # affected frontend tests during iteration
+cd frontend && npm run test:contracts         # CSS/template contracts, including their DOM cases
+cd frontend && npm run test:e2e               # 10 critical E2E cases (needs the test backend)
+cd frontend && npm run test:e2e:full          # all non-live E2E, explicitly requested
+cd frontend && npm run test:e2e:live          # external-provider cases only
+```
+
+For one regression, restrict the full runner to its owning file or title:
+
+```bash
+npm run test:unit -- --run src/utils/__tests__/spec.spec.ts
+npm run test:e2e:full -- e2e/household-spec-edit.spec.ts
+npm run test:e2e -- --list                    # offline discovery; no backend or browser starts
 ```
 
 To see how a change would route:

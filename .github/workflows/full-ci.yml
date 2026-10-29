@@ -156,9 +156,8 @@ jobs:
       # Every account logs in twice (creation and cleanup deletion), so the per-source login cap is
       # the ceiling a full run actually reaches, and a retry spends it again.
       AUTH_SOURCE_LOGIN_RATE_LIMIT_PER_MINUTE: 4000
-      # The readiness probe polls /api/auth/login up to 60 times and the rate guard runs before
-      # authentication, so each expected 401 spends budget. At the default a slow backend answers 429
-      # and the job fails as "never became ready", pointing away from the real startup problem.
+      # Keep account-flow login headroom separate from the per-source login window.
+      # Readiness uses an unauthenticated board read and spends no login budget.
       AUTH_LOGIN_RATE_LIMIT_PER_MINUTE: 500
       E2E_API_BASE_URL: http://127.0.0.1:8080
       PLAYWRIGHT_HTML_OPEN: never

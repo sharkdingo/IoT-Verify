@@ -1,5 +1,6 @@
 import { type APIRequestContext, type Page } from '@playwright/test'
 import path from 'node:path'
+import type { VerificationResult } from '../src/types/verify'
 import {
   apiBaseURL,
   createAuthenticatedUser,
@@ -144,7 +145,7 @@ const expectSceneModel = (body: string, { expectsSpecifications }: { expectsSpec
 }
 
 test.describe('SMV model download', () => {
-  test('delivers the checked model from the verification result, as a primary action', async ({ page, request }) => {
+  test('delivers the checked model from the verification result, as a primary action', { tag: '@smoke' }, async ({ page, request }) => {
     const auth = await createAuthenticatedUser(request)
     await saveEmptyBoard(request, auth)
     await openWorkspace(page, auth)
@@ -152,7 +153,14 @@ test.describe('SMV model download', () => {
 
     await page.getByTestId('open-verification-panel').click()
     await page.getByTestId('verification-mode-sync').click()
+    const checkedResponse = page.waitForResponse(response => response.request().method() === 'POST'
+      && new URL(response.url()).pathname === '/api/verify', { timeout: 60_000 })
     await page.getByTestId('run-verification').click()
+    // As a smoke journey this must prove checking succeeded, beyond producing a downloadable model.
+    const checked = await unwrap<VerificationResult>(await checkedResponse)
+    expect(checked.modelComplete).toBe(true)
+    expect(checked.specResults).toHaveLength(5)
+    expect(checked.specResults.every(result => ['SATISFIED', 'VIOLATED'].includes(result.outcome))).toBe(true)
     await expect(page.getByTestId('verification-result-dialog')).toBeVisible({ timeout: 60_000 })
 
     // The artifact section is in the body, above the footer, and names what it covers.

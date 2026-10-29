@@ -50,7 +50,7 @@ const createDevice = async (page: Page, label: string) => {
   await expect(page.locator('.device-node').filter({ hasText: label })).toBeVisible({ timeout: 15_000 })
 }
 
-test('a successful Board mutation actively refreshes another visible tab', async ({ browser, request }) => {
+test('a successful Board mutation actively refreshes another visible tab', { tag: '@smoke' }, async ({ browser, request }) => {
   const auth = await createAuthenticatedUser(request, { usernamePrefix: 'tabsync' })
   const context = await browser.newContext()
   const writer = await context.newPage()

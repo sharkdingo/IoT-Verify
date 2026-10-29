@@ -169,12 +169,12 @@ Four things will make an E2E run lie to you, and all four read as product regres
 
 ### Run against a dedicated backend with raised auth caps
 
-**A full pass cannot succeed on the default rate limits.** The suite makes ~67
+**A full pass can exceed the default rate limits.** An earlier suite made ~67
 `createAuthenticatedUser` calls, each registering an account — measurably more than the shipped
 `AUTH_SOURCE_REGISTER_RATE_LIMIT_PER_HOUR` allows per hour. An earlier note claimed "a full run stays
 under the cap by design" because `sharedReadOnlyAccount` is worker-scoped; measurement says
 otherwise, and that false reassurance sent several sessions hunting product defects in a wall of
-429s.
+429s. The count changes with test selection and retries; it is not a fixed harness contract.
 
 **Raising only the register limit is not enough.** `AUTH_SOURCE_LOGIN_RATE_LIMIT_PER_MINUTE` is a
 per-source per-minute window, and `board-full-flow.spec.ts` logs in far more often than it registers.
@@ -204,9 +204,11 @@ elsewhere *silently half-worked*: the specs' direct API calls followed `E2E_API_
 browser kept going to 8080, and one run talked to two servers. Redirect the API and the proxy
 together or not at all.
 
-`e2e/global-setup.ts` checks the budget once before any browser starts and prints the four variables
-plus the reset time. When the budget exhausts mid-run the failures scatter across the shared fixture
-and read exactly like regressions.
+The registration-budget preflight was removed. It spent registration budget, could create an
+account, and its fixed registration estimate no longer matched the suite. The local runner now
+checks backend readiness with an unauthenticated board read before frontend startup. Actual
+registration 429s report the backend reason and the four rate-limit settings; failure limits
+stop a broken fixture from consuming the rest of the run. Prefer smoke for routine iteration.
 
 ### Port 3000 must be free
 
@@ -215,13 +217,10 @@ would skip the build and test **stale code** while reporting green. Nothing chec
 run, so the symptom is a mid-suite failure that reads like a product bug. Free the port, or set
 `E2E_BASE_URL` to a server you manage (inline prefix or exported variable).
 
-**`playwright test --list` is the likeliest source of the leftover.** It starts `webServer` like a real
-run but exits without tearing it down, stranding `vite preview --port 3000 --strictPort`. The orphan
-keeps its whole parent chain, so it does not look like debris — and because `--strictPort` refuses to
-fall back, the *next* run dies in `webServer` startup rather than reporting a port conflict. One
-session lost an agent's entire run to an orphan its own earlier `--list` had left. Use `--grep` against
-a real run, or `--reporter=list --dry-run` equivalents that do not boot the server, and check the port
-afterwards if you must use `--list`.
+Use `npm run test:e2e -- --list` to inspect the selection safely. The wrapper skips readiness
+for listing, and `playwright.config.ts` explicitly disables `webServer` for `--list`. Discovery
+therefore starts no frontend server or browser. The older advice to execute real tests instead
+of listing was incorrect for the current harness and could turn a simple inventory into a long run.
 
 ### Do not edit `playwright.config.ts` while a run is starting
 

@@ -9,7 +9,11 @@
   "scripts": {
     "dev": "vite",
     "test:unit": "vitest",
-    "test:e2e": "playwright test",
+    "test:changed": "vitest run --changed",
+    "test:contracts": "vitest run src/styles/__tests__",
+    "test:e2e": "node scripts/run-e2e.mjs smoke",
+    "test:e2e:full": "node scripts/run-e2e.mjs full",
+    "test:e2e:live": "node scripts/run-e2e.mjs live-ai",
     "build": "vue-tsc -b --clean && vue-tsc -b && vite build",
     "preview": "vite preview"
   },

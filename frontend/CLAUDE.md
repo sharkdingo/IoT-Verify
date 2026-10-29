@@ -25,11 +25,15 @@ npm run dev        # dev server :3000, proxies /api → http://localhost:8080
 npm run build      # vue-tsc type-check + production build (run this to verify)
 npm run preview
 npm run test:unit  # Vitest
-npm run test:e2e   # Playwright; needs the backend on :8080
+npm run test:e2e       # critical smoke; needs the test backend
+npm run test:e2e:full  # complete non-live browser regression suite
+npm run test:e2e:live  # explicitly enabled external-provider tests
 ```
 
-`test:e2e` takes minutes — delegate it to a background subagent (see the root CLAUDE.md) instead of
-blocking on it, and keep reading source while it runs.
+Delegate browser runs to a background subagent (see the root CLAUDE.md) instead of blocking on
+them, and keep reading source while they run. Test selection and local execution are owned by
+[../docs/development/ci.md](../docs/development/ci.md); use the full runner only when its broader
+coverage is needed.
 
 **Four things will make an E2E run lie to you, and all four read as product regressions.** A full
 pass needs a second backend with raised auth rate limits (the defaults cannot carry the suite); port

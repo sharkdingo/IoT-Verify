@@ -26,15 +26,13 @@ java -jar "$jar" >"$log" 2>&1 &
 backend_pid=$!
 trap 'kill "$backend_pid" 2>/dev/null || true' EXIT
 
-# A 401 proves the whole request path works: HTTP listener, dispatcher, security filter, and the
-# rate guard. A 200 would need a seeded account; a health endpoint would prove less.
+# A 401 proves HTTP and the security filter are serving. This read creates no account and spends
+# no login budget; probing a rejected login once per poll used to exhaust auth before tests began.
 status=000
 for _ in $(seq 1 60); do
   kill -0 "$backend_pid" 2>/dev/null || { echo "::error::backend exited during startup"; cat "$log"; exit 1; }
   status="$(curl -s -o "${RUNNER_TEMP:-/tmp}/readiness.json" -w '%{http_code}' \
-    -H 'Content-Type: application/json' \
-    -d '{"identifier":"ci-readiness-user","password":"Pass1234!!"}' \
-    http://127.0.0.1:8080/api/auth/login || true)"
+    http://127.0.0.1:8080/api/board/snapshot || true)"
   [ "$status" = 401 ] && break
   sleep 2
 done
@@ -42,6 +40,7 @@ done
 echo "Backend ready."
 
 cd frontend
+export PLAYWRIGHT_JSON_OUTPUT_FILE="$PWD/test-results/e2e-results.json"
 
 # Shared flags. --forbid-only keeps a stray test.only from silently shrinking a run to one test,
 # which is the failure mode that makes a green tick meaningless.
@@ -49,27 +48,13 @@ common=(
   --project=chromium
   --forbid-only
   --trace=retain-on-failure-and-retries
-  --reporter=line
+  --reporter=line,json
 )
 
 case "$tier" in
   smoke)
-    # Chosen for coverage per second, from measured per-spec cost on this repo:
-    #   error-contract (0.9s)             - REST error envelope the whole UI depends on
-    #   canvas-runtime-environment (8.0s) - board renders and shared values reach the canvas
-    #   board-recovery (4.7s)             - the stack recovers rather than wedging
-    #   ui-contracts (15.6s)              - 14 tests of cross-page contracts, cheapest broad net
-    # Together ~30s of test time for a real barrier: the app boots, authenticates, renders a board,
-    # and reports errors in the agreed shape. The two heaviest specs (authority-model-audit and
-    # board-full-flow, 59% of the suite) are deliberately left to Full CI.
-    #
-    # --workers=2 is safe here because these specs create their own accounts and boards; the
-    # sequencing constraint that forces --workers=1 in the full suite is its shared NuSMV budget.
-    npx playwright test \
-      e2e/error-contract.spec.ts \
-      e2e/canvas-runtime-environment.spec.ts \
-      e2e/board-recovery.spec.ts \
-      e2e/ui-contracts.spec.ts \
+    # Tag individual critical journeys. Selecting whole files silently grew smoke to 61 cases.
+    E2E_SUITE=smoke npx playwright test \
       "${common[@]}" --workers=2 --retries=1 --global-timeout=420000
     ;;
   full)
@@ -77,17 +62,15 @@ case "$tier" in
     # --workers=1 and --fail-on-flaky-tests are the standing contract for the complete run: a flake
     # here is a defect report, not noise to be retried away.
     # The expanded suite must finish before the global deadline; per-test deadlines stay unchanged.
-    npx playwright test \
-      --grep-invert='live AI' \
+    E2E_SUITE=full npx playwright test \
       "${common[@]}" --workers=1 --retries=1 \
-      --fail-on-flaky-tests --global-timeout=1800000 --reporter=line,html
+      --fail-on-flaky-tests --global-timeout=1800000 --reporter=line,html,json
     ;;
   live-ai)
     # Only the external-endpoint tests. No --fail-on-flaky-tests: a provider transport failure is not
     # a defect in this repo, and treating it as one would make the gate untrustworthy. Retries absorb
     # a transient outage; a reproducible failure still fails.
-    npx playwright test \
-      --grep='live AI' \
+    E2E_SUITE=live-ai npx playwright test \
       "${common[@]}" --workers=1 --retries=2 --global-timeout=900000
     ;;
   *)

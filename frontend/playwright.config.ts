@@ -1,19 +1,18 @@
 import { defineConfig, devices } from '@playwright/test'
 
 const baseURL = process.env.E2E_BASE_URL || 'http://127.0.0.1:3000'
-const shouldStartFrontend = !process.env.E2E_BASE_URL
+const shouldStartFrontend = !process.env.E2E_BASE_URL && !process.argv.includes('--list')
+const suite = process.env.E2E_SUITE || 'full'
+if (!['smoke', 'full', 'live-ai'].includes(suite)) throw new Error(`Unknown E2E_SUITE: ${suite}`)
 
 export default defineConfig({
   testDir: './e2e',
-  /**
-   * Diagnose an exhausted auth budget before any browser starts.
-   *
-   * A full pass needs ~67 registrations against a per-source default of 60/hour, so it cannot pass on the
-   * defaults — and it fails as a scatter of raw 429s inside the shared fixture, which reads as sixteen
-   * unrelated product regressions. This prints what to set and what the headroom is. See
-   * `e2e/support/authBudget.ts`.
-   */
-  globalSetup: './e2e/global-setup.ts',
+  grep: suite === 'smoke' ? /@smoke/ : suite === 'live-ai' ? /live AI/ : undefined,
+  grepInvert: suite === 'live-ai' ? undefined : /live AI/,
+  // Stop cascades of fixture failures; a stopped run is failed, never reported as complete.
+  maxFailures: suite === 'full' ? 5 : 1,
+  metadata: { suite },
+  reporter: [['list'], ['json', { outputFile: 'test-results/e2e-results.json' }]],
   timeout: 60_000,
   expect: {
     timeout: 5_000

@@ -768,7 +768,7 @@ test('device info renders multi-mode API state tuples as readable mode changes',
   await expect(apiSection).not.toContainText(';cool')
 })
 
-test('environment pool keeps one shared value for multiple readers before simulation', async ({ page, request }) => {
+test('environment pool keeps one shared value for multiple readers before simulation', { tag: '@smoke' }, async ({ page, request }) => {
   const auth = await createAuthenticatedUser(request)
 
   await addNodes(request, auth, [

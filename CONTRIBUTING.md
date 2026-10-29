@@ -34,9 +34,10 @@ Include this line in the PR description and tick it:
 
 ### Recommended CI gates
 
-- Keep the real-backend Playwright suite green. CI runs `npm run test:e2e` against MySQL,
-  Redis, and NuSMV, including recommendation, verification/fix, cancellation, recovery,
-  cross-tab, error-contract, and fuzzing journeys.
+- Follow [the test tiers](docs/development/ci.md): Fast CI runs tagged critical journeys
+  against the real backend, while Full CI covers broader regressions and live AI has its
+  own gate. Locally, `npm run test:e2e` selects smoke; restrict broader runs to affected
+  files during iteration. Add E2E only for a named browser or cross-layer failure.
 - Regenerate the endpoint index from controller annotations and fail if it differs from
   `docs/api/rest-endpoints.md` (see the "Regeneration" note in that file).
 - Run a Markdown dead-link check across `docs/` and the root docs.

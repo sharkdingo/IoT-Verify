@@ -9,7 +9,7 @@ different user-facing contract.
 Read the cited section before changing generated-model semantics, then keep the formal checker,
 bounded explorer, API contract, tests, and UI explanation aligned with the chosen product meaning.
 
-Verified against code on 2026-10-22. Source: `backend/src/main/java/cn/edu/nju/Iot_Verify/component/nusmv/`,
+Verified against code on 2026-10-29 for regression scene coverage. Source: `backend/src/main/java/cn/edu/nju/Iot_Verify/component/nusmv/`,
 `component/fuzz/`. Conformance is also pinned by `TheorySourceConformanceTest`, so a claim here that
 the code contradicts fails the build.
 
@@ -187,10 +187,6 @@ house; unknown RFID leaves the entrance locked; absence leaves the balcony locke
 kitchen gas stays below the danger threshold. Lighting and lock responses use the
 product's next-state convention. The brightness policy conservatively forbids its active
 sources, rather than inventing a lux calibration absent from the original inputs.
-
-The regression also expands the ten lights into thirty, producing 61 devices and 49 rules.
-The additional lights share their original occupancy inputs, and the sleep/away policies
-include every corresponding actuator.
 
 `AcceptanceDemoScenarioNusmvTest` checks discovery, successive application of parameter,
 condition and removal repairs on the same scene, all listed alternatives, and all earlier satisfied

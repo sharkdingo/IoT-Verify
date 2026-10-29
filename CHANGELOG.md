@@ -15,6 +15,34 @@ history into a technical spec. The spec content itself now lives under
 
 ## [Unreleased]
 
+### 2026-10-29 (test selection and cost)
+
+#### Removed
+
+- Retired the editor-copy, global-copy-review and panel-opening-tooltips cosmetic tours
+  (12 cases), four workspace-typography tours, duplicated registration checks and a standalone
+  heading tour, plus 30 redundant language/viewport combinations. Non-live E2E selection drops
+  from 312 to 263 cases. Critical smoke, all import encodings, each repair strategy, keyboard
+  confirmation/cancellation and undo/redo journeys remain covered.
+- Retired the enlarged Salus-house and dynamic-home solver variants that cloned existing
+  lighting without adding a distinct semantic assertion. Both original scenarios keep their
+  complete repair, response-preservation and changing-input checks.
+
+#### Changed
+
+- Local E2E defaults to 10 tagged critical cases; full non-live and live-AI suites are explicit.
+  CI smoke uses the same per-test selection instead of four files that had grown to 61 cases.
+  Runs stop cascading failures and retain machine-readable per-case timing reports.
+- The verification smoke journey requires complete, conclusive property results as well as a
+  valid downloaded model. Explicit live-AI runs enable their tests instead of silently skipping them.
+- Source-only style tests use Node; DOM-dependent style checks keep jsdom. Added a changed-test
+  command for local iteration and documented which checks need a real browser.
+- Removed the speculative registration-budget probe and its diagnostic-copy tests. Backend
+  readiness now uses a read before frontend startup; actual registration 429s carry setup advice.
+  Offline test discovery explicitly starts no server or browser.
+- Recommendation layout E2E waits for the Board's responsive state after resizing, avoiding a
+  race where a pending resize collapsed the panel between opening it and clicking its tab.
+
 ### 2026-10-27 (presentation assets)
 
 #### Added

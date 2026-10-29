@@ -1,9 +1,7 @@
 import { expandCreation } from './support/controlCenter'
-import { openRecommendation, collapseRecommendation } from './support/recommendations'
-import { type APIRequestContext, type Locator, type Page, type Route } from '@playwright/test'
+import { type APIRequestContext, type Page, type Route } from '@playwright/test'
 import { createAuthenticatedUser, expect, test, type AuthUser } from './support/auth'
 import { clickUnderTooltip, dismissHintTooltips } from './support/tooltips'
-import { collapseChatSidebar } from './support/chatSidebar'
 
 /**
  * Covers the routing, session, and accessibility contracts that unit tests can only
@@ -215,191 +213,6 @@ test('updates the selected field label when its option text changes without chan
   await expect(trust).toHaveValue('')
 })
 
-for (const { theme, palette, width } of [
-  { theme: 'light', palette: 'copper', width: 1440 },
-  { theme: 'dark', palette: 'copper', width: 1440 },
-  { theme: 'light', palette: 'monochrome', width: 375 },
-  { theme: 'dark', palette: 'monochrome', width: 375 }
-]) {
-  test(`keeps workspace form typography consistent at ${width}px in ${palette} ${theme}`, async ({ page, sharedReadOnlyAccount: auth }) => {
-    await page.setViewportSize({ width, height: 900 })
-    await seedSession(page, auth, { iot_verify_theme: theme, iot_verify_palette: palette })
-    await page.goto('/#/board')
-    const control = page.getByTestId('control-center')
-    const inspector = page.getByTestId('system-inspector')
-    await expect(control).toBeVisible({ timeout: 60_000 })
-    await expect(page.locator('html')).toHaveAttribute('data-theme', theme)
-    await expect(page.locator('html')).toHaveAttribute('data-palette', palette)
-
-    const exportSceneAndCheckMessage = async () => {
-      const menu = page.locator('details.scene-actions-menu')
-      if (width < 640) await menu.locator('summary').click()
-      const exportButton = width < 640 ? menu.getByRole('button', { name: 'Export Scene', exact: true })
-        : page.getByTestId('scene-export')
-      const download = page.waitForEvent('download')
-      await clickUnderTooltip(page, exportButton)
-      await download
-      const message = page.locator('.el-message__content').filter({ hasText: /Scene JSON download requested/ })
-      await expect(message).toBeVisible()
-      await expect(message).toHaveCSS('font-size', '14px')
-      await expect(message).toHaveCSS('font-weight', '400')
-      await expect(message).toHaveCSS('line-height', '22.4px')
-      const toast = message.locator('..')
-      await expect(toast).toHaveCSS('pointer-events', 'none')
-      await expect(toast).toHaveCSS('border-radius', '14px')
-      await expect(toast).toHaveCSS('padding', '8px 14px')
-      // The transition starts on the next frame; visibility alone can precede its resting position.
-      await expect.poll(() => toast.evaluate(element => {
-        const box = element.getBoundingClientRect()
-        const nav = document.querySelector('.board-nav-bar')!.getBoundingClientRect()
-        return { insideViewport: box.left >= 16 && box.right <= window.innerWidth - 16,
-          centered: Math.abs(box.left + box.width / 2 - window.innerWidth / 2) < 0.5,
-          belowNav: box.top >= nav.bottom, textFits: element.scrollWidth <= element.clientWidth }
-      })).toEqual({ insideViewport: true, centered: true, belowNav: true, textFits: true })
-      if (width < 640) await expect(menu.locator('summary')).toHaveAttribute('aria-expanded', 'false')
-      await expect(toast).toHaveCount(0, { timeout: 10_000 })
-    }
-
-    // Feedback must look the same before and after opening lazy-loaded assistant controls.
-    await exportSceneAndCheckMessage()
-    const expectField = async (field: Locator) => {
-      await expect(field).toBeVisible()
-      await expect(field).toHaveCSS('font-size', '14px')
-      await expect(field).toHaveCSS('font-weight', '400')
-      await expect(field).toHaveCSS('box-shadow', 'none')
-      await expect.poll(() => field.evaluate(element => {
-        const box = element.getBoundingClientRect()
-        const style = getComputedStyle(element)
-        return box.height >= 44 && parseFloat(style.borderTopWidth) > 0
-          && parseFloat(style.borderTopWidth) <= 1
-      })).toBe(true)
-    }
-    const expectAction = async (action: Locator) => {
-      await expect(action).toHaveCSS('font-size', '14px')
-      await expect(action).toHaveCSS('font-weight', '600')
-      await expect(action).toHaveCSS('text-transform', 'none')
-      await expect.poll(() => action.evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44)
-    }
-
-    if (width < 768) {
-      const collapse = inspector.getByRole('button', { name: 'Collapse System Inspector', exact: true })
-      if (await collapse.isVisible()) await collapse.click()
-    } else {
-      const expand = inspector.getByRole('button', { name: 'Expand System Inspector', exact: true })
-      if (await expand.isVisible()) await expand.click()
-      await page.getByTestId('inspector-tab-devices').click()
-      await expectField(page.getByTestId('inspector-search-devices'))
-      await expect(inspector.getByRole('heading', { level: 2 })).toHaveCSS('font-size', '16px')
-    }
-    const expand = control.getByRole('button', { name: 'Expand Control Center', exact: true })
-    if (await expand.isVisible()) await expand.click()
-    await expect(control.getByRole('heading', { level: 2 })).toHaveCSS('font-size', '16px')
-
-    for (const section of ['templates', 'devices', 'rules', 'specs'] as const) {
-      await page.getByTestId(`control-tab-${section}`).click()
-      const panel = page.getByTestId(`control-section-${section}`)
-      await expandCreation(page, section)
-      await expect(panel).toBeVisible()
-      await expect(panel.locator('.board-section-title').first()).toHaveCSS('font-size', '14px')
-      await expect(panel.locator('.board-section-title').first()).toHaveText({
-        templates: 'Import template', devices: 'Create device', rules: 'Create rule', specs: 'Create specification'
-      }[section]!)
-      if (section === 'templates') {
-        await expectField(panel.getByRole('searchbox', { name: /^Search templates/ }))
-      } else {
-        for (const label of await panel.locator('label').all()) {
-          if (await label.isVisible()) await expect(label).toHaveCSS('font-size', '13px')
-        }
-        const field = section === 'devices' ? panel.getByTestId('single-device-name')
-          : section === 'rules' ? panel.locator('#rule-builder-name') : panel.getByTestId('spec-template-select')
-        await expectField(field)
-        if (section === 'devices') {
-          await expectField(panel.getByTestId('single-device-template'))
-          await expectAction(panel.getByTestId('single-device-create'))
-          await expect(panel.getByTestId('single-device-create')).toHaveAccessibleName('Create device')
-          await field.focus()
-          await expect(field).toHaveCSS('outline-style', 'solid')
-          await expect(field).toHaveCSS('outline-width', '2px')
-        } else if (section === 'rules') {
-          await expectField(panel.locator('#rule-target-device'))
-          await expectAction(panel.getByTestId('rule-reset'))
-          await expectAction(panel.getByTestId('rule-save'))
-        } else {
-          await expectAction(panel.getByTestId('spec-create'))
-        }
-      }
-      expect(await panel.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
-    }
-
-    if (width < 768) await control.getByRole('button', { name: 'Collapse Control Center', exact: true }).click()
-    const restoreDock = page.getByTestId('restore-action-dock')
-    if (await restoreDock.isVisible()) await restoreDock.click()
-    await page.getByTestId('open-fuzzing-panel').hover()
-    const hint = page.locator('.iot-info-tooltip-popper:not([aria-hidden="true"])')
-    await expect(hint).toHaveCount(1)
-    await expect(hint).toHaveCSS('font-size', '13px')
-    await expect(hint).toHaveCSS('font-weight', '400')
-    await expect(hint).toHaveCSS('border-radius', '8px')
-    expect(await hint.evaluate(element => getComputedStyle(element).backgroundColor)).not.toMatch(/rgba\(0, 0, 0, 0\)|transparent/)
-    await dismissHintTooltips(page)
-    await page.getByTestId('open-fuzzing-panel').focus()
-    await page.keyboard.press('Enter')
-    const fuzzing = page.getByTestId('fuzzing-panel')
-    await expect(fuzzing.getByRole('heading', { level: 3 })).toHaveCSS('font-size', '16px')
-    await expectField(fuzzing.getByTestId('fuzz-max-iterations'))
-    await expectField(fuzzing.getByTestId('fuzz-path-length'))
-    await expectAction(fuzzing.getByTestId('run-fuzzing'))
-    expect(await fuzzing.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
-    await clickUnderTooltip(page, page.getByTestId('close-fuzzing-panel'))
-
-    for (const kind of ['rule', 'device', 'spec'] as const) {
-      await openRecommendation(page, kind)
-      const panel = page.getByTestId(`${kind}-recommendation-panel`)
-      await expect(panel).toBeVisible()
-      await expect(page.getByTestId(`open-${kind}-recommendations`).locator('.board-section-title')).toHaveCSS('font-size', '14px')
-      await expect(panel.getByRole('spinbutton')).toHaveCount(0)
-      await expectField(panel.locator('textarea'))
-      await expect(panel.locator('label').first()).toHaveCSS('font-size', '13px')
-      const generateId = `generate-${kind}-recommendations`
-      await expectAction(panel.getByTestId(generateId))
-      expect(await panel.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
-      await panel.locator('textarea').focus()
-      await expect(panel.locator('textarea')).toBeFocused()
-      await collapseRecommendation(page, kind)
-    }
-
-    await clickUnderTooltip(page, page.locator('.ai-assistant-btn'))
-    const chat = page.getByTestId('chat-panel')
-    await expect(chat).toBeVisible()
-    await expect(chat.locator('.header-title')).toHaveCSS('font-size', '16px')
-    await expect(chat.locator('.header-title')).toHaveCSS('font-weight', '600')
-    await expect(chat.getByTestId('chat-input')).toHaveCSS('font-size', '14px')
-    await chat.getByTestId('chat-sidebar-toggle').click()
-    await expectAction(chat.getByRole('button', { name: 'New Chat', exact: true }))
-    await collapseChatSidebar(page)
-    await page.getByTestId('chat-close').click()
-    await expect(chat).toBeHidden()
-    await dismissHintTooltips(page)
-
-    await exportSceneAndCheckMessage()
-
-    if (width < 640) {
-      await page.locator('details.scene-actions-menu summary').click()
-      await page.getByTestId('nav-overflow-account').click()
-    } else {
-      await clickUnderTooltip(page, page.getByTestId('open-account-center'))
-    }
-    await page.getByTestId('open-account-delete').click()
-    const accountDialog = page.getByTestId('account-delete-dialog')
-    await expect(accountDialog).toBeVisible()
-    await expect(accountDialog.locator('.iot-dialog__title')).toHaveCSS('font-size', '16px')
-    await expect(accountDialog.locator('.iot-dialog__title')).toHaveCSS('font-weight', '600')
-    await expectField(accountDialog.getByTestId('account-delete-password'))
-    await expectAction(accountDialog.getByTestId('account-delete-cancel'))
-    await accountDialog.getByTestId('account-delete-cancel').click()
-  })
-}
-
 // Every test here is read-only with respect to account state, so they all share the
 // worker-scoped account rather than each registering one (the backend caps registrations
 // per hour, and per-test cleanup would delete an account the next test still needs).
@@ -410,7 +223,7 @@ const expiredToken = () => {
 }
 
 test.describe('routing and session', () => {
-  test('sends an anonymous deep link to login and returns to it after signing in', async ({ page, sharedReadOnlyAccount: auth }) => {
+  test('sends an anonymous deep link to login and returns to it after signing in', { tag: '@smoke' }, async ({ page, sharedReadOnlyAccount: auth }) => {
 
     await page.goto('/#/board')
     await expect(page).toHaveURL(/#\/\?mode=login&redirect=%2Fboard|#\/\?mode=login&redirect=\/board/)
@@ -421,6 +234,7 @@ test.describe('routing and session', () => {
     await page.click('#login-panel button[type="submit"]')
 
     await expect(page.locator('.iot-board')).toBeVisible({ timeout: 60_000 })
+    await expect(page.getByRole('heading', { level: 1 })).toHaveCount(1)
     // The login surface must hand over a clean workspace URL: a lingering ?redirect=
     // used to re-key the route and remount the freshly mounted board.
     expect(new URL(page.url()).hash).toBe('#/board')
@@ -441,6 +255,7 @@ test.describe('routing and session', () => {
     // instead of only that something went wrong. Hence no `$` anchor: `#/404?from=/no-such-page`.
     await expect(page).toHaveURL(/#\/404\?from=%2Fno-such-page$|#\/404\?from=\/no-such-page$/)
     await expect(page).toHaveTitle('IoT-Verify · 404')
+    await expect(page.getByRole('heading', { level: 1 })).toHaveCount(1)
     await expect(page.getByTestId('not-found-attempted')).toContainText('/no-such-page')
 
     // Element Plus's `.el-result` is gone: the page was rebuilt on the product's own tokens so it can follow
@@ -467,27 +282,6 @@ test.describe('routing and session', () => {
     expect(await page.evaluate(() => window.localStorage.getItem('iot_verify_token'))).toBeNull()
   })
 
-  test('exposes exactly one h1 on each route', async ({ page, sharedReadOnlyAccount: auth }) => {
-    // Seed before the first navigation: addInitScript only affects later loads.
-    await seedSession(page, auth, { iot_verify_theme: 'light' })
-
-    await page.goto('/#/404')
-    // Was `.el-result` visible with **zero** h1s — a page whose main message was not a heading at all, which
-    // is the state the rebuild corrected rather than a contract to preserve. One h1 per route, including this
-    // one.
-    //
-    // Deliberately *not* asserting `not-found-attempted` here: this navigates to `/#/404` directly, so there
-    // is no failed address to report and `v-if="attemptedPath"` correctly renders nothing. My first version
-    // demanded that element and failed — the assertion was wrong, not the page. The 404 test above covers the
-    // populated case, where the address arrives as `?from=`.
-    await expect(page.locator('#not-found-title')).toBeVisible()
-    expect(await page.locator('h1').count()).toBe(1)
-
-    await page.goto('/#/board')
-    await expect(page.locator('.iot-board')).toBeVisible({ timeout: 60_000 })
-    expect(await page.locator('h1').count()).toBe(1)
-    await expect(page.locator('h1 .logo-left')).toBeVisible()
-  })
 })
 
 test.describe('theme control', () => {

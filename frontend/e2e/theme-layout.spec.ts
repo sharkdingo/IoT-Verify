@@ -158,22 +158,7 @@ test.describe('public theme and layout', () => {
     }
   })
 
-  test('register validation blocks invalid input before any network request', async ({ page }) => {
-    await openPublicRoute(page, '/#/?mode=register', 'light')
-
-    let registerCalls = 0
-    await page.route('**/api/auth/register', async (route) => {
-      registerCalls += 1
-      await route.abort()
-    })
-
-    await page.locator('.auth-submit').click()
-
-    await expect(page.locator('.auth-form small')).toHaveCount(4)
-    expect(registerCalls).toBe(0)
-  })
-
-  test('user can register and reach the workspace through the UI', async ({ page, request }) => {
+  test('user can register and reach the workspace through the UI', { tag: '@smoke' }, async ({ page, request }) => {
     const credentials = createTestAccountCredentials({ usernamePrefix: 'ui' })
     const { phone, username, password } = credentials
     trackTestAccount(request, credentials)
@@ -247,14 +232,6 @@ test.describe('public theme and layout', () => {
     if (!headerBox) return
     expect(formBox.y).toBeGreaterThan(headerBox.y + headerBox.height)
     expect(formBox.y + formBox.height).toBeLessThanOrEqual(844)
-  })
-
-  test('register dark theme uses the same auth layout system', async ({ page }) => {
-    await openPublicRoute(page, '/#/?mode=register', 'dark')
-
-    await expectAuthHeaderActionsOnRight(page)
-    await expectDarkSurface(page.locator('.auth-panel'))
-    await expect(page.locator('.auth-form input')).toHaveCount(4)
   })
 
   test('workspace dark theme keeps floating panel surfaces coherent', async ({ page, request }) => {

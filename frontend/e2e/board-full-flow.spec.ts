@@ -631,9 +631,10 @@ test.describe('board full-stack NuSMV user flow', () => {
     })
   }
 
-  for (const { scenario, locale, width } of targetedRepairScenarios.flatMap(scenario =>
-    ['zh-CN', 'en'].flatMap(locale => [320, 1920].map(width => ({ scenario, locale, width })))
-  )) {
+  // Exercise each repair strategy once; locale/viewport coverage belongs to the UI journeys.
+  for (const scenario of targetedRepairScenarios) {
+    const locale = 'zh-CN'
+    const width = 320
     test(`finds and applies a ${scenario.strategy} repair for ${scenario.name} in ${locale} at ${width}px`, async ({ page, request }, testInfo) => {
       const auth = await createAuthenticatedUser(request)
       const chinese = locale === 'zh-CN'
