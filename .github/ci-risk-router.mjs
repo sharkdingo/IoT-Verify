@@ -108,10 +108,10 @@ export function route(changedPaths, context = {}) {
   // nightly run is the only thing that catches decay in code nobody touched.
   if (onDefaultBranch || scheduledOrManual || forceFull) {
     return {
-      fast: true,
+      fast: false,
       full: true,
-      backend: true,
-      frontend: true,
+      backend: false,
+      frontend: false,
       reasons: [onDefaultBranch ? 'default branch' : scheduledOrManual ? eventName : 'forced'],
       inertOnly: false,
     };
@@ -149,13 +149,13 @@ export function route(changedPaths, context = {}) {
     reasons.push(`unclassified path(s): ${unclassified.slice(0, 3).join(', ')}`);
   }
 
+  const full = risks.length > 0 || unclassified.length > 0;
   return {
-    fast: true,
-    full: risks.length > 0 || unclassified.length > 0,
-    // Run a language's tests when its own tree changed, and always when escalating, because a
-    // high-risk change is exactly when cross-layer breakage is likely.
-    backend: areas.has('backend') || risks.length > 0 || unclassified.length > 0,
-    frontend: areas.has('frontend') || risks.length > 0 || unclassified.length > 0,
+    fast: !full,
+    full,
+    // Full CI owns both suites and includes smoke; Fast must not repeat them.
+    backend: !full && areas.has('backend'),
+    frontend: !full && areas.has('frontend'),
     reasons: reasons.length > 0 ? [...new Set(reasons)] : ['low-risk source change'],
     inertOnly: false,
   };

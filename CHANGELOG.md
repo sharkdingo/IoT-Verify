@@ -15,6 +15,27 @@ history into a technical spec. The spec content itself now lives under
 
 ## [Unreleased]
 
+### 2026-10-30 (CI execution cost)
+
+#### Changed
+
+- Fast CI is the single push/PR entry point. Main and high-risk changes call Full CI
+  instead of repeating both unit suites, builds and the smoke subset alongside it.
+  Full CI runs frontend and backend checks in parallel and retains all ordinary E2E cases.
+- CI typechecks the frontend project once, then bundles with Vite. Browser jobs download
+  the current workflow's frontend bundle and backend jar; local builds keep their existing checks.
+
+#### Fixed
+
+- The aggregate waits for selected Full CI and rejects failed, cancelled or unexpectedly
+  skipped jobs, plus missing routing outputs. A green Fast status now includes the required full result.
+- Single-language Fast changes still produce both artifacts needed by smoke, without
+  repeating the untouched language's unit suite. Missing prebuilt frontend bundles fail immediately.
+
+#### Removed
+
+- The unused Full CI manual live-AI toggle; external-provider runs use the separate live-AI workflow.
+
 ### 2026-10-29 (test selection and cost)
 
 #### Removed

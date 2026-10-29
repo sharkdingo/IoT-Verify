@@ -1,7 +1,12 @@
 import { defineConfig, devices } from '@playwright/test'
+import { existsSync } from 'node:fs'
 
 const baseURL = process.env.E2E_BASE_URL || 'http://127.0.0.1:3000'
 const shouldStartFrontend = !process.env.E2E_BASE_URL && !process.argv.includes('--list')
+const usePrebuiltFrontend = process.env.E2E_PREBUILT_DIST === '1'
+if (shouldStartFrontend && usePrebuiltFrontend && !existsSync(new URL('./dist/index.html', import.meta.url))) {
+  throw new Error('E2E_PREBUILT_DIST requires dist/index.html from this workflow build')
+}
 const suite = process.env.E2E_SUITE || 'full'
 if (!['smoke', 'full', 'live-ai'].includes(suite)) throw new Error(`Unknown E2E_SUITE: ${suite}`)
 
@@ -44,6 +49,8 @@ export default defineConfig({
    * Vite's dev server transforms modules on demand, so two parallel browsers loading the board at
    * once could exceed the 30s `board-root` wait and fail a test that has nothing wrong with it.
    * A prebuilt bundle removes that variable, and it is also closer to what users run.
+   * CI downloads the current workflow's dist and opts into preview-only startup; a missing bundle
+   * is a configuration error. Local runs retain the build so an old dist cannot silently be tested.
    *
    * `reuseExistingServer` is off deliberately. With it on, any process already holding the port —
    * typically a dev server someone left running — is adopted silently, the build is skipped, and
@@ -52,7 +59,9 @@ export default defineConfig({
    */
   webServer: shouldStartFrontend
     ? {
-        command: 'npm run build && npm run preview -- --port 3000 --strictPort',
+        command: usePrebuiltFrontend
+          ? 'npm run preview -- --port 3000 --strictPort'
+          : 'npm run build && npm run preview -- --port 3000 --strictPort',
         url: baseURL,
         reuseExistingServer: false,
         timeout: 180_000

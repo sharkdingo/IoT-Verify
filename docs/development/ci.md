@@ -2,14 +2,16 @@
 
 Two E2E tiers selected by affected code, plus a separate live-AI gate.
 
-Verified against code on 2026-10-29 for test selection and local execution. Sources: `.github/workflows/`,
-`.github/ci-risk-router.mjs`, `.github/scripts/run-e2e.sh`, `frontend/playwright.config.ts`,
+Verified against code on 2026-10-30 for exclusive tier execution and build reuse. Sources: `.github/workflows/`,
+`.github/ci-risk-router.mjs`, `.github/check-ci-results.mjs`, `.github/scripts/run-e2e.sh`, `frontend/playwright.config.ts`,
 `frontend/scripts/run-e2e.mjs`, and `frontend/e2e/live-ai-no-mock.spec.ts`.
 
 ## Why it is split
 
-Fast CI runs the build, unit tests, and a real-backend smoke subset. Full CI adds the
-complete E2E suite where model, security, persistence, or shared-contract changes warrant it.
+Fast CI is the push/PR entry point. Ordinary source changes select scoped unit tests,
+fresh builds and a real-backend smoke subset. Main and high-risk changes select reusable
+Full CI instead: both unit suites, builds and the complete E2E suite run once. Smoke is
+part of the full suite and is not run separately on that path.
 The [risk router](../../.github/ci-risk-router.mjs) owns the path rules.
 
 ## Tier 1 — Fast CI (`fast-ci.yml`)
@@ -20,12 +22,18 @@ Runs on every push and pull request; the router selects which jobs execute.
    which tiers to run. Runs the router's own tests first, so a broken router fails loudly instead of
    silently routing everything to the cheap tier. It also validates documentation cross-references
    ([`docs-link-check-cli.mjs`](../../.github/docs-link-check-cli.mjs)), because a documentation-only
-   change routes as inert and skips every tier below — making this the only job that reads those files.
+   branch change routes as inert and skips every tier below — making this the only job that reads those files.
    Both checks need no dependency install and add about a second.
-2. **Frontend** — `npm ci`, typecheck, unit tests, build. Typecheck runs before tests because it is
-   the cheapest check that catches the largest class of mistake.
-3. **Backend** — `mvn package` (tests plus the jar), with NuSMV and a dedicated MySQL test database.
+2. **Frontend** — `npm ci`, project typecheck, affected frontend unit tests, Vite build.
+   The project check includes `vite.config.ts`; the later Vite command does not repeat it.
+3. **Backend** — `mvn package`, with NuSMV and a dedicated MySQL test database when backend
+   tests are selected. A frontend-only change packages the unchanged backend with tests skipped.
 4. **E2E smoke** — a browser-driven barrier against real MySQL, Redis, and the packaged jar.
+
+Any smoke run requires both fresh artifact producers, even when only one language's unit
+suite is selected. A backend-only change still builds the frontend; a frontend-only change
+still packages the backend. Missing or failed producers block smoke rather than trying to
+download an artifact that no job created. Full-selected routes skip these Fast jobs entirely.
 
 The smoke subset is tagged **per test** with `@smoke`, selected by
 [`playwright.config.ts`](../../frontend/playwright.config.ts), and used by both local and CI runners.
@@ -136,12 +144,17 @@ opening a panel, so the resize handler cannot collapse it between the opener and
 
 The complete E2E suite, excluding live AI, runs against real infrastructure:
 
-- **`main`** — what gets released.
+- **`main`** — called by Fast CI for every landed commit, including documentation changes.
 - **Nightly (03:17 UTC)** — the only thing that catches decay in code nobody touched.
 - **Manual dispatch** — release candidates, or re-checking a suspicious branch.
-- **High-risk branch pushes** — escalated automatically by the router.
+- **High-risk branch pushes and pull requests** — called by Fast CI after routing.
 
-Both Maven jobs provision `iot_verify_undo_it`, separate from the E2E application database,
+Full CI has no standalone push trigger. Keeping both that trigger and the reusable call
+would run the same commit twice. Its frontend and backend jobs run in parallel; the full
+browser job waits for both and downloads their current-workflow artifacts. Live-AI runs
+remain in their separate workflow; Full CI has no live-AI dispatch toggle.
+
+The Fast and Full Maven test jobs provision `iot_verify_undo_it`, separate from the E2E application database,
 and pass `-Diot.verify.mysql.required=true`. The MySQL integration tests cover
 fresh-schema constraints, edit undo, task leases, cancellation, Board captures, history queries
 and transaction ownership, and verification-result projections. An unavailable or invalid connection
@@ -253,15 +266,21 @@ as an artifact, which is reuse of a verified build rather than a stale one.
 
 - **Concurrency cancellation** on non-`main` refs. A superseded push is wasted capacity and leaves a
   misleading red X on an old commit. `main` never cancels: every landed commit needs its own verdict.
-- **Fail-fast ordering**: route → typecheck → unit → build → smoke. Each stage is cheaper than the one
-  it gates.
-- **Artifact reuse**: each workflow passes its tested backend jar to its E2E job.
-  Playwright builds the frontend before starting the preview server.
+- **Fail-fast ordering**: route → the selected tier's checks/builds → browser tests.
+  Frontend project typechecking runs before units and bundling. The local `npm run build`
+  command still includes typechecking; CI splits those stages so it runs once.
+- **Artifact reuse**: Fast and Full pass the current workflow's backend jar and frontend
+  `dist` to their browser job. CI sets `E2E_PREBUILT_DIST=1`; Playwright starts only the
+  preview server and refuses a missing `dist/index.html` instead of rebuilding or falling
+  back to an older bundle. Local runs still build by default. Offline `--list` needs no
+  bundle or server. The preview process retains `E2E_API_BASE_URL` for its API proxy.
 - **Shared startup**: [`run-e2e.sh`](../../.github/scripts/run-e2e.sh) owns the readiness probe and
   process lifecycle for all three tiers. Duplicated inline in YAML, a subtly different probe in one job
   reports "never became ready" for a backend that was fine.
-- **Aggregate status check**: `fast-ci` collects route, frontend, backend, and smoke
-  results; the escalated Full CI result remains separate.
+- **Aggregate status check**: `fast-ci` waits for route, frontend, backend, smoke and
+  reusable Full CI. Every selected job must succeed, every unselected job must be skipped,
+  and missing or malformed routing outputs fail. Cancellation and an unexpected skip
+  cannot be reported as a successful required tier.
 - **Actions are pinned to a commit SHA with the version in a trailing comment**, so a moved tag cannot
   change what runs. The pin *shape* is asserted for every `uses:` line in `.github/workflows/` **and**
   every `.github/actions/*/action.yml` — scanning only the workflows once left the `setup-nusmv`
@@ -273,15 +292,15 @@ as an artifact, which is reuse of a verified build rather than a stale one.
 ## Branch protection
 
 Branch protection is a GitHub repository setting; workflow files do not establish
-which checks are required. The aggregate `Fast CI` job depends on route, frontend,
-backend, and smoke jobs. It does **not** depend on `escalate`, so its success alone
-does not establish that the high-risk Full CI run passed. Check that result separately
-before merging a high-risk change.
+which checks are required. The aggregate `Fast CI` job includes the reusable Full CI
+result on main and high-risk routes. Its success establishes that the selected validation
+completed. Nightly and manual Full CI runs remain independently visible.
 
 ## Local equivalents
 
 ```bash
 node --test .github/ci-risk-router.test.mjs   # routing logic
+node --test .github/check-ci-results.test.mjs .github/ci-workflows.test.mjs # execution/gate contracts
 node --test .github/docs-link-check.test.mjs  # the docs checker's own logic
 node .github/docs-link-check-cli.mjs .        # documentation links and anchors
 cd backend  && mvn test                       # backend suite

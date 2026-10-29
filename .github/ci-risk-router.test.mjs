@@ -86,8 +86,9 @@ test('a single high-risk line escalates to full CI regardless of diff size', () 
     const decision = route([path], { ref: 'refs/heads/feature/x' });
     assert.equal(decision.full, true, `expected full CI for ${path}`);
     assert.ok(decision.reasons.includes(why), `expected reason "${why}" for ${path}, got ${decision.reasons}`);
-    assert.equal(decision.backend, true, 'escalation runs both suites');
-    assert.equal(decision.frontend, true, 'escalation runs both suites');
+    assert.equal(decision.fast, false, 'Full CI already includes the smoke journeys');
+    assert.equal(decision.backend, false, 'Full CI owns backend validation');
+    assert.equal(decision.frontend, false, 'Full CI owns frontend validation');
   }
 });
 
@@ -100,7 +101,7 @@ test('a high-risk path mixed with docs still escalates', () => {
   assert.equal(decision.full, true);
 });
 
-test('main, schedule, and manual dispatch always run everything', () => {
+test('main, schedule, and manual dispatch select Full CI without duplicating Fast tiers', () => {
   for (const context of [
     { ref: 'refs/heads/main', eventName: 'push' },
     { ref: 'refs/heads/feature/x', eventName: 'schedule' },
@@ -109,7 +110,9 @@ test('main, schedule, and manual dispatch always run everything', () => {
   ]) {
     const decision = route(['README.md'], context);
     assert.equal(decision.full, true, `expected full CI for ${JSON.stringify(context)}`);
-    assert.equal(decision.fast, true);
+    assert.equal(decision.fast, false);
+    assert.equal(decision.backend, false);
+    assert.equal(decision.frontend, false);
     assert.equal(decision.inertOnly, false, 'main must not be short-circuited by a docs-only diff');
   }
 });
@@ -119,6 +122,9 @@ test('an unrecognised path escalates rather than being silently skipped', () => 
   // open ships something nothing validated.
   const decision = route(['services/new-thing/main.go'], { ref: 'refs/heads/feature/x' });
   assert.equal(decision.full, true);
+  assert.equal(decision.fast, false);
+  assert.equal(decision.backend, false);
+  assert.equal(decision.frontend, false);
   assert.ok(decision.reasons.some((r) => r.startsWith('unclassified path')), decision.reasons.join('; '));
 });
 

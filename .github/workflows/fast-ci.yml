@@ -1,12 +1,7 @@
 name: Fast CI
 
-# Every push and PR. Optimized for how quickly it can tell you that you broke something, while
-# still being a real gate: compile, typecheck, unit tests, and a browser-driven smoke barrier that
-# proves the stack actually boots and serves a verification end to end.
-#
-# What it deliberately does not do is run the complete E2E suite. An earlier measurement on this repo:
-# the full suite took 478s of a 588s job, and two specs were 59% of that. Paying it on a component
-# tweak buys almost nothing; Full CI still pays it wherever risk warrants (see .github/ci-risk-router.mjs).
+# One push/PR entry point. Ordinary changes run scoped unit tests, builds and smoke; main and
+# high-risk changes call Full CI instead. Full includes smoke, so the two tiers never run together.
 
 on:
   push:
@@ -46,15 +41,14 @@ jobs:
           # Need enough history to diff against the base commit.
           fetch-depth: 0
 
-      - name: Verify routing logic
-        run: node --test .github/ci-risk-router.test.mjs
+      - name: Verify CI routing and gates
+        run: node --test .github/*.test.mjs
 
-      # Runs here, in the one job that executes for every push, because a documentation-only change
+      # Runs here, in the one job that executes for every push, because a docs-only branch change
       # routes as inert and skips every test tier below -- so this is the only place that reads those
       # files at all. Needs no dependency install and takes about a second.
       - name: Verify documentation cross-references
         run: |
-          node --test .github/docs-link-check.test.mjs
           node .github/docs-link-check-cli.mjs .
 
       - name: Collect changed paths
@@ -116,15 +110,15 @@ jobs:
             echo "| backend unit/integration | ${{ steps.decide.outputs.backend }} |"
             echo "| frontend unit/build | ${{ steps.decide.outputs.frontend }} |"
             echo "| E2E smoke | ${{ steps.decide.outputs.fast }} |"
-            echo "| full E2E (separate workflow) | ${{ steps.decide.outputs.full }} |"
+            echo "| reusable Full CI | ${{ steps.decide.outputs.full }} |"
             echo
             echo "Reasons: ${{ steps.decide.outputs.reasons }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
   frontend:
-    name: Frontend unit & build
+    name: Frontend checks & build
     needs: route
-    if: needs.route.outputs.frontend == 'true'
+    if: needs.route.outputs.frontend == 'true' || needs.route.outputs.smoke == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
@@ -149,13 +143,14 @@ jobs:
       # Typecheck first: it is the cheapest check that catches the largest class of mistake, and a
       # type error makes every downstream failure noise.
       - name: Typecheck
-        run: npx vue-tsc --noEmit
+        run: npx vue-tsc -b --clean && npx vue-tsc -b
 
       - name: Unit tests
+        if: needs.route.outputs.frontend == 'true'
         run: npm run test:unit -- --run
 
       - name: Build
-        run: npm run build
+        run: npx vite build
 
       # The smoke job needs this bundle; building it twice is pure duplication.
       - name: Upload frontend bundle
@@ -167,9 +162,9 @@ jobs:
           if-no-files-found: error
 
   backend:
-    name: Backend tests
+    name: Backend checks & package
     needs: route
-    if: needs.route.outputs.backend == 'true'
+    if: needs.route.outputs.backend == 'true' || needs.route.outputs.smoke == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     services:
@@ -207,10 +202,16 @@ jobs:
       # `package` rather than `test`: same test run, and it also produces the jar the smoke job needs,
       # so the E2E tier no longer recompiles the whole tree from scratch.
       - name: Test and package
+        if: needs.route.outputs.backend == 'true'
         env:
           DB_USERNAME: iot_verify
           DB_PASSWORD: iot_verify_ci
         run: mvn -B package -Diot.verify.mysql.required=true
+
+      # Smoke still needs a fresh jar when only frontend source changed.
+      - name: Package unchanged backend
+        if: needs.route.outputs.backend != 'true'
+        run: mvn -B package -DskipTests
 
       - name: Upload backend jar
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -232,12 +233,10 @@ jobs:
   smoke:
     name: E2E smoke
     needs: [route, frontend, backend]
-    # Runs whenever both halves built. `always()` plus explicit result checks so a skipped sibling
-    # (backend-only change) does not silently skip the barrier.
+    # Both artifact producers must succeed, even when one language's unit suite was routed out.
     if: |
       always() && needs.route.outputs.smoke == 'true'
-      && needs.frontend.result != 'failure' && needs.backend.result != 'failure'
-      && needs.frontend.result != 'cancelled' && needs.backend.result != 'cancelled'
+      && needs.frontend.result == 'success' && needs.backend.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
@@ -275,6 +274,7 @@ jobs:
       AUTH_SOURCE_LOGIN_RATE_LIMIT_PER_MINUTE: 4000
       AUTH_LOGIN_RATE_LIMIT_PER_MINUTE: 500
       E2E_API_BASE_URL: http://127.0.0.1:8080
+      E2E_PREBUILT_DIST: '1'
       PLAYWRIGHT_HTML_OPEN: never
     steps:
       - name: Checkout
@@ -303,6 +303,12 @@ jobs:
         with:
           name: backend-jar-${{ github.sha }}
           path: backend/target/
+
+      - name: Download frontend bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: frontend-dist-${{ github.sha }}
+          path: frontend/dist/
 
       - name: Install frontend dependencies
         working-directory: frontend
@@ -339,14 +345,8 @@ jobs:
 
   escalate:
     name: Escalate to Full CI
-    needs: [route, frontend, backend, smoke]
-    # A high-risk branch push runs the complete suite too. main and scheduled runs reach Full CI
-    # through its own triggers, so they are excluded here to avoid two identical runs per commit.
-    if: |
-      always() && needs.route.outputs.full == 'true'
-      && github.ref != 'refs/heads/main'
-      && needs.frontend.result != 'failure' && needs.backend.result != 'failure'
-      && needs.smoke.result != 'failure'
+    needs: route
+    if: needs.route.outputs.full == 'true'
     # The reusable workflow uploads and downloads the build artifacts it shares between its own jobs,
     # which needs actions: write. A called workflow does not inherit the caller's block, so it is
     # granted explicitly here rather than failing at the upload step with a permissions error that
@@ -360,31 +360,18 @@ jobs:
 
   fast-ci:
     name: Fast CI
-    # Single required status check for branch protection: it stays green when jobs are legitimately
-    # skipped (docs-only) and red when any tier actually failed, so protection does not have to
-    # enumerate conditional jobs.
-    needs: [route, frontend, backend, smoke]
+    # A selected tier must pass; a missing, cancelled or skipped required result is a failure.
+    needs: [route, frontend, backend, smoke, escalate]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Check tier results
-        shell: bash
-        run: |
-          set -euo pipefail
-          route='${{ needs.route.result }}'
-          frontend='${{ needs.frontend.result }}'
-          backend='${{ needs.backend.result }}'
-          smoke='${{ needs.smoke.result }}'
-          echo "route=$route frontend=$frontend backend=$backend smoke=$smoke"
-          if [ "$route" != "success" ]; then
-            echo "::error::routing failed; no tier decision could be trusted"
-            exit 1
-          fi
-          for result in "$frontend" "$backend" "$smoke"; do
-            case "$result" in
-              success|skipped) ;;
-              *) echo "::error::a required tier reported '$result'"; exit 1 ;;
-            esac
-          done
-          echo "Fast CI satisfied (skipped tiers were routed out by risk, not by failure)."
+        env:
+          CI_NEEDS_JSON: ${{ toJSON(needs) }}
+        run: node .github/check-ci-results.mjs
