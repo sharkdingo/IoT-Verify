@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -58,22 +59,4 @@ describe('account deletion scope', () => {
     expect(shared.slice(0, shared.indexOf('}'))).toContain('var(--accent-fill-disabled)')
   })
 
-  it('keeps the flow addressable, since it is the one irreversible action', () => {
-    const dialog = readFileSync(join(__dirname, '../AccountDeleteDialog.vue'), 'utf8')
-    const account = readFileSync(join(__dirname, '../../views/Account.vue'), 'utf8')
-    const logout = readFileSync(join(__dirname, '../LogoutConfirmDialog.vue'), 'utf8')
-
-    // Deletion has its own page entry; the sign-out confirmation only answers the sign-out question.
-    expect(account).toContain('data-testid="open-account-delete"')
-    expect(logout).not.toContain('data-testid="open-account-delete"')
-    for (const id of [
-      'account-delete-dialog',
-      'account-delete-confirmation',
-      'account-delete-password',
-      'account-delete-confirm',
-      'account-delete-cancel'
-    ]) {
-      expect(dialog, `${id} should be addressable`).toContain(`data-testid="${id}"`)
-    }
-  })
 })

@@ -143,53 +143,6 @@ const installPersistedPartialChatMock = async (
   })
 }
 
-test('renders CJK Markdown and literal code consistently after streaming and history reload', async ({ page, request }) => {
-  const auth = await createAuthenticatedUser(request)
-  const session = await unwrap<{ id: string }>(await request.post(`${apiBaseURL}/api/chat/sessions`, {
-    headers: { Authorization: `Bearer ${auth.token}` }
-  }))
-  const markdown = [
-    '场景**“家庭空气质量与舒适度联动”已成功原子替换并应用**。',
-    '注意*“尚未验证”*。删除~~“旧规则”~~后继续。',
-    String.raw`温度为\(x_1 + 2\)。`,
-    '```echarts {}\n{"title":"场景**“测试”**"}\n```',
-    '```component-json {}\n{"status":"ok"}\n```',
-    '~~~text\n' + String.raw`\(x_1\) 场景**“测试”**` + '\n~~~',
-    '参考**[unsafe](javascript:alert(1))**。'
-  ].join('\n\n')
-  const errors: string[] = []
-  page.on('pageerror', error => errors.push(error.message))
-  await installPersistedPartialChatMock(page, session.id, markdown)
-  await openWorkspace(page, auth, 'dark')
-  const openSession = async () => {
-    await page.getByTestId('open-ai-assistant').click()
-    const toggle = page.getByTestId('chat-sidebar-toggle')
-    if (await toggle.getAttribute('aria-expanded') === 'false') await toggle.click()
-    await page.getByTestId(`chat-session-${session.id}`).click()
-  }
-  const expectRendered = async () => {
-    const reply = page.locator('.ai-row').last()
-    await expect(reply.locator('strong').filter({ hasText: '“家庭空气质量与舒适度联动”已成功原子替换并应用' }))
-      .toHaveText('“家庭空气质量与舒适度联动”已成功原子替换并应用')
-    await expect(reply.locator('em')).toHaveText('“尚未验证”')
-    await expect(reply.locator('del')).toHaveText('“旧规则”')
-    await expect(reply.locator('annotation')).toHaveText('x_1 + 2')
-    await expect(reply.locator('.code-content')).toHaveText([
-      '{"title":"场景**“测试”**"}', '{"status":"ok"}', String.raw`\(x_1\) 场景**“测试”**`
-    ])
-    await expect(reply.getByText('unsafe', { exact: true })).not.toHaveAttribute('href')
-    await expect(page.getByTestId('chat-input')).toBeEnabled()
-    expect(errors).toEqual([])
-  }
-  await openSession()
-  await page.getByTestId('chat-input').fill('展示格式检查结果')
-  await page.getByTestId('chat-send').click()
-  await expectRendered()
-  await page.reload()
-  await openSession()
-  await expectRendered()
-})
-
 test('reopens the assistant after a provider error and failed Board synchronization', async ({ page, request }) => {
   const auth = await createAuthenticatedUser(request)
   const session = await unwrap<{ id: string }>(await request.post(`${apiBaseURL}/api/chat/sessions`, {
@@ -331,72 +284,44 @@ for (const { width, theme } of [{ width: 320, theme: 'dark' }] as const) {
   })
 }
 
-test('reopening the assistant exposes existing history without creating or sending a chat', async ({ page, request }) => {
+test('protected confirm submits the displayed action identity', async ({ page, request }, testInfo) => {
   const auth = await createAuthenticatedUser(request)
-  const session = await unwrap<{ id: string; title: string }>(
-    await request.post(`${apiBaseURL}/api/chat/sessions`, {
-      headers: { Authorization: `Bearer ${auth.token}` }
-    })
-  )
-
+  const session = await unwrap<{ id: string }>(await request.post(`${apiBaseURL}/api/chat/sessions`, {
+    headers: { Authorization: `Bearer ${auth.token}` }
+  }))
+  const confirmationId = `pending-CONFIRM-${auth.userId}`
+  let settled = false
+  await installPersistedPartialChatMock(page, session.id, 'Decision recorded.', async () => { settled = true })
+  await page.route(`**/api/chat/sessions/${session.id}/confirmation`, route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ code: 200, data: {
+      sessionId: session.id,
+      actions: settled ? [] : [{
+        kind: 'DESTRUCTIVE', confirmationId, toolName: 'delete_device', target: 'Kitchen sensor'
+      }]
+    } })
+  }))
+  await page.route(`**/api/chat/sessions/${session.id}/seen`, route => route.fulfill({
+    status: 200, contentType: 'application/json', body: JSON.stringify({ code: 200, data: null })
+  }))
   await openWorkspace(page, auth)
-
   await page.getByTestId('open-ai-assistant').click()
-  await expect(page.getByTestId('chat-panel')).toBeVisible()
   await page.getByTestId('chat-sidebar-toggle').click()
-  await expect(page.getByTestId(`chat-session-${session.id}`)).toBeVisible()
-
-  await collapseChatSidebar(page)
-  await page.getByTestId('chat-close').click()
-  await expect(page.getByTestId('chat-panel')).toBeHidden()
-
-  await page.getByTestId('open-ai-assistant').click()
-  await expect(page.getByTestId('chat-panel')).toBeVisible()
-  await page.getByTestId('chat-sidebar-toggle').click()
-  await expect(page.getByTestId(`chat-session-${session.id}`)).toBeVisible()
-})
-
-for (const action of ['CONFIRM', 'CANCEL'] as const) {
-  test(`protected ${action.toLowerCase()} submits the displayed action identity`, async ({ page, request }, testInfo) => {
-    const auth = await createAuthenticatedUser(request)
-    const session = await unwrap<{ id: string }>(await request.post(`${apiBaseURL}/api/chat/sessions`, {
-      headers: { Authorization: `Bearer ${auth.token}` }
-    }))
-    const confirmationId = `pending-${action}-${auth.userId}`
-    let settled = false
-    await installPersistedPartialChatMock(page, session.id, 'Decision recorded.', async () => { settled = true })
-    await page.route(`**/api/chat/sessions/${session.id}/confirmation`, route => route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({ code: 200, data: {
-        sessionId: session.id,
-        actions: settled ? [] : [{
-          kind: 'DESTRUCTIVE', confirmationId, toolName: 'delete_device', target: 'Kitchen sensor'
-        }]
-      } })
-    }))
-    await page.route(`**/api/chat/sessions/${session.id}/seen`, route => route.fulfill({
-      status: 200, contentType: 'application/json', body: JSON.stringify({ code: 200, data: null })
-    }))
-    await openWorkspace(page, auth)
-    await page.getByTestId('open-ai-assistant').click()
-    await page.getByTestId('chat-sidebar-toggle').click()
-    await page.getByTestId(`chat-session-${session.id}`).click()
-    const decision = page.getByTestId('chat-protected-confirmation')
-    await expect(decision.locator('strong')).toHaveText('请确认：删除设备')
-    await expect(decision.getByTestId('chat-confirmation-target')).toHaveText('Kitchen sensor')
-    await page.screenshot({ path: testInfo.outputPath(`assistant-${action.toLowerCase()}-preview.png`) })
-    const submitted = page.waitForRequest('**/api/chat/completions')
-    await decision.getByRole('button', { name: action === 'CONFIRM' ? '确定' : '取消', exact: true }).click()
-    expect((await submitted).postDataJSON().confirmation).toEqual({
-      kind: 'DESTRUCTIVE', action, confirmationId
-    })
-    expect((await submitted).postDataJSON().content).toBe(action === 'CONFIRM'
-      ? '已确认删除设备：Kitchen sensor' : '已取消删除设备：Kitchen sensor')
-    await expect(decision).toHaveCount(0)
-    await expect(page.getByTestId('chat-input')).toBeEnabled()
+  await page.getByTestId(`chat-session-${session.id}`).click()
+  const decision = page.getByTestId('chat-protected-confirmation')
+  await expect(decision.locator('strong')).toHaveText('请确认：删除设备')
+  await expect(decision.getByTestId('chat-confirmation-target')).toHaveText('Kitchen sensor')
+  await page.screenshot({ path: testInfo.outputPath('assistant-confirm-preview.png') })
+  const submitted = page.waitForRequest('**/api/chat/completions')
+  await decision.getByRole('button', { name: '确定', exact: true }).click()
+  expect((await submitted).postDataJSON().confirmation).toEqual({
+    kind: 'DESTRUCTIVE', action: 'CONFIRM', confirmationId
   })
-}
+  expect((await submitted).postDataJSON().content).toBe('已确认删除设备：Kitchen sensor')
+  await expect(decision).toHaveCount(0)
+  await expect(page.getByTestId('chat-input')).toBeEnabled()
+})
 
 test('closing the browser page preserves an unread terminal result until its history is rendered', async ({
   page,

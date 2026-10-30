@@ -46,7 +46,7 @@ test.describe('public theme and layout', () => {
   test('keeps session controls reachable and focuses Cancel at narrow workspace widths', async ({ page, request }) => {
     const auth = await createAuthenticatedUser(request)
     await openWorkspace(page, auth)
-    for (const width of [320, 390, 414, 453, 499, 500, 639, 640, 720]) {
+    for (const width of [320, 639, 640]) {
       await page.setViewportSize({ width, height: 844 })
       const menu = page.locator('details.scene-actions-menu')
       const opener = width < 640 ? menu.locator('summary') : page.getByTestId('open-account-center')

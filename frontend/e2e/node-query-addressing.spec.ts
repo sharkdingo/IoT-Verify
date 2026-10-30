@@ -10,8 +10,7 @@ const unwrap = async (response: Pick<APIResponse, 'ok' | 'text' | 'json'>) => {
   return body.data
 }
 
-const specialIds = ['slash/id', 'back\\slash', 'percent%2F', 'query?id', 'fragment#id',
-  'internal space', '.', '..', 'semi;colon', 'plus+id', 'comma,id']
+const specialIds = ['slash/id', 'percent%2F', '.', '..', 'comma,id']
 
 test('all five targeted commands preserve special identities, other objects, and undo state', async ({ request }, testInfo) => {
   test.setTimeout(120_000)

@@ -99,7 +99,8 @@ const specification: Specification = { name: 'Safety requirement',
 }
 
 describe('FuzzingPanel', () => {
-  it.each(['en', 'zh-CN'])('explains stale targets once and selects only explorable targets in %s', async locale => {
+  it('explains stale targets once and selects only explorable targets', async () => {
+    const locale = 'en'
     const translations = createI18n({ legacy: false, locale, messages: {
       en: appI18n.global.getLocaleMessage('en'),
       'zh-CN': appI18n.global.getLocaleMessage('zh-CN')

@@ -37,7 +37,7 @@ download an artifact that no job created. Full-selected routes skip these Fast j
 
 The smoke subset is tagged **per test** with `@smoke`, selected by
 [`playwright.config.ts`](../../frontend/playwright.config.ts), and used by both local and CI runners.
-The ordinary suite selects 113 cases; the 18 live-AI cases remain separate. Smoke is included
+The ordinary suite selects 109 cases; the 18 live-AI cases remain separate. Smoke is included
 in the ordinary suite and selects eight critical cases (seven browser journeys and one HTTP
 authentication check):
 
@@ -77,6 +77,11 @@ Undo ordering, exhaustion and redo invalidation are tested at their backend/comp
 browser cases retain rule and device deletion, cascades, reload and keyboard integration.
 Repeated solver scenarios, broad authority audits, all-example round trips, cosmetic tours and
 copy/geometry matrices are retired rather than maintained as browser obligations.
+Targeted node commands retain representative URI identities with real snapshot and undo-journal
+checks; controller tests own the complete lexical matrix. Markdown parsing and protected-action
+cancellation stay at their component owners; browser checks retain the confirmation request and
+assistant recovery. Session-control layout checks sample the minimum width and both sides of
+their breakpoint rather than repeating every intermediate width.
 
 The frontend retains focused contrast, target-size, focus, reduced-motion, token-reference,
 toast-interaction and recommendation-evidence checks. Source scans that prescribe helper names,
@@ -98,6 +103,9 @@ branches need representative caller coverage, rather than repeating the complete
 every wrapper. Prompt checks retain JSON examples and schema/enum payload contracts; exact prose
 and blanket bans on future DTO field names are review concerns. Runtime mapping, rejected inputs, loading,
 uncertain writes and incomplete evidence remain test obligations.
+Packaged-backend startup is exercised by the browser gate against MySQL; an empty H2 context
+test adds no application behavior. Fuzz-engine determinism and finding generation stay with
+the engine tests rather than a second seeded tour of a shipped example.
 
 ## Choose the smallest useful check
 

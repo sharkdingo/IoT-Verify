@@ -187,8 +187,8 @@ describe('ControlCenter template authority recovery', () => {
     } finally { wrapper.unmount() }
   })
 
-  it.each(['en', 'zh-CN'] as const)('shows every item in each template detail section in %s', async locale => {
-    i18n.global.locale.value = locale
+  it('shows every item in each template detail section', async () => {
+    i18n.global.locale.value = 'en'
     const names = Array.from({ length: 7 }, (_, index) => `Long custom entry ${index + 1}`)
     const entries = names.map(Name => ({ Name }))
     const wrapper = mountTemplates()

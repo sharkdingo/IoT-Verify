@@ -130,15 +130,25 @@ const mountChat = (props: Record<string, unknown> = {}) => {
 
 describe('ChatView', () => {
   it('passes historical Markdown to the renderer unchanged, including unfinished code fences', async () => {
-    const content = '~~~text\n' + String.raw`\(x_1\) 场景**“测试”**`
+    const content = '~~~text\n' + String.raw`\(x_1\) 场景**“测试”** CallEnd|>`
     chatApi.getSessionList.mockResolvedValue([session])
     chatApi.getSessionHistory.mockResolvedValue(historyPage([{ role: 'assistant', content }]))
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
     chatStore.openChat()
     const wrapper = mountChat()
-    await flushPromises()
-    await wrapper.get('[data-testid="chat-session-session-1"]').trigger('click')
-    await flushPromises()
-    expect(wrapper.get('.chat-markdown-stub').text()).toBe(content)
+    try {
+      await flushPromises()
+      await wrapper.get('[data-testid="chat-session-session-1"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('.chat-markdown-stub').text()).toBe(content)
+      await wrapper.get(`button[aria-label="${i18n.global.t('app.chat.copyAll')}"]`).trigger('click')
+      expect(writeText).toHaveBeenCalledWith(content)
+    } finally {
+      if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard)
+      else Reflect.deleteProperty(navigator, 'clipboard')
+    }
   })
 
   it('starts with task suggestions and reveals guidance without losing its unsent fields', async () => {
@@ -3770,47 +3780,6 @@ describe('ChatView', () => {
     await expect(preparation).resolves.toBe('outcome-unknown')
     expect(chatStore.state.reconciliationRequired).toBe(true)
     expect(authStore.getToken()).toBe(bobToken)
-  })
-
-  it('preserves ordinary history prose and literal former protocol markers when rendering and copying', async () => {
-    const content = '正在执行指令... This sentence discusses CallEnd|> literally.'
-    chatApi.getSessionList.mockResolvedValue([session])
-    chatApi.getSessionHistory.mockResolvedValue(historyPage([
-      { role: 'assistant', content, executionStatus: 'COMPLETED' }
-    ]))
-    const writeText = vi.fn().mockResolvedValue(undefined)
-    const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
-    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
-    chatStore.openChat()
-    const wrapper = mountChat()
-    try {
-      await flushPromises()
-      await wrapper.get('[data-testid="chat-session-session-1"]').trigger('click')
-      await flushPromises()
-      expect(wrapper.get('.chat-markdown-stub').text()).toBe(content)
-      await wrapper.get(`button[aria-label="${i18n.global.t('app.chat.copyAll')}"]`).trigger('click')
-      expect(writeText).toHaveBeenCalledWith(content)
-    } finally {
-      if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard)
-      else Reflect.deleteProperty(navigator, 'clipboard')
-    }
-  })
-
-  it('preserves a literal former protocol marker arriving in a live stream', async () => {
-    chatApi.createSession.mockResolvedValue(session)
-    chatApi.sendStreamChat.mockImplementation((...args: any[]) => {
-      args[2].onAccepted?.()
-      args[2].onMessage('Executing command... CallEnd|> is ordinary text.')
-      return new Promise<void>(resolve => args[3].signal.addEventListener('abort', () => resolve(), { once: true }))
-    })
-    chatStore.openChat()
-    const wrapper = mountChat()
-    await flushPromises()
-    await wrapper.get('[data-testid="chat-input"]').setValue('Explain these strings')
-    await wrapper.get('[data-testid="chat-send"]').trigger('click')
-    await flushPromises()
-    expect(wrapper.findAll('.chat-markdown-stub').map(message => message.text()))
-      .toContain('Executing command... CallEnd|> is ordinary text.')
   })
 
   it('stops an active stream with its owner token when another account takes over', async () => {

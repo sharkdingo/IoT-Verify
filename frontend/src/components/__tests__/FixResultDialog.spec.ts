@@ -1224,12 +1224,9 @@ describe('FixResultDialog strategy workflow', () => {
     await expect((wrapper.vm as any).dialogRef.prepareForLogout()).resolves.toBe('ready')
   })
 
-  it.each([
-    ['an HTTP rejection', { response: { status: 503, data: { message: 'Unavailable' } } }],
-    ['an invalid authoritative response', { code: FIX_RESPONSE_INCOMPLETE_CODE }]
-  ])('releases request tracking after %s', async (_label, rejection) => {
+  it('releases request tracking after an invalid authoritative response', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-    boardApi.fixTrace.mockRejectedValueOnce(rejection)
+    boardApi.fixTrace.mockRejectedValueOnce({ code: FIX_RESPONSE_INCOMPLETE_CODE })
     const wrapper = mountDialog()
     await flush()
 
@@ -1241,28 +1238,28 @@ describe('FixResultDialog strategy workflow', () => {
     errorSpy.mockRestore()
   })
 
-  it.each(['SEARCHING_AND_VERIFYING', 'COMPARING_VERIFIED_OPTIONS'] as const)(
-    'shows the server-observed %s phase without offering an unfinished result', async stage => {
-      const pending = deferred<FixResult>()
-      boardApi.fixTrace.mockReturnValueOnce(pending.promise)
-      boardApi.getFixRequestStatus.mockResolvedValue({ requestId: 'request', state: 'RUNNING', stage, elapsedMs: 1000 })
-      const wrapper = mountDialog()
-      await flush()
+  it('shows the server-observed search phase without offering an unfinished result', async () => {
+    const stage = 'SEARCHING_AND_VERIFYING'
+    const pending = deferred<FixResult>()
+    boardApi.fixTrace.mockReturnValueOnce(pending.promise)
+    boardApi.getFixRequestStatus.mockResolvedValue({ requestId: 'request', state: 'RUNNING', stage, elapsedMs: 1000 })
+    const wrapper = mountDialog()
+    await flush()
 
-      vi.useFakeTimers()
-      await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
-      await vi.advanceTimersByTimeAsync(1000)
-      await wrapper.vm.$nextTick()
+    vi.useFakeTimers()
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await vi.advanceTimersByTimeAsync(1000)
+    await wrapper.vm.$nextTick()
 
-      expect(boardApi.getFixRequestStatus).toHaveBeenCalledWith(expect.any(String), defaultToken)
-      expect(wrapper.text()).toContain(`fixProgressStage_${stage}`)
-      expect(wrapper.get('[data-testid="fix-search-announcement"]').text())
-        .toContain(`fixProgressStage_${stage}`)
-      expect(wrapper.find('[data-testid="fix-apply-current"]').exists()).toBe(false)
+    expect(boardApi.getFixRequestStatus).toHaveBeenCalledWith(expect.any(String), defaultToken)
+    expect(wrapper.text()).toContain(`fixProgressStage_${stage}`)
+    expect(wrapper.get('[data-testid="fix-search-announcement"]').text())
+      .toContain(`fixProgressStage_${stage}`)
+    expect(wrapper.find('[data-testid="fix-apply-current"]').exists()).toBe(false)
 
-      vi.useRealTimers()
-      pending.resolve(parameterResult())
-      await flush()
+    vi.useRealTimers()
+    pending.resolve(parameterResult())
+    await flush()
   })
 
   it('invalidates an old verified suggestion before retrying that strategy', async () => {
@@ -2688,6 +2685,7 @@ describe('FixResultDialog strategy workflow', () => {
     expect(wrapper.get('[data-testid="fix-search-failure-summary"]').text()).toBe('failedToLoadFixSuggestions')
     expect(wrapper.get('[role="dialog"]').classes()).toContain('iot-dialog--danger')
     expect(elementPlus.error).not.toHaveBeenCalled()
+    await expect((wrapper.vm as any).prepareForLogout()).resolves.toBe('ready')
 
     const pending = deferred<FixResult>()
     boardApi.fixTrace.mockReturnValueOnce(pending.promise)

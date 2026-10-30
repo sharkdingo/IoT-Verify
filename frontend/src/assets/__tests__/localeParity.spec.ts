@@ -32,22 +32,6 @@ describe('locale parity', () => {
     return { zh: new Map(flatten(messages['zh-CN'])), en: new Map(flatten(messages.en)) }
   }
 
-  it('walks the complete catalogues rather than a small subset', () => {
-    // A partial catalogue cannot certify locale parity.
-    const { zh, en } = locales()
-    expect(zh.size, 'zh-CN key count').toBeGreaterThan(800)
-    expect(en.size, 'en key count').toBeGreaterThan(800)
-  })
-
-  it('defines every key in both locales', () => {
-    const { zh, en } = locales()
-    const missingInEn = [...zh.keys()].filter(k => !en.has(k))
-    const missingInZh = [...en.keys()].filter(k => !zh.has(k))
-    // Named, not counted: a reader needs to know which key to add.
-    expect(missingInEn, 'keys present in zh-CN but missing from en').toEqual([])
-    expect(missingInZh, 'keys present in en but missing from zh-CN').toEqual([])
-  })
-
   it('uses the same interpolation placeholders in both locales', () => {
     const { zh, en } = locales()
     // The distinct set, because pluralization legitimately repeats a placeholder per form.

@@ -4,7 +4,6 @@ import { createI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { describe, expect, it, vi } from 'vitest'
 import RuleBuilder from '../RuleBuilder.vue'
-import InfoTooltip from '../common/InfoTooltip.vue'
 import type { DeviceNode } from '@/types/node'
 import actualI18n from '@/assets/i18n'
 import boardApi, {
@@ -288,23 +287,6 @@ describe('RuleBuilder action semantics', () => {
       expect((wrapper.vm as any).ruleData.sources).toHaveLength(1)
     } finally { wrapper.unmount() }
   })
-  it('keeps conceptual help at its headings without covering field errors', async () => {
-    const wrapper = mount(RuleBuilder, { props: { active: true, nodes, deviceTemplates: [template] },
-      global: { plugins: [i18n] } })
-    try {
-      expect(wrapper.get('[data-testid="rule-conditions-help"]').attributes('aria-label')).toBe('Help for Trigger sources')
-      expect(wrapper.getComponent(InfoTooltip).props('text')).toBe('AND logic')
-      expect(wrapper.text()).not.toContain('AND logic')
-      await wrapper.get('#rule-target-device').setValue('target')
-      await wrapper.get('#rule-target-action').setValue('turn_on')
-      expect(wrapper.get('[data-testid="rule-content-help"]').attributes('aria-label')).toBe('Help for Content payload')
-      expect(wrapper.findAllComponents(InfoTooltip).map(item => item.props('text'))).toContain('Optional')
-      expect(wrapper.text()).not.toContain('Optional')
-      await wrapper.get('[data-testid="rule-content-device"]').setValue('source')
-      expect(wrapper.get('[data-testid="rule-source-readiness"]').text()).toBeTruthy()
-    } finally { wrapper.unmount() }
-  })
-
   it('names shared condition values as device reports and previews only a complete rule', async () => {
     const readableTemplate = { ...template, manifest: { ...template.manifest,
       InternalVariables: [{ Name: 'temperature', IsInside: false, Reads: true, LowerBound: 0, UpperBound: 40,

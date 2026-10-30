@@ -152,23 +152,6 @@ const recommend = async (page: Page, kind: RecommendationKind, count: number) =>
   await expect(page.getByTestId(`apply-all-${kind}-recommendations`)).toBeEnabled()
 }
 
-test('cancelling another recommendation kind preserves the earlier batch receipt and disabled action', async ({ page, request }) => {
-  await prepare(page, request)
-  await recommend(page, 'device', 2)
-  await page.getByTestId('apply-all-device-recommendations').click()
-  await expect(page.locator('#device-batch-apply-status')).toContainText('All 2')
-  await recommend(page, 'rule', 2)
-  await page.route('**/api/board/rules/check-similarity', route => route.fulfill({
-    status: 503, json: { code: 503, message: 'Similarity service unavailable' }
-  }))
-  await page.getByTestId('apply-all-rule-recommendations').click()
-  await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click()
-  await expect(page.locator('#rule-batch-apply-status')).toContainText('0/2 confirmed applied')
-  await openRecommendation(page, 'device')
-  await expect(page.getByTestId('apply-all-device-recommendations')).toBeDisabled()
-  await expect(page.locator('#device-batch-apply-status')).toContainText('All 2')
-})
-
 for (const kind of ['device'] as const) {
   for (const profile of [
     { name: 'desktop', locale: 'en', theme: 'light', width: 1440, height: 900 }

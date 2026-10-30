@@ -259,7 +259,8 @@ describe('independent JSON and CSV device imports', () => {
     expect(errors[1]).toBe(errors[0])
   })
 
-  it.each(['en', 'zh-CN'])('locates field errors and blocks the entire batch in %s', async locale => {
+  it('locates field errors and blocks the entire batch', async () => {
+    const locale = 'en'
     vi.useFakeTimers()
     for (const format of ['json', 'csv']) {
       const wrapper = panel(locale)
@@ -274,9 +275,9 @@ describe('independent JSON and CSV device imports', () => {
         expect(row.text()).toContain('bedroom_phone')
         if (format === 'csv') expect(row.text()).toContain('variable:steps')
         expect(row.get('[data-testid="device-import-row-source"]').text())
-          .toBe(format === 'json' ? (locale === 'en' ? 'Entry 1' : '第 1 项') : (locale === 'en' ? 'Line 2' : '第 2 行'))
+          .toBe(format === 'json' ? 'Entry 1' : 'Line 2')
         const reason = wrapper.get('[data-testid="device-import-blocked-reason"]')
-        expect(reason.text()).toContain(locale === 'en' ? 'entire batch' : '整批')
+        expect(reason.text()).toContain('entire batch')
         const submit = wrapper.get('[data-testid="device-import-create"]')
         expect(submit.attributes('aria-describedby')).toContain(reason.attributes('id'))
         expect(submit.attributes('disabled')).toBeDefined()
@@ -286,7 +287,8 @@ describe('independent JSON and CSV device imports', () => {
     }
   })
 
-  it.each(['en', 'zh-CN'])('locates shared value and label conflicts once and restores a valid batch in %s', async locale => {
+  it('locates shared value and label conflicts once and restores a valid batch', async () => {
+    const locale = 'zh-CN'
     vi.useFakeTimers()
     for (const format of ['json', 'csv']) {
       const wrapper = panel(locale, [{ label: 'phone' }])
@@ -302,7 +304,7 @@ describe('independent JSON and CSV device imports', () => {
         const conflicts = wrapper.get('[data-testid="device-import-environment-conflicts"]')
         expect(conflicts.attributes('role')).toBe('alert')
         expect(conflicts.findAll('li')).toHaveLength(3)
-        expect(conflicts.text()).toContain(format === 'json' ? (locale === 'en' ? 'Entry 1' : '第 1 项') : (locale === 'en' ? 'Line 2' : '第 2 行'))
+        expect(conflicts.text()).toContain(format === 'json' ? '第 1 项' : '第 2 行')
         expect(conflicts.text()).not.toContain('#')
         expect(wrapper.findAll('[data-testid="device-import-blocked-reason"]')).toHaveLength(1)
         expect(wrapper.get('[data-testid="device-import-create"]').attributes('disabled')).toBeDefined()

@@ -1,21 +1,13 @@
 package cn.edu.nju.Iot_Verify.component.fuzz;
 
-import cn.edu.nju.Iot_Verify.component.board.PortableSceneTestImport;
-import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
 import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
-import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
-import cn.edu.nju.Iot_Verify.dto.trace.TraceStateDto;
 import cn.edu.nju.Iot_Verify.util.mapper.BoardDataConverter;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 
@@ -76,34 +68,6 @@ class BoardFuzzGuidanceTest {
         assertEquals(0.0, violationScore.distance());
     }
 
-    @Test
-    void householdEntrySearchFindsTheViolationWithinTheRecordedSmallBudgetRepeatably() throws Exception {
-        var snapshot = householdAt("absent", "none", "off");
-        var engine = new FuzzEngine();
-        var input = new FuzzEngineInput(snapshot, new FuzzEngineConfig(List.of(), 60, 8, 4, 17L));
-
-        var first = engine.run(input, null, () -> false);
-        var second = engine.run(input, null, () -> false);
-
-        assertEquals(FuzzEngineOutcome.FINDINGS_FOUND, first.outcome());
-        assertEquals(60, first.iterations());
-        assertEquals(240, first.generatedPaths());
-        assertEquals(1, first.findings().size(),
-                "the safety defect must not turn the two normal-response requirements into violations");
-        FuzzFinding finding = first.findings().get(0);
-        assertEquals(snapshot.specifications().get(0).getId(), finding.specification().getId());
-        assertTrue(finding.firstViolationStep() > 0);
-        TraceStateDto before = finding.states().get(finding.states().size() - 2);
-        TraceStateDto after = finding.states().get(finding.states().size() - 1);
-        assertEquals("absent", environment(before, "occupancy"));
-        assertEquals("visitor", environment(before, "entryRequest"));
-        assertEquals("locked", deviceState(before, "door_1"));
-        assertEquals("unlocked", deviceState(after, "door_1"));
-        assertEquals(first.findings(), second.findings());
-        assertEquals(first.generatedPaths(), second.generatedPaths());
-        assertEquals(first.eligibility(), second.eligibility());
-    }
-
     private static FuzzModel.SpecEvaluation responseScore(
             FuzzModel model, SpecificationDto specification, long... genes) {
         return model.evaluate(specification, model.simulate(genes, 3));
@@ -145,36 +109,5 @@ class BoardFuzzGuidanceTest {
         condition.setRelation("=");
         condition.setValue("yes");
         return condition;
-    }
-
-    private static BoardDataConverter.ModelInputSnapshot householdAt(
-            String occupancy,
-            String request,
-            String lightState) throws Exception {
-        var scene = new ObjectMapper().readTree(Files.readString(
-                Path.of("..", "docs", "examples", "household-entry-scene-zh.json")));
-        var imported = PortableSceneTestImport.importScene(scene, "scene_spec_");
-        imported.getEnvironmentVariables().forEach(variable -> {
-            if ("occupancy".equals(variable.getName())) variable.setValue(occupancy);
-            if ("entryRequest".equals(variable.getName())) variable.setValue(request);
-        });
-        imported.getNodes().stream().filter(node -> "light_1".equals(node.getId()))
-                .findFirst().orElseThrow().setState(lightState);
-        // Reproduce the failing stored Board snapshot's canonical node order, not the file's layout order.
-        List<DeviceNodeDto> nodes = imported.getNodes().stream()
-                .sorted(Comparator.comparing(DeviceNodeDto::getId)).toList();
-        return new BoardDataConverter(null).toModelInputSnapshot(new BoardSemanticSnapshotDto(
-                nodes, imported.getEnvironmentVariables(), PortableSceneTestImport.importRules(scene),
-                imported.getSpecs(), imported.getTemplateSnapshots()));
-    }
-
-    private static String environment(TraceStateDto state, String name) {
-        return state.getEnvVariables().stream().filter(variable -> name.equals(variable.getName()))
-                .findFirst().orElseThrow().getValue();
-    }
-
-    private static String deviceState(TraceStateDto state, String id) {
-        return state.getDevices().stream().filter(device -> id.equals(device.getDeviceId()))
-                .findFirst().orElseThrow().getState();
     }
 }

@@ -224,7 +224,8 @@ describe('PlaybackTerminal', () => {
     wrapper.unmount()
   })
 
-  it.each(['simulation', 'counterexample', 'fuzzing'] as const)('lets a %s state number be edited before committing the seek', async kind => {
+  it('lets a counterexample state number be edited before committing the seek', async () => {
+    const kind = 'counterexample'
     const wrapper = mountNumberScene(kind, 11, 120)
     try {
       await nextTick()

@@ -28,8 +28,7 @@ const expectLabel = (id: string, key: string) => {
 
 describe('specification condition editor accessibility', () => {
   it.each([
-    ['=', 'FALSE'], ['!=', 'TRUE'], ['in', 'FALSE,TRUE'], ['not in', 'FALSE'],
-    ['=', ' false '], ['IN', ' false | true ']
+    ['=', 'FALSE'], ['IN', ' false | true ']
   ])('preserves an existing API condition %s %s when editing it', async (relation, value) => {
     await mountEditor()
     await wrapper.setProps({
@@ -117,7 +116,7 @@ describe('specification condition editor accessibility', () => {
   })
 
   it.each([
-    ['mode', '='], ['mode', 'in'], ['variable', '='], ['variable', 'not in']
+    ['mode', 'in'], ['variable', '=']
   ])('rejects stale %s %s values after selecting another property', async (targetType, relation) => {
     const dialog = await mountEditor()
     await wrapper.setProps({ deviceTemplates: [{ name: 'AC', manifest: {

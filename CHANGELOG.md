@@ -15,6 +15,26 @@ history into a technical spec. The spec content itself now lives under
 
 ## [Unreleased]
 
+### 2026-10-31 (remaining test redundancy)
+
+#### Removed
+
+- Reduced frontend unit selection from 2,650 to 2,627 by sampling repeated component locale,
+  condition and playback-kind combinations, retiring cosmetic/test-id scans and duplicate
+  catalogue checks, and consolidating copy and request-cleanup assertions into existing mounts.
+- Removed the empty H2 application-context check and the repeated fixed-budget household fuzz
+  tour. Backend selection is 3,566 instead of 3,568; packaged MySQL startup, engine determinism,
+  finding generation and formal scenario regressions remain covered.
+- Reduced ordinary E2E selection from 113 to 109 by retiring mocked Markdown, repeated assistant
+  reopen/cancel and cross-kind recommendation-state cases already covered by components.
+  The eight smoke cases and separate live-AI selection are unchanged.
+
+#### Changed
+
+- Narrowed browser viewport and node-identity matrices while retaining breakpoint edges,
+  every targeted command, real persistence/undo and rejected-query no-mutation checks.
+- Five source-reading contract specs use Node without starting a simulated browser.
+
 ### 2026-10-31 (unit test pruning)
 
 #### Removed

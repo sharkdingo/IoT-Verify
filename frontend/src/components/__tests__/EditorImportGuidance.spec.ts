@@ -13,7 +13,8 @@ const translations = (locale: string) => createI18n({ legacy: false, locale, mes
 } })
 
 describe('device import and specification guidance', () => {
-  it.each(['en', 'zh-CN'])('names the import input and provides a keyboard file command in %s', async locale => {
+  it('names the import input and provides a keyboard file command', async () => {
+    const locale = 'en'
     const i18n = translations(locale)
     const wrapper = mount(ControlCenter, { attachTo: document.body,
       props: { activeSection: 'devices' }, global: { plugins: [i18n] } })
@@ -85,7 +86,8 @@ describe('device import and specification guidance', () => {
     } finally { wrapper.unmount() }
   })
 
-  it.each(['en', 'zh-CN'])('keeps import errors and automatic-name warnings readable without hover in %s', async locale => {
+  it('keeps import errors and automatic-name warnings readable without hover', async () => {
+    const locale = 'zh-CN'
     const i18n = translations(locale)
     const wrapper = mount(ControlCenter, { attachTo: document.body,
       props: { activeSection: 'devices', deviceTemplates: [{ name: 'Light', manifest: { Name: 'Light' } }] },
@@ -114,7 +116,8 @@ describe('device import and specification guidance', () => {
     } finally { vi.useRealTimers(); wrapper.unmount() }
   })
 
-  it.each(['en', 'zh-CN'])('warns about discarding specification conditions before a template change in %s', async locale => {
+  it('warns about discarding specification conditions before a template change', async () => {
+    const locale = 'en'
     const i18n = translations(locale)
     const wrapper = mount(ControlCenter, { attachTo: document.body,
       props: { activeSection: 'specs', nodes: [{ id: 'lamp', label: 'Lamp', templateName: 'Light' }] },

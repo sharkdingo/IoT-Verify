@@ -61,15 +61,13 @@ const unresolvedKeys = (pattern: RegExp) => {
 }
 
 describe('literal i18n calls', () => {
-  it('use the same keys and parameters in both languages, with valid message syntax', () => {
+  it('use the same keys in both languages, with valid message syntax', () => {
     const messages = i18n.global.messages.value as Record<string, unknown>
     const zh = Object.fromEntries(messageEntries(messages['zh-CN']))
     const en = Object.fromEntries(messageEntries(messages.en))
     expect(Object.keys(en).sort()).toEqual(Object.keys(zh).sort())
-    const parameters = (text: string) => [...new Set([...text.matchAll(/\{([A-Za-z]\w*)\}/g)].map(match => match[1]))].sort()
     const errors: string[] = []
     for (const [key, text] of Object.entries(zh)) {
-      expect(parameters(en[key]), key).toEqual(parameters(text))
       for (const [locale, message] of [['zh-CN', text], ['en', en[key]]]) {
         baseCompile(message, { onError: error => { errors.push(`${locale}.${key}: ${error.message}`) } })
       }
