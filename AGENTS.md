@@ -151,6 +151,27 @@ The recurring shapes, with the incidents behind them:
 When a check fails, find the root cause. "Flaky" is a conclusion that needs evidence — a different
 test failing each run points at the environment, the same assertion failing points at the code.
 
+### Keep test coverage worth its cost
+
+- **Require a coverage gap.** Before adding or expanding a test, identify the concrete failure,
+  production path and input constraint not already checked. Extend the owning test where possible;
+  test counts and coverage percentages are not reasons to add cases.
+- **Prove duplication before pruning.** A shared helper alone does not prove duplicate coverage:
+  check the same branch and input constraint, and retain representative caller checks.
+  Leading digits and illegal inner characters are different identifier constraints. A mocked
+  repository cannot prove database collation or concurrent commits, and controller metadata cannot
+  prove HTTP authentication.
+- **Sample combinations, cover behavior.** Avoid blanket locale/theme/viewport/status/entity-kind
+  and example-scene cross products; each extra variant needs a distinct regression risk. Preserve
+  checks for unique rejections, ownership and uncertain outcomes rather than chasing a lower count.
+- **Assert behavior and contracts.** Source spelling, helper-call counts, CSS/layout/copy details and
+  generated accessors need a named functional, accessibility or wire contract to justify a test.
+  Do not mirror an algorithm and test only the copy, or substitute tests of your extraction helper
+  for tests of production behavior.
+- **Prune as code changes.** Retire obsolete or overlapping cases and fixtures in the area being
+  changed; do not build a complex harness just to keep a weak assertion. Use the smallest faithful
+  runtime. Layer and runtime choices live in the [CI coverage policy](docs/development/ci.md#coverage-policy).
+
 ### Scale the check to the change — do not re-run everything per edit
 
 Verification is staged. Running the full suite (or worse, E2E) after every small edit burns minutes
