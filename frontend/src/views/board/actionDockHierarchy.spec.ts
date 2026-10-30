@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -79,12 +80,14 @@ describe('board action dock hierarchy', () => {
   })
 
   it('marks open panels with a shared marker rather than an inset shadow', () => {
+    for (const id of RUN_TOOLS) expect(buttonMarkup(id), id).toContain(':aria-pressed=')
     const rule = (selector: string) => {
       const start = css.indexOf(selector + ' {')
       expect(start, selector).toBeGreaterThan(-1)
       return css.slice(start, css.indexOf('}', start))
     }
     expect(rule('.iot-board .board-tool-button')).toContain('box-shadow: none;')
+    expect(rule('.iot-board .board-tool-button::before')).toContain('opacity: 0;')
     const selected = rule(".iot-board .board-tool-button[aria-pressed='true']")
     expect(selected).toContain('background-color: var(--accent-surface);')
     expect(selected).not.toContain('box-shadow')
@@ -120,35 +123,6 @@ describe('board action dock hierarchy', () => {
     const changes = readFileSync(join(root, 'components/PlaybackChangesPanel.vue'), 'utf8')
     expect(changes.match(/data-testid="playback-change-automation"/g)).toHaveLength(1)
     expect(changes).not.toMatch(/<details(?:\s|>)/)
-  })
-
-  it('derives every dock mode decision from one list of available modes', () => {
-    // Which modes a viewport allows was written four times in four shapes: two hardcoded cycle arrays
-    // selected by `>= 1280`, a clamp restating the same threshold, a restore handler re-deriving the
-    // same answer, and a `>= 1280` ternary inline in the launcher's `aria-label`. They agreed only by
-    // coincidence, so a new width rule had to be remembered in three other places.
-    expect(board).toContain('const availableActionDockModes = computed<ActionDockMode[]>')
-
-    // The threshold appears once, in that list. The 720px fallback is a separate documented rule and
-    // lives in `actionDockMode`, which is why it is excluded rather than counted here.
-    const railWidthThresholds = board.match(/actionDockViewportWidth\.value\s*[<>]=?\s*1280/g) ?? []
-    expect(railWidthThresholds, 'the 1280px rail threshold should have one owner').toHaveLength(1)
-
-    // The launcher names the mode it restores instead of re-deriving it from a width.
-    expect(board).toContain(':aria-label="actionDockRestoreLabel"')
-    expect(board).not.toMatch(/:aria-label="actionDockViewportWidth >= 1280/)
-  })
-
-  it('names the set of workflow panels once', () => {
-    expect(board).toContain('const isWorkflowPanelOpen = computed(')
-    const listings = board.match(/showVerificationPanel\.value \|\|\s*\n\s*showSimulationPanel\.value/g) ?? []
-    expect(listings, 'the workflow-panel set should be enumerated once').toHaveLength(1)
-
-    const at = board.indexOf('const showCanvasEmptyState = computed(')
-    expect(at, 'showCanvasEmptyState should exist').toBeGreaterThan(-1)
-    const body = board.slice(at, at + board.slice(at).indexOf('\n)'))
-    expect(body, 'it should read the shared predicate').toContain('isWorkflowPanelOpen.value')
-    expect(body, 'it should not re-list the recommendation panels').not.toContain('showDeviceRecommendationPanel')
   })
 
   it('keeps the canvas map and its viewport controls visible together', () => {

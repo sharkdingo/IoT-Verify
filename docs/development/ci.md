@@ -2,7 +2,7 @@
 
 Two E2E tiers selected by affected code, plus a separate live-AI gate.
 
-Verified against code on 2026-10-30 for exclusive tier execution and build reuse. Sources: `.github/workflows/`,
+Verified against code on 2026-10-30 for test pruning, exclusive tier execution and build reuse. Sources: `.github/workflows/`,
 `.github/ci-risk-router.mjs`, `.github/check-ci-results.mjs`, `.github/scripts/run-e2e.sh`, `frontend/playwright.config.ts`,
 `frontend/scripts/run-e2e.mjs`, and `frontend/e2e/live-ai-no-mock.spec.ts`.
 
@@ -39,7 +39,7 @@ The smoke subset is tagged **per test** with `@smoke`, selected by
 [`playwright.config.ts`](../../frontend/playwright.config.ts), and used by both local and CI runners.
 The initial 2026-10-29 discovery found 330 cases: 312 ordinary cases and 18 live-AI cases.
 After retiring cosmetic tours and redundant matrix combinations, the ordinary suite has
-263 cases; the 18 live-AI cases remain separate. Smoke is included in the ordinary suite.
+251 cases; the 18 live-AI cases remain separate. Smoke is included in the ordinary suite.
 The former four-file smoke selection had grown to 61 cases; it now selects 10 critical cases
 (seven browser journeys and three HTTP integration checks):
 
@@ -89,6 +89,18 @@ A new browser case must identify a browser-only or cross-layer failure it detect
 language or viewport should require a specific layout or interaction risk; it is not an
 automatic multiplier for an existing persistence/solver case.
 
+Task cancellation/recovery and history reading-context journeys each switch language and
+viewport within the case. They run once per business flow instead of repeating that same
+coverage for four initial locale/width combinations. Every task kind still checks the real
+persisted outcome; navigation retains expanded evidence, scroll position and reachable controls.
+
+Unit checks retain target sizes, contrast, reduced motion and evidence presentation. The shared
+target-size spec owns navigation controls, including label-bearing actions and a nonempty narrow
+viewport scan. Retired checks pinned incidental borders, a fixed radius-token inventory,
+recommendation button colours, helper names and code spelling, or asserted a fixture's own values.
+Toolbar structure uses the existing AST check rather than a second wrapper count. Backend
+provider/tool-loop tests own combined text/tool responses; test discovery reads each source once.
+
 The backend retains the original 41-device Salus house and 23-device dynamic-home repair
 regressions, including every successive repair, protected response and initial-transient check.
 Their two enlarged variants only cloned existing lights, rules and specification conditions;
@@ -108,9 +120,9 @@ preservation. A future scale benchmark should have an explicit performance requi
 | Viewport/theme/language matrices and broad scene/repair audits | Affected E2E cases or Full CI |
 | External provider/tool behaviour | Explicit live-AI suite |
 
-The 32 source-only style test files declare the Node environment. The two style tests that
-actually use the DOM retain jsdom. Assertions and coverage are retained while avoiding a DOM
-environment for text parsing. The auth-budget advice tests were removed: they asserted diagnostic
+The 31 source-only style test files declare the Node environment. The two style tests that
+actually use the DOM retain jsdom. Switching the parsing environment does not remove assertions;
+the retired checks are described above. The auth-budget advice tests were removed: they asserted diagnostic
 prose, environment-variable spellings and a hardcoded registration estimate rather than harness
 behaviour. Actual auth fixture failures still include the backend response and setup advice.
 
@@ -186,7 +198,7 @@ already trusts:
 **Unrecognised paths escalate.** A new top-level directory has unbounded blast radius, so failing
 safe costs a slow pipeline while failing open ships something nothing validated.
 
-To add a rule, state *why* in the same commit. The test suite asserts every reason is non-trivial so
+To add a rule, state *why* in the same commit. Routing tests verify escalation and expected reasons so
 the list stays a standard rather than folklore.
 
 ## Tier 3 — Live AI (`live-ai-ci.yml`)

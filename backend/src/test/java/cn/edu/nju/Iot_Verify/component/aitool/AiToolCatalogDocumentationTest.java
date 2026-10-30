@@ -16,7 +16,6 @@ import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -92,18 +91,6 @@ class AiToolCatalogDocumentationTest {
         assertTrue(wrong.isEmpty(),
                 () -> "the catalog has " + actual + " tools but these documents disagree: " + wrong
                         + ". Update them, or update this list if a tool was added or removed.");
-    }
-
-    @Test
-    void toolDiscoveryExcludesTheAbstractBaseClass() throws IOException {
-        List<String> names = concreteTools().stream()
-                .map(path -> path.getFileName().toString())
-                .toList();
-
-        assertFalse(names.contains("AbstractAiTool.java"),
-                "AbstractAiTool implements AiTool but is abstract; counting it inflates the catalog");
-        assertTrue(names.stream().allMatch(name -> name.endsWith("Tool.java")),
-                () -> "every catalog entry should be a *Tool class, got: " + names);
     }
 
     /**

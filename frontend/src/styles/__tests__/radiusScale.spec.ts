@@ -38,8 +38,6 @@ const sources = () => {
   return files
 }
 
-const ROLES = ['marker', 'control', 'action', 'well', 'card', 'panel', 'surface', 'pill', 'resize']
-
 describe('radius scale', () => {
   it('declares every corner radius through a containment role', () => {
     const offenders: string[] = []
@@ -63,9 +61,4 @@ describe('radius scale', () => {
     expect(offenders).toEqual([])
   })
 
-  it('defines every role the scale advertises, and no radius token outside it', () => {
-    const base = readFileSync(join(SRC, 'styles/base.css'), 'utf8')
-    const defined = [...base.matchAll(/^\s*--iot-radius-([a-z]+):/gm)].map(m => m[1]).sort()
-    expect(defined).toEqual([...ROLES].sort())
-  })
 })

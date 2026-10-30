@@ -15,6 +15,22 @@ history into a technical spec. The spec content itself now lives under
 
 ## [Unreleased]
 
+### 2026-10-30 (duplicate test pruning)
+
+#### Removed
+
+- Twelve repeated ordinary E2E matrix cases whose lifecycle/navigation journeys already switch
+  language and viewport internally. Each task kind and history reading-context flow remains covered.
+- Redundant navigation-size, toolbar, routing and AI-response checks; self-asserting fixtures;
+  incidental borders, button colours, fixed radius-token inventory and helper-spelling assertions.
+  Test-source reachability and its nonempty-scan guard now share one traversal. English
+  singular/plural and Chinese multi-rule
+  removal confirmations retain cancellation and escaping coverage without a redundant fourth case.
+
+#### Changed
+
+- Source-only dock and shared rule-type checks use Node instead of starting a DOM environment.
+
 ### 2026-10-30 (CI execution cost)
 
 #### Changed

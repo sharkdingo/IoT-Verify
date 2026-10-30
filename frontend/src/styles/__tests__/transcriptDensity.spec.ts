@@ -63,13 +63,4 @@ describe('transcript density', () => {
     expect(block, 'the log stays capped in height').toMatch(/max-h-\d+/)
   })
 
-  it('leaves the section itself bordered, so the group is still scoped', () => {
-    // The fix is about *per-line* framing, not about removing structure. The enclosing section keeps its border,
-    // which is what tells a reader these lines belong together — one frame doing the job seven were doing.
-    const source = boardVue()
-    const anchor = source.indexOf("t('app.executionLogs')")
-    const sectionStart = source.lastIndexOf('<details', anchor)
-    const section = source.slice(sectionStart, anchor)
-    expect(section, 'the check-log section keeps a single enclosing border').toMatch(/border/)
-  })
 })

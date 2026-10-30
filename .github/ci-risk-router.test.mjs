@@ -50,17 +50,6 @@ test('documentation-only changes run nothing', () => {
   }
 });
 
-test('an ordinary source change runs fast CI only', () => {
-  const decision = route(
-    ['frontend/src/components/DeviceDialog.vue', 'frontend/src/assets/i18n.ts'],
-    { ref: 'refs/heads/feature/x' },
-  );
-  assert.equal(decision.fast, true);
-  assert.equal(decision.full, false, 'a UI component tweak should not need the full E2E suite');
-  assert.equal(decision.frontend, true);
-  assert.equal(decision.backend, false, 'no backend tree touched');
-});
-
 test('a single high-risk line escalates to full CI regardless of diff size', () => {
   const cases = [
     ['backend/src/main/java/cn/edu/nju/Iot_Verify/component/nusmv/generator/module/SmvMainModuleBuilder.java', 'NuSMV model generation'],
@@ -207,14 +196,6 @@ test('backend-only and frontend-only changes scope their suites', () => {
   assert.equal(frontendOnly.frontend, true);
   assert.equal(frontendOnly.backend, false);
   assert.equal(frontendOnly.full, false);
-});
-
-test('every high-risk rule states why it is high risk', () => {
-  // Without a stated standard the list becomes folklore and nobody can judge an addition.
-  const decision = route(['backend/pom.xml'], { ref: 'refs/heads/feature/x' });
-  for (const reason of decision.reasons) {
-    assert.ok(reason.length > 3, `reason too vague: ${reason}`);
-  }
 });
 
 test('every workflow action is pinned to a full commit sha with a version comment', () => {

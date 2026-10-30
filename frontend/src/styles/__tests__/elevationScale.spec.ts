@@ -135,25 +135,6 @@ describe('elevation scale', () => {
     expect(elevation).toBeLessThan(Number(tokens['--z-modal']))
   })
 
-  it('routes every dock button hint through the shared popper, not a clipped span', () => {
-    // Eight of the nine dock buttons showed no hint at all: their hand-rolled `<span>` sat inside the
-    // dock's own clipping context and was positioned outside it, so it was clipped away. Run History
-    // looked like the exception only because it was already wrapped in `HintTooltip`, which teleports
-    // to <body>. Locking the mechanism in place is what stops one button drifting back.
-    const board = readFileSync(join(SRC, 'views/Board.vue'), 'utf8')
-    const dockAt = board.indexOf('board-floating-actions board-action-dock')
-    expect(dockAt, 'the action dock should be found').toBeGreaterThan(-1)
-    const dock = board.slice(dockAt, board.indexOf('<TraceHistoryPanel', dockAt))
-
-    expect(dock, 'the clipped span must not come back').not.toContain('board-tool-tooltip')
-
-    const buttons = dock.match(/class="board-tool-button[^"]*"/g) ?? []
-    expect(buttons.length, 'the dock buttons should be found').toBeGreaterThanOrEqual(4)
-    // Functional tools keep hints; layout switches retain only their accessible names.
-    const wrappers = dock.match(/<HintTooltip/g) ?? []
-    expect(wrappers.length).toBeGreaterThanOrEqual(buttons.length)
-  })
-
   it('keeps every dock button inside the toolbar elevation', () => {
     // `open-verification-panel` carried Tailwind's `shadow-lg` while its siblings declared
     // `box-shadow: none` — one action floating above a strip they all belong to, inside a panel that is

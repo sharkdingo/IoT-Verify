@@ -59,10 +59,12 @@ class TestClassNamingReachabilityTest {
     @Test
     void everyClassCarryingTestMethodsIsReachableBySurefire() throws IOException {
         List<String> unreachable = new ArrayList<>();
+        int scanned = 0;
         try (Stream<Path> files = Files.walk(TEST_SOURCES)) {
             for (Path file : files.filter(path -> path.toString().endsWith(".java")).toList()) {
                 String source = Files.readString(file, StandardCharsets.UTF_8);
                 if (!declaresTestMethods(source)) continue;
+                scanned++;
                 String className = file.getFileName().toString().replace(".java", "");
                 if (!surefireWouldRunIt(className)) {
                     unreachable.add(file + " (class " + className + ")");
@@ -70,6 +72,10 @@ class TestClassNamingReachabilityTest {
             }
         }
 
+        // An empty scan must not certify that every test is reachable.
+        assertTrue(scanned > 100,
+                "Only " + scanned + " test-bearing sources found under " + TEST_SOURCES.toAbsolutePath()
+                        + "; the scan root is wrong, so the reachability check above proves nothing.");
         assertTrue(unreachable.isEmpty(),
                 "These classes declare test methods but match no surefire include pattern, so they "
                         + "never run and the suite stays green without them. Rename to *Test, or "
@@ -77,28 +83,4 @@ class TestClassNamingReachabilityTest {
                         + String.join("\n  ", unreachable));
     }
 
-    /**
-     * A guard that scans nothing passes for the wrong reason. If the walk root ever moves, this
-     * fails instead of silently exempting the entire suite.
-     */
-    @Test
-    void theScanActuallyReachesTheSuite() throws IOException {
-        long scanned;
-        try (Stream<Path> files = Files.walk(TEST_SOURCES)) {
-            scanned = files.filter(path -> path.toString().endsWith(".java"))
-                    .filter(path -> {
-                        try {
-                            return declaresTestMethods(
-                                    Files.readString(path, StandardCharsets.UTF_8));
-                        } catch (IOException e) {
-                            throw new IllegalStateException("Unreadable test source: " + path, e);
-                        }
-                    })
-                    .count();
-        }
-
-        assertTrue(scanned > 100,
-                "Only " + scanned + " test-bearing sources found under " + TEST_SOURCES.toAbsolutePath()
-                        + "; the scan root is wrong, so the reachability check above proves nothing.");
-    }
 }

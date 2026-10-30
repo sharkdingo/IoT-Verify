@@ -110,27 +110,6 @@ describe.each(combinations)('$palette $theme workspace tools', ({ palette, theme
   })
 })
 
-it('uses one quiet surface and a separate open-state marker for every toolbar entry', () => {
-  const host = document.createElement('div')
-  host.innerHTML = templates[0]
-  const buttons = host.querySelectorAll('.board-action-dock .board-tool-button')
-  expect(buttons).toHaveLength(4)
-  for (const button of buttons) {
-    expect(button.className).not.toMatch(/board-tool-button--|\bbg-|\bshadow-/)
-    expect(button.hasAttribute('style') || button.hasAttribute(':style')).toBe(false)
-    expect(button.hasAttribute(':class')).toBe(false)
-    expect(button.hasAttribute(':aria-pressed')).toBe(true)
-  }
-  expect(declarations('.iot-board .board-tool-button')['background-color']).toBe('var(--board-card-bg)')
-  expect(declarations('.iot-board .board-tool-button::before').opacity).toBe('0')
-  const marker = declarations(".iot-board .board-tool-button[aria-pressed='true']::before")
-  expect(marker.opacity).toBe('1')
-  expect(marker.transform).toBe('translateY(-50%) scaleY(1)')
-  css.walkRules(rule => {
-    expect(rule.selector).not.toMatch(/\.board-tool-button--(?:primary|evidence|view|suggestion)/)
-  })
-})
-
 it('preserves the open marker while suppressing toolbar movement under reduced motion', () => {
   const selectors = new Map<string, Record<string, string>>()
   css.walkAtRules('media', rule => {

@@ -86,12 +86,16 @@ describe('interactive target size floor', () => {
       '.board-nav-bar .nav-account-btn'
     ]) {
       const block = ruleBody('board.css', selector)
+      expect(block).toContain('width: var(--iot-target-min)')
+      expect(block).toContain('height: var(--iot-target-min)')
       const sizes = declaredSizes(block)
       expect(sizes.length, `${selector} must declare its target size`).toBeGreaterThan(0)
       for (const size of sizes) {
         expect(size.px, `${selector}: ${size.raw}`).toBeGreaterThanOrEqual(MINIMUM_REM * 16)
       }
     }
+    const actions = ruleBody('board.css', '.board-nav-bar .scene-action-btn,\n.board-nav-bar .ai-assistant-btn')
+    expect(actions).toContain('min-height: var(--iot-target-min)')
   })
 
   it('never grants a narrow viewport a larger target than the base', () => {
@@ -99,13 +103,16 @@ describe('interactive target size floor', () => {
     // exception. Found twice in this audit — here and in the playback overlay caps.
     const source = css('board.css')
     const offenders: string[] = []
+    let inspected = 0
     for (const block of source.match(/@media \(max-width: 1023\.98px\)[^{]*\{[\s\S]*?\n\}/g) || []) {
       for (const rule of block.matchAll(/(\.board-nav-bar [^{]+|\.iot-board \.board-tool-button[^{]*)\{([^}]*)\}/g)) {
         for (const size of declaredSizes(rule[2])) {
+          inspected += 1
           if (size.px < MINIMUM_REM * 16) offenders.push(`${rule[1].trim()} -> ${size.raw}`)
         }
       }
     }
+    expect(inspected, 'the narrow target scan must inspect declared sizes').toBeGreaterThan(0)
     expect(offenders).toEqual([])
   })
 

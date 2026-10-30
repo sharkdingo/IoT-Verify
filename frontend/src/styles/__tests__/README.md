@@ -18,7 +18,7 @@ Each was tested by injecting the violation it owns and confirming it goes red. R
 | `semanticColourOwnership` | yes | Tailwind hue names in **templates** |
 | `scrollOwnership` | yes | undefined `scrollbar-*` classes |
 | `buttonCursor` | yes, after repair | `board.css`, any selector depth |
-| `navTargetSize` | yes, after repair | narrow-viewport nav rules, rem **and** px |
+| `targetSizeFloor` | yes | shared targets, nav base/label-bearing actions and narrow overrides, rem **and** px |
 | `reducedMotion` | yes, after repair | the reduced-motion block's own braces |
 | `emptyGroupDisclosure` | yes, after repair | `v-for`-driven `<details>` |
 | `playbackOverlayCaps` | yes | both timeline height ceilings |
