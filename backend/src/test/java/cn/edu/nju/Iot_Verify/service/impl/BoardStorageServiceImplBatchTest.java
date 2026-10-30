@@ -2096,7 +2096,7 @@ class BoardStorageServiceImplBatchTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"name", "manifest", "both"})
+    @ValueSource(strings = {"name", "manifest"})
     void saveBoardBatch_reusesCanonicalTemplateAfterImportingNameWhitespace(String paddedField) {
         var serviceWithTemplates = new BoardStorageServiceImpl(
                 nodeRepo, environmentRepo, specRepo, ruleRepo, null, deviceTemplateRepo, null,

@@ -52,15 +52,6 @@ class GetTraceToolTest {
     }
 
     @Test
-    void execute_withoutLogin_shouldReturnErrorJson() throws Exception {
-        String result = tool.execute("{\"traceId\":1}");
-
-        JsonNode json = objectMapper.readTree(result);
-        assertEquals("UNAUTHORIZED", json.path("errorCode").asText());
-        assertEquals(401, json.path("status").asInt());
-    }
-
-    @Test
     void execute_withInvalidTraceId_shouldReturnValidationError() throws Exception {
         UserContextHolder.setUserId(1L);
         String result = tool.execute("{\"traceId\":0}");

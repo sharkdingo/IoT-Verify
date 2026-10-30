@@ -6,7 +6,6 @@ import { i18n } from '@/assets/i18n'
 import Landing from './Landing.vue'
 import { ElMessage } from 'element-plus'
 import { useAuth } from '@/stores/auth'
-import { useTheme } from '@/composables/useTheme'
 
 const authApi = vi.hoisted(() => ({
   login: vi.fn(),
@@ -241,7 +240,8 @@ describe('Landing authentication usability', () => {
     wrapper.unmount()
   })
 
-  it.each(['zh-CN', 'en'] as const)('keeps %s login prompts out of the form until validation needs them', async locale => {
+  it('keeps login prompts out of the form until validation needs them', async () => {
+    const locale = 'zh-CN'
     i18n.global.locale.value = locale
     const { wrapper } = await mountLanding()
     expect(wrapper.find('.auth-heading p').exists()).toBe(false)
@@ -266,7 +266,8 @@ describe('Landing authentication usability', () => {
     wrapper.unmount()
   })
 
-  it.each(['zh-CN', 'en'] as const)('keeps %s registration requirements and shows confirmation errors only when needed', async locale => {
+  it('keeps registration requirements and shows confirmation errors only when needed', async () => {
+    const locale = 'zh-CN'
     i18n.global.locale.value = locale
     const { wrapper } = await mountLanding('/?mode=register')
     expect(wrapper.get('#register-panel').findAll('small')).toHaveLength(3)
@@ -554,7 +555,8 @@ describe('Landing authentication usability', () => {
     } finally { wrapper.unmount() }
   })
 
-  it.each(['en', 'zh-CN'] as const)('distinguishes rejected login credentials from transport failures in %s', async locale => {
+  it('distinguishes rejected login credentials from transport failures', async () => {
+    const locale = 'en'
     i18n.global.locale.value = locale
     const cause = 'Account or password is incorrect'
     authApi.login.mockRejectedValueOnce({ response: { status: 401, data: { code: 401, message: cause } } })
@@ -650,27 +652,4 @@ describe('Landing authentication usability', () => {
     wrapper.unmount()
   })
 
-  it.each(['light', 'dark'] as const)('offers theme and language controls on the %s public surface', async theme => {
-    useTheme().setTheme(theme)
-    const { wrapper } = await mountLanding('/', false)
-
-    expect(document.documentElement.dataset.theme).toBe(theme)
-    expect(wrapper.find('.theme-toggle').exists()).toBe(true)
-    expect(wrapper.find('.language-toggle').exists()).toBe(true)
-    expect(wrapper.get('.public-header__brand').text()).toBe('IoT-Verify')
-    expect(wrapper.get('.product-mark').attributes('aria-hidden')).toBe('true')
-    wrapper.unmount()
-  })
-
-  it('keeps overview and form copy localized after switching to English', async () => {
-    i18n.global.locale.value = 'en'
-    const { wrapper } = await mountLanding('/')
-
-    expect(wrapper.get('.hero-title').text()).toContain('Map the system.')
-    expect(wrapper.get('.model-preview').text()).toContain('Example model')
-    await wrapper.get('.hero-cta').trigger('click')
-    await flushPromises()
-    expect(wrapper.get('.auth-submit').text()).toContain('Enter workspace')
-    wrapper.unmount()
-  })
 })

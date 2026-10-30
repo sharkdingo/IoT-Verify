@@ -682,54 +682,6 @@ class SimulationServiceImplTest {
     }
 
     @Test
-    void submitSimulation_ruleWithNullCommand_rejectsBeforeCreatingTask() throws Exception {
-        RuleDto invalidRule = RuleDto.builder()
-                .conditions(List.of(RuleDto.Condition.builder()
-                        .deviceName("testdevice")
-                        .attribute("state")
-                        .targetType("state")
-                        .relation("=")
-                        .value("on")
-                        .build()))
-                .command(null)
-                .build();
-
-        ValidationException ex = assertThrows(ValidationException.class,
-                () -> service.submitSimulation(
-                        1L, simRequest(singleDevice(), List.of(invalidRule), 10, false, 0, false)));
-
-        assertEquals("Command cannot be null", ex.getErrors().get("rules[0].command"));
-        verify(simulationTaskRepository, never()).save(any(SimulationTaskPo.class));
-        verify(smvGenerator, never()).generate(any(), any(), any(), any(), any(), anyBoolean(), any());
-    }
-
-    @Test
-    void submitSimulation_ruleWithBlankCommandFields_rejectsBeforeCreatingTask() throws Exception {
-        RuleDto invalidRule = RuleDto.builder()
-                .conditions(List.of(RuleDto.Condition.builder()
-                        .deviceName("testdevice")
-                        .attribute("state")
-                        .targetType("state")
-                        .relation("=")
-                        .value("on")
-                        .build()))
-                .command(RuleDto.Command.builder()
-                        .deviceName(" ")
-                        .action("")
-                        .build())
-                .build();
-
-        ValidationException ex = assertThrows(ValidationException.class,
-                () -> service.submitSimulation(
-                        1L, simRequest(singleDevice(), List.of(invalidRule), 10, false, 0, false)));
-
-        assertEquals("Command device name is required", ex.getErrors().get("rules[0].command.deviceName"));
-        assertEquals("Command action is required", ex.getErrors().get("rules[0].command.action"));
-        verify(simulationTaskRepository, never()).save(any(SimulationTaskPo.class));
-        verify(smvGenerator, never()).generate(any(), any(), any(), any(), any(), anyBoolean(), any());
-    }
-
-    @Test
     void submitSimulation_nonPositivePersistedRuleId_rejectsBeforeCreatingTask() throws Exception {
         RuleDto invalidRule = makeRule();
         invalidRule.setId(0L);

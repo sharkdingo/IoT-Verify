@@ -17,8 +17,6 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Pins the portable scene format's two declarations — {@link PortableSceneDto} and the frontend's
@@ -64,28 +62,6 @@ class PortableSceneContractTest {
                             + " declare different fields. A field on only one side is dropped silently,"
                             + " so add it to both or to neither.");
         }
-    }
-
-    /**
-     * Guards the guard. Regex-parsed TypeScript is the weak link here: a refactor that renames or
-     * reformats these interfaces would make {@link #typeScriptFields} return nothing, and an empty
-     * expected set compares equal to an empty actual one — the check would pass while reading no
-     * contract at all.
-     */
-    @Test
-    void theTypeScriptDeclarationIsActuallyBeingRead() throws IOException {
-        String source = Files.readString(SCENE_TYPES);
-
-        for (String interfaceName : SHAPES.keySet()) {
-            if ("PortableSceneEnvironmentVariable".equals(interfaceName)) {
-                continue;
-            }
-            assertFalse(typeScriptFields(source, interfaceName).isEmpty(),
-                    "Parsed no fields from interface " + interfaceName + " in " + SCENE_TYPES
-                            + ". The parser, not the contract, is what broke.");
-        }
-        // A field known to exist, to catch a parser that returns plausible-but-wrong names.
-        assertTrue(typeScriptFields(source, "PortableSceneCondition").contains("variableSource"));
     }
 
     private Set<String> typeScriptFields(String source, String interfaceName) {

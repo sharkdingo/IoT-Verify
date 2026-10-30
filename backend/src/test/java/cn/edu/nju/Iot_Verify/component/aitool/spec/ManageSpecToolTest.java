@@ -815,23 +815,6 @@ class ManageSpecToolTest {
     }
 
     @Test
-    void execute_whenJsonSerializationFails_shouldReturnStableErrorJson() throws Exception {
-        ObjectMapper failingMapper = mock(ObjectMapper.class);
-        when(failingMapper.writeValueAsString(any())).thenThrow(new JsonProcessingException("boom") {
-        });
-
-        ManageSpecTool fallbackTool = new ManageSpecTool(boardStorageService, failingMapper, destructiveActionGuard, reads.service);
-        UserContextHolder.clear();
-
-        String result = fallbackTool.execute("{}");
-
-        JsonNode json = new ObjectMapper().readTree(result);
-        assertEquals("User not logged in", json.path("error").asText());
-        assertEquals("UNAUTHORIZED", json.path("errorCode").asText());
-        assertEquals(401, json.path("status").asInt());
-    }
-
-    @Test
     void add_whenResponseSerializationFails_shouldReturnResultUnavailable() throws Exception {
         ObjectMapper failingMapper = spy(new ObjectMapper());
         doThrow(new RuntimeException("boom")).when(failingMapper).writeValueAsString(any());

@@ -11,7 +11,6 @@ import type { ModelRunSnapshot } from '@/types/modelSemantics'
 import type { Specification } from '@/types/spec'
 import actualI18n from '@/assets/i18n'
 import InfoTooltip from '@/components/common/InfoTooltip.vue'
-import HintTooltip from '@/components/common/HintTooltip.vue'
 
 const i18n = createI18n({
   legacy: false,
@@ -256,27 +255,6 @@ describe('TraceHistoryPanel two-layer semantics', () => {
     } finally { wrapper.unmount() }
   })
 
-  it('keeps the end of a scrolled list visible when a shorter viewport reflows it', async () => {
-    const wrapper = mount(TraceHistoryPanel, {
-      props: { ...baseProps, activeLayer: 'results', verificationRuns: [runWithSnapshot(31, snapshot(1))] },
-      global: { plugins: [i18n] }
-    })
-    try {
-      await flushPromises()
-      const body = wrapper.get<HTMLElement>('.history-body')
-      Object.defineProperties(body.element, { scrollHeight: { value: 300 }, clientHeight: { value: 200 } })
-      const bodyBounds = vi.spyOn(body.element, 'getBoundingClientRect')
-        .mockReturnValue({ top: 100, bottom: 300 } as DOMRect)
-      const line = wrapper.get('.history-card__scope').element
-      vi.spyOn(line, 'getBoundingClientRect').mockReturnValue({ top: 240, bottom: 260, height: 20 } as DOMRect)
-      body.element.scrollTop = 100
-      await body.trigger('scroll')
-      bodyBounds.mockReturnValue({ top: 100, bottom: 200 } as DOMRect)
-      window.dispatchEvent(new Event('resize'))
-      expect(body.element.scrollTop).toBe(200)
-    } finally { wrapper.unmount() }
-  })
-
   it('names deletion rather than playback while a pending deletion locks history actions', async () => {
     const previousLocale = actualI18n.global.locale.value
     const wrapper = mount(TraceHistoryPanel, {
@@ -375,28 +353,8 @@ describe('TraceHistoryPanel two-layer semantics', () => {
     } finally { wrapper.unmount(); actualI18n.global.locale.value = previousLocale }
   })
 
-  it('gives result refresh the same contextual hint as task refresh and follows language changes in empty history', async () => {
-    const previousLocale = actualI18n.global.locale.value
-    actualI18n.global.locale.value = 'zh-CN'
-    const wrapper = mount(TraceHistoryPanel, { props: { ...baseProps, activeLayer: 'results' }, global: { plugins: [actualI18n] } })
-    try {
-      for (const locale of ['zh-CN', 'en'] as const) {
-        actualI18n.global.locale.value = locale
-        await flushPromises()
-        const refresh = wrapper.get(`button[aria-label="${actualI18n.global.t('app.refresh')}"]`)
-        expect(refresh.attributes('title')).toBeUndefined()
-        expect(wrapper.findAllComponents(HintTooltip).some(hint => hint.props('content') === actualI18n.global.t('app.refresh'))).toBe(true)
-        const empty = wrapper.get('.history-empty')
-        expect(empty.text()).toContain(actualI18n.global.t('app.noRunResults'))
-        expect(empty.text()).toMatch(locale === 'en' ? /saved verification/i : /已保存的验证/)
-      }
-      await wrapper.setProps({ loadingResults: true })
-      expect(wrapper.get('.history-empty p').text()).toBe(actualI18n.global.t('app.loadingRunResults'))
-      expect(wrapper.text()).not.toContain(actualI18n.global.t('app.noRunResults'))
-    } finally { wrapper.unmount(); actualI18n.global.locale.value = previousLocale }
-  })
-
-  it.each(['en', 'zh-CN'])('keeps exploration outcomes, duration and contextual help consistent in %s', async locale => {
+  it('keeps exploration outcomes, duration and contextual help consistent', async () => {
+    const locale = 'en'
     const translations = createI18n({ legacy: false, locale, messages: {
       en: actualI18n.global.getLocaleMessage('en'), 'zh-CN': actualI18n.global.getLocaleMessage('zh-CN')
     } })
@@ -441,7 +399,8 @@ describe('TraceHistoryPanel two-layer semantics', () => {
     } finally { wrapper.unmount() }
   })
 
-  it.each(['zh-CN', 'en'] as const)('keeps %s empty results specific to the selected filter when language changes', async locale => {
+  it('keeps empty results specific to the selected filter when language changes', async () => {
+    const locale = 'zh-CN'
     const previousLocale = actualI18n.global.locale.value
     actualI18n.global.locale.value = locale
     const wrapper = mount(TraceHistoryPanel, {
@@ -452,26 +411,19 @@ describe('TraceHistoryPanel two-layer semantics', () => {
       expect(wrapper.get('.history-empty .font-semibold').text()).toBe(actualI18n.global.t('app.noFilteredRunResults', {
         kind: actualI18n.global.t('app.fuzzSearch')
       }))
-      actualI18n.global.locale.value = locale === 'en' ? 'zh-CN' : 'en'
+      actualI18n.global.locale.value = 'en'
       await flushPromises()
       expect(wrapper.get('.history-empty .font-semibold').text()).toBe(actualI18n.global.t('app.noFilteredRunResults', {
         kind: actualI18n.global.t('app.fuzzSearch')
       }))
       await wrapper.setProps({ resultFilter: 'all' })
       expect(wrapper.get('.history-empty .font-semibold').text()).toBe(actualI18n.global.t('app.noRunResults'))
+      await wrapper.setProps({ loadingResults: true })
+      expect(wrapper.get('.history-empty p').text()).toBe(actualI18n.global.t('app.loadingRunResults'))
+      expect(wrapper.text()).not.toContain(actualI18n.global.t('app.noRunResults'))
+      await wrapper.setProps({ loadingResults: false })
+      expect(wrapper.get('.history-empty .font-semibold').text()).toBe(actualI18n.global.t('app.noRunResults'))
     } finally { wrapper.unmount(); actualI18n.global.locale.value = previousLocale }
-  })
-
-  it('keeps the task-layer explanation in contextual help instead of repeating it in the empty state', async () => {
-    const wrapper = mount(TraceHistoryPanel, {
-      props: { ...baseProps, activeLayer: 'tasks' }, global: { plugins: [actualI18n] }
-    })
-    try {
-      expect(wrapper.get('.history-empty').findAll('p')).toHaveLength(1)
-      expect(wrapper.get('[data-testid="history-tasks-help"]').attributes('aria-label')).toBe(actualI18n.global.t('app.showHelpFor', {
-        topic: actualI18n.global.t('app.taskStatusLayer')
-      }))
-    } finally { wrapper.unmount() }
   })
 
   it('offers all results when another run type has saved history', async () => {
@@ -897,25 +849,6 @@ describe('TraceHistoryPanel two-layer semantics', () => {
   })
 
   const currentModels = { verification: 'a'.repeat(64), simulation: 'a'.repeat(64) }
-
-  it.each([
-    ['UNCHANGED', 'a'.repeat(64), currentModels, 'Matches current model'],
-    ['CHANGED', 'b'.repeat(64), currentModels, 'Board model changed'],
-    ['NOT_COMPARED', null, currentModels, 'Model comparison not recorded'],
-    ['UNAVAILABLE', 'a'.repeat(64), null, 'Current model comparison unavailable']
-  ] as const)('shows %s from model contents, independently of counts', (state, fingerprint, current, label) => {
-    const wrapper = mount(TraceHistoryPanel, {
-      props: { ...baseProps, activeLayer: 'results',
-        verificationRuns: [runWithSnapshot(60, { ...snapshot(2), modelFingerprint: fingerprint })],
-        currentModelFingerprints: current },
-      global: { plugins: [i18n] }
-    })
-    const notice = wrapper.get('[data-testid="verification-history-model-comparison-60"]')
-    expect(notice.attributes('data-state')).toBe(state)
-    expect(notice.text()).toContain(label)
-    expect(wrapper.get('[data-testid="run-details-verification-60"]').attributes('open')).toBeUndefined()
-    wrapper.unmount()
-  })
 
   it('warns during execution without turning a changed model into cancellation', () => {
     const task: VerificationTaskSummary = { id: 61, initiator: 'USER', status: 'RUNNING',

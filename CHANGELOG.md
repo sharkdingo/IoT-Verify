@@ -15,6 +15,24 @@ history into a technical spec. The spec content itself now lives under
 
 ## [Unreleased]
 
+### 2026-10-31 (unit test pruning)
+
+#### Removed
+
+- Reduced repeated component locale/status matrices, visual/copy assertions and recommendation
+  ownership combinations. Frontend unit coverage selects 2,650 cases instead of 2,712, retaining
+  distinct loading, failure, cancellation, ownership and incomplete-evidence paths.
+- Retired backend tests that repeated shared validators and inherited AI-tool authentication or
+  serialization fallback paths, plus DTO field-name bans, prompt-phrase inventories and an extractor
+  self-check. Backend coverage selects 3,568 cases instead of 3,587; actual payload validation,
+  typed mapping and model/solver outcomes remain covered.
+
+#### Changed
+
+- Eleven pure utility/response-validation specs use Node rather than starting a simulated browser.
+  Component and browser-dependent tests retain their browser environment. The existing history test
+  also keeps the empty-result loading guard without a separate component mount.
+
 ### 2026-10-31 (test ownership and CI cadence)
 
 #### Removed

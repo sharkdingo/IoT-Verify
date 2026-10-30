@@ -93,6 +93,12 @@ disabled rules and skipped specifications. AI identity tests keep every tool/fie
 representative inputs instead of repeating a lexical cross product. Documentation counts and
 source spelling are reviewed against code rather than separately scanned.
 
+Unit coverage follows the same ownership rule. Shared validator and inherited tool-authentication
+branches need representative caller coverage, rather than repeating the complete input matrix in
+every wrapper. Prompt checks retain JSON examples and schema/enum payload contracts; exact prose
+and blanket bans on future DTO field names are review concerns. Runtime mapping, rejected inputs, loading,
+uncertain writes and incomplete evidence remain test obligations.
+
 ## Choose the smallest useful check
 
 | Change or assertion | Appropriate check |
@@ -106,8 +112,10 @@ source spelling are reviewed against code rather than separately scanned.
 | Viewport/theme/language matrices and broad scene/repair audits | Affected E2E cases or Full CI |
 | External provider/tool behaviour | Explicit live-AI suite |
 
-The retained source-reading contracts use Node where possible; reduced-motion checks that
-exercise elements keep jsdom. `test:contracts` selects the focused UI contracts in the styles
+Pure utility/response-validation specs and retained source-reading contracts use Node where their
+import graph does not require browser globals. Component and browser-dependent checks keep jsdom;
+`boardInvalidation`, for example, opens its broadcast channel only when `window` exists.
+`test:contracts` selects the focused UI contracts in the styles
 directory. Their [scope](../../frontend/src/styles/__tests__/README.md) distinguishes source
 checks from rendered behavior.
 

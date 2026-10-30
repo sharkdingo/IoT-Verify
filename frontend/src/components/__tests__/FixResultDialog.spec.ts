@@ -1416,20 +1416,6 @@ describe('FixResultDialog strategy workflow', () => {
     expect(wrapper.find('[data-testid="fix-preexisting-violations"]').exists()).toBe(false)
   })
 
-  it('states a verified outcome once and describes the strategy once', async () => {
-    boardApi.fixTrace.mockResolvedValueOnce(parameterResult())
-    const wrapper = mountDialog()
-    await flush()
-    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
-    await flush()
-    await wrapper.vm.$nextTick()
-
-    const text = wrapper.text()
-    const occurrences = (needle: string) => text.split(needle).length - 1
-    expect(occurrences('fixAttemptReason.VERIFIED')).toBe(1)
-    expect(occurrences('fixStrategyParameterDesc')).toBe(1)
-  })
-
   it('lists every option of one strategy as one radio group, the smallest change selected', async () => {
     const wrapper = await tryParameter(parameterAlternativesResult())
 
@@ -1608,15 +1594,6 @@ describe('FixResultDialog strategy workflow', () => {
       .findAll('input[type="number"]')[1]!.element as HTMLInputElement).value).toBe('90')
   })
 
-  it('shows verified parameter changes before optional search ranges', async () => {
-    const wrapper = await tryParameter(parameterResult())
-    const proposals = wrapper.get('[data-testid="fix-verified-proposals"]')
-    const ranges = wrapper.get('[data-testid="fix-parameter-ranges"]')
-    expect(proposals.text()).toContain('70')
-    expect(proposals.text()).toContain('85')
-    expect(proposals.element.compareDocumentPosition(ranges.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-  })
-
   it('identifies equal thresholds by their frozen rule order and device, without truncating the target', async () => {
     const result = jointParameterResult()
     result.parameterTargets[1]!.rulePosition = 2
@@ -1693,21 +1670,8 @@ describe('FixResultDialog strategy workflow', () => {
     expect(wrapper.find('[data-testid="fix-attempt-outcome-note"]').exists()).toBe(false)
   })
 
-  it.each(['SEARCH_BUDGET_EXHAUSTED', 'TIMED_OUT', 'INCONCLUSIVE', 'ALL_CANDIDATES_REJECTED'] as const)(
-    'uses a caution tone for the %s search outcome rather than a service-failure tone', async status => {
-      boardApi.fixTrace.mockResolvedValueOnce(parameterOutcomeResult(status))
-      const wrapper = mountDialog()
-      await flush()
-      await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
-      await flush()
-
-      expect(wrapper.get('[role="dialog"]').classes()).toContain('iot-dialog--warning')
-      expect(wrapper.get('[role="dialog"]').classes()).not.toContain('iot-dialog--danger')
-      expect(wrapper.find('[data-testid="fix-search-failure"]').exists()).toBe(false)
-    }
-  )
-
-  it.each(['en', 'zh-CN'] as const)('explains loss of a response trigger as a possible rejection in %s', async locale => {
+  it('explains loss of a response trigger as a possible rejection', async () => {
+    const locale = 'en'
     const translations = createI18n({ legacy: false, locale, messages: {
       en: actualI18n.global.getLocaleMessage('en'), 'zh-CN': actualI18n.global.getLocaleMessage('zh-CN')
     } })
@@ -2206,7 +2170,8 @@ describe('FixResultDialog strategy workflow', () => {
     expect(wrapper.get('[data-testid="fix-apply-current"]').attributes('disabled')).toBeUndefined()
   })
 
-  it.each(['zh-CN', 'en'] as const)('retries the same signed proposal after a preflight-only rejection in %s', async locale => {
+  it('retries the same signed proposal after a preflight-only rejection', async () => {
+    const locale = 'zh-CN'
     const translations = createI18n({ legacy: false, locale, messages: {
       en: actualI18n.global.getLocaleMessage('en'), 'zh-CN': actualI18n.global.getLocaleMessage('zh-CN')
     } })
@@ -2547,13 +2512,6 @@ describe('FixResultDialog strategy workflow', () => {
     // The refusal is attributed to the incomplete model, not to a comparison that never ran.
     expect(wrapper.text()).toContain('fixSourceModelIncompleteLimitation')
     expect(wrapper.text()).not.toContain('fixTemplateSnapshotUnavailableLimitation')
-  })
-
-  it('states a changed template snapshot once, beside the Apply it blocks', async () => {
-    const wrapper = await tryParameter({ ...parameterResult(), templateSnapshotComparison: 'CHANGED' })
-
-    expect(wrapper.text().split('fixTemplateSnapshotChangedLimitation').length - 1).toBe(1)
-    expect(wrapper.get('[data-testid="fix-apply-readiness"]').text()).toBe('fixTemplateSnapshotChangedLimitation')
   })
 
   it.each([

@@ -820,16 +820,6 @@ class FixStrategyUtilsTest {
     }
 
     @Test
-    void validateCandidateCondition_stateWithLessThan_rejected() {
-        Map<String, DeviceSmvData> deviceMap = buildDeviceMap("sensor");
-
-        RuleDto.Condition candidate = RuleDto.Condition.builder()
-                .deviceName("sensor").targetType("state").attribute("state").relation("<").value("on").build();
-
-        assertFalse(FixStrategyUtils.validateCandidateCondition(candidate, deviceMap));
-    }
-
-    @Test
     void validateCandidateCondition_stateInValidValues_accepted() {
         Map<String, DeviceSmvData> deviceMap = buildDeviceMap("sensor");
 

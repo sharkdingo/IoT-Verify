@@ -1146,20 +1146,6 @@ describe('ChatView', () => {
     }
   })
 
-  it('renders an untitled backend session with the localized new-chat label', async () => {
-    chatApi.getSessionList.mockResolvedValue([{ ...session, title: null }])
-    chatStore.openChat()
-
-    const wrapper = mountChat()
-    await flushPromises()
-
-    const item = wrapper.get('[data-testid="chat-session-session-1"]')
-    expect(item.text()).toContain('新对话')
-    expect(item.text()).not.toContain('New Chat')
-
-    wrapper.unmount()
-  })
-
   it('shows localized feedback when an explicit new-session request is rejected', async () => {
     const errorMessage = vi.spyOn(feedback, 'notifyError').mockImplementation(() => undefined)
     chatApi.createSession.mockRejectedValue(new Error('session limit reached'))
@@ -2176,11 +2162,9 @@ describe('ChatView', () => {
     wrapper.unmount()
   })
 
-  it.each([
-    ['zh-CN', '查看执行记录', '未执行平台工具', '部分完成'],
-    ['en', 'View execution details', 'No platform tools ran', 'Partially completed']
-  ] as const)('keeps a PARTIAL session summary neutral while its messages retain evidence-based labels: %s',
-  async (locale, details, noTools, partial) => {
+  it('keeps a PARTIAL session summary neutral while its messages retain evidence-based labels',
+  async () => {
+    const [locale, details, noTools, partial] = ['zh-CN', '查看执行记录', '未执行平台工具', '部分完成'] as const
     i18n.global.locale.value = locale
     chatApi.getSessionList.mockResolvedValue([{
       ...session, latestTerminalMessageId: 4, latestExecutionStatus: 'PARTIAL'
@@ -3018,7 +3002,8 @@ describe('ChatView', () => {
     wrapper.unmount()
   })
 
-  it.each(['zh-CN', 'en'] as const)('explains an active conversation before stream acceptance in %s', async locale => {
+  it('explains an active conversation before stream acceptance', async () => {
+    const locale = 'zh-CN'
     const errorMessage = vi.spyOn(feedback, 'notifyError').mockImplementation(() => undefined)
     i18n.global.locale.value = locale
     chatApi.getSessionList.mockResolvedValue([session])

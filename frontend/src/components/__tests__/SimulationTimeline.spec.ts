@@ -1,8 +1,5 @@
 // @vitest-environment jsdom
 import { mount } from '@vue/test-utils'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
-import postcss from 'postcss'
 import { createI18n } from 'vue-i18n'
 import { i18n as appI18n } from '@/assets/i18n'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -178,31 +175,6 @@ const states = (prefix: string): TraceState[] => [
 ]
 
 describe('SimulationTimeline', () => {
-  it('keeps the playback heading in the timeline scroll flow', () => {
-    const sheet = postcss.parse(readFileSync(join(process.cwd(), 'src/styles/board.css'), 'utf8'))
-    const positionRules: string[] = []
-    sheet.walkRules(rule => {
-      if (rule.parent?.type !== 'root') return
-      const positions = rule.nodes.filter(node => node.type === 'decl' && node.prop === 'position')
-      if (positions.length) positionRules.push(`${rule.selector} { ${positions.join(';')} }`)
-    })
-    const style = document.createElement('style')
-    style.textContent = positionRules.join('\n')
-    document.head.appendChild(style)
-    const wrapper = mount(SimulationTimeline, {
-      attachTo: document.body,
-      props: { visible: true, modelSemantics: consistentSemantics, states: states('playback') },
-      global: { plugins: [i18n], stubs: { Teleport: true } }
-    })
-    try {
-      // A heading taller than the capped scrollport must scroll away from the seek controls.
-      expect(getComputedStyle(wrapper.get('header').element).position).not.toMatch(/^(sticky|fixed|absolute)$/)
-    } finally {
-      wrapper.unmount()
-      style.remove()
-    }
-  })
-
   beforeEach(() => {
     Element.prototype.scrollIntoView = vi.fn()
   })
@@ -245,7 +217,8 @@ describe('SimulationTimeline', () => {
     } finally { wrapper.unmount() }
   })
 
-  it.each(['en', 'zh-CN'] as const)('keeps saved-scene drift guidance across replay views in %s', async locale => {
+  it('keeps saved-scene drift guidance across replay views', async () => {
+    const locale = 'en'
     const previousLocale = appI18n.global.locale.value
     appI18n.global.locale.value = locale
     const wrapper = mount(SimulationTimeline, {
@@ -458,50 +431,6 @@ describe('SimulationTimeline', () => {
 
     expect(wrapper.get('[data-testid="simulation-runtime-attack"]').attributes('aria-label')).toBe('Current compromised points: 4')
     expect(wrapper.text()).not.toContain('Current compromised points: 9')
-  })
-
-  it('keeps the help concise instead of repeating the run scope', () => {
-    const wrapper = mount(SimulationTimeline, {
-      props: {
-        visible: true,
-        states: states('snapshot'),
-        isAttack: true,
-        attackBudget: 2,
-        enablePrivacy: false,
-        modelSemantics: {
-          attackPointUnit: 'BEHAVIOR_CHANGING_DEVICE_INSTANCE_OR_AUTOMATION_LINK',
-          attackSelectionPolicy: 'UP_TO_ATTACK_BUDGET_NONDETERMINISTIC',
-          attackEffects: [
-            'DECLARED_FALSIFIABLE_READING_NONDETERMINISTIC_WITHIN_DECLARED_DOMAIN',
-            'COMMAND_TO_COMPROMISED_TARGET_IS_DROPPED',
-            'COMMAND_ON_COMPROMISED_AUTOMATION_LINK_IS_DROPPED'
-          ],
-          modeledDeviceAttackPointCount: 3,
-          modeledFalsifiableReadingDeviceCount: 1,
-          modeledAutomationLinkAttackPointCount: 2,
-          modeledAttackPointCount: 5,
-          trustPropagationPolicy: 'TARGET_UNTRUSTED_IF_ALL_TRIGGER_SOURCES_UNTRUSTED',
-          privacyPropagationPolicy: 'NOT_MODELED',
-          labelPropagationScope: 'AUTOMATION_RULE_COMMANDS_ONLY',
-          environmentEvolutionEffects: [
-            'DECLARED_NUMERIC_RATES_AND_DEVICE_EFFECTS_WITHIN_DOMAIN',
-            'UNWRITTEN_DISCRETE_VALUES_NONDETERMINISTIC_WITHIN_DECLARED_DOMAIN',
-    'DEVICE_WRITTEN_DISCRETE_VALUES_HOLD_WHEN_NO_DECLARED_EFFECT_APPLIES'
-          ],
-          localVariableFallbackPolicy: 'STUTTER_WHEN_NO_DECLARED_EVOLUTION'
-        }
-      },
-      global: { plugins: [i18n], stubs: { Teleport: true } }
-    })
-
-    // Asserted on the help affordance's `text` prop, not on rendered output: these facts moved from a
-    // standing disclosure into an `InfoTooltip`, and `ElTooltip` renders its content only once opened,
-    // so `wrapper.text()` cannot see prose that is genuinely reachable.
-    const helpText = wrapper.findComponent({ name: 'InfoTooltip' }).props('text') as string
-    expect(helpText).toContain('Click or drag the timeline')
-    expect(helpText).not.toContain('Exhaustive up to')
-    expect(helpText).not.toContain('Labels propagate only')
-    expect(helpText).not.toContain('Model semantics unavailable')
   })
 
   it('does not infer attack mechanisms when persisted model semantics are unavailable', () => {

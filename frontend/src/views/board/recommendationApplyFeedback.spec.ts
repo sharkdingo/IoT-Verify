@@ -11,7 +11,6 @@ import { errorDetails } from '@/utils/userMessage'
 import { validateDeviceRuntimeConfig } from '@/utils/deviceRuntime'
 import { materializeRuleRecommendation, materializeSpecificationRecommendationConditions, RecommendationCandidateError } from '@/utils/recommendationMaterialization'
 import { REQUEST_LIMITS } from '@/constants/requestLimits'
-import i18n from '@/assets/i18n'
 
 const source = readFileSync(join(__dirname, '../Board.vue'), 'utf8')
 const extract = (start: string, end: string) => {
@@ -190,16 +189,6 @@ describe('production recommendation confirmation and candidate retirement', () =
 })
 
 describe('one-click recommendation application', () => {
-  it.each(['zh-CN', 'en'] as const)('gives each recommendation kind a distinct example in %s', locale => {
-    const messages = i18n.global.getLocaleMessage(locale) as any
-    const placeholders = ['device', 'rule', 'spec'].map(kind => {
-      const key = `${kind}RecommendationPlaceholder`
-      expect(source).toContain(`:placeholder="t('app.${key}')"`)
-      expect(messages.app[key]).toBeTruthy()
-      return messages.app[key]
-    })
-    expect(new Set(placeholders).size).toBe(3)
-  })
   for (const kind of ['rule', 'spec', 'device'] as const) {
     const prepare = () => {
       const state = setup()
@@ -235,7 +224,7 @@ describe('one-click recommendation application', () => {
       expect(writeFor(state, kind)).toHaveBeenCalledTimes(3)
     })
 
-    it.each([rejection, new Error('Disconnected')])(`${kind}: stops on a rejected or unknown second write`, async error => {
+    it.each(kind === 'rule' ? [rejection, new Error('Disconnected')] : [new Error('Disconnected')])(`${kind}: stops on a rejected or unknown second write`, async error => {
       const state = prepare()
       expect(state.applyAllRecommendations).toBeTypeOf('function')
       const write = writeFor(state, kind).getMockImplementation()!
@@ -285,7 +274,7 @@ describe('one-click recommendation application', () => {
       wrapper.unmount()
     })
 
-    it.each(['scene', 'account'])(`${kind}: does not continue after %s changes during a write`, async change => {
+    it.each(kind === 'rule' ? ['scene', 'account'] : ['account'])(`${kind}: does not continue after %s changes during a write`, async change => {
       const state = prepare()
       expect(state.applyAllRecommendations).toBeTypeOf('function')
       const write = writeFor(state, kind).getMockImplementation()!
@@ -362,16 +351,17 @@ describe('candidate apply failure ownership in production Board paths', () => {
       expect(writeFor(state, kind)).toHaveBeenCalledOnce()
       wrapper.unmount()
     })
-    it.each(['epoch', 'scene', 'account'])(`${kind}: does not attach a late rejection after %s changes`, async change => {
+    const rejectionOwnerChange = kind === 'rule' ? 'epoch' : kind === 'spec' ? 'scene' : 'account'
+    it(`${kind}: does not attach a late rejection after ${rejectionOwnerChange} changes`, async () => {
       const state = setup()
       let reject!: (error: unknown) => void
       writeFor(state, kind).mockReturnValue(new Promise((_, fail) => { reject = fail }))
       const submitted = submit(state, kind)
       await flushPromises()
       expect(writeFor(state, kind)).toHaveBeenCalledOnce()
-      if (change === 'epoch') state.retire()
-      if (change === 'scene') state.changeScene()
-      if (change === 'account') state.owner.token = 'session-B'
+      if (rejectionOwnerChange === 'epoch') state.retire()
+      if (rejectionOwnerChange === 'scene') state.changeScene()
+      if (rejectionOwnerChange === 'account') state.owner.token = 'session-B'
       reject(rejection)
       await submitted
       expect(state.recommendationApplyFailures[kind][0]).toBeUndefined()
@@ -392,7 +382,7 @@ describe('candidate apply failure ownership in production Board paths', () => {
       expect(state[`applied${kind === 'rule' ? 'Rule' : kind === 'spec' ? 'Spec' : 'Device'}Recommendations`].value.has(0)).toBe(true)
       expect(state.notifySuccess).not.toHaveBeenCalled()
     })
-    it.each(['epoch', 'scene', 'account'])(`${kind}: a late confirmed write keeps only its live account's canonical state after %s changes`, async change => {
+    it.each(kind === 'rule' ? ['account', 'scene'] : kind === 'spec' ? ['account', 'epoch'] : ['account'])(`${kind}: a late confirmed write keeps only its live account's canonical state after %s changes`, async change => {
       const state = setup()
       let resolve!: (value: unknown) => void
       writeFor(state, kind).mockReturnValue(new Promise(complete => { resolve = complete }))

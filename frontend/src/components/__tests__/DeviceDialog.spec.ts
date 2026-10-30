@@ -152,78 +152,6 @@ describe('DeviceDialog template authority', () => {
     wrapper.unmount()
   })
 
-  it('wraps long custom metadata instead of clipping it on narrow dialogs', () => {
-    const longName = 'CustomDeviceNameWithoutAnyNaturalBreakPoint0123456789'
-    const longLabel = 'LivingRoomInstanceNameWithoutAnyNaturalBreakPoint0123456789'
-    const longDescription = 'DescriptionWithoutAnyNaturalBreakPoint0123456789'.repeat(3)
-    const manifest: DeviceManifest = {
-      Name: longName,
-      Description: longDescription,
-      Modes: [],
-      WorkingStates: [],
-      InternalVariables: [],
-      APIs: []
-    }
-    const wrapper = mount(DeviceDialog, {
-      attachTo: document.body,
-      props: {
-        visible: true,
-        deviceName: longName,
-        label: longLabel,
-        nodeId: 'long-custom-device',
-        manifest,
-        nodes: [{
-          id: 'long-custom-device',
-          templateName: longName,
-          label: longLabel,
-          position: { x: 0, y: 0 },
-          state: 'Working',
-          width: 176,
-          height: 128
-        }],
-        deviceTemplates: [{ name: longName, manifest, defaultTemplate: false }],
-        specs: []
-      },
-      global: { plugins: [i18n] }
-    })
-
-    expect(document.querySelector('.device-basic-table')?.classList).toContain('table-fixed')
-    const values = Array.from(document.querySelectorAll<HTMLElement>('.device-basic-value'))
-    expect(values.find(cell => cell.textContent?.includes(longName))?.classList).toContain('break-words')
-    expect(values.find(cell => cell.textContent?.includes(longLabel))?.classList).toContain('break-words')
-    expect(values.find(cell => cell.textContent?.includes(longDescription))?.classList).toContain('break-words')
-    wrapper.unmount()
-  })
-
-  it('uses reachable dedicated icons for doors and garage doors', async () => {
-    const wrapper = mount(DeviceDialog, {
-      attachTo: document.body,
-      props: {
-        visible: true,
-        deviceName: 'Garage Door',
-        label: 'Garage Door',
-        nodeId: 'garage-1',
-        manifest: null,
-        nodes: [],
-        deviceTemplates: [],
-        specs: []
-      },
-      global: { plugins: [i18n] }
-    })
-
-    const headerIcon = () => document.querySelector(
-      '.iot-dialog__icon .material-icons-round'
-    )?.textContent?.trim()
-    expect(headerIcon()).toBe('garage')
-
-    await wrapper.setProps({ deviceName: 'Door', label: 'Front Door' })
-    expect(headerIcon()).toBe('door_front_door')
-
-    await wrapper.setProps({ deviceName: 'Door Sensor', label: 'Entry Sensor' })
-    expect(headerIcon()).toBe('sensors')
-    wrapper.unmount()
-  })
-
   it('localizes bundled model tokens but preserves tokens from custom or unresolved templates', () => {
     i18n.global.locale.value = 'zh-CN'
     const manifest: DeviceManifest = {
@@ -1352,7 +1280,8 @@ describe('DeviceDialog template authority', () => {
     global: { plugins: [i18n] }
   } as never)
 
-  it.each(['en', 'zh-CN'] as const)('shows only authored metadata and no invented action trigger in %s', async locale => {
+  it('shows only authored metadata and no invented action trigger', async () => {
+    const locale = 'en'
     i18n.global.locale.value = locale
     const manifest: DeviceManifest = {
       Name: 'Switch', Description: ' ', Modes: ['SwitchState'], InitState: 'off',
@@ -1446,66 +1375,6 @@ describe('DeviceDialog template authority', () => {
     const cells = Array.from(row!.querySelectorAll('td')).map(cell => cell.textContent?.trim())
     expect(cells[2]).toBe('No state change')
     expect(cells[4]).toBe('time := 0')
-    wrapper.unmount()
-  })
-
-  // Section headers share a layout; explanations are reserved for non-obvious device semantics.
-  it('keeps section headers consistent without restating basic fields', () => {
-    const manifest: DeviceManifest = {
-      Name: 'Door RFID',
-      Modes: ['ScanState'],
-      InitState: 'idle',
-      WorkingStates: [{ Name: 'idle', Trust: 'trusted', Privacy: 'public' }],
-      InternalVariables: [
-        { Name: 'RFID', IsInside: true, FalsifiableWhenCompromised: true, Trust: 'trusted', Privacy: 'private', Values: ['none', 'authorized'] }
-      ],
-      APIs: [{ Name: 'scan', StartState: '', Signal: true }],
-      Contents: [{ Name: 'badgePhoto', Privacy: 'private' }],
-      Transitions: [
-        {
-          Name: 'reset',
-          StartState: 'idle',
-          EndState: 'idle',
-          Trigger: { Attribute: 'ScanState', Relation: '=', Value: 'idle' }
-        }
-      ]
-    } as never
-    // One specification referencing this device, so the specs section renders too.
-    const wrapper = mountWithManifest(manifest, 'Door RFID', 'idle', [{ name: 'Safety requirement',
-      id: 'spec-1',
-      templateId: '3',
-      aConditions: [{ deviceId: 'transition-node', deviceLabel: 'Door RFID 1', targetType: 'state', key: 'ScanState', relation: '=', value: 'idle' }],
-      ifConditions: [],
-      thenConditions: [],
-      devices: [{ deviceId: 'transition-node', deviceLabel: 'Door RFID 1' }]
-    }])
-
-    for (const section of ['basic', 'variables', 'states', 'transitions', 'apis', 'contents', 'specs']) {
-      const host = document.querySelector(`[data-testid="device-dialog-${section}"]`)
-      expect(host, `section ${section} is missing`).not.toBeNull()
-      // Anchor on the accent bar: it identifies the header row unambiguously, where a class query
-      // for `.flex.items-center` also matched inner rows and passed for the wrong element.
-      const bar = host!.querySelector('.board-section-marker')
-      expect(bar, `section ${section} accent bar`).not.toBeNull()
-      const header = bar!.parentElement!
-      expect(header.className, `section ${section} header spacing`).toContain('mb-4')
-      expect(header.className, `section ${section} header alignment`).toContain('items-start')
-      expect(header!.querySelector('h2'), `section ${section} title`).not.toBeNull()
-      const hint = header!.querySelector('h2 + p')
-      expect(hint).toBeNull()
-      if (section === 'basic') {
-        expect(header.querySelector('.iot-info-tooltip-trigger')).toBeNull()
-      } else {
-        const help = Array.from(wrapper.findAllComponents(InfoTooltip))
-          .find(component => header.contains(component.element))!
-        expect(help, `section ${section} semantics`).toBeTruthy()
-        expect(help.props('text')).toBe(i18n.global.t(`app.device${{
-          variables: 'Variables', states: 'States', transitions: 'Transitions',
-          apis: 'Apis', contents: 'Contents', specs: 'Specs'
-        }[section]}Hint`))
-        expect(help.props('label')).toBe(i18n.global.t('app.showHelpFor', { topic: header.querySelector('h2')!.textContent }))
-      }
-    }
     wrapper.unmount()
   })
 

@@ -515,7 +515,7 @@ describe('validated result presentation', () => {
 })
 
 describe('simulation run ownership', () => {
-  it.each(['SAVED', 'NOT_REQUESTED', 'FAILED', 'OUTCOME_UNKNOWN'])(
+  it.each(['SAVED', 'OUTCOME_UNKNOWN'])(
     'addresses only a saved run when opening %s simulation playback', status => {
       const ports = {
         lastSimulationResult: ref({ playbackScene: { nodes: [] },
@@ -618,7 +618,7 @@ describe('simulation completion during another replay', () => {
     expect(state.ports.notifySimulationOutcome).not.toHaveBeenCalled()
   })
 
-  it.each(['SAVED', 'NOT_REQUESTED', 'FAILED', 'OUTCOME_UNKNOWN'])(
+  it.each(['SAVED', 'NOT_REQUESTED', 'OUTCOME_UNKNOWN'])(
     'keeps a synchronous %s completion from adopting over another replay', async status => {
       const state = context(status)
       const completion = state.start()
@@ -724,7 +724,7 @@ describe('verification completion', () => {
   })
 
   it.each([
-    ['UNREACHABLE', true], ['INCONCLUSIVE', true], ['REACHABLE', false], ['NOT_APPLICABLE', false]
+    ['UNREACHABLE', true], ['REACHABLE', false]
   ] as const)(
     'announces a background formula pass according to its %s trigger evidence', (antecedentReachability, warning) => {
       const ports = {

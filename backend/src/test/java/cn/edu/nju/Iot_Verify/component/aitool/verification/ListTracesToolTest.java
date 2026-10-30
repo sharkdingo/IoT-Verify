@@ -49,16 +49,6 @@ class ListTracesToolTest {
     }
 
     @Test
-    void execute_withoutLogin_shouldReturnErrorJson() throws Exception {
-        String result = tool.execute("{}");
-
-        JsonNode json = objectMapper.readTree(result);
-        assertEquals("User not logged in", json.path("error").asText());
-        assertEquals("UNAUTHORIZED", json.path("errorCode").asText());
-        assertEquals(401, json.path("status").asInt());
-    }
-
-    @Test
     void execute_withNoTrace_shouldReturnEmptySummary() throws Exception {
         UserContextHolder.setUserId(1L);
         when(verificationService.getRuns(1L)).thenReturn(List.of());

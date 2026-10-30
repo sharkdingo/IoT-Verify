@@ -255,14 +255,6 @@ class EditDeviceToolTest {
     }
 
     @Test
-    void edit_requiresLogin() throws Exception {
-        UserContextHolder.clear();
-        JsonNode json = objectMapper.readTree(tool.execute(
-                "{\"id\":\"d1\",\"field\":\"label\",\"label\":\"X\"}"));
-        assertEquals("UNAUTHORIZED", json.path("errorCode").asText());
-    }
-
-    @Test
     void editLayout_unchangedReportsNoChange() throws Exception {
         when(boardStorageService.getNodes(1L)).thenReturn(List.of(device("d1", "AC")));
         when(boardStorageService.updateNodeLayoutIfUnchanged(eq(1L), eq("d1"), any(), any()))

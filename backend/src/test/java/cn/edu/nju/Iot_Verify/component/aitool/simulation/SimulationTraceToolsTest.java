@@ -60,15 +60,6 @@ class SimulationTraceToolsTest {
     }
 
     @Test
-    void listSimulations_withoutLogin_shouldReturnErrorJson() throws Exception {
-        String result = listTool.execute("{}");
-
-        JsonNode json = objectMapper.readTree(result);
-        assertEquals("UNAUTHORIZED", json.path("errorCode").asText());
-        assertEquals(401, json.path("status").asInt());
-    }
-
-    @Test
     void listSimulations_withNoData_shouldReturnEmptySummary() throws Exception {
         UserContextHolder.setUserId(1L);
         when(simulationService.getUserSimulations(1L)).thenReturn(List.of());
