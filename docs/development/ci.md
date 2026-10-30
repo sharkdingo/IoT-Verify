@@ -2,7 +2,7 @@
 
 Two E2E tiers selected by affected code, plus a separate live-AI gate.
 
-Verified against code on 2026-10-30 for test pruning, exclusive tier execution and build reuse. Sources: `.github/workflows/`,
+Verified against code on 2026-10-31 for test ownership, weekly infrastructure checks and exclusive tier execution. Sources: `.github/workflows/`,
 `.github/ci-risk-router.mjs`, `.github/check-ci-results.mjs`, `.github/scripts/run-e2e.sh`, `frontend/playwright.config.ts`,
 `frontend/scripts/run-e2e.mjs`, and `frontend/e2e/live-ai-no-mock.spec.ts`.
 
@@ -37,13 +37,13 @@ download an artifact that no job created. Full-selected routes skip these Fast j
 
 The smoke subset is tagged **per test** with `@smoke`, selected by
 [`playwright.config.ts`](../../frontend/playwright.config.ts), and used by both local and CI runners.
-The ordinary suite selects 129 cases; the 18 live-AI cases remain separate. Smoke is included
-in the ordinary suite and selects 10 critical cases (seven browser journeys and three HTTP
-integration checks):
+The ordinary suite selects 113 cases; the 18 live-AI cases remain separate. Smoke is included
+in the ordinary suite and selects eight critical cases (seven browser journeys and one HTTP
+authentication check):
 
 | Spec | Protects |
 | :--- | :--- |
-| `error-contract` | REST error envelopes |
+| `error-contract` | Anonymous logout and account deletion are rejected over HTTP |
 | `board-recovery` | Failed layout-read recovery |
 | `canvas-runtime-environment` | One shared environment value across readers |
 | `ui-contracts` | Login returns to a private deep link |
@@ -67,9 +67,14 @@ Representative narrow/desktop, keyboard/pointer and language transitions exercis
 A second theme, viewport, language or example scene needs a distinct integration risk.
 
 Parsing, encodings, formula semantics, API validation and repair algorithms belong primarily
-to their unit/component/backend tests. Browser coverage keeps one GB18030 import lifecycle,
+to their unit/component/backend tests. Browser coverage keeps one GB18030 import/preview/persist journey,
 one complete author/simulate/verify/history journey and one reviewed repair/apply/undo journey.
 The cancellation and history-context cases switch language and viewport within the same run.
+Repeated error-envelope and credential-concurrency checks belong to backend tests. Smoke retains
+the actual HTTP authentication boundary for logout and account deletion; a separate HTTP case
+keeps the username/phone namespace boundary against real MySQL collation.
+Undo ordering, exhaustion and redo invalidation are tested at their backend/composable owners;
+browser cases retain rule and device deletion, cascades, reload and keyboard integration.
 Repeated solver scenarios, broad authority audits, all-example round trips, cosmetic tours and
 copy/geometry matrices are retired rather than maintained as browser obligations.
 
@@ -80,12 +85,13 @@ review still follows the [UI conventions](../guides/frontend-ui-conventions.md);
 coverage no longer promises every former visual or wording permutation.
 
 The backend retains real MySQL ownership/lease/undo checks, focused model/solver regressions,
-per-strategy repair tests and the cumulative shared-environment repair scenario. The Salus-house,
-dynamic-home, elderly-care initial/absent-effect and full-background camera repair variants are
-retired as large example/stress coverage. Smaller camera chains still check complete alternatives;
-forward verification directly rejects disabled rules and skipped specifications. AI identity tests
-keep every tool/field route with representative inputs instead of repeating a lexical cross product.
-Documentation counts and source spelling are reviewed against code rather than separately scanned.
+per-strategy repair tests and the cumulative shared-environment repair scenario. Broad example
+and repeated camera-removal tours are outside the automatic suite; the
+[acceptance guide](../guides/acceptance-demo.md) describes the retained solver scenarios.
+Smaller camera chains still check complete alternatives; forward verification directly rejects
+disabled rules and skipped specifications. AI identity tests keep every tool/field route with
+representative inputs instead of repeating a lexical cross product. Documentation counts and
+source spelling are reviewed against code rather than separately scanned.
 
 ## Choose the smallest useful check
 
@@ -136,7 +142,8 @@ opening a panel, so the resize handler cannot collapse it between the opener and
 The complete E2E suite, excluding live AI, runs against real infrastructure:
 
 - **`main`** — called by Fast CI for every landed commit, including documentation changes.
-- **Nightly (03:17 UTC)** — the only thing that catches decay in code nobody touched.
+- **Weekly (Sunday, 03:17 UTC)** — catches infrastructure decay without repeating the full gate daily
+  on an unchanged commit. Every main push still receives its own complete verdict.
 - **Manual dispatch** — release candidates, or re-checking a suspicious branch.
 - **High-risk branch pushes and pull requests** — called by Fast CI after routing.
 
@@ -285,7 +292,7 @@ as an artifact, which is reuse of a verified build rather than a stale one.
 Branch protection is a GitHub repository setting; workflow files do not establish
 which checks are required. The aggregate `Fast CI` job includes the reusable Full CI
 result on main and high-risk routes. Its success establishes that the selected validation
-completed. Nightly and manual Full CI runs remain independently visible.
+completed. Weekly and manual Full CI runs remain independently visible.
 
 ## Local equivalents
 
@@ -298,7 +305,7 @@ cd backend  && mvn test                       # backend suite
 cd frontend && npm run test:unit -- --run     # frontend unit
 cd frontend && npm run test:changed           # affected frontend tests during iteration
 cd frontend && npm run test:contracts         # CSS/template contracts, including their DOM cases
-cd frontend && npm run test:e2e               # 10 critical E2E cases (needs the test backend)
+cd frontend && npm run test:e2e               # critical smoke (needs the test backend)
 cd frontend && npm run test:e2e:full          # all non-live E2E, explicitly requested
 cd frontend && npm run test:e2e:live          # external-provider cases only
 ```

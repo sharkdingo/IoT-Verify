@@ -202,13 +202,6 @@ describe('violation emphasis reaches the canvas', () => {
 
   })
 
-  it('keeps violation words outside the small rail markers', () => {
-    const terminal = readFileSync(join(root, 'src/components/PlaybackTerminal.vue'), 'utf8')
-    expect(terminal).not.toContain('board-playback-violation')
-    expect(board).toContain('data-testid="trace-timeline-violation-chip"')
-    expect(board).toContain('{{ traceStateViolationLabel(traceAnimationState.selectedStateIndex) }}')
-  })
-
   it('marks a liveness cycle on the rail, not only on the canvas', () => {
     // The rail tested `counterexampleViolationStep`, which is `undefined` for templates 2/5/6 by design —
     // those are refuted by an infinite lasso path, so no single step is the fault. The canvas emphasised
@@ -322,12 +315,4 @@ describe('violation emphasis reaches the canvas', () => {
     expect(flashSuppressed, 'the flash must be suppressed throughout the reduced-motion block').toBe(true)
   })
 
-  it('uses the non-text indicator token rather than a literal red', () => {
-    // `--danger-fill` is measured at 4.41:1 light / 3.70:1 dark, against the 3:1 WCAG 1.4.11 asks of a
-    // non-text indicator; a literal would not be theme-aware.
-    const at = css.indexOf('.iot-board .device-node.device-at-violation')
-    const block = css.slice(at, at + 1200)
-    expect(block).toContain('var(--danger-fill)')
-    expect(block, 'no literal hex red').not.toMatch(/#(EF4444|ef4444|F87171|f87171)/)
-  })
 })

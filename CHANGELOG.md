@@ -15,6 +15,27 @@ history into a technical spec. The spec content itself now lives under
 
 ## [Unreleased]
 
+### 2026-10-31 (test ownership and CI cadence)
+
+#### Removed
+
+- Retired repeated browser-only viewport variants and backend-owned account/undo/error checks.
+  Ordinary E2E selects 113 cases instead of 129, including eight smoke cases. The GB18030
+  browser journey now checks import, preview, persisted security values and reload; dedicated
+  browser tests retain editing, deletion, cascades and undo integration. A focused HTTP case
+  retains fullwidth-username versus ASCII-phone identity routing against real MySQL.
+- Reduced frontend gesture/zoom/locale matrices and retired source-layout, naming, copy and
+  mirrored-algorithm assertions. Frontend coverage selects 2,712 cases instead of 2,783.
+- Retired repeated multi-violation/elderly-care camera-removal tours and the fire/climate/RFID
+  example matrix. Reduced repeated read-only AI narration streams; backend coverage selects
+  3,587 cases instead of 3,597. Focused solver, ownership, cancellation and timeout checks remain.
+
+#### Changed
+
+- Full CI's scheduled infrastructure check runs weekly on Sunday rather than daily. Main
+  pushes still run the complete gate, with manual runs available. Live-AI selection and
+  scheduling are unchanged.
+
 ### 2026-10-30 (focused regression coverage)
 
 #### Removed

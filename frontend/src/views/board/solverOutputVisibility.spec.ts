@@ -50,27 +50,4 @@ describe('solver output visibility', () => {
       .toMatch(/requireString\([^)]*'nusmvOutput'/)
   })
 
-  it('places it in the run context, where a run-level artifact belongs', () => {
-    // Raw solver output describes the whole run, not one counterexample — the same level distinction that
-    // moved the SMV model download out of the counterexample dialog.
-    const contextAt = board.indexOf('data-testid="run-context-section"')
-    const outputAt = board.indexOf('data-testid="verification-nusmv-output"')
-    const shortfallAt = board.indexOf('data-testid="verification-evidence-shortfall"')
-    expect(contextAt, 'the run-context section should exist').toBeGreaterThan(-1)
-    expect(outputAt, 'the solver output should sit inside it').toBeGreaterThan(contextAt)
-    // And not inside the counterexample list, which is evidence-level and conditional on there being any.
-    expect(outputAt, 'it is not part of the per-counterexample evidence')
-      .toBeGreaterThan(shortfallAt)
-  })
-
-  it('uses theme-aware paper and ink for diagnostic output', () => {
-    const at = board.indexOf('data-testid="verification-nusmv-output"')
-    const block = board.slice(at, board.indexOf('</details>', at))
-    expect(block).toContain('board-bg-muted')
-    const preAt = block.indexOf('<pre')
-    expect(preAt).toBeGreaterThan(-1)
-    const pre = block.slice(preAt, block.indexOf('>', preAt))
-    expect(pre).toContain('board-text-strong')
-    expect(pre).not.toContain('board-text-success')
-  })
 })

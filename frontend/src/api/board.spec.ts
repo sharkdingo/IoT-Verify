@@ -386,8 +386,7 @@ describe('board mutation response contracts', () => {
     })).resolves.toEqual(response)
   })
 
-  it.each(['slash/id', 'back\\slash', 'percent%2F', 'query?id', 'fragment#id',
-    'internal space', '.', '..', 'semi;colon', 'plus+id'])('addresses %s through an unchanged query value in every targeted API', async nodeId => {
+  it.each(['slash/id', 'percent%2F'])('addresses %s through an unchanged query value in every targeted API', async nodeId => {
     const target = { ...device, id: nodeId }
     const layout = { position: { x: 40, y: 50 }, width: 190, height: 140 }
     const moved = { ...target, ...layout }

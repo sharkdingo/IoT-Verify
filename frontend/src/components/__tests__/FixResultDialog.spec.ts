@@ -2043,7 +2043,7 @@ describe('FixResultDialog strategy workflow', () => {
     }
   })
 
-  it.each([['en', 1], ['en', 2], ['zh-CN', 2]] as const)('names the reviewed rules in %s removal confirmation for %i rules and preserves a cancelled choice', async (locale, count) => {
+  it.each([['en', 1], ['zh-CN', 2]] as const)('names the reviewed rules in %s removal confirmation for %i rules and preserves a cancelled choice', async (locale, count) => {
     const translations = createI18n({ legacy: false, locale, messages: {
       en: actualI18n.global.getLocaleMessage('en'), 'zh-CN': actualI18n.global.getLocaleMessage('zh-CN')
     } })

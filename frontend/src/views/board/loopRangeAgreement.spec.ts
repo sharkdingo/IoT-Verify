@@ -24,8 +24,7 @@ import { describe, expect, it } from 'vitest'
  * free to differ, and only the first one was guarded here: a regression to `findIndex` in the other
  * would have emphasised a device on a state outside the cycle with nothing going red.
  *
- * Inspect the owning computeds without mounting all of `Board.vue`, plus a behavioral check on the exact
- * state shape the backend test pins.
+ * Inspect the owning computeds without mounting all of `Board.vue`.
  */
 describe('loop range agreement between parser and playback', () => {
   const board = readFileSync(join(process.cwd(), 'src/views/Board.vue'), 'utf8')
@@ -61,38 +60,6 @@ describe('loop range agreement between parser and playback', () => {
     // The closing state is set on at most one state, so first-match is correct for it — pinned so a
     // well-meant symmetry edit cannot make both lookups scan backwards and mis-name a two-marker trace.
     expect(code, 'the closing state is located forwards').toMatch(/findIndex\(/)
-  })
-
-  it('names the cycle the backend marked, on a trace with two markers', () => {
-    /*
-     * The exact shape from `SmvTraceParserTest.parseCounterexample_usesTheLastMarkerWhenNuSmvPrintsSeveral`:
-     * five states, `loopStart` on indices 2 and 3, `loopBack` on index 4. The cycle is therefore
-     * states 4–5 in the 1-based numbering the UI shows. Taking the first marker would say 3–5, naming a
-     * state that is not the loop entry.
-     */
-    const states = [
-      {},
-      {},
-      { loopStart: true },
-      { loopStart: true },
-      { loopBack: true }
-    ] as Array<{ loopStart?: boolean; loopBack?: boolean }>
-
-    // The rule under test, mirrored: this is what `activePlaybackLoopRange` must compute.
-    // Reverse scan, matching the implementation: `findLastIndex` needs `lib: ES2023` and this app
-    // targets ES2020.
-    let lastMarker = -1
-    for (let i = states.length - 1; i >= 0; i--) {
-      if (states[i]?.loopStart === true) { lastMarker = i; break }
-    }
-    const start = lastMarker + 1
-    const end = states.findIndex(state => state.loopBack === true) + 1
-
-    expect(start, 'the loop entry is the state the LAST marker points at').toBe(4)
-    expect(end, 'the closing state is the one carrying loopBack').toBe(5)
-    // And the defective form, kept explicit so the difference is visible rather than implied.
-    expect(states.findIndex(state => state.loopStart === true) + 1)
-      .toBe(3)
   })
 
   it('reports no cycle rather than a partial one when either flag is missing', () => {

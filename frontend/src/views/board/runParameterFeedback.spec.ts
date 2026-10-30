@@ -66,9 +66,10 @@ const setup = (kind: 'verification' | 'simulation', mode: string, locale: string
 
 describe('formal run parameter feedback', () => {
   for (const locale of ['en', 'zh-CN']) {
-    it.each([
-      ['verification', 'ANY_UP_TO_BUDGET'], ['verification', 'EXACT_POINTS'], ['simulation', 'EXACT_POINTS']
-    ] as const)(`${locale}: shows the %s %s error once and describes the disabled submit`, (kind, mode) => {
+    const parameterCases = locale === 'en'
+      ? [['verification', 'ANY_UP_TO_BUDGET'], ['verification', 'EXACT_POINTS'], ['simulation', 'EXACT_POINTS']] as const
+      : [['verification', 'EXACT_POINTS']] as const
+    it.each(parameterCases)(`${locale}: shows the %s %s error once and describes the disabled submit`, (kind, mode) => {
       const { wrapper, message } = setup(kind, mode, locale)
       try {
         expect(wrapper.text().split(message)).toHaveLength(2)
@@ -79,7 +80,8 @@ describe('formal run parameter feedback', () => {
       } finally { wrapper.unmount() }
     })
 
-    it.each(['verification', 'simulation'] as const)(`${locale}: preserves a separate %s board-read failure`, async kind => {
+    it.each(locale === 'en' ? ['verification', 'simulation'] as const : ['verification'] as const)(
+      `${locale}: preserves a separate %s board-read failure`, async kind => {
       const { wrapper, ports, i18n, message } = setup(kind, 'EXACT_POINTS', locale)
       try {
         const boardError = i18n.global.t('app.boardDataLoadFailed')

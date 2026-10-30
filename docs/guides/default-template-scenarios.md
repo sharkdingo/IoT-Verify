@@ -4,9 +4,10 @@ These scenes exercise care, security, and comfort rules beyond the night-watch a
 file is a standard version 6 `iot-verify.board-scene` document that can be imported from
 the Board with its bundled and scene-specific template snapshots.
 
-Verified against code on 2026-10-25. Real NuSMV checks include `HouseholdEntrySceneNusmvTest`. Sources:
+Verified against code on 2026-10-31 for regression ownership. Sources:
 `scripts/generate-default-template-scenes.mjs`, the bundled manifests under
 `backend/src/main/resources/deviceTemplate/`, and
+`HouseholdEntrySceneNusmvTest`, `AwayModeUnlockSceneNusmvTest`, and
 `AcceptanceDemoScenarioNusmvTest`.
 
 The files are generated from the current bundled template manifests by
@@ -16,8 +17,10 @@ the embedded snapshots remain exact, self-contained import dependencies.
 
 ## Expected checks
 
-The counts below are deterministic for the generated files and were verified with real
-NuSMV. `Baseline` and `attack` show satisfied/violated specification counts.
+The counts below describe example measurements made with real NuSMV. `Baseline` and
+`attack` show satisfied/violated specification counts. The automatic suite keeps focused
+solver regressions rather than rechecking every example's verdict totals and animation.
+`ShippedSceneImportTest` still admits every example through the actual import parser.
 
 | Scene | Devices / environment / rules / specs | Baseline | Attack budget 1 | Verified repair |
 | :--- | :--- | :--- | :--- | :--- |
@@ -26,11 +29,11 @@ NuSMV. `Baseline` and `attack` show satisfied/violated specification counts.
 | [Climate conflict](../examples/default-climate-conflict-scene.json) | `2 / 2 / 2 / 4` | `2 / 2` | `1 / 3` | Remove the first hot-room heating rule; then `4 / 0` |
 | [RFID access](../examples/default-rfid-access-scene.json) | `3 / 0 / 2 / 5` | `5 / 0` | `2 / 3` | No baseline violation to repair |
 | [Away-mode unlock](../examples/default-away-mode-unlock-scene.json) | `5 / 3 / 3 / 6` | `4 / 2` | `1 / 5` | No accepted automatic repair: deletion would disable the previously reachable re-lock response |
-| [Elderly care](../examples/elderly-care-comprehensive-scene.json) | `14 / 8 / 12 / 12` | `11 / 1` | Not covered by this baseline regression | Removal is rejected because it would disable the photo-sending response trigger; a manual deletion makes the formulas pass vacuously |
+| [Elderly care](../examples/elderly-care-comprehensive-scene.json) | `14 / 8 / 12 / 12` | `11 / 1` | Not part of this example's measurement | Removal is rejected because it would disable the photo-sending response trigger; a manual deletion makes the formulas pass vacuously |
 
-Every baseline and attack run emits all requested properties with zero disabled rules
-and zero skipped specifications. Simulation produces an animatable trajectory for each
-scene. These results describe the formal model, not guaranteed physical-home behavior.
+The measured runs emitted all requested properties with zero disabled rules and zero
+skipped specifications, and simulations produced animatable trajectories. These results
+describe the formal model, not guaranteed physical-home behavior.
 
 ## Household entry
 
@@ -199,7 +202,7 @@ Regenerate the scene JSON after a bundled template changes:
 node scripts/generate-default-template-scenes.mjs
 ```
 
-Run the real-NuSMV regression for the acceptance, default-template, and care scenes:
+Run the focused real-NuSMV regressions for household entry and repair acceptance:
 
 ```bash
 cd backend

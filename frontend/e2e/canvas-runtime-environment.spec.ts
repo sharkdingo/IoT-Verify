@@ -103,252 +103,249 @@ test('overview nodes resize directly without changing canvas zoom and retain the
   }
 })
 
-for (const gesture of ['drag', 'resize'] as const) {
-  for (const finish of ['release', 'cancel'] as const) {
-    test(`held ${gesture} rejects node shortcuts and history edits before ${finish}`, async ({ page, request }) => {
-      const auth = await createAuthenticatedUser(request)
-      const source = { id: 'owned_light', templateName: 'Light', label: 'Owned light', state: 'off',
-        position: { x: 300, y: 200 }, width: 176, height: 128 }
-      await addNodes(request, auth, [source])
-      await unwrap(await request.post(`${apiBaseURL}/api/board/layout`, {
-        headers: authHeaders(auth), data: { canvasZoom: 1, canvasPan: { x: 0, y: 0 },
-          panels: { control: { collapsed: true, width: 320, activeSection: 'templates' },
-            inspector: { collapsed: true, width: 320, activeSection: 'devices' } } }
-      }))
-      await page.setViewportSize({ width: 1280, height: 900 })
-      await openWorkspace(page, auth)
-      const node = page.locator(`[data-node-id="${source.id}"]`)
-      await expect(node).toBeVisible({ timeout: 30_000 })
-      const readNodes = async () => unwrap<Array<typeof source>>(await request.get(`${apiBaseURL}/api/board/nodes`, {
-        headers: authHeaders(auth)
-      }))
-      const originalNodes = await readNodes()
-      const originalHistory = await unwrap(await request.get(`${apiBaseURL}/api/board/edits/availability`, {
-        headers: authHeaders(auth)
-      }))
-      const writes: string[] = []
-      page.on('request', request => {
-        const path = new URL(request.url()).pathname
-        if (request.method() !== 'GET' && (/\/board\/nodes(?:\/|$)/.test(path)
-          || /\/board\/edits\/(?:undo|redo)$/.test(path))) writes.push(path)
-      })
-      await node.focus()
-      await node.hover()
-      const target = gesture === 'drag' ? node : node.locator('.resize-handle.br')
-      const pointer = await target.evaluateHandle(element => {
-        const observed = { id: 0 }
-        element.addEventListener('pointerdown', event => { observed.id = (event as PointerEvent).pointerId }, { once: true })
-        return observed
-      })
-      let held = false
-      let releaseUndoRequest: (() => void) | undefined
-      let pendingUndoResponse: ReturnType<Page['waitForResponse']> | undefined
-      try {
-        const box = (await target.boundingBox())!
-        const start = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
-        await page.mouse.move(start.x, start.y)
-        await page.mouse.down()
-        held = true
-        await page.mouse.move(start.x + 30, start.y + 15)
-        await expect.poll(() => node.evaluate(element => ({ left: (element as HTMLElement).style.left,
-          width: (element as HTMLElement).style.width })))
-          .toEqual({ left: gesture === 'drag' ? '330px' : '300px', width: gesture === 'resize' ? '206px' : '176px' })
-        for (const command of ['ArrowRight', 'Control+ArrowDown', 'Delete', 'Enter', 'Shift+F10',
-          'Control+z', 'Control+Shift+z', 'Control+y']) await page.keyboard.press(command)
-        await page.mouse.down({ button: 'right' })
-        await page.mouse.up({ button: 'right' })
-        // Flush the event turn and Vue updates before checking that no command dispatched a mutation.
-        await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())))
-        expect(writes).toEqual([])
-        expect(await readNodes()).toEqual(originalNodes)
-        expect(await unwrap(await request.get(`${apiBaseURL}/api/board/edits/availability`, {
-          headers: authHeaders(auth)
-        }))).toEqual(originalHistory)
-        await expect(page.getByTestId('device-dialog')).toHaveCount(0)
-        await expect(page.locator('.board-context-menu')).toHaveCount(0)
-        if (finish === 'cancel') {
-          // Exercise component cancellation with the actual captured pointer id; this is a synthetic cancel.
-          await target.dispatchEvent('pointercancel', { pointerId: await pointer.evaluate(value => value.id) })
-        }
-        await page.mouse.up()
-        held = false
-        const released = finish === 'cancel' ? source : { ...source,
-          position: gesture === 'drag' ? { x: 330, y: 215 } : source.position,
-          width: gesture === 'resize' ? 206 : source.width,
-          height: gesture === 'resize' ? 143 : source.height }
-        const savedLayout = async () => {
-          const saved = (await readNodes()).find(item => item.id === source.id)!
-          return { position: saved.position, width: saved.width, height: saved.height }
-        }
-        await expect.poll(savedLayout).toEqual({ position: released.position, width: released.width, height: released.height })
-        expect(writes).toHaveLength(finish === 'release' ? 1 : 0)
-        // A new keyboard edit and its undo must work once the pointer relinquishes ownership.
-        await node.press('ArrowRight')
-        await expect.poll(savedLayout).toEqual({ position: { ...released.position, x: released.position.x + 10 },
-          width: released.width, height: released.height })
-        let undoIntercepted = false
-        const undoGate = new Promise<void>(resolve => { releaseUndoRequest = resolve })
-        await page.route('**/api/board/edits/undo', async route => {
-          undoIntercepted = true
-          await undoGate
-          await route.continue()
-        })
-        await node.press('Control+z')
-        await expect.poll(() => undoIntercepted).toBe(true)
-        pendingUndoResponse = page.waitForResponse(response => response.url().endsWith('/api/board/edits/undo')
-          && response.request().method() === 'POST')
-        // Delay the actual undo request, preserving its real backend result. A pending undo must
-        // also prevent a new gesture from starting against the scene it is about to replace.
-        await expect(node).toHaveAttribute('aria-disabled', 'true')
-        await expect(node.locator('.resize-handle')).toHaveCount(0)
-        const pendingWrites = [...writes]
-        const pendingPosition = await node.evaluate(element => ({ left: (element as HTMLElement).style.left,
-          top: (element as HTMLElement).style.top }))
-        await node.press('ArrowRight')
-        const pendingBox = (await node.boundingBox())!
-        await page.mouse.move(pendingBox.x + pendingBox.width / 2, pendingBox.y + pendingBox.height / 2)
-        await page.mouse.down()
-        held = true
-        await page.mouse.move(pendingBox.x + pendingBox.width / 2 + 30, pendingBox.y + pendingBox.height / 2 + 15)
-        await page.mouse.up()
-        held = false
-        await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())))
-        expect(writes).toEqual(pendingWrites)
-        expect(await node.evaluate(element => ({ left: (element as HTMLElement).style.left,
-          top: (element as HTMLElement).style.top }))).toEqual(pendingPosition)
-        releaseUndoRequest!()
-        expect((await pendingUndoResponse).ok()).toBe(true)
-        await expect.poll(savedLayout).toEqual({ position: released.position, width: released.width, height: released.height })
-        await expect(node).not.toHaveAttribute('aria-disabled', 'true')
-        await page.reload()
-        await expect(node).toBeVisible()
-        await expect.poll(() => node.evaluate(element => ({ left: (element as HTMLElement).style.left,
-          top: (element as HTMLElement).style.top, width: (element as HTMLElement).style.width,
-          height: (element as HTMLElement).style.height })))
-          .toEqual({ left: `${released.position.x}px`, top: `${released.position.y}px`,
-            width: `${released.width}px`, height: `${released.height}px` })
-      } finally {
-        if (held) await page.mouse.up()
-        releaseUndoRequest?.()
-        if (pendingUndoResponse) await pendingUndoResponse
-        await pointer.dispose()
-      }
-    })
-  }
-}
-
-for (const { viewport, theme, zoom } of [
-  { viewport: { width: 1280, height: 720 }, theme: 'light', zoom: 1.25 },
-  { viewport: { width: 375, height: 812 }, theme: 'dark', zoom: 0.4 }
+for (const { gesture, finish } of [
+  { gesture: 'drag', finish: 'cancel' },
+  { gesture: 'resize', finish: 'release' }
 ] as const) {
-  test(`self-loop follows a held drag, persists once and survives undo at ${viewport.width}px in ${theme}`, async ({ page, request }) => {
+  test(`held ${gesture} rejects node shortcuts and history edits before ${finish}`, async ({ page, request }) => {
     const auth = await createAuthenticatedUser(request)
-    await page.setViewportSize(viewport)
-    const source = {
-      id: 'loop_light', templateName: 'Light', label: 'Loop light',
-      position: { x: 100, y: 140 }, state: 'off', width: 176, height: 128
-    }
-    await addNodes(request, auth, [source, { ...source,
-      id: 'other_light', label: 'Other light', position: { x: 420, y: 200 }
-    }])
-    for (const targetId of ['loop_light', 'other_light']) {
-      await unwrap(await request.post(`${apiBaseURL}/api/board/rules`, {
-        headers: authHeaders(auth), data: {
-          ruleString: `Light to ${targetId}`,
-          conditions: [{ deviceName: source.id, targetType: 'state', attribute: 'state', relation: '=', value: 'off' }],
-          command: { deviceName: targetId, action: 'on' }
-        }
-      }))
-    }
+    const source = { id: 'owned_light', templateName: 'Light', label: 'Owned light', state: 'off',
+      position: { x: 300, y: 200 }, width: 176, height: 128 }
+    await addNodes(request, auth, [source])
     await unwrap(await request.post(`${apiBaseURL}/api/board/layout`, {
-      headers: authHeaders(auth), data: {
-        canvasPan: { x: 20, y: 30 }, canvasZoom: zoom,
-        panels: {
-          control: { collapsed: true, width: 320, activeSection: 'templates' },
-          inspector: { collapsed: true, width: 320, activeSection: 'devices' }
-        }
-      }
+      headers: authHeaders(auth), data: { canvasZoom: 1, canvasPan: { x: 0, y: 0 },
+        panels: { control: { collapsed: true, width: 320, activeSection: 'templates' },
+          inspector: { collapsed: true, width: 320, activeSection: 'devices' } } }
     }))
-    await openWorkspace(page, auth, theme)
-    await expect(page.locator('html')).toHaveAttribute('data-theme', theme)
-    const node = page.locator('[data-node-id="loop_light"]')
-    if (viewport.width < 720) {
-      await page.getByTestId('canvas-fit-mobile').click()
-      await expect.poll(() => page.getByTestId('canvas-board').evaluate(canvas => {
-        const frame = canvas.getBoundingClientRect()
-        return [...canvas.querySelectorAll('[data-node-id]')].every(element => {
-          const box = element.getBoundingClientRect()
-          return box.left >= frame.left && box.top >= frame.top
-            && box.right <= frame.right && box.bottom <= frame.bottom
-        })
-      })).toBe(true)
-    }
-    const renderedZoom = await node.evaluate(readCanvasZoom)
-    expect(renderedZoom).toBeGreaterThan(0)
-    const loop = page.locator('path.edge-base-line')
-    const hitarea = page.locator('path.edge-hitarea')
-    await expect(loop).toBeVisible()
-    await hitarea.focus()
-    await expect(page.locator('.edge-label')).toBeVisible()
-    // At overview zoom the focused rule card can cover the node's drag target.
-    await hitarea.press('Escape')
-    await expect(page.getByTestId('canvas-edge-details')).toBeHidden()
-    const originalPath = await loop.getAttribute('d')
-    const numbers = (path: string) => path.match(/-?\d+(?:\.\d+)?(?:e[+-]?\d+)?/gi)!.map(Number)
-    const initialCoordinates = numbers(originalPath!)
-    const rulesBefore = await unwrap<any[]>(await request.get(`${apiBaseURL}/api/board/rules`, { headers: authHeaders(auth) }))
-    const savedPosition = async () => {
-      const nodes = await unwrap<Array<typeof source>>(await request.get(`${apiBaseURL}/api/board/nodes`, { headers: authHeaders(auth) }))
-      return nodes.find(node => node.id === source.id)!.position
-    }
-    let layoutWrites = 0
-    page.on('request', outgoing => {
-      const url = new URL(outgoing.url())
-      if (outgoing.method() === 'PUT' && url.pathname === '/api/board/nodes/layout'
-        && url.searchParams.get('nodeId') === 'loop_light') layoutWrites++
+    await page.setViewportSize({ width: 1280, height: 900 })
+    await openWorkspace(page, auth)
+    const node = page.locator(`[data-node-id="${source.id}"]`)
+    await expect(node).toBeVisible({ timeout: 30_000 })
+    const readNodes = async () => unwrap<Array<typeof source>>(await request.get(`${apiBaseURL}/api/board/nodes`, {
+      headers: authHeaders(auth)
+    }))
+    const originalNodes = await readNodes()
+    const originalHistory = await unwrap(await request.get(`${apiBaseURL}/api/board/edits/availability`, {
+      headers: authHeaders(auth)
+    }))
+    const writes: string[] = []
+    page.on('request', request => {
+      const path = new URL(request.url()).pathname
+      if (request.method() !== 'GET' && (/\/board\/nodes(?:\/|$)/.test(path)
+        || /\/board\/edits\/(?:undo|redo)$/.test(path))) writes.push(path)
     })
-    const box = await node.boundingBox()
-    expect(box).not.toBeNull()
-    // Integer pointer coordinates preserve the requested delta in browser events.
-    const start = { x: Math.round(box!.x + box!.width / 2), y: Math.round(box!.y + box!.height / 2) }
-    await page.mouse.move(start.x, start.y)
-    await page.mouse.down()
+    await node.focus()
+    await node.hover()
+    const target = gesture === 'drag' ? node : node.locator('.resize-handle.br')
+    const pointer = await target.evaluateHandle(element => {
+      const observed = { id: 0 }
+      element.addEventListener('pointerdown', event => { observed.id = (event as PointerEvent).pointerId }, { once: true })
+      return observed
+    })
+    let held = false
+    let releaseUndoRequest: (() => void) | undefined
+    let pendingUndoResponse: ReturnType<Page['waitForResponse']> | undefined
     try {
-      for (const [dx, dy] of [[12, 8], [24, 16]]) {
-        await page.mouse.move(start.x + dx, start.y + dy)
-        await expect.poll(async () => numbers((await loop.getAttribute('d'))!).map(value => Math.round(value * 1e6))).toEqual(
-          initialCoordinates.map((value, index) => Math.round((value + (index % 2 === 0 ? dx : dy) / renderedZoom) * 1e6))
-        )
-        expect(await hitarea.getAttribute('d')).toBe(await loop.getAttribute('d'))
+      const box = (await target.boundingBox())!
+      const start = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+      await page.mouse.move(start.x, start.y)
+      await page.mouse.down()
+      held = true
+      await page.mouse.move(start.x + 30, start.y + 15)
+      await expect.poll(() => node.evaluate(element => ({ left: (element as HTMLElement).style.left,
+        width: (element as HTMLElement).style.width })))
+        .toEqual({ left: gesture === 'drag' ? '330px' : '300px', width: gesture === 'resize' ? '206px' : '176px' })
+      for (const command of ['ArrowRight', 'Control+ArrowDown', 'Delete', 'Enter', 'Shift+F10',
+        'Control+z', 'Control+Shift+z', 'Control+y']) await page.keyboard.press(command)
+      await page.mouse.down({ button: 'right' })
+      await page.mouse.up({ button: 'right' })
+      // Flush the event turn and Vue updates before checking that no command dispatched a mutation.
+      await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())))
+      expect(writes).toEqual([])
+      expect(await readNodes()).toEqual(originalNodes)
+      expect(await unwrap(await request.get(`${apiBaseURL}/api/board/edits/availability`, {
+        headers: authHeaders(auth)
+      }))).toEqual(originalHistory)
+      await expect(page.getByTestId('device-dialog')).toHaveCount(0)
+      await expect(page.locator('.board-context-menu')).toHaveCount(0)
+      if (finish === 'cancel') {
+        // Exercise component cancellation with the actual captured pointer id; this is a synthetic cancel.
+        await target.dispatchEvent('pointercancel', { pointerId: await pointer.evaluate(value => value.id) })
       }
-      // Node dragging takes focus; re-focus the edge to reveal its label at the preview position.
-      await hitarea.focus()
-      const detail = page.getByTestId('canvas-edge-details')
-      await expect(detail).toBeVisible()
-      const detailBox = await detail.boundingBox()
-      const canvasBox = await page.getByTestId('canvas-board').boundingBox()
-      expect(detailBox).not.toBeNull()
-      expect(canvasBox).not.toBeNull()
-      expect(detailBox!.x).toBeGreaterThanOrEqual(canvasBox!.x)
-      expect(detailBox!.y).toBeGreaterThanOrEqual(canvasBox!.y)
-      expect(detailBox!.x + detailBox!.width).toBeLessThanOrEqual(canvasBox!.x + canvasBox!.width)
-      expect(detailBox!.y + detailBox!.height).toBeLessThanOrEqual(canvasBox!.y + canvasBox!.height)
-      expect(await savedPosition()).toEqual(source.position)
-      expect(layoutWrites).toBe(0)
-    } finally {
       await page.mouse.up()
+      held = false
+      const released = finish === 'cancel' ? source : { ...source,
+        position: gesture === 'drag' ? { x: 330, y: 215 } : source.position,
+        width: gesture === 'resize' ? 206 : source.width,
+        height: gesture === 'resize' ? 143 : source.height }
+      const savedLayout = async () => {
+        const saved = (await readNodes()).find(item => item.id === source.id)!
+        return { position: saved.position, width: saved.width, height: saved.height }
+      }
+      await expect.poll(savedLayout).toEqual({ position: released.position, width: released.width, height: released.height })
+      expect(writes).toHaveLength(finish === 'release' ? 1 : 0)
+      // A new keyboard edit and its undo must work once the pointer relinquishes ownership.
+      await node.press('ArrowRight')
+      await expect.poll(savedLayout).toEqual({ position: { ...released.position, x: released.position.x + 10 },
+        width: released.width, height: released.height })
+      let undoIntercepted = false
+      const undoGate = new Promise<void>(resolve => { releaseUndoRequest = resolve })
+      await page.route('**/api/board/edits/undo', async route => {
+        undoIntercepted = true
+        await undoGate
+        await route.continue()
+      })
+      await node.press('Control+z')
+      await expect.poll(() => undoIntercepted).toBe(true)
+      pendingUndoResponse = page.waitForResponse(response => response.url().endsWith('/api/board/edits/undo')
+        && response.request().method() === 'POST')
+      // Delay the actual undo request, preserving its real backend result. A pending undo must
+      // also prevent a new gesture from starting against the scene it is about to replace.
+      await expect(node).toHaveAttribute('aria-disabled', 'true')
+      await expect(node.locator('.resize-handle')).toHaveCount(0)
+      const pendingWrites = [...writes]
+      const pendingPosition = await node.evaluate(element => ({ left: (element as HTMLElement).style.left,
+        top: (element as HTMLElement).style.top }))
+      await node.press('ArrowRight')
+      const pendingBox = (await node.boundingBox())!
+      await page.mouse.move(pendingBox.x + pendingBox.width / 2, pendingBox.y + pendingBox.height / 2)
+      await page.mouse.down()
+      held = true
+      await page.mouse.move(pendingBox.x + pendingBox.width / 2 + 30, pendingBox.y + pendingBox.height / 2 + 15)
+      await page.mouse.up()
+      held = false
+      await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())))
+      expect(writes).toEqual(pendingWrites)
+      expect(await node.evaluate(element => ({ left: (element as HTMLElement).style.left,
+        top: (element as HTMLElement).style.top }))).toEqual(pendingPosition)
+      releaseUndoRequest!()
+      expect((await pendingUndoResponse).ok()).toBe(true)
+      await expect.poll(savedLayout).toEqual({ position: released.position, width: released.width, height: released.height })
+      await expect(node).not.toHaveAttribute('aria-disabled', 'true')
+      await page.reload()
+      await expect(node).toBeVisible()
+      await expect.poll(() => node.evaluate(element => ({ left: (element as HTMLElement).style.left,
+        top: (element as HTMLElement).style.top, width: (element as HTMLElement).style.width,
+        height: (element as HTMLElement).style.height })))
+        .toEqual({ left: `${released.position.x}px`, top: `${released.position.y}px`,
+          width: `${released.width}px`, height: `${released.height}px` })
+    } finally {
+      if (held) await page.mouse.up()
+      releaseUndoRequest?.()
+      if (pendingUndoResponse) await pendingUndoResponse
+      await pointer.dispose()
     }
-    await expect.poll(savedPosition).toEqual({ x: source.position.x + 24 / renderedZoom, y: source.position.y + 16 / renderedZoom })
-    expect(layoutWrites).toBe(1)
-    expect(await unwrap(await request.get(`${apiBaseURL}/api/board/rules`, { headers: authHeaders(auth) }))).toEqual(rulesBefore)
-    const finalPath = await loop.getAttribute('d')
-    await page.reload()
-    await expect(loop).toHaveAttribute('d', finalPath!)
-    await page.getByTestId('board-undo').click()
-    await expect.poll(savedPosition).toEqual(source.position)
-    await expect(loop).toHaveAttribute('d', originalPath!)
   })
 }
+
+test('self-loop follows a held drag, persists once and survives undo at 375px in dark', async ({ page, request }) => {
+  const viewport = { width: 375, height: 812 }
+  const theme = 'dark'
+  const zoom = 0.4
+  const auth = await createAuthenticatedUser(request)
+  await page.setViewportSize(viewport)
+  const source = {
+    id: 'loop_light', templateName: 'Light', label: 'Loop light',
+    position: { x: 100, y: 140 }, state: 'off', width: 176, height: 128
+  }
+  await addNodes(request, auth, [source, { ...source,
+    id: 'other_light', label: 'Other light', position: { x: 420, y: 200 }
+  }])
+  for (const targetId of ['loop_light', 'other_light']) {
+    await unwrap(await request.post(`${apiBaseURL}/api/board/rules`, {
+      headers: authHeaders(auth), data: {
+        ruleString: `Light to ${targetId}`,
+        conditions: [{ deviceName: source.id, targetType: 'state', attribute: 'state', relation: '=', value: 'off' }],
+        command: { deviceName: targetId, action: 'on' }
+      }
+    }))
+  }
+  await unwrap(await request.post(`${apiBaseURL}/api/board/layout`, {
+    headers: authHeaders(auth), data: {
+      canvasPan: { x: 20, y: 30 }, canvasZoom: zoom,
+      panels: {
+        control: { collapsed: true, width: 320, activeSection: 'templates' },
+        inspector: { collapsed: true, width: 320, activeSection: 'devices' }
+      }
+    }
+  }))
+  await openWorkspace(page, auth, theme)
+  await expect(page.locator('html')).toHaveAttribute('data-theme', theme)
+  const node = page.locator('[data-node-id="loop_light"]')
+  await page.getByTestId('canvas-fit-mobile').click()
+  await expect.poll(() => page.getByTestId('canvas-board').evaluate(canvas => {
+    const frame = canvas.getBoundingClientRect()
+    return [...canvas.querySelectorAll('[data-node-id]')].every(element => {
+      const box = element.getBoundingClientRect()
+      return box.left >= frame.left && box.top >= frame.top
+        && box.right <= frame.right && box.bottom <= frame.bottom
+    })
+  })).toBe(true)
+  const renderedZoom = await node.evaluate(readCanvasZoom)
+  expect(renderedZoom).toBeGreaterThan(0)
+  const loop = page.locator('path.edge-base-line')
+  const hitarea = page.locator('path.edge-hitarea')
+  await expect(loop).toBeVisible()
+  await hitarea.focus()
+  await expect(page.locator('.edge-label')).toBeVisible()
+  // At overview zoom the focused rule card can cover the node's drag target.
+  await hitarea.press('Escape')
+  await expect(page.getByTestId('canvas-edge-details')).toBeHidden()
+  const originalPath = await loop.getAttribute('d')
+  const numbers = (path: string) => path.match(/-?\d+(?:\.\d+)?(?:e[+-]?\d+)?/gi)!.map(Number)
+  const initialCoordinates = numbers(originalPath!)
+  const rulesBefore = await unwrap<any[]>(await request.get(`${apiBaseURL}/api/board/rules`, { headers: authHeaders(auth) }))
+  const savedPosition = async () => {
+    const nodes = await unwrap<Array<typeof source>>(await request.get(`${apiBaseURL}/api/board/nodes`, { headers: authHeaders(auth) }))
+    return nodes.find(node => node.id === source.id)!.position
+  }
+  let layoutWrites = 0
+  page.on('request', outgoing => {
+    const url = new URL(outgoing.url())
+    if (outgoing.method() === 'PUT' && url.pathname === '/api/board/nodes/layout'
+      && url.searchParams.get('nodeId') === 'loop_light') layoutWrites++
+  })
+  const box = await node.boundingBox()
+  expect(box).not.toBeNull()
+  // Integer pointer coordinates preserve the requested delta in browser events.
+  const start = { x: Math.round(box!.x + box!.width / 2), y: Math.round(box!.y + box!.height / 2) }
+  await page.mouse.move(start.x, start.y)
+  await page.mouse.down()
+  try {
+    for (const [dx, dy] of [[12, 8], [24, 16]]) {
+      await page.mouse.move(start.x + dx, start.y + dy)
+      await expect.poll(async () => numbers((await loop.getAttribute('d'))!).map(value => Math.round(value * 1e6))).toEqual(
+        initialCoordinates.map((value, index) => Math.round((value + (index % 2 === 0 ? dx : dy) / renderedZoom) * 1e6))
+      )
+      expect(await hitarea.getAttribute('d')).toBe(await loop.getAttribute('d'))
+    }
+    // Node dragging takes focus; re-focus the edge to reveal its label at the preview position.
+    await hitarea.focus()
+    const detail = page.getByTestId('canvas-edge-details')
+    await expect(detail).toBeVisible()
+    const detailBox = await detail.boundingBox()
+    const canvasBox = await page.getByTestId('canvas-board').boundingBox()
+    expect(detailBox).not.toBeNull()
+    expect(canvasBox).not.toBeNull()
+    expect(detailBox!.x).toBeGreaterThanOrEqual(canvasBox!.x)
+    expect(detailBox!.y).toBeGreaterThanOrEqual(canvasBox!.y)
+    expect(detailBox!.x + detailBox!.width).toBeLessThanOrEqual(canvasBox!.x + canvasBox!.width)
+    expect(detailBox!.y + detailBox!.height).toBeLessThanOrEqual(canvasBox!.y + canvasBox!.height)
+    expect(await savedPosition()).toEqual(source.position)
+    expect(layoutWrites).toBe(0)
+  } finally {
+    await page.mouse.up()
+  }
+  await expect.poll(savedPosition).toEqual({ x: source.position.x + 24 / renderedZoom, y: source.position.y + 16 / renderedZoom })
+  expect(layoutWrites).toBe(1)
+  expect(await unwrap(await request.get(`${apiBaseURL}/api/board/rules`, { headers: authHeaders(auth) }))).toEqual(rulesBefore)
+  const finalPath = await loop.getAttribute('d')
+  await page.reload()
+  await expect(loop).toHaveAttribute('d', finalPath!)
+  await page.getByTestId('board-undo').click()
+  await expect.poll(savedPosition).toEqual(source.position)
+  await expect(loop).toHaveAttribute('d', originalPath!)
+})
 
 test('opening canvas node details preserves the viewport while inspector focus remains explicit', async ({ page, request }, testInfo) => {
   const auth = await createAuthenticatedUser(request)

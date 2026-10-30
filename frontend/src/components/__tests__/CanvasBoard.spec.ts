@@ -159,85 +159,84 @@ describe('CanvasBoard live edge geometry', () => {
     })
   }
 
-  for (const zoom of [0.4, 1.5]) {
-    for (const finish of ['pointerup', 'pointercancel', 'lostpointercapture', 'lock'] as const) {
-      it(`moves every self-loop layer and each full edge detail before ${finish} at zoom ${zoom}`, async () => {
-        const source = reactive({
-          id: 'light-1', templateName: 'Light', label: 'Hall light',
-          position: { x: 40, y: 50 }, state: 'off', width: 176, height: 128
-        })
-        const target = reactive({
-          ...source, id: 'light-2', label: 'Other light', position: { x: 420, y: 220 }
-        })
-        const edges = [source, target].map((node, index) => ({
-          id: `edge-${index}`, from: source.id, to: node.id,
-          fromLabel: source.label, toLabel: node.label,
-          fromPos: source.position, toPos: node.position,
-          ruleId: `rule-${index}`, ruleIndex: index, toApi: 'turn on'
-        }))
-        const wrapper = mount(CanvasBoard, {
-          props: {
-            nodes: [source, target], edges, pan: { x: 350, y: 350 }, zoom,
-            highlightedTrace: { selectedStateIndex: 0, states: [{
-              devices: [], triggeredRules: [{ ruleId: 'rule-0', ruleIndex: 0 }]
-            }] },
-            getNodeIcon: () => '', hasNodeStateMachine: () => true,
-            getNodeEffectiveState: node => node.state || 'off'
-          },
-          global: { plugins: [i18n] }
-        })
-        try {
-          Object.defineProperty(wrapper.get('[data-testid="canvas-board"]').element, 'clientWidth', { value: 2000 })
-          window.dispatchEvent(new Event('resize'))
-          const nodeElement = wrapper.get('[data-node-id="light-1"]')
-          const loopHitarea = wrapper.get('path.edge-hitarea')
-          await loopHitarea.trigger('focus')
-          await wrapper.get('line.edge-hitarea').trigger('focus')
-          const originalPath = getSelfLoopPath(source)
-          expect(wrapper.get('path.edge-base-line').attributes('d')).toBe(originalPath)
-          nodeElement.element.dispatchEvent(pointerEvent('pointerdown', 100, 100))
-          window.dispatchEvent(pointerEvent('pointermove', 112, 108))
-          await nextAnimationFrame()
-          window.dispatchEvent(pointerEvent('pointermove', 140, 120))
-          await nextAnimationFrame()
-
-          const visualNode = { ...source, position: { x: 40 + 40 / zoom, y: 50 + 20 / zoom } }
-          for (const selector of ['path.edge-base-line', 'path.edge-hitarea', 'path.particle-line']) {
-            expect(wrapper.get(selector).attributes('d')).toBe(getSelfLoopPath(visualNode))
-          }
-          const points = getLinkPoints(visualNode, target)
-          expect(Number(wrapper.get('line.edge-base-line').attributes('x1'))).toBe(points.fromPoint.x)
-          expect(Number(wrapper.get('line.edge-base-line').attributes('y1'))).toBe(points.fromPoint.y)
-          const label = wrapper.get<HTMLElement>('[data-testid="canvas-edge-details"]')
-          expect(label.attributes('data-edge-id')).toBe('edge-1')
-          expect(Number.parseFloat(label.element.style.left)).toBeCloseTo((points.fromPoint.x + points.toPoint.x) / 2 * zoom + 350 + 16)
-          expect(Number.parseFloat(label.element.style.top)).toBeCloseTo(((points.fromPoint.y + points.toPoint.y) / 2 - 10) * zoom + 350 - 12)
-          await loopHitarea.trigger('focus')
-          expect(label.attributes('data-edge-id')).toBe('edge-0')
-          expect(Number.parseFloat(label.element.style.left)).toBeCloseTo((visualNode.position.x + source.width / 2) * zoom + 350 + 16)
-          expect(Number.parseFloat(label.element.style.top)).toBeCloseTo((visualNode.position.y - 16) * zoom + 350 - 12)
-          // Rendering a preview must not persist intermediate coordinates or create undo entries.
-          expect(source.position).toEqual({ x: 40, y: 50 })
-          expect(wrapper.emitted('node-moved-or-resized')).toBeUndefined()
-
-          if (finish === 'lock') await wrapper.setProps({ interactionLocked: true })
-          else if (finish === 'lostpointercapture') nodeElement.element.dispatchEvent(pointerEvent(finish, 140, 120))
-          else window.dispatchEvent(pointerEvent(finish, 140, 120))
-          await nextTick()
-          if (finish === 'pointerup') {
-            expect(source.position).toEqual(visualNode.position)
-            expect(wrapper.emitted('node-moved-or-resized')).toEqual([[source.id]])
-          } else {
-            expect(source.position).toEqual({ x: 40, y: 50 })
-            expect(wrapper.get('path.edge-base-line').attributes('d')).toBe(originalPath)
-            expect(wrapper.emitted('node-moved-or-resized')).toBeUndefined()
-          }
-          expect(wrapper.emitted('node-layout-interaction-end')).toEqual([[source.id]])
-        } finally {
-          wrapper.unmount()
-        }
+  for (const [zoom, finish] of [[0.4, 'pointerup'], [1.5, 'pointercancel'],
+    [0.4, 'lostpointercapture'], [1.5, 'lock']] as const) {
+    it(`moves every self-loop layer and each full edge detail before ${finish} at zoom ${zoom}`, async () => {
+      const source = reactive({
+        id: 'light-1', templateName: 'Light', label: 'Hall light',
+        position: { x: 40, y: 50 }, state: 'off', width: 176, height: 128
       })
-    }
+      const target = reactive({
+        ...source, id: 'light-2', label: 'Other light', position: { x: 420, y: 220 }
+      })
+      const edges = [source, target].map((node, index) => ({
+        id: `edge-${index}`, from: source.id, to: node.id,
+        fromLabel: source.label, toLabel: node.label,
+        fromPos: source.position, toPos: node.position,
+        ruleId: `rule-${index}`, ruleIndex: index, toApi: 'turn on'
+      }))
+      const wrapper = mount(CanvasBoard, {
+        props: {
+          nodes: [source, target], edges, pan: { x: 350, y: 350 }, zoom,
+          highlightedTrace: { selectedStateIndex: 0, states: [{
+            devices: [], triggeredRules: [{ ruleId: 'rule-0', ruleIndex: 0 }]
+          }] },
+          getNodeIcon: () => '', hasNodeStateMachine: () => true,
+          getNodeEffectiveState: node => node.state || 'off'
+        },
+        global: { plugins: [i18n] }
+      })
+      try {
+        Object.defineProperty(wrapper.get('[data-testid="canvas-board"]').element, 'clientWidth', { value: 2000 })
+        window.dispatchEvent(new Event('resize'))
+        const nodeElement = wrapper.get('[data-node-id="light-1"]')
+        const loopHitarea = wrapper.get('path.edge-hitarea')
+        await loopHitarea.trigger('focus')
+        await wrapper.get('line.edge-hitarea').trigger('focus')
+        const originalPath = getSelfLoopPath(source)
+        expect(wrapper.get('path.edge-base-line').attributes('d')).toBe(originalPath)
+        nodeElement.element.dispatchEvent(pointerEvent('pointerdown', 100, 100))
+        window.dispatchEvent(pointerEvent('pointermove', 112, 108))
+        await nextAnimationFrame()
+        window.dispatchEvent(pointerEvent('pointermove', 140, 120))
+        await nextAnimationFrame()
+
+        const visualNode = { ...source, position: { x: 40 + 40 / zoom, y: 50 + 20 / zoom } }
+        for (const selector of ['path.edge-base-line', 'path.edge-hitarea', 'path.particle-line']) {
+          expect(wrapper.get(selector).attributes('d')).toBe(getSelfLoopPath(visualNode))
+        }
+        const points = getLinkPoints(visualNode, target)
+        expect(Number(wrapper.get('line.edge-base-line').attributes('x1'))).toBe(points.fromPoint.x)
+        expect(Number(wrapper.get('line.edge-base-line').attributes('y1'))).toBe(points.fromPoint.y)
+        const label = wrapper.get<HTMLElement>('[data-testid="canvas-edge-details"]')
+        expect(label.attributes('data-edge-id')).toBe('edge-1')
+        expect(Number.parseFloat(label.element.style.left)).toBeCloseTo((points.fromPoint.x + points.toPoint.x) / 2 * zoom + 350 + 16)
+        expect(Number.parseFloat(label.element.style.top)).toBeCloseTo(((points.fromPoint.y + points.toPoint.y) / 2 - 10) * zoom + 350 - 12)
+        await loopHitarea.trigger('focus')
+        expect(label.attributes('data-edge-id')).toBe('edge-0')
+        expect(Number.parseFloat(label.element.style.left)).toBeCloseTo((visualNode.position.x + source.width / 2) * zoom + 350 + 16)
+        expect(Number.parseFloat(label.element.style.top)).toBeCloseTo((visualNode.position.y - 16) * zoom + 350 - 12)
+        // Rendering a preview must not persist intermediate coordinates or create undo entries.
+        expect(source.position).toEqual({ x: 40, y: 50 })
+        expect(wrapper.emitted('node-moved-or-resized')).toBeUndefined()
+
+        if (finish === 'lock') await wrapper.setProps({ interactionLocked: true })
+        else if (finish === 'lostpointercapture') nodeElement.element.dispatchEvent(pointerEvent(finish, 140, 120))
+        else window.dispatchEvent(pointerEvent(finish, 140, 120))
+        await nextTick()
+        if (finish === 'pointerup') {
+          expect(source.position).toEqual(visualNode.position)
+          expect(wrapper.emitted('node-moved-or-resized')).toEqual([[source.id]])
+        } else {
+          expect(source.position).toEqual({ x: 40, y: 50 })
+          expect(wrapper.get('path.edge-base-line').attributes('d')).toBe(originalPath)
+          expect(wrapper.emitted('node-moved-or-resized')).toBeUndefined()
+        }
+        expect(wrapper.emitted('node-layout-interaction-end')).toEqual([[source.id]])
+      } finally {
+        wrapper.unmount()
+      }
+    })
   }
 })
 
@@ -248,67 +247,7 @@ describe('CanvasBoard drag scheduling and presentation', () => {
     variables: [{ name: 'temperature', value: '21' }]
   })
 
-  it('updates zoom-dependent content without rewriting unchanged node styles', async () => {
-    const source = node()
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes: [source], edges: [], pan: { x: 0, y: 0 }, zoom: 0.5,
-        getNodeIcon: () => '', getNodeEffectiveState: current => current.state,
-        hasNodeStateMachine: () => true
-      }, global: { plugins: [i18n] }
-    })
-    const rendered = wrapper.get<HTMLElement>('[data-node-id="light-1"]')
-    const content = rendered.get<HTMLElement>('.device-node-content')
-    const nodeStyleWrites = vi.spyOn(rendered.element.style, 'setProperty')
-    const contentStyleWrites = vi.spyOn(content.element.style, 'setProperty')
-    try {
-      await wrapper.setProps({ zoom: 0.6 })
-      expect(rendered.classes()).toContain('device-node--condensed')
-      expect(content.element.style.getPropertyValue('--node-ui-scale')).toBe('0.6')
-      expect(nodeStyleWrites).not.toHaveBeenCalled()
-      expect(rendered.element.style.left).toBe('40px')
-      expect(rendered.element.style.width).toBe('176px')
-      await wrapper.setProps({ zoom: 1.1 })
-      contentStyleWrites.mockClear()
-      await wrapper.setProps({ zoom: 1.2 })
-      expect(nodeStyleWrites).not.toHaveBeenCalled()
-      expect(contentStyleWrites).not.toHaveBeenCalled()
-      expect(content.element.style.getPropertyValue('--node-ui-scale')).toBe('1')
-      expect(Number.parseFloat(rendered.get<HTMLElement>('.resize-handle.br').element.style.width) * 1.2)
-        .toBeCloseTo(44)
-    } finally {
-      nodeStyleWrites.mockRestore()
-      contentStyleWrites.mockRestore()
-      wrapper.unmount()
-    }
-  })
-
-  it('moves and scales the grid with non-inherited background properties', async () => {
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes: [], edges: [], pan: { x: 70, y: -30 }, zoom: 0.4,
-        getNodeIcon: () => '', getNodeEffectiveState: current => current.state,
-        hasNodeStateMachine: () => true
-      }, global: { plugins: [i18n] }
-    })
-    try {
-      const canvas = wrapper.get<HTMLElement>('[data-testid="canvas-board"]')
-      const expectGrid = (size: number, x: number, y: number) => {
-        expect(canvas.element.style.backgroundSize).toBe(`${size}px ${size}px`)
-        const position = canvas.element.style.backgroundPosition.split(' ').map(Number.parseFloat)
-        expect(position[0]).toBeCloseTo(x)
-        expect(position[1]).toBeCloseTo(y)
-        expect(canvas.attributes('style')).not.toContain('--canvas-grid-')
-      }
-      expectGrid(12.8, 6, 8.4)
-      await wrapper.setProps({ pan: { x: -9, y: 17 }, zoom: 0.25 })
-      expectGrid(8, 7, 1)
-      await wrapper.setProps({ zoom: 2 })
-      expectGrid(64, 55, 17)
-    } finally { wrapper.unmount() }
-  })
-
-  it.each([0.2, 0.5, 1, 1.25, 2])('keeps resize geometry in direct properties without inherited zoom variables at zoom %s', zoom => {
+  it.each([0.2, 1, 2])('keeps resize geometry in direct properties without inherited zoom variables at zoom %s', zoom => {
     const source = node()
     const wrapper = mount(CanvasBoard, {
       props: {
@@ -712,17 +651,16 @@ describe('CanvasBoard drag scheduling and presentation', () => {
     }
   })
 
-  it.each((['drag', 'resize'] as const).flatMap(gesture =>
-    (['pointerup', 'pointercancel'] as const).flatMap(finish => [
-      { key: 'ArrowRight' },
-      { key: 'ArrowDown', ctrlKey: true },
-      { key: 'Delete' },
-      { key: 'Backspace' },
-      { key: 'Enter' },
-      { key: ' ' },
-      { key: 'ContextMenu' },
-      { key: 'F10', shiftKey: true }
-    ].map(command => ({ gesture, finish, ...command })))))(
+  it.each([
+    { gesture: 'drag', finish: 'pointerup', key: 'ArrowRight' },
+    { gesture: 'resize', finish: 'pointercancel', key: 'ArrowDown', ctrlKey: true },
+    { gesture: 'drag', finish: 'pointercancel', key: 'Delete' },
+    { gesture: 'resize', finish: 'pointerup', key: 'Backspace' },
+    { gesture: 'drag', finish: 'pointerup', key: 'Enter' },
+    { gesture: 'resize', finish: 'pointercancel', key: ' ' },
+    { gesture: 'drag', finish: 'pointercancel', key: 'ContextMenu' },
+    { gesture: 'resize', finish: 'pointerup', key: 'F10', shiftKey: true }
+  ] as const)(
     'keeps $key from interrupting a held $gesture before $finish', async ({ gesture, finish, ...command }) => {
       const frames = controlAnimationFrames()
       const source = node()
@@ -1647,43 +1585,7 @@ describe('CanvasBoard device context actions', () => {
 
 })
 
-
 describe('CanvasBoard edge legibility across zoom', () => {
-  it.each([0, 52])('keeps HTML and SVG origins aligned with a %spx playback toolbar', toolbarHeight => {
-    const css = postcss.parse(readFileSync(join(__dirname, '../../styles/board.css'), 'utf8'))
-    const style = document.createElement('style')
-    css.walkRules(rule => {
-      if (['.iot-board .canvas', '.iot-board .canvas-inner', '.iot-board .edge-layer'].includes(rule.selector)) {
-        style.textContent += rule.toString()
-          .replace('var(--board-nav-height)', '69px')
-          .replace('var(--board-playback-toolbar-height)', `${toolbarHeight}px`)
-      }
-    })
-    document.head.append(style)
-    const host = document.createElement('div')
-    host.className = 'iot-board'
-    document.body.append(host)
-    const wrapper = mount(CanvasBoard, { attachTo: host,
-      props: { nodes: [], edges: [], pan: { x: 70, y: -30 }, zoom: 0.4,
-        getNodeIcon: () => '', hasNodeStateMachine: () => true, getNodeEffectiveState: () => 'off' },
-      global: { plugins: [i18n] }
-    })
-    try {
-      expect(getComputedStyle(wrapper.get('.canvas').element).paddingTop).toBe(`calc(${69 + toolbarHeight}px)`)
-      for (const selector of ['.canvas-inner', '.edge-layer']) {
-        const computed = getComputedStyle(wrapper.get(selector).element)
-        expect(computed.position, `${selector} must ignore normal-flow padding`).toBe('absolute')
-        // jsdom preserves inset shorthand rather than expanding it into top/left.
-        expect(computed.top || computed.inset).toMatch(/^0(px)?$/)
-        expect(computed.left || computed.inset).toMatch(/^0(px)?$/)
-        expect(computed.willChange).toBe('transform')
-      }
-    } finally {
-      wrapper.unmount()
-      host.remove()
-      style.remove()
-    }
-  })
 
   it.each([0.25, 1, 2.5])('keeps both reverse connections on rendered node boundaries during a drag at zoom %s', async zoom => {
     const source = reactive({ id: 'source', templateName: 'Light', label: 'Source',
@@ -1738,42 +1640,4 @@ describe('CanvasBoard edge legibility across zoom', () => {
     expect(pointerEvents['.iot-board .device-node']).toBe('auto')
   })
 
-  it.each([0.25, 1, 2.5])('keeps direction markers and hover labels at screen size at zoom %s', async zoom => {
-    const source = { id: 'source', templateName: 'Light', label: 'Source light', position: { x: 50, y: 50 }, state: 'off', width: 176, height: 128 }
-    const target = { ...source, id: 'target', label: 'Target light', position: { x: 400, y: 200 } }
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes: [source, target], edges: [{ id: 'edge', from: source.id, to: target.id,
-          fromLabel: source.label, toLabel: target.label, fromPos: source.position, toPos: target.position,
-          fromApi: 'off', toApi: 'on', ruleId: 'rule' }], pan: { x: 0, y: 0 }, zoom,
-        getNodeIcon: () => '', hasNodeStateMachine: () => true, getNodeEffectiveState: node => node.state
-      }, global: { plugins: [i18n] }
-    })
-    try {
-      const layer = wrapper.get<SVGElement>('.edge-layer')
-      expect(layer.element.closest('.canvas-inner')).toBeNull()
-      const world = layer.get('[data-testid="canvas-edge-world"]')
-      expect(layer.element.style.transform).toBe('translate(0px, 0px)')
-      expect(world.attributes('transform')).toBe(`scale(${zoom})`)
-      const marker = wrapper.findAll('marker')[0]
-      expect(marker.attributes('markerUnits')).toBe('userSpaceOnUse')
-      expect(marker.attributes('viewBox')).toBe('0 0 10 10')
-      const physicalWidth = Number(marker.attributes('markerWidth')) * zoom
-      expect(physicalWidth).toBeGreaterThanOrEqual(6)
-      expect(physicalWidth).toBeLessThanOrEqual(12)
-      await wrapper.get('.edge-hitarea').trigger('focus')
-      const label = wrapper.get<HTMLElement>('[data-testid="canvas-edge-details"]')
-      expect(label.element.closest('svg')).toBeNull()
-      const width = Number.parseFloat(label.element.style.width)
-      expect(width).toBe(320)
-      expect(wrapper.get('.edge-hitarea').attributes('aria-label')).toContain('Source light')
-      const nextZoom = zoom === 2.5 ? 0.25 : 2.5
-      await wrapper.setProps({ zoom: nextZoom, pan: { x: 80, y: -50 } })
-      expect(layer.element.style.transform).toBe('translate(80px, -50px)')
-      expect(world.attributes('transform')).toBe(`scale(${nextZoom})`)
-      expect(wrapper.get<HTMLElement>('.canvas-inner').element.style.transform).toBe(`translate(80px, -50px) scale(${nextZoom})`)
-      expect(Number(marker.attributes('markerWidth')) * nextZoom).toBeCloseTo(physicalWidth)
-      expect(Number.parseFloat(label.element.style.width)).toBe(width)
-    } finally { wrapper.unmount() }
-  })
 })

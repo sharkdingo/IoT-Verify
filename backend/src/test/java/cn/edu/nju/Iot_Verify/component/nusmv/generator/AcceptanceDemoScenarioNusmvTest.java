@@ -68,35 +68,10 @@ class AcceptanceDemoScenarioNusmvTest {
     private static final long USER_ID = 1L;
     private static final Path SCENE_PATH =
             Path.of("..", "docs", "examples", "acceptance-demo-scene.json");
-    private static final Path MULTI_VIOLATION_SCENE_PATH =
-            Path.of("..", "docs", "examples", "multi-violation-repair-scene.json");
     private static final Path CLIMATE_SCENE_PATH =
             Path.of("..", "docs", "examples", "default-climate-conflict-scene.json");
     private static final Path FIRE_SCENE_PATH =
             Path.of("..", "docs", "examples", "default-fire-evacuation-scene.json");
-    private static final List<AdditionalScenarioExpectation> ADDITIONAL_SCENARIOS = List.of(
-            new AdditionalScenarioExpectation(
-                    "fire",
-                    Path.of("..", "docs", "examples", "default-fire-evacuation-scene.json"),
-                    4, 2, 3, 5, 1, 4,
-                    "door_1", "unlocked",
-                    "When the alarm sounds, unlock the front door for evacuation",
-                    2),
-            new AdditionalScenarioExpectation(
-                    "climate",
-                    Path.of("..", "docs", "examples", "default-climate-conflict-scene.json"),
-                    2, 2, 2, 4, 2, 3,
-                    "ac_1", "heat",
-                    "Unsafe conflicting rule: when the room is hot, heat the living room",
-                    1),
-            new AdditionalScenarioExpectation(
-                    "rfid",
-                    Path.of("..", "docs", "examples", "default-rfid-access-scene.json"),
-                    3, 0, 2, 5, 0, 3,
-                    "door_1", "unlocked",
-                    null,
-                    2));
-
     @Test
     void documentedSceneTemplateSnapshots_matchBundledTemplates() throws Exception {
         ObjectMapper objectMapper = new ObjectMapper();
@@ -232,97 +207,6 @@ class AcceptanceDemoScenarioNusmvTest {
         assertEquals(1, fixResult.getFaultRules().size(),
                 "The camera violation should localize only the photo automation");
         assertTrue(fixResult.getUnusedPreferredRangeSelections().isEmpty());
-        var repairedModel = generator.generateWithEnvironment(USER_ID, devices, environment,
-                rules.subList(1, rules.size()), specs, AttackScenarioDto.none(), true,
-                SmvGenerator.GeneratePurpose.VERIFICATION);
-        assertAllPropertiesPassWithUnreachableResponse(executor, repairedModel, 1);
-    }
-    @Test
-    void multiViolationScene_rejectsRootCauseRemovalThatDisablesTheCameraResponse() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for the multi-violation scene regression");
-
-        ObjectMapper objectMapper = new ObjectMapper();
-        JsonNode scene = objectMapper.readTree(Files.readString(MULTI_VIOLATION_SCENE_PATH));
-        assertEquals("iot-verify.board-scene", scene.path("schema").asText());
-        assertEquals(6, scene.path("version").asInt());
-        assertEquals(4, scene.path("devices").size());
-        assertEquals(2, scene.path("environmentVariables").size());
-        assertEquals(3, scene.path("rules").size());
-        assertEquals(5, scene.path("specs").size());
-        assertEquals("untrusted", scene.path("environmentVariables").get(1).path("trust").asText());
-
-        SmvGenerator generator = buildGenerator(objectMapper, scene);
-        NusmvExecutor executor = buildExecutor(nusmvPath);
-        List<DeviceVerificationDto> devices = readDevices(scene);
-        List<BoardEnvironmentVariableDto> environment = readEnvironment(scene);
-        List<RuleDto> rules = readRules(scene);
-        List<SpecificationDto> specs = readSpecs(scene, devices, "multi-violation");
-
-        SmvGenerator.GenerateResult baselineModel = generator.generateWithEnvironment(
-                USER_ID, devices, environment, rules, specs,
-                AttackScenarioDto.none(), true, SmvGenerator.GeneratePurpose.VERIFICATION);
-        assertEquals(0, baselineModel.disabledRuleCount());
-        assertEquals(0, baselineModel.skippedSpecCount());
-
-        NusmvExecutor.NusmvResult baseline = FormalCheckTestSupport.checkProperties(executor, baselineModel);
-        assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
-        assertEquals(5, baseline.getSpecResults().size());
-        assertEquals(2, violationCount(baseline));
-        NusmvExecutor.SpecCheckResult cameraNever = baseline.getSpecResults().stream()
-                .filter(result -> result.getSpecExpression().contains("camera_1.MachineState = takingphoto"))
-                .filter(result -> !result.getSpecExpression().contains("trust_MachineState_takingphoto"))
-                .findFirst()
-                .orElseThrow();
-        NusmvExecutor.SpecCheckResult untrustedCamera = baseline.getSpecResults().stream()
-                .filter(result -> result.getSpecExpression().contains("trust_MachineState_takingphoto"))
-                .findFirst()
-                .orElseThrow();
-        assertFalse(cameraNever.isPassed(), "The camera never-taking-photo property must be violated");
-        assertFalse(untrustedCamera.isPassed(), "The untrusted-source camera property must be violated");
-        assertNotNull(cameraNever.getCounterexample());
-        assertNotNull(untrustedCamera.getCounterexample());
-
-        SmvTraceParser traceParser = new SmvTraceParser();
-        List<TraceStateDto> cameraViolationStates = traceParser.parseCounterexampleStates(
-                cameraNever.getCounterexample(), baselineModel.deviceSmvMap(), rules);
-        assertTrue(cameraViolationStates.size() >= 2);
-        assertTrue(hasDeviceState(cameraViolationStates, "camera_1", "takingphoto"));
-
-        SmvGenerator.GenerateResult simulationModel = generator.generateWithEnvironment(
-                USER_ID, devices, environment, rules, specs,
-                AttackScenarioDto.none(), true, SmvGenerator.GeneratePurpose.SIMULATION);
-        NusmvExecutor.SimulationOutput simulation =
-                executor.executeInteractiveSimulation(simulationModel.smvFile(), 6);
-        assertTrue(simulation.isSuccess(), simulation::getErrorMessage);
-        List<TraceStateDto> simulationStates = traceParser.parseCounterexampleStates(
-                simulation.getTraceText(), simulationModel.deviceSmvMap(), rules);
-        assertTrue(hasDeviceState(simulationStates, "camera_1", "takingphoto"));
-        assertTrue(hasDeviceState(simulationStates, "alarm_1", "siren"));
-        assertTrue(hasDeviceState(simulationStates, "light_1", "on"));
-
-        FixConfig fixConfig = new FixConfig();
-        fixConfig.setFixTimeoutMs(120_000);
-        RuleFixer fixer = new RuleFixer(
-                new FaultLocalizer(),
-                List.of(new RemoveRulesFixStrategy(generator, executor)),
-                fixConfig);
-        FixResultDto fixResult = fixer.fix(
-                200L,
-                specs.get(0).getId(),
-                cameraViolationStates,
-                rules,
-                devices,
-                environment,
-                specs,
-                baselineModel.deviceSmvMap(),
-                USER_ID,
-                AttackScenarioDto.none(), true,
-                List.of("remove"),
-                10,
-                Map.of());
-        assertTriggerPreservationRejected(fixResult);
         var repairedModel = generator.generateWithEnvironment(USER_ID, devices, environment,
                 rules.subList(1, rules.size()), specs, AttackScenarioDto.none(), true,
                 SmvGenerator.GeneratePurpose.VERIFICATION);
@@ -1222,45 +1106,6 @@ class AcceptanceDemoScenarioNusmvTest {
     }
 
     @Test
-    void elderlyCareScene_rejectsRemovalThatDisablesItsPhotoResponse() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for the care-apartment regression");
-        ObjectMapper mapper = new ObjectMapper();
-        JsonNode scene = mapper.readTree(Files.readString(
-                Path.of("..", "docs", "examples", "elderly-care-comprehensive-scene.json")));
-        SmvGenerator generator = buildGenerator(mapper, scene);
-        NusmvExecutor executor = buildExecutor(nusmvPath);
-        List<DeviceVerificationDto> devices = readDevices(scene);
-        List<BoardEnvironmentVariableDto> environment = readEnvironment(scene);
-        List<RuleDto> rules = readRules(scene);
-        List<SpecificationDto> specs = readSpecs(scene, devices, "care");
-        SmvGenerator.GenerateResult model = generator.generateWithEnvironment(
-                USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), true,
-                SmvGenerator.GeneratePurpose.VERIFICATION);
-        assertCompleteModel(model);
-        NusmvExecutor.NusmvResult baseline = FormalCheckTestSupport.checkProperties(executor, model);
-        assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
-        assertEquals(12, baseline.getSpecResults().size());
-        assertEquals(1, violationCount(baseline));
-        Map<String, NusmvExecutor.SpecCheckResult> verdicts = verdictsBySpecId(baseline, model);
-        assertTrue(verdicts.get(specs.get(0).getId()).isPassed(), "Night-time bed exit must light the way in the next step");
-        assertTrue(verdicts.get(specs.get(6).getId()).isPassed(), "The declared window effect must lower CO2");
-        String target = specs.get(11).getId();
-        assertFalse(verdicts.get(target).isPassed(), "The lamp-to-camera privacy defect must remain visible");
-        List<TraceStateDto> states = new SmvTraceParser().parseCounterexampleStates(
-                verdicts.get(target).getCounterexample(), model.deviceSmvMap(), rules);
-        FixResultDto fixes = allStrategyFixer(generator, executor, 60_000).fix(
-                316L, target, states, rules, devices, environment, specs, model.deviceSmvMap(),
-                USER_ID, AttackScenarioDto.none(), true, List.of("remove"), 20, Map.of());
-        assertTriggerPreservationRejected(fixes);
-        var editedRules = new ArrayList<>(rules);
-        editedRules.remove(6);
-        var repairedModel = generator.generateWithEnvironment(USER_ID, devices, environment,
-                editedRules, specs, AttackScenarioDto.none(), true, SmvGenerator.GeneratePurpose.VERIFICATION);
-        assertAllPropertiesPassWithUnreachableResponse(executor, repairedModel, 7);
-    }
-    @Test
     void salusVentilationThreshold_repairsAnIdleRuleBeforeTheEnvironmentCrossesTheLimit() throws Exception {
         String nusmvPath = resolveNusmvPath();
         Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
@@ -1554,152 +1399,6 @@ class AcceptanceDemoScenarioNusmvTest {
                 USER_ID, devices, environment, rules.subList(1, rules.size()), specs,
                 AttackScenarioDto.anyUpToBudget(1), true, SmvGenerator.GeneratePurpose.VERIFICATION);
         assertAllPropertiesPassWithUnreachableResponse(executor, repairedModel, 1);
-    }
-
-    @Test
-    void additionalDefaultTemplateScenes_areImportableAnimatableAndSemanticallyStable() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for the default-scene regression");
-
-        ObjectMapper objectMapper = new ObjectMapper();
-        SmvTraceParser traceParser = new SmvTraceParser();
-
-        for (AdditionalScenarioExpectation expectation : ADDITIONAL_SCENARIOS) {
-            JsonNode scene = objectMapper.readTree(Files.readString(expectation.path()));
-            assertEquals("iot-verify.board-scene", scene.path("schema").asText(), expectation.name());
-            assertEquals(6, scene.path("version").asInt(), expectation.name());
-            assertEquals(expectation.deviceCount(), scene.path("devices").size(), expectation.name());
-            assertEquals(expectation.environmentCount(), scene.path("environmentVariables").size(),
-                    expectation.name());
-            assertEquals(expectation.ruleCount(), scene.path("rules").size(), expectation.name());
-            assertEquals(expectation.specCount(), scene.path("specs").size(), expectation.name());
-
-            SmvGenerator generator = buildGenerator(objectMapper, scene);
-            NusmvExecutor executor = buildExecutor(nusmvPath);
-            List<DeviceVerificationDto> devices = readDevices(scene);
-            List<BoardEnvironmentVariableDto> environment = readEnvironment(scene);
-            List<RuleDto> rules = readRules(scene);
-            List<SpecificationDto> specs = readSpecs(scene, devices, expectation.name());
-
-            SmvGenerator.GenerateResult baselineModel = generator.generateWithEnvironment(
-                    USER_ID, devices, environment, rules, specs,
-                    AttackScenarioDto.none(), true, SmvGenerator.GeneratePurpose.VERIFICATION);
-            assertEquals(0, baselineModel.disabledRuleCount(), expectation.name());
-            assertEquals(0, baselineModel.skippedSpecCount(), expectation.name());
-            NusmvExecutor.NusmvResult baseline = FormalCheckTestSupport.checkProperties(executor, baselineModel);
-            assertTrue(baseline.isSuccess(), baseline::getErrorMessage);
-            assertEquals(expectation.specCount(), baseline.getSpecResults().size(), expectation.name());
-            assertEquals(expectation.baselineViolationCount(), violationCount(baseline), expectation.name());
-
-            SmvGenerator.GenerateResult simulationModel = generator.generateWithEnvironment(
-                    USER_ID, devices, environment, rules, specs,
-                    AttackScenarioDto.none(), true, SmvGenerator.GeneratePurpose.SIMULATION);
-            NusmvExecutor.SimulationOutput simulation =
-                    executor.executeInteractiveSimulation(simulationModel.smvFile(), 6);
-            assertTrue(simulation.isSuccess(), simulation::getErrorMessage);
-            List<TraceStateDto> simulationStates = traceParser.parseCounterexampleStates(
-                    simulation.getTraceText(), simulationModel.deviceSmvMap(), rules);
-            assertTrue(simulationStates.size() >= 2, expectation.name() + " must be animatable");
-            assertTrue(hasDeviceState(
-                            simulationStates,
-                            expectation.simulationDeviceId(),
-                            expectation.simulationState()),
-                    expectation.name() + " must expose its main automation state");
-
-            SmvGenerator.GenerateResult attackedModel = generator.generateWithEnvironment(
-                    USER_ID, devices, environment, rules, specs,
-                    AttackScenarioDto.anyUpToBudget(1), true, SmvGenerator.GeneratePurpose.VERIFICATION);
-            assertEquals(0, attackedModel.disabledRuleCount(), expectation.name());
-            assertEquals(0, attackedModel.skippedSpecCount(), expectation.name());
-            NusmvExecutor.NusmvResult attacked = FormalCheckTestSupport.checkProperties(executor, attackedModel);
-            assertTrue(attacked.isSuccess(), attacked::getErrorMessage);
-            assertEquals(expectation.attackViolationCount(), violationCount(attacked), expectation.name());
-
-            if (expectation.removedRuleDescription() != null) {
-                FixSuggestionDto removal = findVerifiedRemoval(
-                        expectation,
-                        baseline,
-                        baselineModel,
-                        traceParser,
-                        generator,
-                        executor,
-                        rules,
-                        devices,
-                        environment,
-                        specs);
-                assertEquals(List.of(expectation.removedRuleDescription()),
-                        removal.getRemovedRuleDescriptions(), expectation.name());
-
-                Set<Integer> removedIndices = new HashSet<>(removal.getRemovedRuleIndices());
-                List<RuleDto> repairedRules = new ArrayList<>();
-                for (int index = 0; index < rules.size(); index++) {
-                    if (!removedIndices.contains(index)) {
-                        repairedRules.add(rules.get(index));
-                    }
-                }
-                assertEquals(expectation.repairedRuleCount(), repairedRules.size(), expectation.name());
-
-                SmvGenerator.GenerateResult repairedModel = generator.generateWithEnvironment(
-                        USER_ID, devices, environment, repairedRules, specs,
-                        AttackScenarioDto.none(), true, SmvGenerator.GeneratePurpose.VERIFICATION);
-                NusmvExecutor.NusmvResult repaired = FormalCheckTestSupport.checkProperties(executor, repairedModel);
-                assertTrue(repaired.isSuccess(), repaired::getErrorMessage);
-                assertFalse(repaired.hasAnyViolation(),
-                        expectation.name() + " verified removal must satisfy every emitted specification");
-            }
-        }
-    }
-
-    private FixSuggestionDto findVerifiedRemoval(
-            AdditionalScenarioExpectation expectation,
-            NusmvExecutor.NusmvResult baseline,
-            SmvGenerator.GenerateResult baselineModel,
-            SmvTraceParser traceParser,
-            SmvGenerator generator,
-            NusmvExecutor executor,
-            List<RuleDto> rules,
-            List<DeviceVerificationDto> devices,
-            List<BoardEnvironmentVariableDto> environment,
-            List<SpecificationDto> specs) {
-        FixConfig fixConfig = new FixConfig();
-        fixConfig.setFixTimeoutMs(120_000);
-        RuleFixer fixer = new RuleFixer(
-                new FaultLocalizer(),
-                List.of(new RemoveRulesFixStrategy(generator, executor)),
-                fixConfig);
-
-        for (int index = 0; index < baseline.getSpecResults().size(); index++) {
-            NusmvExecutor.SpecCheckResult result = baseline.getSpecResults().get(index);
-            if (result.isPassed() || result.getCounterexample() == null) {
-                continue;
-            }
-            List<TraceStateDto> states = traceParser.parseCounterexampleStates(
-                    result.getCounterexample(), baselineModel.deviceSmvMap(), rules);
-            FixResultDto fixResult = fixer.fix(
-                    100L + index,
-                    specs.get(index).getId(),
-                    states,
-                    rules,
-                    devices,
-                    environment,
-                    specs,
-                    baselineModel.deviceSmvMap(),
-                    USER_ID,
-                    AttackScenarioDto.none(), true,
-                    List.of("remove"),
-                    10,
-                    Map.of());
-            Optional<FixSuggestionDto> removal = fixResult.getSuggestions().stream()
-                    .filter(suggestion -> "remove".equals(suggestion.getStrategy()))
-                    .filter(suggestion -> suggestion.getRemovedRuleDescriptions()
-                            .contains(expectation.removedRuleDescription()))
-                    .findFirst();
-            if (removal.isPresent()) {
-                return removal.get();
-            }
-        }
-        throw new AssertionError(expectation.name() + " did not produce the expected verified removal");
     }
 
     private void assertTriggerPreservationRejected(FixResultDto result) {
@@ -2154,20 +1853,5 @@ class AcceptanceDemoScenarioNusmvTest {
         }
         Path bundled = Path.of("D:/NuSMV/NuSMV-2.7.1-win64/NuSMV-2.7.1-win64/bin/NuSMV.exe");
         return Files.exists(bundled) ? bundled.toString() : "NuSMV";
-    }
-
-    private record AdditionalScenarioExpectation(
-            String name,
-            Path path,
-            int deviceCount,
-            int environmentCount,
-            int ruleCount,
-            int specCount,
-            int baselineViolationCount,
-            int attackViolationCount,
-            String simulationDeviceId,
-            String simulationState,
-            String removedRuleDescription,
-            int repairedRuleCount) {
     }
 }

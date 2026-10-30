@@ -24,8 +24,7 @@ name: Live AI CI
 
 on:
   schedule:
-    # 04:23 UTC, after the nightly Full CI, so a shared infrastructure failure shows up in the cheaper
-    # workflow first and this one is not the confusing first symptom.
+    # Daily at 04:23 UTC. Provider availability can change independently of repository changes.
     - cron: '23 4 * * *'
   workflow_dispatch:
 

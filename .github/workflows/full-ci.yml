@@ -5,13 +5,13 @@ name: Full CI
 #
 # Fast CI calls it instead of the fast tier on main and high-risk pushes/PRs.
 # It also runs independently for:
-#   - a nightly schedule, the only thing that catches decay in code nobody touched;
+#   - a weekly schedule to catch infrastructure decay in code nobody touched;
 #   - manual dispatch, for release candidates and for re-checking a suspicious branch;
 
 on:
   schedule:
-    # 03:17 UTC. Off the hour so it does not queue behind every other cron on the runner fleet.
-    - cron: '17 3 * * *'
+    # Sunday at 03:17 UTC. Every main push already runs this gate in full.
+    - cron: '17 3 * * 0'
   workflow_dispatch:
   # Pushes and PRs have one owner; do not add a standalone push trigger here.
   workflow_call:

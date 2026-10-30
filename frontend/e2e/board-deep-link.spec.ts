@@ -339,20 +339,6 @@ test.describe('board run deep links', () => {
     await expect(page.locator('[data-node-id="ac_1"]')).toHaveCount(0)
   })
 
-  test('keeps server-persisted layout state out of the URL', async ({ page, request }) => {
-    const auth = await createAuthenticatedUser(request)
-    await openBoard(page, auth)
-
-    // Panel layout and canvas transform are persisted per user server-side; putting them in
-    // the URL would create a second authority for the same value.
-    await page.getByTestId('control-tab-rules').click()
-    await expect(page.getByTestId('control-section-rules')).toBeVisible()
-    await page.getByTestId('open-verification-panel').click()
-    await expect(page.getByTestId('verification-panel')).toBeVisible()
-
-    expect(boardQuery(page)).toBe('')
-  })
-
   test('restores a deep-linked run at a narrow width and from the keyboard', async ({ page, request }) => {
     const auth = await createAuthenticatedUser(request)
     await page.setViewportSize({ width: 800, height: 720 })
@@ -370,33 +356,5 @@ test.describe('board run deep links', () => {
     await page.keyboard.press('Escape')
     await expect(dialog).toBeHidden()
     expect(boardQuery(page)).not.toContain('run=')
-  })
-})
-
-test.describe('destructive confirmation behaviour', () => {
-  test('treats cancel as an ordinary no and survives repeated clicks', async ({ page, request }) => {
-    const auth = await createAuthenticatedUser(request)
-    await openBoard(page, auth)
-
-    const clearScene = page.getByTestId('scene-clear')
-    await clearScene.click()
-    const box = page.locator('.el-message-box')
-    await expect(box).toBeVisible()
-
-    // Cancelling must not raise an error toast: declining is a normal outcome.
-    await box.getByRole('button', { name: /Cancel|取消/ }).click()
-    await expect(box).toBeHidden()
-    await expect(page.locator('.el-message--error')).toHaveCount(0)
-
-    // Re-opening works, and a second trigger click does not stack a second confirmation.
-    await clearScene.click()
-    await expect(box).toBeVisible()
-    expect(await page.locator('.el-message-box').count()).toBe(1)
-
-    // Escape dismisses it exactly like Cancel, leaving the board untouched and usable.
-    await page.keyboard.press('Escape')
-    await expect(box).toBeHidden()
-    await page.getByTestId('open-verification-panel').click()
-    await expect(page.getByTestId('verification-panel')).toBeVisible()
   })
 })

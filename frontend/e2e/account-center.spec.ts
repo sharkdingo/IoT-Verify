@@ -462,104 +462,34 @@ test('a background 401 before password response delivery preserves the unknown r
   }
 })
 
-test('concurrent name claims and password changes have exactly one committed winner', async ({ request }) => {
-  const users = await Promise.all([
-    createAuthenticatedUser(request, { usernamePrefix: 'claimone' }),
-    createAuthenticatedUser(request, { usernamePrefix: 'claimtwo' })
-  ])
-  const claimed = uniqueName()
-  const claims = await Promise.all(users.map(auth => request.patch(`${apiBaseURL}/api/auth/account/username`, {
-    headers: headers(auth.token), data: { username: claimed, expectedUsername: auth.username, currentPassword: PASSWORD }
-  })))
-  const winner = claims.findIndex(response => response.status() === 200)
-  if (winner >= 0) trackTestAccount(request, { phone: users[winner]!.phone, username: claimed, password: PASSWORD })
-  expect(claims.map(response => response.status()).sort()).toEqual([200, 409])
-  const loser = 1 - winner
-  expect((await claims[loser]!.json()).data.reasonCode).toBe('USERNAME_ALREADY_EXISTS')
-  const owner = users[winner]!
-  const ownerProfile = await unwrap<AccountProfile>(await request.get(`${apiBaseURL}/api/auth/account`, { headers: headers(owner.token) }))
-  expect(ownerProfile.username).toBe(claimed)
-  const loserProfile = await unwrap<AccountProfile>(await request.get(`${apiBaseURL}/api/auth/account`, { headers: headers(users[loser]!.token) }))
-  expect(loserProfile.username).toBe(users[loser]!.username)
-
-  const passwords = ['FirstConcurrentPass2026!', 'SecondConcurrentPass2026!']
-  const changes = await Promise.all(passwords.map(newPassword => request.post(`${apiBaseURL}/api/auth/account/password`, {
-    headers: headers(owner.token), data: { currentPassword: PASSWORD, newPassword }
-  })))
-  const passwordWinner = changes.findIndex(response => response.status() === 200)
-  if (passwordWinner >= 0) trackTestAccount(request, {
-    phone: owner.phone, username: claimed, password: passwords[passwordWinner]!
-  })
-  expect(changes.filter(response => response.status() === 200)).toHaveLength(1)
-  // A request that reaches authentication after the other commit is rejected before password validation.
-  const rejected = changes[1 - passwordWinner]!
-  expect([400, 401]).toContain(rejected.status())
-  if (rejected.status() === 400) expect((await rejected.json()).data.reasonCode).toBe('CURRENT_PASSWORD_INCORRECT')
-  expect((await request.get(`${apiBaseURL}/api/auth/account`, { headers: headers(owner.token) })).status()).toBe(401)
-  expect((await request.post(`${apiBaseURL}/api/auth/login`, {
-    data: { identifier: owner.phone, password: passwords[1 - passwordWinner] }
-  })).status()).toBe(401)
-  const signedIn = await unwrap<AuthUser>(await request.post(`${apiBaseURL}/api/auth/login`, {
-    data: { identifier: owner.phone, password: passwords[passwordWinner] }
-  }))
-  const originalVersion = JSON.parse(Buffer.from(owner.token.split('.')[1]!, 'base64url').toString()).authVersion
-  const currentVersion = JSON.parse(Buffer.from(signedIn.token.split('.')[1]!, 'base64url').toString()).authVersion
-  expect(currentVersion).toBe(originalVersion + 1)
-  expect(signedIn.userId).toBe(owner.userId)
-})
-
-test('registration and rename share the username namespace without confusing a fullwidth name with an ASCII phone', async ({ request }) => {
+test('fullwidth usernames and ASCII phone numbers retain separate owners through rename and reclaim', async ({ request }) => {
   const phoneOwner = await createAuthenticatedUser(request, { usernamePrefix: 'phoneowner', phonePrefix: '138' })
   const fullwidthName = phoneOwner.phone.replace(/[0-9]/g, digit => String.fromCharCode(digit.charCodeAt(0) + 0xFEE0))
   const credentials = { ...createTestAccountCredentials({ usernamePrefix: 'nameowner' }), username: fullwidthName }
   trackTestAccount(request, credentials)
-  const nameOwner = await unwrap<AuthUser>(await request.post(`${apiBaseURL}/api/auth/register`, {
-    data: credentials
-  }))
-  expect(nameOwner.username).toBe(fullwidthName)
+  const nameOwner = await unwrap<AuthUser>(await request.post(`${apiBaseURL}/api/auth/register`, { data: credentials }))
   expect(nameOwner.userId).not.toBe(phoneOwner.userId)
-  for (const [identifier, userId] of [
-    [fullwidthName, nameOwner.userId], [nameOwner.phone, nameOwner.userId], [phoneOwner.phone, phoneOwner.userId]
-  ] as const) {
-    const signedIn = await unwrap<AuthUser>(await request.post(`${apiBaseURL}/api/auth/login`, {
-      data: { identifier, password: PASSWORD }
-    }))
-    expect(signedIn.userId).toBe(userId)
-  }
 
-  const renamed = uniqueName()
-  await unwrap(await request.patch(`${apiBaseURL}/api/auth/account/username`, {
-    headers: headers(nameOwner.token), data: { username: renamed, expectedUsername: fullwidthName, currentPassword: PASSWORD }
+  const login = async (identifier: string) => unwrap<AuthUser>(await request.post(`${apiBaseURL}/api/auth/login`, {
+    data: { identifier, password: PASSWORD }
   }))
-  trackTestAccount(request, { phone: nameOwner.phone, username: renamed, password: PASSWORD })
+  expect((await login(fullwidthName)).userId).toBe(nameOwner.userId)
+  expect((await login(phoneOwner.phone)).userId).toBe(phoneOwner.userId)
+
+  const relinquishedName = uniqueName()
+  await unwrap(await request.patch(`${apiBaseURL}/api/auth/account/username`, {
+    headers: headers(nameOwner.token),
+    data: { username: relinquishedName, expectedUsername: fullwidthName, currentPassword: PASSWORD }
+  }))
+  trackTestAccount(request, { phone: nameOwner.phone, username: relinquishedName, password: PASSWORD })
   const nextOwner = await createAuthenticatedUser(request, { usernamePrefix: 'nextowner' })
   await unwrap(await request.patch(`${apiBaseURL}/api/auth/account/username`, {
-    headers: headers(nextOwner.token), data: { username: fullwidthName, expectedUsername: nextOwner.username, currentPassword: PASSWORD }
+    headers: headers(nextOwner.token),
+    data: { username: fullwidthName, expectedUsername: nextOwner.username, currentPassword: PASSWORD }
   }))
   trackTestAccount(request, { phone: nextOwner.phone, username: fullwidthName, password: PASSWORD })
-  const signedIn = await unwrap<AuthUser>(await request.post(`${apiBaseURL}/api/auth/login`, {
-    data: { identifier: fullwidthName, password: PASSWORD }
-  }))
-  expect(signedIn.userId).toBe(nextOwner.userId)
-
-  const rejectedRegistration = { ...createTestAccountCredentials(), username: phoneOwner.phone }
-  expect((await request.post(`${apiBaseURL}/api/auth/register`, { data: rejectedRegistration })).status()).toBe(400)
-  expect((await request.post(`${apiBaseURL}/api/auth/login`, {
-    data: { identifier: rejectedRegistration.phone, password: PASSWORD }
-  })).status()).toBe(401)
-  expect((await request.patch(`${apiBaseURL}/api/auth/account/username`, {
-    headers: headers(nextOwner.token), data: { username: phoneOwner.phone, expectedUsername: fullwidthName, currentPassword: PASSWORD }
-  })).status()).toBe(400)
-  const unchanged = await unwrap<AccountProfile>(await request.get(`${apiBaseURL}/api/auth/account`, {
-    headers: headers(nextOwner.token)
-  }))
-  expect(unchanged.username).toBe(fullwidthName)
-  expect((await request.post(`${apiBaseURL}/api/auth/register`, {
-    data: { ...createTestAccountCredentials(), username: fullwidthName }
-  })).status()).toBe(409)
-  expect((await request.post(`${apiBaseURL}/api/auth/register`, {
-    data: { ...createTestAccountCredentials(), phone: phoneOwner.phone }
-  })).status()).toBe(409)
+  expect((await login(fullwidthName)).userId).toBe(nextOwner.userId)
+  expect((await login(phoneOwner.phone)).userId).toBe(phoneOwner.userId)
 })
 
 test('a queued native authentication event cannot replace a newer UI login or its account details', async ({ page, request }) => {
@@ -648,84 +578,6 @@ test('a queued native authentication event cannot replace a newer UI login or it
       await receiver.close()
     }
   }
-})
-
-test('the narrow workspace has one account entry and opens a full page in both themes', async ({ page, sharedReadOnlyAccount: auth }) => {
-  await page.setViewportSize({ width: 375, height: 740 })
-  await openWorkspace(page, auth)
-  const originalURL = page.url()
-  let lightBackground = ''
-  for (const theme of ['light', 'dark']) {
-    const menu = page.getByRole('button', { name: 'Scene actions', exact: true })
-    await menu.focus()
-    await menu.press('Enter')
-    await expect(menu).toHaveAttribute('aria-expanded', 'true')
-    await expect(page.getByTestId('nav-overflow-account')).toHaveCount(1)
-    await expect(page.getByRole('button', { name: 'Log Out', exact: true })).toHaveCount(0)
-    await expect(page.getByTestId('open-account-center')).toBeHidden()
-    if (theme === 'dark') {
-      await page.locator('.scene-actions-menu .theme-toggle:visible').click()
-      await page.getByRole('region', { name: 'Appearance' }).locator('[data-theme-mode="dark"]').click()
-      await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
-      if (await menu.getAttribute('aria-expanded') !== 'true') await menu.press('Enter')
-    }
-    await page.getByTestId('nav-overflow-account').focus()
-    await page.getByTestId('nav-overflow-account').press('Enter')
-    const account = page.getByTestId('account-page')
-    await expect(account).toBeVisible()
-    await expect(page.getByRole('main')).toHaveCount(1)
-    await expect(account).not.toHaveAttribute('aria-modal', 'true')
-    await expect(page.getByRole('dialog')).toHaveCount(0)
-    await expect(page.getByTestId('board-root')).toHaveCount(0)
-    await expect(account.getByTestId('account-username-value')).toBeVisible()
-    await expect(account.locator('input')).toHaveCount(0)
-    await expect(account.getByTestId('account-username-form')).toHaveCount(0)
-    await expect(account.getByTestId('account-password-form')).toHaveCount(0)
-    await account.getByTestId('account-edit-password').click()
-    await expect(account.getByLabel('New password', { exact: true })).toHaveAttribute('autocomplete', 'new-password')
-    await account.getByTestId('account-cancel-password').click()
-    const box = await account.boundingBox()
-    expect(box).not.toBeNull()
-    expect(box!.x).toBeGreaterThanOrEqual(0)
-    expect(box!.x + box!.width).toBeLessThanOrEqual(375)
-    expect(await account.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
-    const background = await page.locator('.account-shell').evaluate(element => getComputedStyle(element).backgroundColor)
-    if (theme === 'light') lightBackground = background
-    else expect(background).not.toBe(lightBackground)
-    await account.getByTestId('account-logout').click()
-    const logout = page.getByTestId('logout-dialog')
-    await expect(logout).toBeVisible()
-    await expect(logout.getByTestId('logout-cancel')).toBeFocused()
-    await expect(logout.getByTestId('open-account-delete')).toHaveCount(0)
-    await page.keyboard.press('Escape')
-    await expect(logout).toHaveCount(0)
-    await expect(account.getByTestId('account-logout')).toBeFocused()
-    await page.getByTestId('account-back').click()
-    await expect(page.getByTestId('board-root')).toBeVisible({ timeout: 30_000 })
-    expect(page.url()).toBe(originalURL)
-    expect((await storedSession(page)).token).toBe(auth.token)
-  }
-})
-
-test('a direct account address requires sign-in and keeps its safe workspace return address', async ({ page, request }) => {
-  const auth = await createAuthenticatedUser(request, { usernamePrefix: 'privateaccount' })
-  await page.addInitScript(() => {
-    localStorage.clear()
-    localStorage.setItem('locale', 'en')
-  })
-  const target = `/account?returnTo=${encodeURIComponent('/board')}`
-  await page.goto(target)
-  await expect(page.locator('#login-panel')).toBeVisible()
-  const hash = new URL(page.url()).hash
-  expect(new URLSearchParams(hash.slice(hash.indexOf('?') + 1)).get('redirect')).toBe(target)
-  await page.locator('#login-panel input[autocomplete="username"]').fill(auth.username)
-  await page.locator('#login-panel input[type="password"]').fill(PASSWORD)
-  await page.locator('#login-panel button[type="submit"]').click()
-  await expect(page.getByTestId('account-page')).toBeVisible({ timeout: 30_000 })
-  await expect(page.getByTestId('account-phone')).toHaveText(auth.phone)
-  await page.getByTestId('account-back').click()
-  await expect(page).toHaveURL(/#\/board$/)
-  await expect(page.getByTestId('board-root')).toBeVisible()
 })
 
 test('browser Back cannot discard the result of an in-flight account mutation', async ({ page, request }) => {

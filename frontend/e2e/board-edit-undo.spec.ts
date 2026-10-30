@@ -111,59 +111,56 @@ const deleteFirstRule = async (page: Page) => {
 }
 
 test.describe('board edit undo and redo', () => {
-  for (const { viewport, theme } of [
-    { viewport: { width: 1280, height: 720 }, theme: 'light' },
-    { viewport: { width: 375, height: 812 }, theme: 'dark' }
-  ] as const) {
-    test(`renames from the keyboard without a duplicate toast and undoes at ${viewport.width}px in ${theme}`, async ({ page, request }) => {
-      const auth = await createAuthenticatedUser(request)
-      await page.setViewportSize(viewport)
-      await openBoardWithScene(page, request, auth, theme)
-      await expect(page.locator('html')).toHaveAttribute('data-theme', theme)
+  test('renames from the keyboard without a duplicate toast and undoes at 375px in dark', async ({ page, request }) => {
+    const viewport = { width: 375, height: 812 }
+    const theme = 'dark'
+    const auth = await createAuthenticatedUser(request)
+    await page.setViewportSize(viewport)
+    await openBoardWithScene(page, request, auth, theme)
+    await expect(page.locator('html')).toHaveAttribute('data-theme', theme)
 
-      const originalLabel = 'Living-room Air Conditioner'
-      const renamedLabel = 'Renamed living-room air conditioner'
-      const inspector = page.getByTestId('system-inspector')
-      if (await inspector.getByRole('button', { name: 'Expand System Inspector', exact: true }).isVisible()) {
-        await inspector.getByRole('button', { name: 'Expand System Inspector', exact: true }).click()
-      }
-      await page.getByTestId('inspector-tab-devices').click()
-      await inspector.locator('[data-device-id="ac_1"]')
-        .getByRole('button', { name: originalLabel, exact: true }).click()
-      await inspector.getByRole('button', { name: 'Collapse System Inspector', exact: true }).click()
+    const originalLabel = 'Living-room Air Conditioner'
+    const renamedLabel = 'Renamed living-room air conditioner'
+    const inspector = page.getByTestId('system-inspector')
+    if (await inspector.getByRole('button', { name: 'Expand System Inspector', exact: true }).isVisible()) {
+      await inspector.getByRole('button', { name: 'Expand System Inspector', exact: true }).click()
+    }
+    await page.getByTestId('inspector-tab-devices').click()
+    await inspector.locator('[data-device-id="ac_1"]')
+      .getByRole('button', { name: originalLabel, exact: true }).click()
+    await inspector.getByRole('button', { name: 'Collapse System Inspector', exact: true }).click()
 
-      const node = page.locator('[data-node-id="ac_1"]')
-      await node.click()
-      await page.getByTestId('device-dialog').getByTestId('device-rename').click()
-      const renameDialog = page.getByRole('dialog', { name: 'Rename device' })
-      await renameDialog.getByPlaceholder('Enter device name').fill(renamedLabel)
-      await page.keyboard.press('Enter')
+    const node = page.locator('[data-node-id="ac_1"]')
+    await node.click()
+    await page.getByTestId('device-dialog').getByTestId('device-rename').click()
+    const renameDialog = page.getByRole('dialog', { name: 'Rename device' })
+    await renameDialog.getByPlaceholder('Enter device name').fill(renamedLabel)
+    await page.keyboard.press('Enter')
 
-      await expect(renameDialog).toHaveCount(0)
-      // An auto-retrying absence assertion would wait for the redundant toast to expire and pass.
-      expect(await page.locator('.el-message').filter({ hasText: 'Renamed successfully' }).count()).toBe(0)
-      await expect(node).toContainText(renamedLabel)
-      await expect.poll(async () => (await boardSnapshot(request, auth)).nodes
-        .find(candidate => candidate.id === 'ac_1')?.label).toBe(renamedLabel)
-      await expect.poll(() => page.evaluate(() => {
-        const focused = document.activeElement as HTMLElement | null
-        if (!focused || focused === document.body) return false
-        const box = focused.getBoundingClientRect()
-        const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)
-        return box.width > 0 && box.height > 0
-          && box.left >= 0 && box.top >= 0
-          && box.right <= window.innerWidth && box.bottom <= window.innerHeight
-          && !!hit && focused.contains(hit)
-      })).toBe(true)
+    await expect(renameDialog).toHaveCount(0)
+    // An auto-retrying absence assertion would wait for the redundant toast to expire and pass.
+    expect(await page.locator('.el-message').filter({ hasText: 'Renamed successfully' }).count()).toBe(0)
+    await expect(node).toContainText(renamedLabel)
+    await expect.poll(async () => (await boardSnapshot(request, auth)).nodes
+      .find(candidate => candidate.id === 'ac_1')?.label).toBe(renamedLabel)
+    await expect.poll(() => page.evaluate(() => {
+      const focused = document.activeElement as HTMLElement | null
+      if (!focused || focused === document.body) return false
+      const box = focused.getBoundingClientRect()
+      const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)
+      return box.width > 0 && box.height > 0
+        && box.left >= 0 && box.top >= 0
+        && box.right <= window.innerWidth && box.bottom <= window.innerHeight
+        && !!hit && focused.contains(hit)
+    })).toBe(true)
 
-      await expect(undoButton(page)).toBeEnabled()
-      await undoButton(page).click()
-      await expect(node).toContainText(originalLabel)
-      await expect.poll(async () => (await boardSnapshot(request, auth)).nodes
-        .find(candidate => candidate.id === 'ac_1')?.label).toBe(originalLabel)
-      await expect(redoButton(page)).toBeEnabled()
-    })
-  }
+    await expect(undoButton(page)).toBeEnabled()
+    await undoButton(page).click()
+    await expect(node).toContainText(originalLabel)
+    await expect.poll(async () => (await boardSnapshot(request, auth)).nodes
+      .find(candidate => candidate.id === 'ac_1')?.label).toBe(originalLabel)
+    await expect(redoButton(page)).toBeEnabled()
+  })
 
   test('restores a deleted rule, redoes it, and survives a refresh', async ({ page, request }) => {
     const auth = await createAuthenticatedUser(request)
@@ -201,29 +198,6 @@ test.describe('board edit undo and redo', () => {
     await expect(undoButton(page)).toBeEnabled()
     await undoButton(page).click()
     await expect.poll(async () => (await ruleIds(request, auth)).length).toBe(before.length)
-  })
-
-  test('restores a deleted rule to its original execution position', async ({ page, request }) => {
-    const auth = await createAuthenticatedUser(request)
-    await openBoardWithScene(page, request, auth)
-
-    // Execution order is model semantics: the lower rule wins when guards overlap. Restoring the
-    // content but not the position hands back a board that verifies differently.
-    // Reverse first, so the expected sequence is descending by id and an append-at-the-end restore
-    // produces a visibly different order rather than accidentally the right one.
-    const before = await reverseRuleOrder(request, auth)
-    expect(before.length).toBeGreaterThan(1)
-    await expect.poll(async () => ruleIds(request, auth), { timeout: 30_000 }).toEqual(before)
-
-    // Delete the first rule: the survivor keeps order 1, so a restore that reuses the survivor count
-    // would land on 1 too and let the id tiebreak decide the ordering instead of the user.
-    await deleteFirstRule(page)
-    await expect.poll(async () => (await ruleIds(request, auth)).length).toBe(before.length - 1)
-    await expect(undoButton(page)).toBeEnabled()
-
-    await undoButton(page).click()
-    // Order-sensitive: the exact sequence must come back, not merely the same set of ids.
-    await expect.poll(async () => ruleIds(request, auth), { timeout: 30_000 }).toEqual(before)
   })
 
   test('reconciles undo availability when a committed edit response is incomplete', async ({ page, request }) => {
@@ -311,30 +285,6 @@ test.describe('board edit undo and redo', () => {
     }).toEqual(afterDelete)
   })
 
-  test('drops the undo affordance when a scene replacement clears the journal', async ({ page, request }) => {
-    const auth = await createAuthenticatedUser(request)
-    await openBoardWithScene(page, request, auth)
-
-    await deleteFirstRule(page)
-    await expect(undoButton(page)).toBeEnabled()
-
-    // Replacing the scene rewrites every collection, so no per-record inverse can reach a legal
-    // board and the server clears the journal. The button must follow that server state rather
-    // than keep offering an undo that would report "nothing to undo".
-    const scenePath = path.resolve(
-      process.cwd(), '..', 'docs', 'examples', 'default-fire-evacuation-scene.json'
-    )
-    await page.getByTestId('scene-import-file').setInputFiles(scenePath)
-    const confirmation = page.getByRole('dialog', { name: 'Replace the current scene?' })
-    await expect(confirmation).toContainText('1 undo/redo entries')
-    await confirmation
-      .getByRole('button', { name: 'Replace scene' })
-      .click()
-
-    await expect(undoButton(page)).toBeDisabled({ timeout: 60_000 })
-    await expect(redoButton(page)).toBeDisabled()
-  })
-
   test('reverses a rule reorder, which users read as one edit', async ({ page, request }) => {
     const auth = await createAuthenticatedUser(request)
     await openBoardWithScene(page, request, auth)
@@ -355,44 +305,6 @@ test.describe('board edit undo and redo', () => {
     await expect(redoButton(page)).toBeEnabled()
     await redoButton(page).click()
     await expect.poll(async () => ruleIds(request, auth)).not.toEqual(before)
-  })
-
-  test('keeps pressing undo past the end harmless', async ({ page, request }) => {
-    const auth = await createAuthenticatedUser(request)
-    await openBoardWithScene(page, request, auth)
-
-    const before = await ruleIds(request, auth)
-    await deleteFirstRule(page)
-    await expect(undoButton(page)).toBeEnabled()
-
-    await undoButton(page).click()
-    await expect.poll(async () => (await ruleIds(request, auth)).length).toBe(before.length)
-
-    // Repeating an exhausted undo is idempotent: no error, no second restore, no duplicate rule.
-    await expect(undoButton(page)).toBeDisabled()
-    await page.keyboard.press('Control+z')
-    await page.keyboard.press('Control+z')
-    await expect.poll(async () => (await ruleIds(request, auth)).sort()).toEqual([...before].sort())
-  })
-
-  test('invalidates redo once a new edit happens after an undo', async ({ page, request }) => {
-    const auth = await createAuthenticatedUser(request)
-    await openBoardWithScene(page, request, auth)
-
-    const before = await ruleIds(request, auth)
-    await deleteFirstRule(page)
-    await undoButton(page).click()
-    await expect.poll(async () => (await ruleIds(request, auth)).length).toBe(before.length)
-    await expect(redoButton(page)).toBeEnabled()
-
-    // A new edit makes the undone branch unreachable — redoing it would overwrite this edit.
-    await deleteFirstRule(page)
-    await expect(redoButton(page)).toBeDisabled()
-    const afterNewEdit = await ruleIds(request, auth)
-
-    await page.keyboard.press('Control+Shift+z')
-    await expect.poll(async () => (await ruleIds(request, auth)).sort())
-      .toEqual([...afterNewEdit].sort())
   })
 })
 

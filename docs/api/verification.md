@@ -8,7 +8,7 @@ Responses are wrapped in the standard `Result<T>` envelope (authoritative defini
 [overview.md](overview.md)). The `data` shapes below are what appears under that
 envelope's `data` field.
 
-Verified against code on 2026-10-25. Source:
+Verified against code on 2026-10-31 for solver-output regression ownership. Source:
 `controller/VerificationController.java`, `controller/SimulationController.java`,
 `service/InteractiveFixExecutionService.java`, and the DTOs under
 `dto/verification/`, `dto/simulation/`, `dto/device/`,
@@ -89,7 +89,7 @@ still expose derived `isAttack` and `attackBudget` summary fields for convenient
 | `traces` | `TraceDto[]` | Counterexample traces for parsed property violations. An `INCONCLUSIVE` run can retain traces parsed before another result became incomplete; clients must present them as partial evidence, not as a complete verdict. |
 | `specResults` | `SpecResultDto[]` | Per-emitted-spec result objects; specs skipped before SMV emission are counted/logged separately |
 | `checkLogs` | `String[]` | Human-readable check log |
-| `nusmvOutput` | `String` | NuSMV diagnostic output retained for storage/display. Values longer than 10,000 characters contain the first 10,000 characters plus an explicit truncation marker. Verdicts, per-spec results, and traces are parsed before this presentation cap is applied. **This is the only channel by which anything NuSMV says other than `-- specification … is true/false` can reach a user** — the trace parser models no other line — so the client must render it. It appears in the verification result dialog's run-context section, guarded by `frontend/src/views/board/solverOutputVisibility.spec.ts` after a refactor once deleted the disclosure and a later sweep deleted its now-unreferenced label. |
+| `nusmvOutput` | `String` | NuSMV diagnostic output retained for storage/display. Values longer than 10,000 characters contain the first 10,000 characters plus an explicit truncation marker. Verdicts, per-spec results, and traces are parsed before this presentation cap is applied. **This is the only channel by which anything NuSMV says other than `-- specification … is true/false` can reach a user** — the trace parser models no other line — so the client must render it. It appears in the verification result dialog's run-context section. `frontend/src/views/board/solverOutputVisibility.spec.ts` guards rendering and the required response field, after a refactor once deleted the disclosure and a later sweep deleted its now-unreferenced label. |
 | `disabledRuleCount` | `Integer` | Count of rules whose generated guard failed closed to `FALSE` |
 | `skippedSpecCount` | `Integer` | Count of specs omitted because no valid NuSMV property could be generated |
 | `generationIssues` | `ModelGenerationIssueDto[]` | Item-level name and reason for every disabled rule or omitted specification |

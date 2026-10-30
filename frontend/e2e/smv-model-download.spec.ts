@@ -14,7 +14,7 @@ import {
  *
  * This feature shipped completely unreachable: four buttons were written, and each was gated on a
  * `hasSmvModel` flag the backend never sent for that response, so none ever rendered and nothing
- * errored. The unit specs pin *where* the control may appear; only this file can prove that clicking
+ * errored. The unit specs pin availability, run identity and ownership; only this file can prove that clicking
  * it delivers a real model. Nothing covered that before — the defect survived a green suite, a clean
  * typecheck, and a manual review.
  *

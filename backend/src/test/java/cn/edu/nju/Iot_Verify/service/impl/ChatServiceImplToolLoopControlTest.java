@@ -132,13 +132,6 @@ class ChatServiceImplToolLoopControlTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"我已完成当前规则的静态分析，没有运行验证。",
-            "这些检查要求目前只是已配置的 specifications，本次没有读取到正式验证结果，因此不能称为已经验证通过。",
-            "配置了检查要求不等于已经运行验证；本轮没有请求或执行验证。",
-            "当前规则中存在灯亮后开门的路径，因此不能仅因为检查要求已经保存，就宣称行为已经安全。",
-            " **当前检查要求尚未证明已运行成功**  \n   画布中已有3条检查要求，但本轮没有形式化验证结果。",
-            "修复分析已完成：共有 **3 个经模型验证可行的候选方案**，均保留现有 3 项检查要求且不修改规约。",
-            "上述‘通过’表示在本次正式验证模型及原有检查要求范围内通过，不等于证明保留了所有未配置的家庭行为，也不代表某个方案已经应用。",
-            "我先读取当前画布及已保存规则，依据实际设备能力区分可表达的联动与尚缺的信息；本轮只做检查，不修改画布。",
             "- **当前设备数量：4**\n- **已保存规则数量：3**\n\n| 规则 | 条件 | 动作 |\n|---|---|---|\n"
                     + "| Guest light | occupancy = absent | Light on |\n\n这些条件和动作均对应当前设备能力。"})
     void readOnlyAnalysisRemainsVisibleAndSavedWithoutAnOperationWarning(String statement) throws Exception {

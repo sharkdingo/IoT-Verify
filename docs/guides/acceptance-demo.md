@@ -4,7 +4,7 @@ This runbook exercises authoring, observation, verification and repair rejection
 deliberately conflicting night-watch scene. For a successful household repair that retains
 useful functions, start with the [household workflow](household-workflow.md#run-the-entrance-demo).
 
-Verified against code on 2026-10-30 for focused regression coverage. Sources:
+Verified against code on 2026-10-31 for focused regression coverage. Sources:
 [`../examples/acceptance-demo-scene.json`](../examples/acceptance-demo-scene.json), the additional
 scenes linked below, and `AcceptanceDemoScenarioNusmvTest`.
 
@@ -304,8 +304,11 @@ heating or cooling is not sufficient by itself: device modes persist, so the env
 later re-enter the forbidden region unless another rule exits that mode. Every expected repair
 is therefore applied to the original rules and checked again against the complete model.
 
-The same test class also runs random simulation, budget-one attack verification, and the
-additional default-template scenario matrix:
+The same test class also checks simulation and budget-one attack verification. Repeated
+multi-violation and elderly-care camera-removal tours, and the fire/climate/RFID example
+matrix, are outside the automatic suite. The smaller camera-response checks retain the
+repair-rejection invariant; shipped scene admission is covered by `ShippedSceneImportTest`.
+Run the focused solver regressions with:
 
 ```bash
 cd backend
