@@ -24,8 +24,7 @@ import { describe, expect, it } from 'vitest'
  * free to differ, and only the first one was guarded here: a regression to `findIndex` in the other
  * would have emphasised a device on a state outside the cycle with nothing going red.
  *
- * Asserted over the source rather than by mounting `Board.vue` (far too large to mount cheaply, per
- * `actionDockHierarchy.spec.ts`), plus a behavioural check of the resolution rule itself on the exact
+ * Inspect the owning computeds without mounting all of `Board.vue`, plus a behavioral check on the exact
  * state shape the backend test pins.
  */
 describe('loop range agreement between parser and playback', () => {

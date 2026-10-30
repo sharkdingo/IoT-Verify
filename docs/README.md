@@ -127,18 +127,19 @@ current product contracts.
 
 ## Documentation checks
 
-Run the owning test after editing these contracts.
+Review changed facts against the owning code and run the relevant behavioral checks.
+DTO inventories, example counts and prose wording are reviewed with the doc-sync checklist;
+the suite focuses on executable contracts.
 
 | Document | Test | What it enforces |
 | :--- | :--- | :--- |
-| [api/verification.md](api/verification.md) | `ModelSnapshotDocumentationTest` | Every field of the run-snapshot and provenance DTOs appears in the field tables — a new DTO field fails until documented |
-| [api/ai-tools.md](api/ai-tools.md), [architecture/overview.md](architecture/overview.md) | `AiToolCatalogDocumentationTest` | The stated tool count matches the concrete `*Tool` classes (also checked in the root and module READMEs and `backend/CLAUDE.md`) |
-| [architecture/theory-sources.md](architecture/theory-sources.md) | `TheorySourceConformanceTest` | The documented paper-derived semantics match what the code implements |
+| [api/verification.md](api/verification.md) | `ModelRequestSnapshotSupportTest`, `ForwardVerifyAcceptanceTest` | Frozen model inputs and acceptance/refusal of candidate repairs |
+| [api/ai-tools.md](api/ai-tools.md) | `AiToolCatalogDocumentationTest` | Advertised tool arguments agree with the fields each tool accepts |
+| [architecture/theory-sources.md](architecture/theory-sources.md) | `ParameterAdjustStrategyTest`, `PaperDistanceMetricPropertyTest`, `ForwardVerifyAcceptanceTest` | Search, distance and repair acceptance behavior |
 | [architecture/shared-value-semantics.md](architecture/shared-value-semantics.md) | `EnvironmentProvenanceCollectorTest` | Provenance behaviour matches the documented semantics |
 | [guides/away-mode-unlock-demo.md](guides/away-mode-unlock-demo.md) | `AwayModeUnlockSceneNusmvTest` | The walkthrough's counterexample claims hold under a real NuSMV run |
 | [api/auth.md](api/auth.md) | `AccountDeletionCoverageTest` | The documented account-deletion coverage matches the code |
 
-`backend/CLAUDE.md` is pinned the same way by `SchemaDocumentationTruthTest` (table count, table
-names, composite keys). A doc test should pin *facts*, never phrasing — if one blocks a legitimate
-rewrite, loosen the test rather than contorting the prose, and verify by mutation that it still
-catches the defect it exists for.
+`SchemaDocumentationTruthTest` retains the per-table composite-key check for user isolation.
+`FreshSchemaMySqlIntegrationTest` and `DatabaseSchemaConstraintsTest` exercise the database mapping.
+Documentation counts and table inventories no longer have separate prose-scanning gates.

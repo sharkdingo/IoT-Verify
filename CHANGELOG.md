@@ -15,6 +15,27 @@ history into a technical spec. The spec content itself now lives under
 
 ## [Unreleased]
 
+### 2026-10-30 (focused regression coverage)
+
+#### Removed
+
+- Retired broad browser authority/layout audits, repeated solver and import scenarios,
+  and theme/viewport/copy permutations. Ordinary E2E selects 129 cases instead of 251;
+  the 10 critical smoke cases and 18 live-AI cases retain their selection.
+- Removed 33 frontend source-policy specs and most illustrative-showcase animation tests.
+  Focused contrast, input, interaction, evidence and runtime behavior tests remain.
+- Retired the Salus-house, dynamic-home and elderly-care initial/absent-effect repair tours,
+  plus the full-background camera variant. Smaller solver regressions retain cumulative
+  repairs, response preservation and complete camera alternatives.
+- Retired prose/source-spelling checks and reduced repeated AI identity lexical matrices
+  while retaining every tool, condition-side and command-field route.
+
+#### Changed
+
+- Forward-verification tests directly reject candidate models with disabled rules or skipped
+  specifications, replacing source-substring assertions. Documentation describes the narrower
+  automated obligations and the visual checks owned by review.
+
 ### 2026-10-30 (duplicate test pruning)
 
 #### Removed

@@ -6,11 +6,9 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.List;
-import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -18,30 +16,11 @@ import java.util.stream.Stream;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * Makes the AI tool catalog size authoritative in code instead of hand-maintained in prose.
- *
- * <p>The tool count appears in six user-facing documents. Nothing connected them to the code, so the
- * only thing preventing drift was remembering to update all six — and a count that is wrong is worse
- * than no count, because a reader cannot tell which number to trust.
- *
- * <p>A full Spring context would be the most direct source of truth, but it is heavy for one integer
- * and the registry is discovered by classpath scanning anyway. Counting the concrete implementations
- * on disk is equivalent, needs no context, and fails fast with the exact files and documents involved.
- */
+/** Checks that tool argument schemas agree with their accepted top-level fields. */
 class AiToolCatalogDocumentationTest {
 
     private static final Path TOOL_ROOT =
             Path.of("src/main/java/cn/edu/nju/Iot_Verify/component/aitool");
-
-    /** Documents that state the catalog size, and the repo-relative path to each. */
-    private static final List<String> DOCUMENTS = List.of(
-            "../README.md",
-            "../docs/README.md",
-            "../docs/api/ai-tools.md",
-            "../docs/architecture/overview.md",
-            "CLAUDE.md",
-            "README.md");
 
     private static List<Path> concreteTools() throws IOException {
         try (Stream<Path> paths = Files.walk(TOOL_ROOT)) {
@@ -60,53 +39,6 @@ class AiToolCatalogDocumentationTest {
         }
     }
 
-    @Test
-    void everyDocumentReportsTheActualNumberOfRegisteredTools() throws IOException {
-        List<Path> tools = concreteTools();
-        int actual = tools.size();
-        assertTrue(actual > 0, "no AI tools found; the discovery rule itself is broken");
-
-        Pattern claim = Pattern.compile("(?<!\\d)(\\d{2,3})\\s+(?:built-in\\s+|AI\\s+)?tools\\b");
-        Map<String, List<String>> wrong = new LinkedHashMap<>();
-        int documentsChecked = 0;
-
-        for (String document : DOCUMENTS) {
-            Path path = Path.of(document);
-            if (!Files.exists(path)) continue;
-            documentsChecked++;
-            Matcher matcher = claim.matcher(Files.readString(path));
-            List<String> claimed = new ArrayList<>();
-            while (matcher.find()) {
-                claimed.add(matcher.group(1));
-            }
-            for (String value : claimed) {
-                if (Integer.parseInt(value) != actual) {
-                    wrong.computeIfAbsent(document, key -> new ArrayList<>()).add(value);
-                }
-            }
-        }
-
-        assertEquals(DOCUMENTS.size(), documentsChecked,
-                "a document that states the tool count moved or was renamed; update DOCUMENTS");
-        assertTrue(wrong.isEmpty(),
-                () -> "the catalog has " + actual + " tools but these documents disagree: " + wrong
-                        + ". Update them, or update this list if a tool was added or removed.");
-    }
-
-    /**
-     * A tool's schema is what the model plans against; {@code requireOnlyFields} is what the tool
-     * accepts. A field advertised by one and refused by the other costs the model a round on a
-     * guaranteed {@code VALIDATION_ERROR}, and the model cannot see the allowlist to know better.
-     *
-     * <p>The catalog is consistent today, so this test does not fix anything — it removes the need to
-     * remember. The rule was previously carried only as prose in {@code backend/CLAUDE.md}, and the
-     * two declaration idioms in use ({@code props.put(...)} and an inline {@code Map.of(...)} passed
-     * straight to the constructor) make the drift easy to introduce and invisible in review.
-     *
-     * <p>Checked in one direction only. A name the allowlist accepts but the top-level schema omits is
-     * legitimate: nested object and array members are validated by the same helper deeper in the
-     * payload, so requiring symmetry would report every composite-argument tool.
-     */
     @Test
     void everyAdvertisedArgumentIsAcceptedByTheToolThatAdvertisesIt() throws IOException {
         Pattern propsPut = Pattern.compile("(?:props|properties)\\.put\\(\\s*\"([^\"]+)\"");

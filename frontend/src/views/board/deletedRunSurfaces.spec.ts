@@ -17,8 +17,7 @@ import { describe, expect, it } from 'vitest'
  *    run is gone" and "the run stored no model", and the copy asserted the second as fact. So the
  *    explanation for a deletion one click old was a historical persistence limitation.
  *
- * Source-text assertions rather than a mounted render (`Board.vue` is far too large to mount cheaply,
- * per `actionDockHierarchy.spec.ts`).
+ * Inspect the owning handlers directly because mounting all of `Board.vue` adds unrelated setup.
  */
 describe('surfaces for a deleted verification run', () => {
   const board = readFileSync(join(process.cwd(), 'src/views/Board.vue'), 'utf8')

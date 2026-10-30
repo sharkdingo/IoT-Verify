@@ -17,8 +17,7 @@ import { readThemeTokens, themeColor, contrast } from './themeTokens'
  * this test is the mechanical half, because the rule is decidable from the source: a `background` painted
  * with a bare role plus a `color` of white is always wrong.
  *
- * Related but distinct: `badgeContrast.spec.ts` catches *lightening a fill* (`white/20` over an accent),
- * a different way to collapse the same contrast. Both patterns look like a subtle surface and fail silently.
+ * Lightening a fill with a translucent white layer is a separate contrast risk and needs rendered review.
  */
 
 const SRC = join(__dirname, '../..')

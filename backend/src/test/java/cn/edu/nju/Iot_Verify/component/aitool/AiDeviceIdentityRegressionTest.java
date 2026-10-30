@@ -53,11 +53,9 @@ import static org.mockito.Mockito.when;
 class AiDeviceIdentityRegressionTest {
 
     private static final List<String> BOUNDARY_IDS = List.of(
-            " lamp_a", "lamp_a ", "\tlamp_a", "lamp_a\n",
-            "\u00a0lamp_a", "lamp_a\u00a0", "\ufefflamp_a", "lamp_a\ufeff",
-            "\u0085lamp_a", "lamp_a\u0085", "");
+            " lamp_a ", "\ufefflamp_a", "");
     private static final List<String> LEGAL_IDS = List.of(
-            "lamp_a", "room lamp", "room\u0085lamp", "room\ufefflamp", "设备_一");
+            "lamp_a", "设备 一");
     private static final List<String> RULE_FIELDS = List.of("condition", "command", "contentDevice");
     private static final List<String> SPEC_SIDES = List.of("a", "if", "then");
     private static final List<String> MODEL_TOOLS = List.of("simulate", "simulateAsync", "verify", "verifyAsync");

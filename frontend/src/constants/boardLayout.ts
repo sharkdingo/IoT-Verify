@@ -44,6 +44,6 @@ export const ACTION_DOCK_RAIL_PX = Object.freeze({
  * Declared here rather than only in `board.css` because the two timeline hosts are siblings of `.iot-board`, not
  * descendants, so they cannot see a custom property scoped to it. `boardShellStyle` injects this onto them; the
  * stylesheet keeps its own `--board-floating-gap` declaration for everything *inside* the board. Two readers, one
- * value — `boardDockGeometry.spec.ts` fails if they drift.
+ * value; keep the injected and stylesheet declarations aligned.
  */
 export const BOARD_FLOATING_GAP_CSS = 'clamp(0.75rem, 2vw, 1rem)'

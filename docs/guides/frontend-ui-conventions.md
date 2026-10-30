@@ -5,7 +5,7 @@ colour roles, type scale, depth, CSS precedence, and replay. These are **rules, 
 when code and this document disagree, one of them is a bug. Keep them short; they exist to stop the
 same argument being re-litigated per PR, and each carries the measurement that settled it.
 
-Verified against code on 2026-10-26. Source: `frontend/src/styles/`, `frontend/src/composables/`,
+Verified against code on 2026-10-30 for focused test coverage. Source: `frontend/src/styles/`, `frontend/src/composables/`,
 `frontend/src/utils/feedback.ts`, and the spec files each rule names.
 
 ## Template library and scene operations
@@ -243,7 +243,7 @@ user must act**.
   and an unavailable shared run can coexist; neither may cover the other's explanation, Retry or
   dismiss control. The stack is a toast anchor and lets pointer events through except on its buttons.
   A retry changes the persistent state itself, without a second toast for the same result. Geometry
-  and keyboard recovery are covered by `ui-contracts.spec.ts` at desktop and narrow widths.
+  and keyboard recovery are covered by a focused narrow-viewport `ui-contracts.spec.ts` journey.
 - **A result without a confirmed save cannot be deferred only to persisted history.** If a synchronous run
   completes during another replay, the current replay keeps its run and frozen scene. A confirmed
   saved result remains in history. An unsaved or unconfirmed save remains in a persistent result
@@ -520,9 +520,7 @@ forms, `--lg` results, `--xl` the rule builder) + optional tone (`--danger`/`--w
 - Element Plus MessageBox cannot carry these classes, so `base.css` sizes its buttons from the same
   `--iot-target-min` token rather than repeating the literal — two plausible literals with no link
   between them is how five button heights coexisted here before.
-  `dialogSurfaceConsistency.spec.ts` fails if a modal skips the layer (counted per dialog, not per file), if
-  a surface goes translucent, if the narrow block re-docks, if the token is bypassed, or if an orphan class
-  is left on markup.
+  Review modal opacity, narrow layouts and remaining local classes against the shared styles.
 
 Verification summaries become label/count rows in narrow dialogs. The SMV artifact description
 retains a readable column before its download action wraps; it must not shrink to a vertical strip.
@@ -530,7 +528,7 @@ Counterexample actions wrap as necessary and use shared dialog buttons: replay i
 rule repair is secondary, and the evidence verdict carries the outcome colour. Technical disclosures
 retain full interaction targets. Run failures group their headline and `FailureDetails` in one notice;
 `board-run-notice` and history notices share the body-copy tier and padding rhythm.
-Browser geometry is covered by `e2e/run-surface-layout.spec.ts`.
+The focused history/result keyboard journeys check modal focus and reachable controls.
 
 ## 5. Action emphasis
 
@@ -562,7 +560,7 @@ groups were painted identically, so the grouping was invisible.
 - **Do not spend a new hue on a new category.** Eight saturated hues accumulated one feature at a
   time, each locally reasonable. A new dock entry uses the shared control and belongs in the relevant group.
 
-`views/board/actionDockHierarchy.spec.ts` pins the distinction between run actions, history and suggestions.
+Review the grouping and open-state marker when changing the dock.
 
 ### Run actions share a treatment; outcomes retain their meaning
 
@@ -732,10 +730,11 @@ same clear-control target and text gutter. Device-creation labels associate with
 `neutralSurfaceOwnership.spec.ts` checks the actual roles, fields, progress cards and switches in all four
 palette/mode combinations, and rejects class-keyed theme repairs throughout styles and component templates.
 It also checks production script literals so dynamically returned classes cannot restore old neutral colors.
-`themeContrast.spec.ts` covers semantic colors and node tones; `boardToolPresentation.spec.ts` checks workflow
-headings and toolbar states. Generated device artwork and Shiki syntax colors keep their own paint.
+`themeContrast.spec.ts` covers semantic colors and node tones. Review actual workflow headings and
+toolbar states in the browser. Generated device artwork and Shiki syntax colors keep their own paint.
 Shiki's syntax colors retain their paired background; its padded code surface must not be made
-transparent over a different theme ground. `CodeBlock.spec.ts` and `chat-assistant.spec.ts` cover this.
+transparent over a different theme ground. Review its rendered colors together; `CodeBlock.spec.ts`
+checks the component and `chat-assistant.spec.ts` checks streamed content and reload behavior.
 
 ### A domain value maps to one role, product-wide — and an empty class is not a role
 
@@ -774,14 +773,13 @@ the wrong element.
 
 ## 7. Text size: the floor is not the target, and headings need a tier
 
-`--iot-font-min` (0.6875rem = 11px) is the smallest size any interface text may be declared at, enforced by
-`styles/__tests__/typographyFloor.spec.ts`. Two things that rule does *not* say, both of which produced real
-defects:
+`--iot-font-min` (0.6875rem = 11px) is the smallest size any interface text may be declared at.
+Check its rendered size during visual review. Two distinctions matter:
 
 - **A heading sized just above the floor is not a heading.** The action dock's "Board tools" was `0.72rem` at
   weight 800 against `--iot-font-min`/700 group labels *beneath* it — 0.52px of difference at a heavier
   weight, so two levels of heading rendered as one and a reader saw three rows of small uppercase text with
-  nothing marking which named the panel. It passed `typographyFloor` (11.52px over an 11px floor) throughout.
+  nothing marking which named the panel, despite clearing the 11px floor.
   Panel headings use the 16px body token; section headings use the 14px control token.
   Leave at least 2px between heading levels that appear together.
 - **Pick a step on the scale, not a nearby number.** `0.72rem` and `0.78rem` each appeared at multiple sites
@@ -793,7 +791,7 @@ defects:
   four-character label it is most of why the label looks too small. Ordinary section labels retain
   sentence case, just like form labels and actions.
 
-Pinned by `views/board/actionDockHierarchy.spec.ts` for the dock, which is where the tier inversion was.
+Check this hierarchy together with the labels beneath the heading.
 
 ### Workspace typography and control shape have one owner
 
@@ -845,7 +843,7 @@ caps its height and wraps long tokens; enterable help can scroll instead of exte
 window. A preferred side is not permission to crop the explanation.
 Model/formula/code text keeps its monospace family, while warning, failure and selection colours
 retain their domain meaning. Narrow layouts wrap content without shrinking the text tier.
-Browser parity and focus checks live in `e2e/ui-contracts.spec.ts`.
+Focused keyboard and hint-dismissal journeys live in `e2e/ui-contracts.spec.ts`.
 
 Icon actions, search-clear controls, template actions and simulation steppers retain the same
 44px target on desktop and touch screens, including assistant header, voice, send/stop,
@@ -873,16 +871,14 @@ declared floor was the rendered size at every viewport, and three node declarati
 under an 11px minimum. Before writing a sub-floor floor, compute what the preferred term evaluates to at the
 container's real size.
 
-If a test exempts the pattern, the exemption needs a measurement, not a comment. `typographyFloor.spec.ts`
-exempted these on a claim that they "render at 16px", which was false — so the check certified the defect it
-existed to catch. Canvas name labels counter-scale with `--node-ui-scale` so the minimum is
+Measure the rendered size rather than inferring it from a declaration. Canvas name labels
+counter-scale with `--node-ui-scale` so the minimum is
 measured on screen. A capped world-space size defeated this at low zoom: 14.4px at a fitted
 19.6% overview painted below 3px. Compact labels retain the 11px screen floor and ellipsis;
 name, state, runtime and security text counter-scale below 100% zoom using the shared
 caption, label and minimum font tokens. The node title and State details retain the complete
 name when the overview cannot fit it.
-Literal sub-floor clamp bounds have no test exemption; browser checks also measure transformed
-device-name text in fitted overviews.
+Check text in fitted overviews as part of visual review.
 
 ### Fixed playback hosts need their own layout variables
 
@@ -891,9 +887,9 @@ board-scoped width or spacing variables, and a descendant selector beginning wit
 `.iot-board .board-timeline` cannot reach it. Inject `boardShellStyle` onto each
 replay owner and target the unprefixed `.board-timeline-host` or `.board-timeline`.
 
-`boardDockGeometry.spec.ts` checks the shared geometry values and
-`timelineHostScope.spec.ts` rejects unreachable selectors. Shared role classes and
-their variants also need definitions reachable from these sibling surfaces.
+Shared role classes and their variants need definitions reachable from these sibling surfaces.
+Check their rendered controls when resizing the viewport; the focused playback journeys cover
+control reachability during real interaction.
 
 ## 8. Depth is a scale, and it means containment
 
@@ -940,8 +936,7 @@ ground invalidates the old measurement.
   has a bottom border marking the boundary; a panel lift under something with nowhere to float *to* reads as a
   heavy smear across the viewport. Use its border to separate it from the canvas.
 
-Pinned by `styles/__tests__/elevationScale.spec.ts`, which covers `base.css` and `board.css`.
-Scoped component elevations outside those stylesheets need their own review; public pages
+Review elevations in `base.css`, `board.css` and scoped component styles together; public pages
 use the same elevation tokens.
 
 ## 9. A scoped rule outranks a Tailwind utility on the same element
@@ -975,16 +970,11 @@ and shared role state selectors own their appearance explicitly; use §6's share
 
 - Do not put a `max-width`/`max-height` in a scoped block on an element that also carries a Tailwind
   `max-w-*`/`max-h-*`. Constrain the children that need containment, not the capped element itself.
-  `styles/__tests__/scopedWidthOverride.spec.ts` fails on the overlap, per axis.
 - Do not recolor all text descendants to repair legacy utilities. Give each element its role directly;
   a broad scoped text selector can swallow the status and accent roles inside it.
-- **"Defined" is not the same as "defined where this element is."** `roleClassVariants.spec.ts` matched the
-  class name as a substring, so a variant declared only as `.iot-board .hover\:board-…` counted as defined
-  for the two replay bars, which are *siblings* of `.iot-board`. That is the fourth defect from this one
-  structure, so it is now a check: a variant class used inside a `.board-timeline` region must have at least
-  one definition that is unprefixed or `.board-timeline`-scoped. The check reads the stylesheet with comments
-  stripped — a prose mention of the bare selector (`board.css:1953` explains why one lost the cascade) read as
-  a definition and let the first version pass a class that had none.
+- **A role must be defined where its element lives.** A variant used inside a `.board-timeline`
+  region needs a definition that is unprefixed or `.board-timeline`-scoped, because the replay bars
+  are siblings of `.iot-board`. Inspect matched styles on the rendered element.
 - When a rule that looks right does not apply, read the winner from CDP matched-styles rather than
   reasoning about specificity. At equal specificity, source order decides, and raising specificity is then
   the wrong fix.
@@ -1284,10 +1274,9 @@ width before their values. Typography follows [the screen-size rule](#a-clamp-wh
 Card layout lives in `board.css`; `CanvasBoard.vue` owns density selection and state semantics.
 The card uses the shared action radius and palette surface. Its content clips inside that shape,
 while the attack marker is a sibling outside the clipped content. Saved node dimensions and
-positions remain the geometry used by connections and resize handles. Real browser coverage in
-`canvas-runtime-environment.spec.ts` checks complete names where the footprint has room, and
-two-line ellipsis with full-name tooltips and accessible labels on constrained compact cards.
-It also checks text size, containment and icon/name separation across shapes, zoom levels and themes.
+positions remain the geometry used by connections and resize handles. Focused browser coverage in
+`canvas-runtime-environment.spec.ts` checks persisted resize/drag, playback and viewport reachability.
+Review name clipping, readable text size and icon separation across shapes, zoom levels and themes.
 
 Expanded cards center their content within a maximum 30rem screen-space column. Enlarging the
 card gives its content room without separating the artwork, name, readings, and security labels
@@ -1389,7 +1378,8 @@ when a short panel cannot fit both recovery and the draft, instead of clipping i
 failure uses `AssistantRecoveryPanel` above the canvas rather than a fallback below the full-height
 Board. It can be hidden, reopened, or retried without clearing persisted conversations. Remounting
 requires authoritative reconciliation before further assistant work; retry alone cannot clear that
-guard. `App.spec.ts` and `chat-assistant.spec.ts` cover recovery, focus and narrow/short viewports.
+guard. `App.spec.ts` and `chat-assistant.spec.ts` cover recovery and focus; the browser suite also
+keeps a narrow pending-reply case. Review short-viewport layouts when changing these surfaces.
 Before the assistant first mounts, timer and focus refreshes share one in-flight session observation.
 Further refresh demand schedules one follow-up after that observation and its reconciliation settle,
 so slow responses remain usable. Account changes, public navigation and unmount discard the old

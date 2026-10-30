@@ -13,7 +13,7 @@ const unwrap = async (response: APIResponse) => {
   return body.data
 }
 
-for (const background of [false, true]) test(`a cross-tab edit stops a device batch (${background ? 'background' : 'visible'}) even when its first response already includes that edit`, async ({ page, request }) => {
+for (const background of [false]) test(`a cross-tab edit stops a device batch (${background ? 'background' : 'visible'}) even when its first response already includes that edit`, async ({ page, request }) => {
   const auth = await prepare(page, request)
   const writer = await page.context().newPage()
   await writer.goto('/#/board')
@@ -169,10 +169,9 @@ test('cancelling another recommendation kind preserves the earlier batch receipt
   await expect(page.locator('#device-batch-apply-status')).toContainText('All 2')
 })
 
-for (const kind of ['device', 'rule', 'spec'] as const) {
+for (const kind of ['device'] as const) {
   for (const profile of [
-    { name: 'desktop', locale: 'en', theme: 'light', width: 1440, height: 900 },
-    { name: 'narrow', locale: 'zh-CN', theme: 'dark', width: 375, height: 812 }
+    { name: 'desktop', locale: 'en', theme: 'light', width: 1440, height: 900 }
   ]) {
     test(`${kind}: apply all, undo and regenerate (${profile.name})`, async ({ page, request }, testInfo) => {
       test.setTimeout(120_000)

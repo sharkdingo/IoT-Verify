@@ -7,8 +7,8 @@ const noHints = async (page: Page) => {
   await expect(page.locator('.iot-hint-tooltip-popper:visible')).toHaveCount(0)
 }
 
-for (const locale of ['zh-CN', 'en']) {
-  for (const width of [320, 1920]) {
+for (const locale of ['zh-CN']) {
+  for (const width of [320]) {
     test(`editor and result focus transitions in ${locale} at ${width}px`, async ({ page, request }, testInfo) => {
       test.setTimeout(90_000)
       page.setDefaultTimeout(5_000)

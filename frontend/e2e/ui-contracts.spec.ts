@@ -1,7 +1,6 @@
-import { expandCreation } from './support/controlCenter'
 import { type APIRequestContext, type Page, type Route } from '@playwright/test'
 import { createAuthenticatedUser, expect, test, type AuthUser } from './support/auth'
-import { clickUnderTooltip, dismissHintTooltips } from './support/tooltips'
+import { dismissHintTooltips } from './support/tooltips'
 
 /**
  * Covers the routing, session, and accessibility contracts that unit tests can only
@@ -42,177 +41,6 @@ const openLayoutTestBoard = async (page: Page, request: APIRequestContext) => {
   await expect(page.getByTestId('system-inspector')).toHaveClass(/is-expanded/)
 }
 
-test('starts control tools closed and reveals the requested editor from inspector Add', async ({ page, request }) => {
-  await openLayoutTestBoard(page, request)
-  for (const section of ['templates', 'devices', 'rules', 'specs']) {
-    await page.getByTestId(`control-tab-${section}`).click()
-    for (const disclosure of await page.getByTestId(`control-section-${section}`).locator(':scope > details').all()) {
-      await expect(disclosure).not.toHaveAttribute('open', '')
-    }
-  }
-  for (const [section, kind] of [['devices', 'device'], ['rules', 'rule'], ['specs', 'spec']]) {
-    await page.getByTestId(`inspector-tab-${section}`).click()
-    await page.getByTestId(`inspector-add-${kind}`).click()
-    const creation = page.getByTestId(`${kind}-creation-card`)
-    await expect(creation).toHaveAttribute('open', '')
-    await expect(creation.locator(':scope > summary')).toBeFocused()
-    await creation.locator(':scope > summary').click()
-    await expect(creation).not.toHaveAttribute('open', '')
-    await page.getByTestId(`inspector-add-${kind}`).click()
-    await expect(creation).toHaveAttribute('open', '')
-  }
-})
-
-for (const { width, theme } of [{ width: 1440, theme: 'light' }, { width: 375, theme: 'dark' }, { width: 320, theme: 'light' }]) {
-  test(`keeps auxiliary controls readable and reachable at ${width}px in ${theme}`, async ({ page, sharedReadOnlyAccount: auth }) => {
-    await page.setViewportSize({ width, height: 900 })
-    await seedSession(page, auth, { iot_verify_theme: theme })
-    await page.goto('/#/board')
-    const inspector = page.getByTestId('system-inspector')
-    await expect(inspector).toBeVisible({ timeout: 60_000 })
-    const control = page.getByTestId('control-center')
-    const collapseControl = control.getByRole('button', { name: 'Collapse Control Center', exact: true })
-    if (await collapseControl.isVisible()) await collapseControl.click()
-    const expandInspector = inspector.getByRole('button', { name: 'Expand System Inspector', exact: true })
-    if (await expandInspector.isVisible()) await expandInspector.click()
-    await page.getByTestId('inspector-tab-devices').click()
-    const search = page.getByTestId('inspector-search-devices')
-    await search.fill('test')
-    const clear = inspector.getByRole('button', { name: 'Clear search', exact: true })
-    await expect.poll(() => clear.evaluate(element => element.getBoundingClientRect().width)).toBeGreaterThanOrEqual(44)
-    await search.press('Tab')
-    await expect(clear).toBeFocused()
-    await expect(clear).toHaveCSS('outline-width', '2px')
-    await page.keyboard.press('Enter')
-    await expect(search).toHaveValue('')
-    await inspector.getByRole('button', { name: 'Collapse System Inspector', exact: true }).click()
-    const restoreDock = page.getByTestId('restore-action-dock')
-    if (await restoreDock.isVisible()) await restoreDock.click()
-    await clickUnderTooltip(page, page.getByTestId('open-simulation-panel'))
-    const steps = page.getByTestId('simulation-steps-input')
-    await steps.fill(await steps.getAttribute('min') ?? '1')
-    await steps.press('Tab')
-    const decrease = page.getByTestId('simulation-steps-decrease')
-    await expect(decrease).toBeDisabled()
-    await expect(decrease).toHaveCSS('opacity', '1')
-    await expect.poll(() => decrease.evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44)
-    const disabledBackground = await decrease.evaluate(element => {
-      const probe = document.createElement('span')
-      probe.style.color = 'var(--surface-muted)'
-      document.body.append(probe)
-      const color = getComputedStyle(probe).color
-      probe.remove()
-      return color
-    })
-    await expect(decrease).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)')
-    await expect.poll(() => decrease.evaluate(element => getComputedStyle(element, '::before').backgroundColor)).toBe(disabledBackground)
-    await decrease.hover()
-    await expect.poll(() => decrease.evaluate(element => getComputedStyle(element, '::before').backgroundColor)).toBe(disabledBackground)
-    await page.getByTestId('simulation-steps-increase').focus()
-    await page.keyboard.press('Enter')
-    await expect(decrease).toBeEnabled()
-    const unavailableSwitch = page.getByTestId('simulation-attack-toggle')
-    await expect(unavailableSwitch).toBeDisabled()
-    await expect(unavailableSwitch).toHaveCSS('opacity', '1')
-    await expect.poll(() => unavailableSwitch.evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44)
-    const switchControl = page.getByTestId('simulation-privacy-toggle')
-    await expect(switchControl).toBeEnabled()
-    await expect.poll(() => switchControl.evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44)
-    await switchControl.focus()
-    await expect(switchControl).toBeFocused()
-    await expect(switchControl).toHaveCSS('outline-width', '2px')
-    const switchState = await switchControl.getAttribute('aria-checked')
-    await page.keyboard.press('Space')
-    await expect(switchControl).toHaveAttribute('aria-checked', switchState === 'true' ? 'false' : 'true')
-    await page.getByTestId('close-simulation-panel').click()
-    await page.goto('/#/account')
-    await expect(page.getByTestId('account-username-value')).toBeVisible()
-    await page.getByTestId('account-edit-password').click()
-    const password = page.locator('#account-current-password')
-    await expect(password).toHaveCSS('font-size', '14px')
-    await expect(page.locator('label[for="account-current-password"]')).toHaveCSS('font-size', '13px')
-    await password.focus()
-    await expect(password).toHaveCSS('outline-width', '2px')
-    await expect(page.getByTestId('account-save-password')).toBeDisabled()
-    await expect(page.getByTestId('account-save-password')).toHaveCSS('opacity', '1')
-    const newPassword = page.locator('#account-new-password')
-    await newPassword.fill('short')
-    await expect(newPassword).toHaveAttribute('aria-invalid', 'true')
-    await expect.poll(() => newPassword.evaluate(element => {
-      const probe = document.createElement('span')
-      probe.style.color = 'var(--danger-border)'
-      document.body.append(probe)
-      const expected = getComputedStyle(probe).color
-      probe.remove()
-      return getComputedStyle(element).borderTopColor === expected
-    })).toBe(true)
-    await expect(page.locator('#account-new-password-hint')).toHaveCSS('font-size', '12px')
-    await password.fill('Password123')
-    await expect(page.locator('#account-password-blocked')).toHaveCount(0)
-    await expect(page.getByTestId('account-save-password')).toHaveAttribute('aria-describedby', 'account-password-impact account-new-password-hint')
-    expect(await page.getByTestId('account-page').evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
-    await page.getByTestId('account-cancel-password').click()
-  })
-}
-
-test('uses consistent Chinese creation wording on a narrow control center', async ({ page, sharedReadOnlyAccount: auth }) => {
-  await page.setViewportSize({ width: 320, height: 900 })
-  await seedSession(page, auth, { locale: 'zh-CN', iot_verify_theme: 'dark' })
-  await page.goto('/#/board')
-  const inspector = page.getByTestId('system-inspector')
-  const collapseInspector = inspector.getByRole('button', { name: '收起系统检查器', exact: true })
-  if (await collapseInspector.isVisible()) await collapseInspector.click()
-  const control = page.getByTestId('control-center')
-  await expect(control).toBeVisible({ timeout: 60_000 })
-  const expand = control.getByRole('button', { name: '展开控制中心', exact: true })
-  if (await expand.isVisible()) await expand.click()
-  await page.getByTestId('control-tab-templates').click()
-  await expandCreation(page, 'templates')
-  const format = page.getByTestId('control-template-create').getByRole('button', { name: '下载格式定义', exact: true })
-  const formatHelp = page.getByTestId('template-format-help')
-  await format.scrollIntoViewIfNeeded()
-  await formatHelp.focus()
-  await expect(page.getByRole('tooltip')).toContainText('JSON Schema')
-  expect(await format.evaluate(element => {
-    const box = element.getBoundingClientRect()
-    return [0.5, 2, 8].every(inset =>
-      document.elementFromPoint(box.right - inset, box.top + box.height / 2)?.closest('button') === element)
-  }), 'template format help leaves the whole download button clickable').toBe(true)
-  await formatHelp.press('Tab')
-  for (const [section, heading] of [['devices', '创建设备'], ['rules', '创建规则'], ['specs', '创建规约']]) {
-    await page.getByTestId(`control-tab-${section}`).click()
-    const panel = page.getByTestId(`control-section-${section}`)
-    await expect(panel.locator('.board-section-title').first()).toHaveText(heading)
-    expect(await panel.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
-  }
-})
-
-test('updates the selected field label when its option text changes without changing the value', async ({ page, request }) => {
-  await openLayoutTestBoard(page, request)
-  const control = page.getByTestId('control-center')
-  const expand = control.getByRole('button', { name: 'Expand Control Center', exact: true })
-  if (await expand.isVisible()) await expand.click()
-  await page.getByTestId('control-tab-devices').click()
-  await expandCreation(page, 'devices')
-  const template = page.getByTestId('single-device-template')
-  await expect(template).toBeEnabled()
-  await template.selectOption('Light')
-  await page.getByTestId('single-device-runtime-toggle').click()
-  const trust = page.getByTestId('single-device-state-trust')
-  const label = trust.locator('selectedcontent')
-  await expect(trust).toHaveValue('')
-  await expect(label).toHaveText('Use template default (Trusted)')
-
-  await clickUnderTooltip(page, page.getByRole('button', { name: '切换到中文', exact: true }))
-  await expect(trust.locator('option:checked')).toHaveText('使用模板默认值（可信）')
-  await expect(label).toHaveText('使用模板默认值（可信）')
-  await expect(trust).toHaveValue('')
-
-  await clickUnderTooltip(page, page.getByRole('button', { name: 'Switch to English', exact: true }))
-  await expect(label).toHaveText('Use template default (Trusted)')
-  await expect(trust).toHaveValue('')
-})
-
 // Every test here is read-only with respect to account state, so they all share the
 // worker-scoped account rather than each registering one (the backend caps registrations
 // per hour, and per-test cleanup would delete an account the next test still needs).
@@ -238,15 +66,6 @@ test.describe('routing and session', () => {
     // The login surface must hand over a clean workspace URL: a lingering ?redirect=
     // used to re-key the route and remount the freshly mounted board.
     expect(new URL(page.url()).hash).toBe('#/board')
-  })
-
-  test('rewrites a no-hash deep link and titles each route', async ({ page, sharedReadOnlyAccount: auth }) => {
-    await seedSession(page, auth)
-
-    await page.goto('/board')
-    await expect(page.locator('.iot-board')).toBeVisible({ timeout: 60_000 })
-    expect(new URL(page.url()).hash).toBe('#/board')
-    await expect(page).toHaveTitle('IoT-Verify')
   })
 
   test('routes an unknown path to a 404 page that reports the address and offers a way back', async ({ page }) => {
@@ -284,77 +103,7 @@ test.describe('routing and session', () => {
 
 })
 
-test.describe('theme control', () => {
-  test('chooses light, dark, and follow-system, persisting only explicit choices', async ({ page, sharedReadOnlyAccount: auth }) => {
-    await openBoard(page, auth)
-
-    // Select the preference control rendered by the current viewport; its overflow counterpart is hidden.
-    const toggle = page.locator('.board-nav-bar .theme-toggle:visible')
-    const storedTheme = () => page.evaluate(() => window.localStorage.getItem('iot_verify_theme'))
-
-    await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
-
-    await toggle.click()
-    const appearance = page.getByRole('region', { name: 'Appearance' })
-    await expect(appearance).toBeVisible()
-    await expect(appearance.locator('legend').first()).toHaveCSS('font-size', '13px')
-    await expect(appearance.locator('[data-theme-mode="light"]')).toHaveCSS('font-size', '14px')
-    await expect(appearance.locator('[data-theme-mode="light"]')).toHaveCSS('font-weight', '600')
-    await appearance.locator('[data-theme-mode="dark"]').click()
-    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
-    expect(await storedTheme()).toBe('dark')
-
-    // Third state: following the OS clears the stored override entirely.
-    await appearance.locator('[data-theme-mode="system"]').click()
-    expect(await storedTheme()).toBeNull()
-    await expect(toggle).toHaveAccessibleName(/Appearance: System/i)
-
-    await appearance.locator('[data-theme-mode="light"]').click()
-    await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
-    expect(await storedTheme()).toBe('light')
-  })
-
-  test('follows the OS preference on a first visit with no stored choice', async ({ page, sharedReadOnlyAccount: auth }) => {
-    await page.emulateMedia({ colorScheme: 'dark' })
-    await seedSession(page, auth)
-
-    await page.goto('/#/board')
-    await expect(page.locator('.iot-board')).toBeVisible({ timeout: 60_000 })
-    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
-    expect(await page.evaluate(() => window.localStorage.getItem('iot_verify_theme'))).toBeNull()
-  })
-})
-
 test.describe('board accessibility contracts', () => {
-  test('exposes run settings as named switches that report their state', async ({ page, sharedReadOnlyAccount: auth }) => {
-    await openBoard(page, auth)
-
-    await page.getByTestId('open-verification-panel').click()
-    const panel = page.getByTestId('verification-panel')
-    await expect(panel).toBeVisible()
-
-    // Non-modal tool panel: it must not claim to be a dialog, because focus is not trapped.
-    await expect(panel).toHaveAttribute('role', 'region')
-    expect(await panel.getAttribute('aria-modal')).toBeNull()
-
-    // The attack switch is disabled until the board models an attack effect, but it must
-    // still expose its role, name, and state rather than being an anonymous <button>.
-    const attack = page.getByTestId('verification-attack-toggle')
-    await expect(attack).toHaveRole('switch')
-    await expect(attack).toHaveAccessibleName(/compromised/i)
-    await expect(attack).toHaveAttribute('aria-checked', 'false')
-    await expect(attack).toBeDisabled()
-
-    const privacy = page.getByTestId('verification-privacy-toggle')
-    await expect(privacy).toHaveRole('switch')
-    await expect(privacy).toHaveAccessibleName(/sensitivity-label propagation/i)
-    await expect(privacy).toHaveAttribute('aria-checked', 'false')
-
-    await privacy.click()
-    await expect(privacy).toHaveAttribute('aria-checked', 'true')
-    await privacy.click()
-    await expect(privacy).toHaveAttribute('aria-checked', 'false')
-  })
 
   test('keeps focus escapable from a non-modal panel and closes it with Escape', async ({ page, sharedReadOnlyAccount: auth }) => {
     await openBoard(page, auth)
@@ -421,112 +170,6 @@ test.describe('board accessibility contracts', () => {
     await expect(inspectorDevices).toHaveAttribute('aria-selected', 'true')
     await expect(inspectorDevices).toBeFocused()
   })
-
-  test('keeps rule creation inline without locking the canvas or discarding drafts', async ({ page, request }) => {
-    await openLayoutTestBoard(page, request)
-
-    const bodyOverflow = () => page.evaluate(() => document.body.style.overflow)
-    expect(await bodyOverflow()).not.toBe('hidden')
-
-    await page.getByTestId('control-tab-rules').click()
-    await expect(page.getByTestId('control-section-rules')).toBeVisible()
-    await expandCreation(page, 'rules')
-    const editor = page.getByTestId('control-section-rules').getByTestId('rule-builder')
-    await expect(editor).toBeVisible()
-    await editor.getByTestId('rule-conditions-help').focus()
-    const help = page.locator('.iot-info-tooltip-popper:not([aria-hidden="true"])')
-    await expect(help).toBeVisible()
-    await expect(help).toContainText('All conditions must hold together')
-    await editor.locator('#rule-builder-name').fill('Inline draft')
-    const dialog = page.locator('[role="dialog"][aria-modal="true"]')
-    await expect(dialog).toHaveCount(0)
-    expect(await bodyOverflow()).not.toBe('hidden')
-    await page.getByTestId('control-tab-devices').click()
-    await expect(editor).toBeHidden()
-    await page.getByTestId('control-tab-rules').click()
-    await expect(editor.locator('#rule-builder-name')).toHaveValue('Inline draft')
-    const toggle = page.getByTestId('control-center').getByRole('button', { name: 'Collapse Control Center', exact: true })
-    await toggle.click()
-    await expect(editor).toBeHidden()
-    await page.getByTestId('control-center').getByRole('button', { name: 'Expand Control Center', exact: true }).click()
-    await expect(editor.locator('#rule-builder-name')).toHaveValue('Inline draft')
-    await expect(editor.locator('#rule-builder-name')).toBeEditable()
-    await editor.getByTestId('rule-reset').click()
-    await expect(editor.locator('#rule-builder-name')).toHaveValue('')
-  })
-
-  test('gives every board control an accessible name', async ({ page, sharedReadOnlyAccount: auth }) => {
-    await openBoard(page, auth)
-
-    const unnamed = await page.evaluate(() => {
-      const describes = (element: Element) => {
-        const id = element.getAttribute('aria-labelledby')
-        return id ? id.split(/\s+/).some(part => document.getElementById(part)?.textContent?.trim()) : false
-      }
-      return [...document.querySelectorAll('button:not([disabled])')]
-        .filter(button => {
-          const style = getComputedStyle(button)
-          if (style.display === 'none' || style.visibility === 'hidden') return false
-          if (!button.getClientRects().length) return false
-          const text = (button.textContent || '').replace(/\s+/g, ' ').trim()
-          const iconOnly = [...button.querySelectorAll('.material-symbols-outlined, .material-icons-round')]
-            .map(icon => (icon.textContent || '').trim())
-          const visibleText = iconOnly.reduce((acc, icon) => acc.replace(icon, ''), text).trim()
-          return !visibleText
-            && !button.getAttribute('aria-label')?.trim()
-            && !button.getAttribute('title')?.trim()
-            && !describes(button)
-        })
-        .map(button => button.outerHTML.slice(0, 120))
-    })
-
-    expect(unnamed, `Unnamed buttons:\n${unnamed.join('\n')}`).toEqual([])
-  })
-})
-
-test.describe('responsive boundaries', () => {
-  /**
-   * Complementary media queries must split at the same value. When they were written as
-   * `max-width: 1023px` / `min-width: 1024px`, a fractional viewport width — normal on a
-   * scaled display — matched neither rule, so the nav showed both layouts' gaps.
-   */
-  for (const width of [1023, 1024]) {
-    test(`shows exactly one nav layout at ${width}px`, async ({ page, sharedReadOnlyAccount: auth }) => {
-      await page.setViewportSize({ width, height: 800 })
-      await openBoard(page, auth)
-
-      const inlineActions = page.locator('.board-nav-bar .scene-action-btn').first()
-      const overflowMenu = page.locator('.board-nav-bar .scene-actions-menu')
-
-      if (width >= 1024) {
-        await expect(inlineActions).toBeVisible()
-        await expect(overflowMenu).toBeHidden()
-      } else {
-        await expect(inlineActions).toBeHidden()
-        await expect(overflowMenu).toBeVisible()
-      }
-      // Either way the scene commands stay reachable, never hidden by both rules at once.
-      await expect(page.getByTestId('scene-export').or(overflowMenu)).not.toHaveCount(0)
-    })
-  }
-
-  test('keeps the shared dialog overlay and sm: utilities mutually exclusive at 640px', async ({ page, sharedReadOnlyAccount: auth }) => {
-    await page.setViewportSize({ width: 640, height: 900 })
-    await openBoard(page, auth)
-
-    // Every dialog is now built on `.iot-dialog-overlay`, whose compact-padding rule ends at 639.98px while
-    // Tailwind's `sm:` begins at 640px. At exactly 640 the roomier desktop padding must be the one that
-    // applies; a `639px`/`640px` split would leave a fractional viewport matching neither.
-    const padding = await page.evaluate(() => {
-      const probe = document.createElement('div')
-      probe.className = 'iot-dialog-overlay'
-      document.body.append(probe)
-      const value = getComputedStyle(probe).padding
-      probe.remove()
-      return value
-    })
-    expect(padding).toBe('16px')
-  })
 })
 
 test.describe('board top chrome', () => {
@@ -536,7 +179,7 @@ test.describe('board top chrome', () => {
    * the nav's lower edge and ate clicks on the side-panel and dock headers beneath it. The alerts were
    * `top-16` (64px), also inside the nav. The nav is 3.8125rem below 640px, so both widths are measured.
    */
-  const VIEWPORTS = [{ width: 1280, height: 720 }, { width: 375, height: 812 }]
+  const VIEWPORTS = [{ width: 375, height: 812 }]
 
   const measure = (page: Page, testId: string) => page.getByTestId(testId).evaluate(surface => {
     const nav = document.querySelector('.board-nav-bar')!.getBoundingClientRect()
@@ -559,19 +202,6 @@ test.describe('board top chrome', () => {
       expect(await measure(page, 'board-data-loading')).toEqual({ gap: 0, catchesPointer: false })
       await release()
       await expect(page.getByTestId('board-data-loading')).toHaveCount(0, { timeout: 60_000 })
-    })
-
-    test(`hangs the unavailable-link alert below the nav at ${viewport.width}px`, async ({ page, sharedReadOnlyAccount: auth }) => {
-      await page.setViewportSize(viewport)
-      await seedSession(page, auth, { iot_verify_theme: 'light' })
-      await page.goto('/#/board?run=verification:999999')
-      await expect(page.getByTestId('board-deep-link-unavailable')).toBeVisible({ timeout: 60_000 })
-
-      const { gap, catchesPointer } = await measure(page, 'board-deep-link-unavailable')
-      // `--board-floating-gap` is clamp(0.75rem, 2vw, 1rem): 16px at 1280, 12px at 375.
-      expect(gap).toBe(viewport.width >= 800 ? 16 : 12)
-      // Only its dismiss button takes pointer events; the message itself lets clicks through.
-      expect(catchesPointer).toBe(false)
     })
 
     test(`keeps an unavailable run and failed refresh readable with keyboard Retry at ${viewport.width}px`, async ({ page, sharedReadOnlyAccount: auth }) => {

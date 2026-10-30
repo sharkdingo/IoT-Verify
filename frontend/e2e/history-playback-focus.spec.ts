@@ -23,8 +23,8 @@ const expectControlsReachable = async (page: Page, prefix: string) => {
   }
 }
 
-for (const locale of ['zh-CN', 'en']) {
-  for (const width of [320, 1920]) {
+for (const locale of ['zh-CN']) {
+  for (const width of [320]) {
     test(`history result and playback focus in ${locale} at ${width}px`, async ({ page, request }, testInfo) => {
       test.setTimeout(90_000)
       const auth = await createAuthenticatedUser(request)

@@ -174,8 +174,8 @@ single owner of the "session gone → login" location.
   **opaque** (`--surface-elevated`, never the 30%-alpha `--iot-color-card-bg`), and a dialog stays centred at
   every width — a narrow-viewport bottom sheet was reverted because Element Plus MessageBox cannot dock, so
   it gave one class of surface two positions. Address dialog controls by `data-testid`, never by an
-  appearance class. `styles/__tests__/dialogSurfaceConsistency.spec.ts` enforces all of this; the reasoning
-  and the measured before-state are in
+  appearance class. Review the rendered surface against the shared layer; the reasoning
+  and measured examples are in
   [../docs/guides/frontend-ui-conventions.md](../docs/guides/frontend-ui-conventions.md) §4.
 - **All user feedback goes through `utils/feedback.ts`.** Call sites state the intent
   (`notifySuccess`/`notifyInfo`/`notifyBlocked`/`notifyError`, `confirmDestructive`,
@@ -217,7 +217,7 @@ single owner of the "session gone → login" location.
 - **A `clamp()` whose middle term can never win is a fixed size wearing responsive syntax.** `cqmin`
   is a percentage of the *container*, so a sub-floor floor on a canvas node renders below the 11px
   minimum at every viewport. Compute what the preferred term evaluates to at the container's real
-  size, and never exempt a pattern from `typographyFloor.spec.ts` on a claim you have not measured.
+  size, and verify the rendered text at the canvas zoom where users will read it.
   Both, with the numbers: [../docs/guides/frontend-ui-conventions.md](../docs/guides/frontend-ui-conventions.md) §7.
 - **A semantic role has an ink half and a paper half.** Fill under light labels with
   `--<role>-fill`; bare roles are text inks that lighten in dark mode. Disabled controls keep opaque

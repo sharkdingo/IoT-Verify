@@ -19,7 +19,7 @@ import { describe, expect, it } from 'vitest'
  * evidence, or that one violation is somehow not real.
  *
  * Source-text assertions rather than a mounted render: `Board.vue` is far too large to mount cheaply
- * (see `actionDockHierarchy.spec.ts`).
+ * for this focused evidence check.
  */
 describe('violation evidence shortfall', () => {
   const board = readFileSync(join(process.cwd(), 'src/views/Board.vue'), 'utf8')

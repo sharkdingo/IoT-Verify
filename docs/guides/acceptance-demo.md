@@ -4,7 +4,7 @@ This runbook exercises authoring, observation, verification and repair rejection
 deliberately conflicting night-watch scene. For a successful household repair that retains
 useful functions, start with the [household workflow](household-workflow.md#run-the-entrance-demo).
 
-Verified against code on 2026-10-29 for regression scene coverage. Sources:
+Verified against code on 2026-10-30 for focused regression coverage. Sources:
 [`../examples/acceptance-demo-scene.json`](../examples/acceptance-demo-scene.json), the additional
 scenes linked below, and `AcceptanceDemoScenarioNusmvTest`.
 
@@ -314,21 +314,15 @@ mvn -Dtest=AcceptanceDemoScenarioNusmvTest test
 
 The test is skipped only when the NuSMV executable is unavailable.
 
-The browser acceptance regression exercises verified parameter/condition repairs and the
-combined-response case through scene import, the live REST API, the Board verification UI,
-repair application, persistence reload, and a new verification. The night-watch and
-multi-violation scenes additionally require camera-removal rejection. The household
-entrance demo covers successful removal with reachable response triggers.
-It also repeats the redundant same-command scenario independently for parameter, condition,
-and removal, requiring all two-item signed operations to survive apply and database reload
-before the complete model is verified again.
-The parameter and condition fixtures are generated in memory from the exact bundled template
-snapshots so the browser path tests the real import contract without adding test-only device
-capabilities:
+The focused browser suite keeps one reviewed repair/apply/undo journey, stale-verdict
+withdrawal, and a complete author/simulate/verify/history journey against the live REST API.
+The repair fixture uses bundled template snapshots. Strategy matrices, combined responses
+and camera-removal rejection belong to the backend regressions rather than repeated browser
+tours. The household entrance demo remains a browser journey for successful removal:
 
 ```bash
 cd frontend
-npx playwright test e2e/board-full-flow.spec.ts --grep "finds and applies|persists every item in a coordinated|imports the acceptance scene"
+npm run test:e2e:full -- e2e/board-full-flow.spec.ts
 ```
 
 ## Dynamic interactions and incompatible requirements
@@ -338,6 +332,10 @@ The importable [dynamic home](../examples/dynamic-home-repair-scene.json) contai
 may change on every modeled step; temperature has `[-1,1]` natural drift and heating/cooling
 effects, while gas evolves through the open supply and extractor. These inputs are intentionally
 independent, so verification includes simultaneous changes rather than assuming a favorable schedule.
+
+This remains an importable large example; it is no longer a multi-round solver regression in
+the automatic suite. Focused strategy tests and the smaller cumulative shared-environment
+scenario check repair acceptance and preservation.
 
 The five seeded problems are late heating/cooling, motion lighting that overrides away shutoff,
 away locking that overrides emergency evacuation, hot-room window opening that overrides rain
@@ -379,9 +377,10 @@ a three-hop smoke-alarm chain, and a changing CO2 environment exercise unrelated
 the same complete model. Initially twelve requirements pass; camera privacy, the CO2 bound,
 and eventual ventilation from the boundary reading fail. The camera repair must preserve all
 twelve passing requirements and cut one downstream link on each path, never the shared entry
-response. There are nine minimal two-rule cuts. The owning regression lists all nine for the
-independent seven-device, seven-rule, two-requirement chain, and separately verifies every listed
-repair with all devices and the original changing environment. In that larger model, the measured cost may justify an explicitly
+response. There are nine minimal two-rule cuts. The focused regression lists and independently
+verifies all nine for the seven-device, seven-rule, two-requirement chain. Full-background
+repair enumeration remains example/stress coverage outside that regression. In the larger model,
+the measured cost may justify an explicitly
 incomplete alternative list; completeness is governed by [automatic fix](../architecture/auto-fix.md#listing-alternatives-fixalternatives).
 Successive CO2 and camera repairs must also preserve requirements established by earlier repairs.
 

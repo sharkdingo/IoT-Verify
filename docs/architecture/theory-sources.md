@@ -9,9 +9,10 @@ different user-facing contract.
 Read the cited section before changing generated-model semantics, then keep the formal checker,
 bounded explorer, API contract, tests, and UI explanation aligned with the chosen product meaning.
 
-Verified against code on 2026-10-29 for regression scene coverage. Source: `backend/src/main/java/cn/edu/nju/Iot_Verify/component/nusmv/`,
-`component/fuzz/`. Conformance is also pinned by `TheorySourceConformanceTest`, so a claim here that
-the code contradicts fails the build.
+Verified against code on 2026-10-30 for behavioral regression coverage. Source:
+`backend/src/main/java/cn/edu/nju/Iot_Verify/component/nusmv/` and `component/fuzz/`.
+Focused search, distance and forward-verification tests exercise the adopted behavior; paper
+attribution and deliberate deviations are checked by reviewing this document with the owning code.
 
 ## The four papers
 
@@ -237,10 +238,10 @@ These are intentional, not drift. Keep the list honest when adding more.
 
 ## Conformance checked against the papers (2026-08-04)
 
-Read alongside the implementation, and now **pinned by `TheorySourceConformanceTest`**, whose checks fail if a
-claim below stops being true of the code, naming the paragraph that has become false. A dated conformance note is
-otherwise the kind of assertion that rots silently: the paper does not change, the code does, and nothing fails when
-they diverge. Verified conforming:
+Read these claims alongside the implementation. `ParameterAdjustStrategyTest`,
+`PaperDistanceMetricPropertyTest` and `ForwardVerifyAcceptanceTest` check search, distance and
+repair acceptance directly; they do not validate prose or require a particular helper spelling.
+Verified conforming:
 
 - **Salus §5.3 parameter refinement** — a solved value is moved toward the original by
   `refineToClosest` (`ParameterAdjustStrategy`): each iteration re-solves `¬ρ` with that threshold
@@ -264,9 +265,9 @@ they diverge. Verified conforming:
   (`DistMeasurement.java:25`), whose `powerMap` denominator is therefore `2^0 = 1`, not `7`. At one
   level the weight degenerates to `1`, so the artifact never descends a predecessor chain at all and
   the three-level descent is an extension *beyond* it. This paragraph previously claimed the artifact
-  "obtains the same denominator by summing the powers used by all levels", which is false as written
-  and is the kind of claim `TheorySourceConformanceTest` cannot catch: it greps the two `Math.scalb`
-  substrings and so pins the formula's shape while leaving its instantiation unchecked.
+  "obtains the same denominator by summing the powers used by all levels", which is false as written.
+  A source-substring check cannot establish that correspondence; attribution needs a comparison
+  with the cited algorithm and artifact.
 - **FSM thesis ch.4 repair loop** — the ¬ρ search proposes candidate values and `forwardVerify`
   re-checks each against the real specification; a candidate it does not accept is excluded by an
   invariant on the next solve rather than retried. `forwardVerify` also refuses to confirm a fix whose regenerated

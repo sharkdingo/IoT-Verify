@@ -20,7 +20,7 @@ import { describe, expect, it } from 'vitest'
  *   handing out the same file N times under a name implying N different models
  *
  * Source-text assertions rather than a mounted render: `Board.vue` is far too large to mount cheaply
- * (see `actionDockHierarchy.spec.ts`). The end-to-end behaviour — that clicking actually delivers a
+ * for this structure check. The end-to-end behaviour — that clicking actually delivers a
  * model file — is `e2e/smv-model-download.spec.ts`; this pins the structure that E2E cannot express.
  */
 describe('run artifact placement', () => {

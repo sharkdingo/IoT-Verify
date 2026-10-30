@@ -109,6 +109,24 @@ class ForwardVerifyAcceptanceTest {
     }
 
     @Test
+    void aCandidateWithDisabledRulesCannotBeCertified() throws Exception {
+        givenIncompleteCandidate(1, 0);
+        givenVerdicts(candidateModel, true, true, true);
+
+        assertEquals(Verification.inconclusive(), judge(NAME));
+        verify(nusmvExecutor, never()).executeRepairSearch(eq(candidateModel), anyLong());
+    }
+
+    @Test
+    void aCandidateWithSkippedSpecificationsCannotBeCertified() throws Exception {
+        givenIncompleteCandidate(0, 1);
+        givenVerdicts(candidateModel, true, true, true);
+
+        assertEquals(Verification.inconclusive(), judge(NAME));
+        verify(nusmvExecutor, never()).executeRepairSearch(eq(candidateModel), anyLong());
+    }
+
+    @Test
     void theOriginalRulesAreCheckedOncePerFixRequest() throws Exception {
         givenVerdicts(candidateModel, true, false, true);
         givenVerdicts(baselineModel, false, false, true);
@@ -291,6 +309,13 @@ class ForwardVerifyAcceptanceTest {
         when(smvGenerator.generateWithResolvedDeviceModel(
                 any(), any(), any(), same(rules), any(), any(), anyBoolean(), any(), any(), any(), any()))
                 .thenReturn(new SmvGenerator.GenerateResult(smvFile, Map.of(), List.of(), 0, 0, EMITTED));
+    }
+
+    private void givenIncompleteCandidate(int disabledRules, int skippedSpecs) throws Exception {
+        when(smvGenerator.generateWithResolvedDeviceModel(
+                any(), any(), any(), same(candidateRules), any(), any(), anyBoolean(), any(), any(), any(), any()))
+                .thenReturn(new SmvGenerator.GenerateResult(candidateModel, Map.of(), List.of(),
+                        disabledRules, skippedSpecs, EMITTED));
     }
 
     private void givenVerdicts(File smvFile, boolean target, boolean other, boolean healthy) throws Exception {

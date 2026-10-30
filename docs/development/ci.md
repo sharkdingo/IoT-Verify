@@ -37,11 +37,9 @@ download an artifact that no job created. Full-selected routes skip these Fast j
 
 The smoke subset is tagged **per test** with `@smoke`, selected by
 [`playwright.config.ts`](../../frontend/playwright.config.ts), and used by both local and CI runners.
-The initial 2026-10-29 discovery found 330 cases: 312 ordinary cases and 18 live-AI cases.
-After retiring cosmetic tours and redundant matrix combinations, the ordinary suite has
-251 cases; the 18 live-AI cases remain separate. Smoke is included in the ordinary suite.
-The former four-file smoke selection had grown to 61 cases; it now selects 10 critical cases
-(seven browser journeys and three HTTP integration checks):
+The ordinary suite selects 129 cases; the 18 live-AI cases remain separate. Smoke is included
+in the ordinary suite and selects 10 critical cases (seven browser journeys and three HTTP
+integration checks):
 
 | Spec | Protects |
 | :--- | :--- |
@@ -60,53 +58,34 @@ The verification/download journey asserts a complete response with five conclusi
 results as well as valid downloaded model bytes. A visible dialog or generated file alone does
 not prove that verification ran successfully.
 
-### Retired coverage and retained responsibilities
+### Coverage policy
 
-The broad `editor-copy`, `global-copy-review` and `panel-opening-tooltips` tours were removed
-(12 cases). They repeatedly provisioned real accounts/scenes to check wording, exact button
-heights, header gaps, or unsolicited close hints. Form validation and localized feedback belong
-to the component tests; shared dialog rules belong to the style contracts. `ui-contracts`
-retains actual browser checks for loading-strip placement, tooltip dismissal and focus recovery.
-Exact per-dialog pixel/copy sweeps are intentionally no longer E2E obligations.
+Every browser case needs a named browser or cross-layer failure. Core journeys cover sign-in
+and deep links, targeted authoring and undo/redo, cross-tab changes, real run submission and
+model download, history/playback, protected actions and failed or uncertain outcomes.
+Representative narrow/desktop, keyboard/pointer and language transitions exercise those flows.
+A second theme, viewport, language or example scene needs a distinct integration risk.
 
-The four workspace-typography tours were also retired: each visited editors, recommendations,
-chat and account settings, then waited for two export toasts to disappear just to assert exact
-font sizes, weights, padding and radii. Readability floors, focus indicators, target sizes and
-toast pointer transparency retain their source-contract checks; representative layout and
-keyboard journeys remain in the browser suite. Registration validation stays in `Landing.spec.ts`,
-and the duplicate dark registration-card check is covered by the shared auth layout's login checks
-and the real registration journey. Single-heading assertions now share existing login/404 journeys.
+Parsing, encodings, formula semantics, API validation and repair algorithms belong primarily
+to their unit/component/backend tests. Browser coverage keeps one GB18030 import lifecycle,
+one complete author/simulate/verify/history journey and one reviewed repair/apply/undo journey.
+The cancellation and history-context cases switch language and viewport within the same run.
+Repeated solver scenarios, broad authority audits, all-example round trips, cosmetic tours and
+copy/geometry matrices are retired rather than maintained as browser obligations.
 
-Thirty repeated matrix cases were also retired. Layout checks keep representative desktop,
-narrow and short viewports, with real dark-theme and Chinese-text coverage. Composer resizing
-still covers mouse/keyboard interaction on narrow Chinese and wide English layouts.
-Each parameter/condition repair strategy runs once, and one full keyboard repair journey
-retains cancellation, confirmation, undo, redo and re-verification. Import integration keeps
-JSON, UTF-8 CSV and GB18030 lifecycle coverage; parser/encoding component tests cover input
-combinations without repeating the whole persisted workflow for each UI language.
+The frontend retains focused contrast, target-size, focus, reduced-motion, token-reference,
+toast-interaction and recommendation-evidence checks. Source scans that prescribe helper names,
+CSS vocabulary, dialog shells, typography inventories or exact layout were retired. Visual
+review still follows the [UI conventions](../guides/frontend-ui-conventions.md); automated
+coverage no longer promises every former visual or wording permutation.
 
-A new browser case must identify a browser-only or cross-layer failure it detects. A second
-language or viewport should require a specific layout or interaction risk; it is not an
-automatic multiplier for an existing persistence/solver case.
-
-Task cancellation/recovery and history reading-context journeys each switch language and
-viewport within the case. They run once per business flow instead of repeating that same
-coverage for four initial locale/width combinations. Every task kind still checks the real
-persisted outcome; navigation retains expanded evidence, scroll position and reachable controls.
-
-Unit checks retain target sizes, contrast, reduced motion and evidence presentation. The shared
-target-size spec owns navigation controls, including label-bearing actions and a nonempty narrow
-viewport scan. Retired checks pinned incidental borders, a fixed radius-token inventory,
-recommendation button colours, helper names and code spelling, or asserted a fixture's own values.
-Toolbar structure uses the existing AST check rather than a second wrapper count. Backend
-provider/tool-loop tests own combined text/tool responses; test discovery reads each source once.
-
-The backend retains the original 41-device Salus house and 23-device dynamic-home repair
-regressions, including every successive repair, protected response and initial-transient check.
-Their two enlarged variants only cloned existing lights, rules and specification conditions;
-they repeated the same assertions with 61 and 39 devices and were retired with the unused
-expansion helper. The original scenarios continue to exercise changing inputs and repair
-preservation. A future scale benchmark should have an explicit performance requirement.
+The backend retains real MySQL ownership/lease/undo checks, focused model/solver regressions,
+per-strategy repair tests and the cumulative shared-environment repair scenario. The Salus-house,
+dynamic-home, elderly-care initial/absent-effect and full-background camera repair variants are
+retired as large example/stress coverage. Smaller camera chains still check complete alternatives;
+forward verification directly rejects disabled rules and skipped specifications. AI identity tests
+keep every tool/field route with representative inputs instead of repeating a lexical cross product.
+Documentation counts and source spelling are reviewed against code rather than separately scanned.
 
 ## Choose the smallest useful check
 
@@ -114,23 +93,23 @@ preservation. A future scale benchmark should have an explicit performance requi
 | :--- | :--- |
 | Domain parsing, formula semantics, serialization | Owning unit tests and backend model tests |
 | Component state, validation messages, request payloads | Vue component tests |
-| CSS/source conventions | Node source-contract tests; these do not prove rendered behaviour |
+| Contrast, input and evidence invariants | Retained focused UI contracts |
+| Visual styling and source conventions | Review the owning styles and rendered interface |
 | Layout geometry, focus, pointer interaction, multiple tabs | Targeted browser tests; jsdom cannot prove these |
 | Login, persistence, verification, download across layers | Tagged smoke journeys |
 | Viewport/theme/language matrices and broad scene/repair audits | Affected E2E cases or Full CI |
 | External provider/tool behaviour | Explicit live-AI suite |
 
-The 31 source-only style test files declare the Node environment. The two style tests that
-actually use the DOM retain jsdom. Switching the parsing environment does not remove assertions;
-the retired checks are described above. The auth-budget advice tests were removed: they asserted diagnostic
-prose, environment-variable spellings and a hardcoded registration estimate rather than harness
-behaviour. Actual auth fixture failures still include the backend response and setup advice.
+The retained source-reading contracts use Node where possible; reduced-motion checks that
+exercise elements keep jsdom. `test:contracts` selects the focused UI contracts in the styles
+directory. Their [scope](../../frontend/src/styles/__tests__/README.md) distinguishes source
+checks from rendered behavior.
 
 During local iteration, run affected files first. Avoid rerunning the whole frontend, building
 production assets, or starting the full browser stack after every wording or metadata edit.
 Broaden verification for changed contracts, unresolved failures, or a release decision.
 `test:changed` follows Vitest's import graph. Tests that read source files through `fs` are not
-ordinary import dependencies; run `test:contracts` explicitly for CSS/template convention changes.
+ordinary import dependencies; run `test:contracts` when changing one of its retained invariants.
 
 `npm run test:e2e` defaults to smoke, with no automatic retries and a one-failure stop.
 Full runs stop after five final failures; use `--max-failures=0` explicitly when every failure

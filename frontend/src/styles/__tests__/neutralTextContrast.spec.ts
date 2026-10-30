@@ -6,8 +6,7 @@ import { describe, expect, it } from 'vitest'
 /**
  * Structural neutrals are legitimate, but not every step of the ramp is legible as text.
  *
- * `semanticColourOwnership.spec.ts` deliberately exempts slate/gray/zinc: they are the structural greys, not
- * semantic roles, and banning them would be wrong. That exemption quietly covered a real defect, though —
+ * Slate/gray/zinc are structural greys rather than semantic roles, but that alone does not make text legible:
  * `text-slate-400` is **2.56:1 on white**, well under the 4.5:1 AA minimum for normal text, and it was used
  * on 103 text elements with no light-theme alternative.
  *

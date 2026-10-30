@@ -26,7 +26,7 @@ import { describe, expect, it } from 'vitest'
  * disagree about what counts as a semantic change.
  *
  * Asserted over `Board.vue`'s source: the logic is inline in a component too large to mount
- * cheaply (see `actionDockHierarchy.spec.ts`), and extracting a comparison of one module-scoped
+ * cheaply, and extracting a comparison of one module-scoped
  * counter would need the reactive scope injected — the pass-through layer the frontend rules
  * forbid. `loopRangeAgreement.spec.ts` uses the same approach for the same reason.
  */
