@@ -104,16 +104,9 @@ public class DeviceSmvDataFactory {
                 continue;
             }
             smv.setManifest(manifest);
-            // A value the device's state determines wins over whatever the request carried. It is a derived
-            // fact — the generator gives `next(<device>.<var>)` a branch per state, so a submitted value
-            // survives only step 0 — and a run must not be refused because a node stored before this rule
-            // existed still carries the old value. Board writes canonicalise the same way, so the two
-            // boundaries agree. Done here rather than at intake above, where the manifest is not yet loaded.
-            smv.getVariableValues().replaceAll((name, value) -> {
-                String declared = DeviceManifestModes.stateDeclaredValue(
-                        manifest, device.getState(), name);
-                return declared != null ? declared : value;
-            });
+            smv.setAuthoredStatesByMode(DeviceManifestModes.authoredStatesByMode(manifest,
+                    reason -> SmvGenerationException.smvGenerationError(
+                            "Device '" + device.getVarName() + "': " + reason)));
             if (!snapshotOnly) {
                 smv.setModelTokenSource(templateSourceCache.getOrDefault(
                         smv.getTemplateName(), ModelTokenSource.UNKNOWN));
@@ -122,8 +115,8 @@ public class DeviceSmvDataFactory {
 
             extractModes(smv, manifest);
             extractStatesAndTrust(smv, manifest);
-            parseTemplateInitState(smv, manifest);
-            parseCurrentModeStates(smv, device);
+            parseModeStates(smv, manifest.getInitState(), smv.getTemplateInitModeStates());
+            parseModeStates(smv, smv.getCurrentState(), smv.getCurrentModeStates());
 
             if (manifest.getInternalVariables() != null) smv.getVariables().addAll(manifest.getInternalVariables());
             extractSignalVars(smv, manifest);
@@ -197,84 +190,45 @@ public class DeviceSmvDataFactory {
             for (String rawMode : manifest.getModes()) {
                 String mode = sanitizeSmvToken(rawMode);
                 smv.getModes().add(mode);
+                String authored = rawMode.trim();
+                if (!mode.equals(authored)) {
+                    smv.getRenamedModes().put(mode, authored);
+                }
                 smv.getModeStates().put(mode, new ArrayList<>());
             }
         }
     }
 
-    /** 解析模板 InitState 到 templateInitModeStates（在 extractStatesAndTrust 之后调用） */
-    private void parseTemplateInitState(DeviceSmvData smv, DeviceManifest manifest) {
-        if (smv.getModes().isEmpty() || manifest.getInitState() == null || manifest.getInitState().isBlank()) return;
-        String initState = manifest.getInitState();
-        if (smv.getModes().size() == 1) {
-            String singleMode = smv.getModes().get(0);
-            String cleanState = sanitizeSmvToken(initState);
-            List<String> modeStateList = smv.getModeStates().get(singleMode);
-            if (modeStateList != null && modeStateList.contains(cleanState)) {
-                smv.getTemplateInitModeStates().put(singleMode, cleanState);
-            }
-        } else {
-            String[] parts = initState.split(";");
-            for (int i = 0; i < parts.length && i < smv.getModes().size(); i++) {
-                String mode = smv.getModes().get(i);
-                String cleanState = sanitizeSmvToken(parts[i].trim());
-                if (cleanState.isEmpty() || cleanState.equals("_")) continue;
-                List<String> modeStateList = smv.getModeStates().get(mode);
-                if (modeStateList != null && modeStateList.contains(cleanState)) {
-                    smv.getTemplateInitModeStates().put(mode, cleanState);
-                }
-            }
-        }
-    }
-
-    private void parseCurrentModeStates(DeviceSmvData smv, DeviceVerificationDto device) {
-        if (smv.getModes().isEmpty()) return;
-        if (smv.getCurrentState() != null) {
-            String cleanState = sanitizeSmvToken(smv.getCurrentState());
-            if (smv.getModes().size() == 1) {
-                String singleMode = smv.getModes().get(0);
-                List<String> modeStateList = smv.getModeStates().get(singleMode);
-                if (modeStateList != null && modeStateList.contains(cleanState))
-                    smv.getCurrentModeStates().put(singleMode, cleanState);
-            } else {
-                String[] parts = smv.getCurrentState().split(";");
-                for (int i = 0; i < parts.length && i < smv.getModes().size(); i++) {
-                    String mode = smv.getModes().get(i);
-                    String part = sanitizeSmvToken(parts[i].trim());
-                    if (!part.isEmpty() && !part.equals("_")) {
-                        List<String> modeStateList = smv.getModeStates().get(mode);
-                        if (modeStateList != null && modeStateList.contains(part))
-                            smv.getCurrentModeStates().put(mode, part);
-                    }
-                }
+    /** Bind template and instance state segments against the same authored mode domains. */
+    private void parseModeStates(DeviceSmvData smv, String state, Map<String, String> modeStates) {
+        if (state == null || state.isBlank()) return;
+        String[] parts = state.split(";", -1);
+        for (int i = 0; i < parts.length && i < smv.getModes().size(); i++) {
+            if (isWildcardStateSegment(parts[i])) continue;
+            String mode = smv.getModes().get(i);
+            String token = smv.resolveAuthoredState(mode, parts[i]);
+            if (token != null) {
+                modeStates.put(mode, token);
             }
         }
     }
 
     private void extractStatesAndTrust(DeviceSmvData smv, DeviceManifest manifest) {
         if (manifest.getWorkingStates() == null) return;
-        String singleMode = (smv.getModes().size() == 1) ? smv.getModes().get(0) : null;
         for (DeviceManifest.WorkingState ws : manifest.getWorkingStates()) {
             if (ws.getName() == null) continue;
-            String cleanName = sanitizeSmvToken(ws.getName());
-            smv.getStates().add(cleanName);
-            if (singleMode != null) {
-                List<String> modeStateList = smv.getModeStates().get(singleMode);
-                if (modeStateList != null && !modeStateList.contains(cleanName))
-                    modeStateList.add(cleanName);
-                String key = singleMode + "_" + cleanName;
-                if (ws.getTrust() != null) smv.getModeStateTrust().put(key, normalizeTrustPrivacy(ws.getTrust()));
-            } else {
-                String[] parts = ws.getName().split(";");
-                for (int i = 0; i < parts.length && i < smv.getModes().size(); i++) {
-                    String mode = smv.getModes().get(i);
-                    String stateName = sanitizeSmvToken(parts[i].trim());
-                    List<String> modeStateList = smv.getModeStates().get(mode);
-                    if (modeStateList != null && !modeStateList.contains(stateName))
-                        modeStateList.add(stateName);
-                    String key = mode + "_" + stateName;
-                    if (ws.getTrust() != null) smv.getModeStateTrust().put(key, normalizeTrustPrivacy(ws.getTrust()));
+            smv.getStates().add(sanitizeSmvToken(ws.getName().trim()));
+            String[] parts = ws.getName().split(";", -1);
+            for (int i = 0; i < parts.length && i < smv.getModes().size(); i++) {
+                String mode = smv.getModes().get(i);
+                String stateName = cleanStateName(parts[i]);
+                if (stateName.isEmpty()) continue;
+                List<String> modeStateList = smv.getModeStates().get(mode);
+                if (!modeStateList.contains(stateName)) {
+                    modeStateList.add(stateName);
                 }
+                String key = mode + "_" + stateName;
+                if (ws.getTrust() != null) smv.getModeStateTrust().put(key, normalizeTrustPrivacy(ws.getTrust()));
             }
         }
     }
@@ -503,6 +457,15 @@ public class DeviceSmvDataFactory {
         return deviceSmvMap.get(deviceName);
     }
 
+    /** Resolve a declared mode name to its emitted NuSMV identifier. */
+    public static String resolveModeIdentifier(DeviceSmvData smv, String modeName) {
+        if (smv == null || smv.getModes() == null || modeName == null || modeName.isBlank()) return null;
+        String authored = modeName.trim();
+        if (!DeviceManifestModes.modeNames(smv.getManifest()).contains(authored)) return null;
+        String identifier = sanitizeSmvToken(authored);
+        return smv.getModes().contains(identifier) ? identifier : null;
+    }
+
     /** 清理状态名：移除分号后进行 NuSMV 标识符清洗 */
     public static String cleanStateName(String raw) {
         if (raw == null) return null;
@@ -514,6 +477,16 @@ public class DeviceSmvDataFactory {
     /** Empty and underscore tuple segments both mean that the mode is unconstrained. */
     public static boolean isWildcardStateSegment(String raw) {
         return raw == null || raw.trim().isEmpty() || "_".equals(raw.trim());
+    }
+
+    /** The emitted state for one positional API/transition endpoint, or null when omitted. */
+    public static String getStateForMode(String tuple, int modeIndex, boolean startState) {
+        if (tuple == null) return null;
+        String[] states = tuple.split(";", -1);
+        if (modeIndex >= states.length) return null;
+        String raw = states[modeIndex].trim();
+        if (raw.isEmpty() || (startState && isWildcardStateSegment(raw))) return null;
+        return cleanStateName(raw);
     }
 
     /**

@@ -21,6 +21,9 @@ public final class ModelTraceToolPresenter {
     public static final int DEFAULT_STATE_LIMIT = 10;
     public static final int MAX_STATE_LIMIT = 10;
     public static final int MAX_STATE_OFFSET = Integer.MAX_VALUE;
+    public static final String ENVIRONMENT_PROVENANCE_GUIDANCE =
+            "modelSnapshot.environmentProvenance describes ordinary evolution when no autonomous assignment is active. "
+                    + "Treat its writers as possible influences. The trace does not record the cause of each value change.";
 
     private ModelTraceToolPresenter() {
     }

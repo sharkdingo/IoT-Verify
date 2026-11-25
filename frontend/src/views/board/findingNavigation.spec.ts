@@ -42,7 +42,7 @@ const listener = (component: string, event: string, ports: Record<string, any>) 
 
 const modelSnapshot = {
   capturedAt: '2026-10-09T10:00:00', deviceCount: 1, ruleCount: 0, specificationCount: 1,
-  environmentVariableCount: 0, deviceTemplateCount: 1, modelFingerprint: 'a'.repeat(64), templatesFrozen: true as const
+  environmentVariableCount: 0, deviceTemplateCount: 1, modelFingerprint: 'a'.repeat(64), modelSemanticsVersion: 1, templatesFrozen: true as const
 }
 const specification: Specification = { name: 'Safety requirement', id: 'spec-1', templateId: '1', templateLabel: 'Door remains closed',
   aConditions: [], ifConditions: [], thenConditions: [] }

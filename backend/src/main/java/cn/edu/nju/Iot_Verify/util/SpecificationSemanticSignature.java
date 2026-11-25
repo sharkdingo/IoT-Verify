@@ -1,6 +1,7 @@
 package cn.edu.nju.Iot_Verify.util;
 
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvRelationUtils;
+import cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 
@@ -9,6 +10,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.function.ToIntFunction;
 
 /** Canonical signature for the authored inputs from which a specification is rebuilt. */
 public final class SpecificationSemanticSignature {
@@ -25,18 +27,27 @@ public final class SpecificationSemanticSignature {
     }
 
     public static Signature from(SpecificationDto specification) {
+        return from(specification, null);
+    }
+
+    public static Signature from(SpecificationDto specification, ToIntFunction<String> modeCountForDevice) {
         if (specification == null) {
             return new Signature("", Map.of(), Map.of(), Map.of());
         }
         return new Signature(
                 normalize(specification.getTemplateId()),
-                conditionKeys(specification.getAConditions()),
-                conditionKeys(specification.getIfConditions()),
-                conditionKeys(specification.getThenConditions()));
+                conditionKeys(specification.getAConditions(), modeCountForDevice),
+                conditionKeys(specification.getIfConditions(), modeCountForDevice),
+                conditionKeys(specification.getThenConditions(), modeCountForDevice));
     }
 
     public static boolean exactlyMatches(SpecificationDto left, SpecificationDto right) {
         return from(left).equals(from(right));
+    }
+
+    public static boolean exactlyMatches(SpecificationDto left, SpecificationDto right,
+                                         ToIntFunction<String> modeCountForDevice) {
+        return from(left, modeCountForDevice).equals(from(right, modeCountForDevice));
     }
 
     /**
@@ -46,7 +57,8 @@ public final class SpecificationSemanticSignature {
      * signature gates the "delete only if unchanged" and duplicate-spec checks. Collapsing a
      * repeated condition let a delete land on a specification that had genuinely been edited.
      */
-    private static Map<String, Long> conditionKeys(List<SpecConditionDto> conditions) {
+    private static Map<String, Long> conditionKeys(List<SpecConditionDto> conditions,
+                                                   ToIntFunction<String> modeCountForDevice) {
         Map<String, Long> keys = new TreeMap<>();
         if (conditions == null) {
             return keys;
@@ -57,8 +69,11 @@ public final class SpecificationSemanticSignature {
             }
             String targetType = normalize(condition.getTargetType()).toLowerCase(Locale.ROOT);
             String relation = normalizeRelation(condition.getRelation());
+            String device = normalize(condition.getDeviceId());
+            String value = modeCountForDevice == null ? null : SmvRelationUtils.canonicalStateMembershipValue(
+                    condition.getValue(), relation, targetType, modeCountForDevice.applyAsInt(device));
             keys.merge(String.join("|",
-                    normalize(condition.getDeviceId()),
+                    device,
                     targetType,
                     normalize(condition.getPropertyScope()).toLowerCase(Locale.ROOT),
                     // Part of authored identity: the same key asked as `environment` (the value in the
@@ -68,15 +83,17 @@ public final class SpecificationSemanticSignature {
                     normalize(condition.getVariableSource()).toLowerCase(Locale.ROOT),
                     normalize(condition.getKey()),
                     relation,
-                    normalizeValue(condition.getValue(), relation, targetType)), 1L, Long::sum);
+                    value != null ? value : canonicalConditionValue(condition.getValue(), relation, targetType)),
+                    1L, Long::sum);
         }
         return keys;
     }
 
-    private static String normalizeValue(String value, String relation, String targetType) {
+    /** Canonical value for a comparison key, with an already normalized relation and target type. */
+    public static String canonicalConditionValue(String value, String relation, String targetType) {
         String normalized = normalize(value);
         if ("api".equals(targetType)) {
-            normalized = normalized.toUpperCase(Locale.ROOT);
+            normalized = ManifestConditionSemantics.canonicalApiSignalValue(normalized);
         }
         if (!"in".equals(relation) && !"not in".equals(relation)) {
             return normalized;

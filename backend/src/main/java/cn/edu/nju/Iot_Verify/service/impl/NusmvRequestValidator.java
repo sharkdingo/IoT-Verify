@@ -74,8 +74,9 @@ final class NusmvRequestValidator {
             boolean hasModes = smv.getModes() != null && !smv.getModes().isEmpty();
             String prefix = "devices[" + i + "]";
             if (hasModes) {
-                if (hasText(device.getState())) {
-                    validateStateValues(errors, prefix + ".state", smv, "=", device.getState());
+                if (hasText(device.getState()) && ManifestConditionSemantics.resolveStatePattern(
+                        device.getState(), smv.getModes(), smv::resolveAuthoredState).size() != smv.getModes().size()) {
+                    putError(errors, prefix + ".state", "Illegal state value for device template: " + device.getState());
                 }
                 if (device.getCurrentStateTrust() != null) {
                     validateLiteralValues(errors, prefix + ".currentStateTrust", "=",
@@ -130,13 +131,12 @@ final class NusmvRequestValidator {
             String varName = smv != null && hasText(smv.getVarName()) ? smv.getVarName() : device.getVarName();
             registerMainIdentifier(errors, identifiers, varName, "devices[" + i + "].varName",
                     "device instance '" + varName + "'");
-            rejectFixGeneratedPrefix(errors, varName, "devices[" + i + "].varName");
         }
 
         Map<String, DeviceManifest.InternalVariable> requiredEnvironmentVariables =
                 NusmvEnvironmentPool.collectRequired(deviceSmvMap);
         for (String envName : requiredEnvironmentVariables.keySet()) {
-            registerMainIdentifier(errors, identifiers, "a_" + envName, "environmentVariables",
+            registerMainIdentifier(errors, identifiers, SmvConstants.ENVIRONMENT_POOL_PREFIX + envName, "environmentVariables",
                     "generated environment variable for '" + envName + "'");
         }
         if (rules != null) {
@@ -169,36 +169,6 @@ final class NusmvRequestValidator {
                 "Attack modeling would not change this model: the scene has no automation command-delivery "
                         + "links and no device reading marked FalsifiableWhenCompromised. Disable attack modeling, "
                         + "or add an applicable rule or explicitly falsifiable sensor/received-data variable.");
-    }
-
-    /*
-     * A device may not take a name the automatic fixer will mint.
-     *
-     * The other generated identifiers are namespaced (`iot_verify_…`) and registered below by their concrete
-     * names. Condition adjustment's guard probes are namespaced too, but their names are only known once a fix
-     * runs, so they are reserved by prefix here. The fix strategies' `param_` / `lambda_` / `condition_value_`
-     * are not namespaced at all, and `param_` cannot be renamed — it is the
-     * wire format for `PreferredRangeSelection.targetId`, validated by a `@Pattern` on the DTO and by
-     * `^param_[A-Za-z0-9_-]{24}$` in the frontend's `fixResponse.ts`.
-     *
-     * So the collision was real and reachable: a device named `condition_value_r0_c1` is accepted by
-     * `/api/board/nodes` (verified against the running API), saves, and verifies — then `SmvMainModuleBuilder`
-     * throws when the user asks for a fix, which is correct but arrives long after the mistake was made and
-     * blames a surface the user was not editing. Rejecting the name here says it at the moment it is chosen.
-     */
-    private static void rejectFixGeneratedPrefix(Map<String, String> errors, String varName, String field) {
-        if (!hasText(varName)) {
-            return;
-        }
-        String normalized = varName.trim().toLowerCase(Locale.ROOT);
-        for (String prefix : SmvConstants.FIX_GENERATED_NAME_PREFIXES) {
-            if (normalized.startsWith(prefix)) {
-                putError(errors, field,
-                        "Device name '" + varName + "' starts with '" + prefix + "', which the automatic-fix "
-                                + "generator reserves for its own variables. Rename the device.");
-                return;
-            }
-        }
     }
 
     private static void registerMainIdentifier(Map<String, String> errors,
@@ -649,7 +619,7 @@ final class NusmvRequestValidator {
                 }
             }
             case "mode" -> {
-                String mode = resolveModeName(smv, attribute);
+                String mode = DeviceSmvDataFactory.resolveModeIdentifier(smv, attribute);
                 if (mode == null) {
                     putError(errors, prefix + ".attribute", "Unknown mode for rule condition: " + attribute);
                 } else {
@@ -702,7 +672,7 @@ final class NusmvRequestValidator {
                         putError(errors, prefix + ".key", "Unknown or non-signal API for specification: " + key);
                     }
                     validateLiteralValues(errors, prefix + ".value", relation, condition.getValue(),
-                            Set.of("TRUE", "FALSE"), "TRUE or FALSE");
+                            ManifestConditionSemantics.API_SIGNAL_LITERALS, "TRUE or FALSE");
                 }
                 case "state" -> {
                     validateEnumRelation(errors, prefix + ".relation", relation, "state");
@@ -713,7 +683,7 @@ final class NusmvRequestValidator {
                 }
                 case "mode" -> {
                     validateEnumRelation(errors, prefix + ".relation", relation, "mode");
-                    String mode = resolveModeName(smv, key);
+                    String mode = DeviceSmvDataFactory.resolveModeIdentifier(smv, key);
                     if (mode == null) {
                         putError(errors, prefix + ".key", "Unknown mode for specification: " + key);
                     } else {
@@ -956,7 +926,7 @@ final class NusmvRequestValidator {
             putError(errors, field, "Device template has no legal states");
             return;
         }
-        List<String> candidates = splitStateCandidates(rawValue, relation, smv);
+        List<String> candidates = SmvRelationUtils.stateConditionValues(rawValue, relation, smv.getModes().size());
         if (candidates.isEmpty()) {
             putError(errors, field, "State condition value cannot be empty");
             return;
@@ -966,7 +936,8 @@ final class NusmvRequestValidator {
             return;
         }
         for (String candidate : candidates) {
-            if (!ManifestConditionSemantics.isLegalState(candidate, smv.getModes(), smv.getModeStates())) {
+            if (ManifestConditionSemantics.resolveStatePattern(
+                    candidate, smv.getModes(), smv::resolveAuthoredState).isEmpty()) {
                 putError(errors, field, "Illegal state value for device template: " + candidate);
                 return;
             }
@@ -996,8 +967,7 @@ final class NusmvRequestValidator {
             return;
         }
         for (String candidate : candidates) {
-            String cleaned = DeviceSmvDataFactory.cleanStateName(candidate);
-            if (!hasText(cleaned) || !legalValues.contains(cleaned)) {
+            if (smv.resolveAuthoredState(mode, candidate) == null) {
                 putError(errors, field, "Illegal mode value '" + candidate + "' for mode '" + mode + "'");
                 return;
             }
@@ -1197,22 +1167,6 @@ final class NusmvRequestValidator {
         return smv.getEnvVariables() != null ? smv.getEnvVariables().get(normalized) : null;
     }
 
-    private static String resolveModeName(DeviceSmvData smv, String rawMode) {
-        if (smv == null || smv.getModes() == null || !hasText(rawMode)) {
-            return null;
-        }
-        String trimmed = rawMode.trim();
-        String cleaned = DeviceSmvDataFactory.cleanStateName(trimmed);
-        for (String mode : smv.getModes()) {
-            if (mode != null && (mode.equals(trimmed)
-                    || mode.equalsIgnoreCase(trimmed)
-                    || mode.equals(cleaned))) {
-                return mode;
-            }
-        }
-        return null;
-    }
-
     private static void validatePropertyReference(Map<String, String> errors,
                                                   String prefix,
                                                   SpecConditionDto condition,
@@ -1232,7 +1186,7 @@ final class NusmvRequestValidator {
             }
             return;
         }
-        if (resolveModeName(smv, key) == null) {
+        if (DeviceSmvDataFactory.resolveModeIdentifier(smv, key) == null) {
             putError(errors, prefix + ".key", "Unknown state-label mode for specification: " + key);
         }
     }
@@ -1244,24 +1198,6 @@ final class NusmvRequestValidator {
     // Delegated so this boundary and BoardStorageServiceImpl cannot fold a value differently.
     private static String normalizeVariableSource(String value) {
         return SpecConditionNormalization.variableSource(value);
-    }
-
-    private static List<String> splitStateCandidates(String rawValue, String relation, DeviceSmvData smv) {
-        if (!hasText(rawValue)) {
-            return List.of();
-        }
-        if (!"in".equals(relation) && !"not in".equals(relation)) {
-            return List.of(rawValue.trim());
-        }
-        String splitRegex = (smv.getModes() != null && smv.getModes().size() > 1) ? "[,|]" : "[,;|]";
-        String[] parts = rawValue.split(splitRegex);
-        List<String> result = new ArrayList<>();
-        for (String part : parts) {
-            if (hasText(part)) {
-                result.add(part.trim());
-            }
-        }
-        return result;
     }
 
     private static String normalizeKnownRelation(String relation) {

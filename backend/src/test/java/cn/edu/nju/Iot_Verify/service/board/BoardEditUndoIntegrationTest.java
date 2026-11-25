@@ -27,6 +27,8 @@ import cn.edu.nju.Iot_Verify.po.RulePo;
 import cn.edu.nju.Iot_Verify.po.UserPo;
 import cn.edu.nju.Iot_Verify.repository.*;
 import cn.edu.nju.Iot_Verify.service.impl.BoardStorageServiceImpl;
+import cn.edu.nju.Iot_Verify.util.ModelFingerprint;
+import cn.edu.nju.Iot_Verify.util.mapper.BoardDataConverter;
 import cn.edu.nju.Iot_Verify.util.mapper.DeviceNodeMapper;
 import cn.edu.nju.Iot_Verify.util.mapper.DeviceTemplateMapper;
 import cn.edu.nju.Iot_Verify.util.mapper.RuleMapper;
@@ -602,6 +604,183 @@ class BoardEditUndoIntegrationTest {
         assertEquals(result.getCurrentItems(), service.getRules(userId));
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void changingWildcardMembershipSpellingKeepsTheCapturedBoardIdentity(boolean replaceRuleList) {
+        seedMultiModeControl();
+        String originalValue = "idle;_, _;high";
+        String relation = replaceRuleList ? "NOT_IN" : "IN";
+        RuleDto submitted = newRule("When state is in " + originalValue);
+        var trigger = submitted.getConditions().get(0);
+        trigger.setDeviceName("control-1");
+        trigger.setRelation(relation);
+        trigger.setValue(originalValue);
+        RuleDto original = service.addRule(userId, submitted).getAffectedItem();
+        var converter = new BoardDataConverter(service);
+        var fingerprint = new ModelFingerprint(new ObjectMapper().registerModule(new JavaTimeModule()));
+        var before = fingerprint.boardFingerprints(converter.getModelInputSnapshot(userId));
+
+        String reversed = "; high, idle ;, idle;_";
+        RuleDto desired = newRule("When state is in " + reversed);
+        desired.setId(original.getId());
+        trigger = desired.getConditions().get(0);
+        trigger.setDeviceName("control-1");
+        trigger.setRelation(relation);
+        trigger.setValue(reversed);
+        if (replaceRuleList) {
+            service.updateRulesAgainstSnapshot(userId, snapshot -> List.of(desired));
+        } else {
+            service.updateRuleIfUnchanged(userId, original.getId(), original, desired);
+        }
+
+        RuleDto stored = service.getRules(userId).get(0);
+        assertEquals(desired.getRuleString(), stored.getRuleString());
+        assertEquals(reversed, stored.getConditions().get(0).getValue());
+        assertEquals(before, fingerprint.boardFingerprints(converter.getModelInputSnapshot(userId)));
+    }
+
+    @Test
+    void addingWholeStateRuleWithEquivalentWildcardSpellingRejectsDuplicate() {
+        seedMultiModeControl();
+        RuleDto first = newRule("Only one axis needs to match");
+        var condition = first.getConditions().get(0);
+        condition.setDeviceName("control-1");
+        condition.setRelation("IN");
+        condition.setValue("idle;_, _;high");
+        RuleDto original = service.addRule(userId, first).getAffectedItem();
+        RuleDto duplicate = newRule("The same guard with empty segments");
+        condition = duplicate.getConditions().get(0);
+        condition.setDeviceName("control-1");
+        condition.setRelation("IN");
+        condition.setValue(";high, idle;, idle;_");
+
+        assertEquals("DUPLICATE_RULE",
+                assertThrows(ConflictException.class, () -> service.addRule(userId, duplicate)).getReasonCode());
+        assertEquals(List.of(original), service.getRules(userId));
+    }
+
+    @Test
+    void equivalentWholeStateSpecificationWildcardsKeepTheIdentityAndRejectDuplicates() {
+        seedMultiModeControl();
+        SpecificationDto first = newSpec("on");
+        var condition = first.getAConditions().get(0);
+        condition.setDeviceId("control-1");
+        condition.setRelation("NOT_IN");
+        condition.setValue("idle;_, _;high");
+        var original = service.addSpec(userId, first).getAffectedItem();
+        var converter = new BoardDataConverter(service);
+        var fingerprint = new ModelFingerprint(new ObjectMapper().registerModule(new JavaTimeModule()));
+        var before = fingerprint.boardFingerprints(converter.getModelInputSnapshot(userId));
+
+        SpecificationDto equivalent = newSpec("off");
+        condition = equivalent.getAConditions().get(0);
+        condition.setDeviceId("control-1");
+        condition.setRelation("NOT_IN");
+        condition.setValue(";high, idle;");
+        assertEquals("DUPLICATE_SPECIFICATION",
+                assertThrows(ConflictException.class, () -> service.addSpec(userId, equivalent)).getReasonCode());
+        equivalent.setId(original.getId());
+        var saved = service.updateSpecIfUnchanged(userId, original.getId(), original, equivalent).getAffectedItem();
+        assertEquals(";high, idle;", saved.getAConditions().get(0).getValue());
+        assertEquals(before, fingerprint.boardFingerprints(converter.getModelInputSnapshot(userId)));
+
+        condition.setValue("idle;high");
+        service.updateSpecIfUnchanged(userId, original.getId(), saved, equivalent);
+        assertNotEquals(before.verification(),
+                fingerprint.boardFingerprints(converter.getModelInputSnapshot(userId)).verification());
+    }
+
+    private void seedMultiModeControl() {
+        templates.saveAndFlush(DeviceTemplatePo.builder().userId(userId).name("Audit Control").manifestJson("""
+                {"Name":"Audit Control","Modes":["Power","Fan"],"InitState":"idle;low",
+                 "WorkingStates":[{"Name":"idle;low","Trust":"trusted","Privacy":"public"},
+                                  {"Name":"running;high","Trust":"trusted","Privacy":"public"}]}
+                """).build());
+        nodes.saveAndFlush(DeviceNodePo.builder().id("control-1").userId(userId).templateName("Audit Control")
+                .label("Control").state("idle;low").posX(0.0).posY(0.0).width(176).height(128).build());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void equivalentSingleModeMembershipSurvivesBothRuleWriters(boolean replaceRuleList) {
+        String relation = replaceRuleList ? "NOT_IN" : "IN";
+        RuleDto submitted = newRule("Original set");
+        var trigger = submitted.getConditions().get(0);
+        trigger.setRelation(relation);
+        trigger.setValue("off;on");
+        RuleDto original = service.addRule(userId, submitted).getAffectedItem();
+        var converter = new BoardDataConverter(service);
+        var fingerprint = new ModelFingerprint(new ObjectMapper().registerModule(new JavaTimeModule()));
+        var before = fingerprint.boardFingerprints(converter.getModelInputSnapshot(userId));
+
+        RuleDto edited = newRule("Same set in a different order");
+        edited.setId(original.getId());
+        trigger = edited.getConditions().get(0);
+        trigger.setRelation(relation);
+        trigger.setValue("on, off");
+        if (replaceRuleList) {
+            service.updateRulesAgainstSnapshot(userId, snapshot -> List.of(edited));
+        } else {
+            service.updateRuleIfUnchanged(userId, original.getId(), original, edited);
+        }
+
+        assertEquals(before, fingerprint.boardFingerprints(converter.getModelInputSnapshot(userId)));
+    }
+
+    @Test
+    void addingEquivalentSingleModeRuleRejectsDuplicateWithoutChangingStoredOperands() {
+        var first = newRule("Primary rule");
+        first.getConditions().get(0).setRelation("IN");
+        first.getConditions().get(0).setValue("on;off");
+        var original = service.addRule(userId, first).getAffectedItem();
+        var duplicate = newRule("Same guard and action");
+        duplicate.getConditions().get(0).setRelation("IN");
+        duplicate.getConditions().get(0).setValue("off,on");
+
+        assertEquals("DUPLICATE_RULE",
+                assertThrows(ConflictException.class, () -> service.addRule(userId, duplicate)).getReasonCode());
+        assertEquals(List.of(original), service.getRules(userId));
+        assertEquals("on;off", original.getConditions().get(0).getValue());
+    }
+
+    @Test
+    void addingEquivalentSingleModeSpecificationRejectsDuplicateWithoutChangingStoredOperands() {
+        var first = newSpec("on");
+        first.getAConditions().get(0).setRelation("IN");
+        first.getAConditions().get(0).setValue("on;off");
+        var original = service.addSpec(userId, first).getAffectedItem();
+        var duplicate = newSpec("off");
+        duplicate.getAConditions().get(0).setRelation("IN");
+        duplicate.getAConditions().get(0).setValue("off,on");
+
+        assertEquals("DUPLICATE_SPECIFICATION",
+                assertThrows(ConflictException.class, () -> service.addSpec(userId, duplicate)).getReasonCode());
+        assertEquals(List.of(original), service.getSpecs(userId));
+        assertEquals("on;off", original.getAConditions().get(0).getValue());
+    }
+
+    @Test
+    void equivalentSingleModeSpecificationMembershipKeepsTheCapturedBoardIdentity() {
+        SpecificationDto submitted = newSpec("on");
+        submitted.getAConditions().get(0).setRelation("NOT_IN");
+        submitted.getAConditions().get(0).setValue("off;on");
+        SpecificationDto original = service.addSpec(userId, submitted).getAffectedItem();
+        var converter = new BoardDataConverter(service);
+        var fingerprint = new ModelFingerprint(new ObjectMapper().registerModule(new JavaTimeModule()));
+        var before = fingerprint.boardFingerprints(converter.getModelInputSnapshot(userId));
+
+        SpecificationDto edited = newSpec("on");
+        edited.getAConditions().get(0).setRelation("NOT_IN");
+        edited.getAConditions().get(0).setValue("on | off");
+        var saved = service.updateSpecIfUnchanged(userId, original.getId(), original, edited).getAffectedItem();
+        assertEquals(before, fingerprint.boardFingerprints(converter.getModelInputSnapshot(userId)));
+
+        edited.getAConditions().get(0).setValue("on");
+        service.updateSpecIfUnchanged(userId, original.getId(), saved, edited);
+        assertNotEquals(before.verification(),
+                fingerprint.boardFingerprints(converter.getModelInputSnapshot(userId)).verification());
+    }
+
     @Test
     void renamingASpecificationPersistsAndRejectsStaleEditsWithoutChangingItsLogic() {
         SpecificationDto original = service.addSpec(userId, newSpec("on")).getAffectedItem();
@@ -788,7 +967,7 @@ class BoardEditUndoIntegrationTest {
     }
 
     @Test
-    void editingAnUnresolvedSpecificationCanSupplyItsMissingVariableSource() throws Exception {
+    void editingAnUnresolvedSpecificationCanSupplyItsMissingVariableSourceButUndoCannotRestoreIt() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         DeviceTemplatePo template = templates.findByUserId(userId).get(0);
         JsonNode manifest = mapper.readTree(template.getManifestJson());
@@ -817,9 +996,10 @@ class BoardEditUndoIntegrationTest {
 
         assertEquals("updated", result.getOperation());
         assertEquals("reported", result.getAffectedItem().getAConditions().get(0).getVariableSource());
-        assertTrue(service.undoLastEdit(userId).isApplied());
-        assertNull(service.getSpecs(userId).get(0).getAConditions().get(0).getVariableSource());
-        assertTrue(service.redoLastUndoneEdit(userId).isApplied());
+        var entry = journal.nextToUndo(userId).orElseThrow();
+        ConflictException error = assertThrows(ConflictException.class, () -> service.undoLastEdit(userId));
+        assertTrue(error.getMessage().contains("variableSource"), error::getMessage);
+        assertFalse(journalRepo.findById(entry.getId()).orElseThrow().isUndone());
         assertEquals(result.getAffectedItem(), service.getSpecs(userId).get(0));
     }
 
@@ -1461,6 +1641,7 @@ class BoardEditUndoIntegrationTest {
         second.setId(first.getId());
         var batch = new cn.edu.nju.Iot_Verify.dto.board.BoardBatchDto(
                 service.getNodes(userId), service.getEnvironmentVariables(userId), List.of(), List.of(first, second));
+        batch.setTemplateSnapshots(service.getDeviceTemplates(userId));
         batch.setImpactToken(service.previewBoardReplacement(userId).getImpactToken());
         long historyCount = journalRepo.countByUserId(userId);
 
@@ -1490,6 +1671,7 @@ class BoardEditUndoIntegrationTest {
             var batch = new cn.edu.nju.Iot_Verify.dto.board.BoardBatchDto(
                     List.of(newDevice("light-2", "Light 2", 100)),
                     service.getEnvironmentVariables(userId), List.of(), List.of());
+            batch.setTemplateSnapshots(service.getDeviceTemplates(userId));
             batch.setImpactToken(service.previewBoardReplacement(userId).getImpactToken());
 
             assertThrows(IllegalStateException.class, () -> service.saveBoardBatch(userId, batch, () -> {

@@ -5,11 +5,14 @@ import type {
 } from '../types/spec'
 import { specTemplateDetails } from '../assets/config/specTemplates'
 import { normalizeModelRelation } from './modelRequest'
-import { splitSpecConditionValues } from './specConditionDomain'
+import { canonicalStateModeMembership, splitConditionValueList } from './stateConditionDomain'
 
 interface SpecFormulaContext {
     nodes?: DeviceNode[]
+    modeCount: ModeCountForDevice
 }
+
+type ModeCountForDevice = (deviceId: string) => number | undefined
 
 /* =========================================
  * 条件创建 & 模式判断
@@ -78,20 +81,21 @@ const previewConditionTarget = (condition: SpecCondition, context?: SpecFormulaC
     }
 }
 
-const previewScalar = (value: unknown): string => {
+const previewScalar = (value: unknown, targetType: SpecCondition['targetType']): string => {
     const text = String(value ?? '').trim()
     if (/^-?\d+(?:\.\d+)?$/.test(text)) return text
-    // Split from the label literals below: NuSMV booleans are uppercase and the backend's own preview
-    // renders them that way, so folding all six to lowercase made the same condition display as `true`
-    // here and `TRUE` there — two spellings of one formula, from the two halves of one feature.
-    if (/^(?:true|false)$/i.test(text)) return text.toUpperCase()
-    if (/^(?:trusted|untrusted|public|private)$/i.test(text)) return text.toLowerCase()
+    // Model enum literals can share these spellings and still be case-sensitive.
+    if (targetType === 'api' && /^(?:true|false)$/i.test(text)) return text.toUpperCase()
+    if ((targetType === 'trust' && /^(?:trusted|untrusted)$/i.test(text))
+        || (targetType === 'privacy' && /^(?:public|private)$/i.test(text))) return text.toLowerCase()
     return previewQuote(text)
 }
 
-const previewConditionValue = (condition: SpecCondition, relation: string): string => {
-    if (relation !== 'in' && relation !== 'not in') return previewScalar(condition.value)
-    const values = splitSpecConditionValues(condition.value, condition.targetType).map(previewScalar)
+const previewConditionValue = (condition: SpecCondition, relation: string, context?: SpecFormulaContext): string => {
+    const { value, targetType } = condition
+    if (relation !== 'in' && relation !== 'not in') return previewScalar(value, targetType)
+    const values = splitConditionValueList(value, targetType, context?.modeCount(condition.deviceId))
+        .map(item => previewScalar(item, targetType))
     return `{${values.join(', ')}}`
 }
 
@@ -99,7 +103,7 @@ const conditionToFormulaTerm = (condition: SpecCondition, context?: SpecFormulaC
     if (!condition?.deviceId || !condition.key) return ''
     const target = previewConditionTarget(condition, context)
     const relation = normalizeModelRelation(condition.relation) || '='
-    return `${target} ${relation} ${previewConditionValue(condition, relation)}`
+    return `${target} ${relation} ${previewConditionValue(condition, relation, context)}`
 }
 
 const conditionGroupToFormula = (conditions: SpecCondition[] = [], context?: SpecFormulaContext): string => {
@@ -209,20 +213,25 @@ export const buildSpecFormulaPreview = (spec: Parameters<typeof buildSpecFormula
 const normalizeSpecificationSetValue = (
     value: unknown,
     relation: string,
-    targetType: string
+    targetType: string,
+    modeCount?: number
 ): string => {
     const text = String(value ?? '').trim()
     const normalized = targetType === 'api' ? text.toUpperCase() : text
     if (relation !== 'in' && relation !== 'not in') return normalized
-    return splitSpecConditionValues(normalized, targetType).sort().join(',')
+    if (targetType === 'state' || targetType === 'mode') {
+        return canonicalStateModeMembership(normalized, targetType, modeCount)
+    }
+    return splitConditionValueList(normalized, targetType).sort().join(',')
 }
 
-const specificationConditionKeys = (conditions: SpecCondition[] = []): string[] =>
+const specificationConditionKeys = (conditions: SpecCondition[] = [], modeCount?: ModeCountForDevice): string[] =>
     conditions.map(condition => {
+        const deviceId = String(condition.deviceId || '').trim()
         const targetType = String(condition.targetType || '').trim().toLowerCase()
         const relation = normalizeModelRelation(condition.relation) || String(condition.relation || '').trim()
         return JSON.stringify({
-            deviceId: String(condition.deviceId || '').trim(),
+            deviceId,
             targetType,
             propertyScope: String(condition.propertyScope || '').trim().toLowerCase(),
             // Part of the identity: the same key with the other source is a different question, so
@@ -230,22 +239,23 @@ const specificationConditionKeys = (conditions: SpecCondition[] = []): string[] 
             variableSource: String(condition.variableSource || '').trim().toLowerCase(),
             key: String(condition.key || '').trim(),
             relation,
-            value: normalizeSpecificationSetValue(condition.value, relation, targetType)
+            value: normalizeSpecificationSetValue(condition.value, relation, targetType,
+                targetType === 'state' ? modeCount?.(deviceId) : undefined)
         })
     }).sort()
 
 export const buildSpecificationSemanticKey = (specification: Pick<
     Specification,
     'templateId' | 'aConditions' | 'ifConditions' | 'thenConditions'
->): string => JSON.stringify({
+>, modeCount?: ModeCountForDevice): string => JSON.stringify({
     templateId: String(specification.templateId ?? '').trim(),
-    aConditions: specificationConditionKeys(specification.aConditions),
-    ifConditions: specificationConditionKeys(specification.ifConditions),
-    thenConditions: specificationConditionKeys(specification.thenConditions)
+    aConditions: specificationConditionKeys(specification.aConditions, modeCount),
+    ifConditions: specificationConditionKeys(specification.ifConditions, modeCount),
+    thenConditions: specificationConditionKeys(specification.thenConditions, modeCount)
 })
 
-export const isSameSpecification = (a: Specification, b: Specification): boolean =>
-    buildSpecificationSemanticKey(a) === buildSpecificationSemanticKey(b)
+export const isSameSpecification = (a: Specification, b: Specification, modeCount?: ModeCountForDevice): boolean =>
+    buildSpecificationSemanticKey(a, modeCount) === buildSpecificationSemanticKey(b, modeCount)
 
 /**
  * A stored `variable` condition that never recorded which value it means. The backend rejects it,

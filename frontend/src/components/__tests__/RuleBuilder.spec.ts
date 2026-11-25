@@ -178,6 +178,46 @@ const completeRuleDraft = async (wrapper: VueWrapper) => {
 }
 
 describe('RuleBuilder action semantics', () => {
+  it('shows an existing composed state condition and preserves its per-mode spellings', async () => {
+    const existingRule = { id: '7', name: 'State rule', toId: 'target', toApi: 'turn_on', sources: [{
+      fromId: 'source', fromApi: 'state', itemType: 'state' as const, relation: '=', value: '  Case ; _Case  '
+    }] }
+    const wrapper = mount(RuleBuilder, {
+      props: { active: true, nodes, editRule: existingRule, deviceTemplates: [{ ...template, manifest: {
+        ...template.manifest, Modes: ['Power', 'Aux'],
+        WorkingStates: [{ Name: 'Case;ready' }, { Name: 'slow heat;_Case' }] } }] },
+      global: { plugins: [i18n] }
+    })
+    await wrapper.get('[data-testid="rule-edit-source-0"]').trigger('click')
+    const control = wrapper.get<HTMLSelectElement>('#rule-source-value')
+    expect(control.element.value).toBe('Case ; _Case')
+    expect(control.findAll('option').map(option => option.attributes('value'))).not.toContain('_Case;Case')
+    await wrapper.get('[data-testid="rule-add-source"]').trigger('click')
+    expect(wrapper.get('[data-testid="rule-edit-source-0"]').element.parentElement?.textContent).toContain('Case ; _Case')
+  })
+
+  it('keeps saved wildcard operands available when editing a rule exclusion set', async () => {
+    const operands = ['Case;_', ';_Case']
+    const rule = { id: '7', name: 'State rule', toId: 'target', toApi: 'turn_on', sources: [{
+      fromId: 'source', fromApi: 'state', itemType: 'state' as const, relation: 'not in', value: operands.join(' | ')
+    }] }
+    const wrapper = mount(RuleBuilder, {
+      props: { active: true, nodes, editRule: rule, deviceTemplates: [{ ...template, manifest: {
+        ...template.manifest, Modes: ['Power', 'Aux'],
+        WorkingStates: [{ Name: 'Case;ready' }, { Name: 'slow heat;_Case' }] } }] },
+      global: { plugins: [i18n] }
+    })
+    await wrapper.get('[data-testid="rule-edit-source-0"]').trigger('click')
+    const control = wrapper.get<HTMLSelectElement>('#rule-source-value')
+    expect(Array.from(control.element.selectedOptions, option => option.value)).toEqual(operands)
+    await control.setValue([operands[1]])
+    expect(control.findAll('option').map(option => option.attributes('value'))).toContain(operands[0])
+    await control.setValue(operands)
+    await wrapper.get('[data-testid="rule-add-source"]').trigger('click')
+    await wrapper.get('[data-testid="rule-edit-source-0"]').trigger('click')
+    expect(Array.from(control.element.selectedOptions, option => option.value)).toEqual(operands)
+  })
+
   it.each(['Existing hall rule', null])('keeps duplicate-check feedback localized without repeating the headline: %s', async matchedRule => {
     const previousLocale = actualI18n.global.locale.value
     actualI18n.global.locale.value = 'zh-CN'

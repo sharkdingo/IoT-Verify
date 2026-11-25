@@ -1,13 +1,20 @@
 package cn.edu.nju.Iot_Verify.component.template;
 
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvDataFactory;
+import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
+import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.function.Function;
+import java.util.function.UnaryOperator;
 
 /**
  * Reads the mode / working-state structure out of a device manifest.
@@ -37,8 +44,55 @@ public final class DeviceManifestModes {
                 .toList();
     }
 
+    /** Mode counts keyed by the authored Board node id, from the same Board snapshot as its rules and specs. */
+    public static Map<String, Integer> boardModeCounts(List<DeviceNodeDto> nodes, List<DeviceTemplateDto> templates) {
+        Map<String, Integer> countByTemplate = new HashMap<>();
+        for (DeviceTemplateDto template : templates) {
+            if (template != null && hasText(template.getName()) && template.getManifest() != null) {
+                countByTemplate.put(template.getName().trim().toLowerCase(Locale.ROOT),
+                        modeNames(template.getManifest()).size());
+            }
+        }
+        Map<String, Integer> counts = new HashMap<>();
+        for (DeviceNodeDto node : nodes) {
+            if (node != null && hasText(node.getId()) && hasText(node.getTemplateName())) {
+                Integer count = countByTemplate.get(node.getTemplateName().trim().toLowerCase(Locale.ROOT));
+                if (count != null) counts.put(node.getId().trim(), count);
+            }
+        }
+        return counts;
+    }
+
     /** Mode name to the distinct states that mode can take, in declaration order. */
     public static Map<String, List<String>> modeStates(DeviceManifest manifest) {
+        return modeStateValues(manifest, DeviceSmvDataFactory::cleanStateName);
+    }
+
+    public static Map<String, List<String>> authoredModeStates(DeviceManifest manifest) {
+        return modeStateValues(manifest, String::trim);
+    }
+
+    /** For each authored mode, maps the checked NuSMV atom back to its unique declared state name. */
+    public static Map<String, Map<String, String>> authoredStatesByMode(
+            DeviceManifest manifest, Function<String, ? extends RuntimeException> invalid) {
+        Map<String, Map<String, String>> result = new LinkedHashMap<>();
+        authoredModeStates(manifest).forEach((mode, states) -> {
+            Map<String, String> authoredNames = new LinkedHashMap<>();
+            for (String state : states) {
+                String token = DeviceSmvDataFactory.cleanStateName(state);
+                String previous = authoredNames.putIfAbsent(token, state);
+                if (previous != null && !previous.equals(state)) {
+                    throw invalid.apply("Working states '" + previous + "' and '" + state
+                            + "' of mode '" + mode + "' collide at NuSMV state token '" + token + "'.");
+                }
+            }
+            result.put(mode, Map.copyOf(authoredNames));
+        });
+        return Map.copyOf(result);
+    }
+
+    private static Map<String, List<String>> modeStateValues(
+            DeviceManifest manifest, UnaryOperator<String> stateName) {
         List<String> modes = modeNames(manifest);
         if (modes.isEmpty() || manifest == null || manifest.getWorkingStates() == null) {
             return Collections.emptyMap();
@@ -54,12 +108,12 @@ public final class DeviceManifestModes {
                 continue;
             }
             if (singleMode) {
-                addUniqueState(result.get(modes.get(0)), DeviceSmvDataFactory.cleanStateName(state.getName()));
+                addUniqueState(result.get(modes.get(0)), stateName.apply(state.getName()));
                 continue;
             }
             String[] parts = state.getName().split(";");
             for (int i = 0; i < parts.length && i < modes.size(); i++) {
-                addUniqueState(result.get(modes.get(i)), DeviceSmvDataFactory.cleanStateName(parts[i]));
+                addUniqueState(result.get(modes.get(i)), stateName.apply(parts[i]));
             }
         }
         return result;
@@ -100,14 +154,14 @@ public final class DeviceManifestModes {
         if (isDrivenByTransition(manifest, variableName)) {
             return null;
         }
-        String wanted = stateName.trim();
+        List<String> wanted = authoredTuple(stateName);
         for (DeviceManifest.WorkingState state : manifest.getWorkingStates()) {
             if (state == null || state.getName() == null || state.getDynamics() == null) {
                 continue;
             }
             // Match the complete tuple: a multi-mode InitState like `heating;ready` names one WorkingState,
             // and matching a single segment would pick an arbitrary sibling.
-            if (!wanted.equals(state.getName().trim())) {
+            if (!wanted.equals(authoredTuple(state.getName()))) {
                 continue;
             }
             for (DeviceManifest.Dynamic dynamic : state.getDynamics()) {
@@ -120,6 +174,30 @@ public final class DeviceManifestModes {
         return null;
     }
 
+    private static List<String> authoredTuple(String state) {
+        return Arrays.stream(state.split(";", -1)).map(String::trim).toList();
+    }
+
+    /** Validate authored endpoint operands before either engine maps them to solver atoms. */
+    public static String endpointIssue(String state, List<String> modes,
+                                       Map<String, List<String>> authoredStates, boolean startState) {
+        if (!hasText(state) || (startState && !modes.isEmpty() && "_".equals(state.trim()))) {
+            return null;
+        }
+        List<String> parts = authoredTuple(state);
+        if (parts.size() != modes.size()) {
+            return parts.size() + " segments, expected " + modes.size() + " for modes " + modes;
+        }
+        for (int i = 0; i < parts.size(); i++) {
+            String part = parts.get(i);
+            if (part.isEmpty() || (startState && "_".equals(part))) continue;
+            String mode = modes.get(i);
+            if (!authoredStates.getOrDefault(mode, List.of()).contains(part)) {
+                return "state '" + part + "' is not declared for mode '" + mode + "'";
+            }
+        }
+        return null;
+    }
 
     /** Whether a Transition assignment targets this variable, making it more than the state's consequence. */
     private static boolean isDrivenByTransition(DeviceManifest manifest, String variableName) {
@@ -139,23 +217,27 @@ public final class DeviceManifestModes {
         return false;
     }
 
-    /**
-     * A device-local variable's initial value for a device starting in {@code stateName}: the value that
-     * state declares, else the documented template default (first enum literal, or the lower bound).
-     *
-     * <p>{@code stateName} is the device's own starting state, not necessarily the template's
-     * {@code InitState} — a user who sets a car's state to {@code garage} means its location to read
-     * {@code garage}. {@code FuzzModel} already resolves its initial state that way.</p>
-     */
     public static String localInitialValue(DeviceManifest manifest,
                                           DeviceManifest.InternalVariable variable,
                                           String stateName) {
+        return localInitialValue(manifest, variable, stateName, null);
+    }
+
+    /** The starting state owns a derived value; otherwise an independent instance value can override the default. */
+    public static String localInitialValue(DeviceManifest manifest,
+                                          DeviceManifest.InternalVariable variable,
+                                          String stateName,
+                                          String instanceValue) {
         if (variable == null || variable.getName() == null) {
             return null;
         }
-        String declared = stateDeclaredValue(manifest, stateName, variable.getName());
+        String initialState = hasText(stateName) || manifest == null ? stateName : manifest.getInitState();
+        String declared = stateDeclaredValue(manifest, initialState, variable.getName());
         if (declared != null) {
             return declared;
+        }
+        if (instanceValue != null) {
+            return instanceValue;
         }
         if (variable.getValues() != null && !variable.getValues().isEmpty()) {
             return variable.getValues().get(0);

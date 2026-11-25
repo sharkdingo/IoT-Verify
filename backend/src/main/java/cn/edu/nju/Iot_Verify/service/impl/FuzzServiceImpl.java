@@ -334,13 +334,6 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
     }
 
     @Override
-    public String getCurrentModelFingerprint(Long userId) {
-        ModelInputSnapshot snapshot = boardDataConverter.getModelInputSnapshot(userId);
-        modelComplexityUnits(snapshot);
-        return modelFingerprint(snapshot);
-    }
-
-    @Override
     public Long submit(Long userId, FuzzRequestDto request) {
         NormalizedRequest normalized = validateAndNormalize(request);
         SubmissionCapacityPermit capacityPermit = acquireSubmissionCapacity();

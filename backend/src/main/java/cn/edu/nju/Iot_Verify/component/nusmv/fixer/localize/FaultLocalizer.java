@@ -61,8 +61,7 @@ public class FaultLocalizer {
                         .targetDeviceLabel(displayDeviceLabel(targetSmv, targetDeviceName))
                         .targetActionId(action)
                         .targetActionLabel(displayActionLabel(matchedApi, action))
-                        // Same reader-facing rendering as the conflict labels: the two are shown side by
-                        // side in one sentence, so they must not mix raw tuples with cleaned names.
+                        // The same authored spelling is used in playback and in both conflict labels.
                         .targetEndState(describeEndState(targetSmv, matchedApi.getEndState()))
                         .reasonCode("TRIGGERED")
                         .build());
@@ -134,9 +133,6 @@ public class FaultLocalizer {
 
                 String secondDescription = describeRule(rules, second.getRuleIndex());
                 String firstDescription = describeRule(rules, first.getRuleIndex());
-                // A multi-mode manifest stores the end state as a `;`-joined internal tuple. The
-                // comparison above already reads it per mode through `cleanStateName`; the sentence the
-                // user reads must use that same vocabulary rather than the raw token.
                 String firstLabel = describeEndState(smv, firstEndState);
                 String secondLabel = describeEndState(smv, secondEndState);
                 first.setConflicting(true);
@@ -189,9 +185,7 @@ public class FaultLocalizer {
     }
 
     /**
-     * The end state as a reader should see it: one cleaned state for a single-mode device, and the
-     * per-mode states joined with a separator a person can parse for a multi-mode one. Blank slots are
-     * dropped because they mean "this mode is unaffected", not a state named "".
+     * Render authored state names in mode order, omitting slots for modes the command leaves unchanged.
      *
      * <p>The separator must stay one of {@code ; , |}: for a bundled template the frontend's
      * {@code formatBuiltInModelToken} splits on those and localizes each token, so any other joiner
@@ -201,19 +195,19 @@ public class FaultLocalizer {
         if (endState == null || endState.isBlank()) {
             return endState;
         }
-        int modeCount = smv.getModes() == null ? 1 : Math.max(1, smv.getModes().size());
+        List<String> modes = smv.getModes();
+        if (modes == null || modes.isEmpty()) {
+            return endState.trim();
+        }
         String[] targets = endState.split(";", -1);
         List<String> labels = new ArrayList<>();
-        for (int modeIndex = 0; modeIndex < modeCount; modeIndex++) {
+        for (int modeIndex = 0; modeIndex < modes.size(); modeIndex++) {
             String target = targetForMode(targets, modeIndex);
-            if (target != null && !target.isBlank()) {
-                labels.add(target);
+            if (target != null) {
+                labels.add(smv.authoredStateName(modes.get(modeIndex), target));
             }
         }
-        // Nothing recognizable: keep the cleaned original rather than inventing a label.
-        return labels.isEmpty()
-                ? DeviceSmvDataFactory.cleanStateName(endState)
-                : String.join("; ", labels);
+        return String.join("; ", labels);
     }
 
     private String targetForMode(String[] targets, int modeIndex) {

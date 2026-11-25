@@ -27,6 +27,9 @@ public class DeviceSmvData {
 
     // ── 模式与状态（从模板 Modes + WorkingStates 解析） ──
     private List<String> modes = new ArrayList<>();
+    /** Inverse mapping for mode identifiers whose spelling changed during compilation. */
+    private final Map<String, String> renamedModes = new HashMap<>();
+    private Map<String, Map<String, String>> authoredStatesByMode = Map.of();
     private Map<String, List<String>> modeStates = new LinkedHashMap<>();
     private List<String> states = new ArrayList<>();
 
@@ -69,6 +72,22 @@ public class DeviceSmvData {
 
     // ── 模板引用 ──
     private transient DeviceManifest manifest;
+
+    public String authoredModeName(String identifier) {
+        return renamedModes.getOrDefault(identifier, identifier);
+    }
+
+    public String authoredStateName(String mode, String state) {
+        return authoredStatesByMode.getOrDefault(authoredModeName(mode), Map.of()).getOrDefault(state, state);
+    }
+
+    public String resolveAuthoredState(String mode, String name) {
+        if (name == null || name.isBlank()) return null;
+        String authored = name.trim();
+        String token = DeviceSmvDataFactory.cleanStateName(authored);
+        return modeStates.getOrDefault(mode, List.of()).contains(token) && authored.equals(authoredStateName(mode, token))
+                ? token : null;
+    }
 
     // ── 内部数据类 ──
 

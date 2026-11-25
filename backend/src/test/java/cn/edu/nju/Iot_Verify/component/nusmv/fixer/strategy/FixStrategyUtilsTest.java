@@ -56,8 +56,29 @@ class FixStrategyUtilsTest {
                 .command(RuleDto.Command.builder().deviceName("ac_1").action("heat").build())
                 .build();
 
-        assertFalse(FixStrategyUtils.candidateRulesPersistable(List.of(first, duplicateWithAlias)));
-        assertTrue(FixStrategyUtils.candidateRulesPersistable(List.of(first, distinctThreshold)));
+        assertFalse(FixStrategyUtils.candidateRulesPersistable(List.of(first, duplicateWithAlias), Map.of()));
+        assertTrue(FixStrategyUtils.candidateRulesPersistable(List.of(first, distinctThreshold), Map.of()));
+    }
+
+    @Test
+    void candidateRulesPersistable_resolvesWholeStateMembershipUsingTheFrozenModeCount() {
+        RuleDto first = membershipRule("off;on");
+        RuleDto duplicate = membershipRule("on,off,on");
+        Map<String, DeviceSmvData> devices = buildDeviceMap("lamp_1");
+        devices.get("lamp_1").setModes(List.of("Power"));
+
+        assertFalse(FixStrategyUtils.candidateRulesPersistable(List.of(first, duplicate), devices));
+
+        devices.get("lamp_1").setModes(List.of("Power", "Setting"));
+        assertTrue(FixStrategyUtils.candidateRulesPersistable(
+                List.of(membershipRule("off;on, on;off"), membershipRule("off;off, on;on")), devices));
+    }
+
+    private RuleDto membershipRule(String value) {
+        return RuleDto.builder().conditions(List.of(RuleDto.Condition.builder()
+                        .deviceName("lamp_1").targetType("state").attribute("state").relation("in").value(value).build()))
+                .command(RuleDto.Command.builder().deviceName("lamp_1").action("turnOn").build())
+                .build();
     }
 
     @Test
@@ -101,6 +122,7 @@ class FixStrategyUtilsTest {
             smv.setVarName(name);
             smv.setModuleName(name + "Module");
             smv.setModes(List.of("default"));  // single mode (generator requires modes for state)
+            smv.setManifest(DeviceManifest.builder().modes(List.of("default")).build());
             smv.getModeStates().put("default", new ArrayList<>(List.of("on", "off")));
             smv.setStates(List.of("on", "off"));
             DeviceManifest.InternalVariable tempVar = DeviceManifest.InternalVariable.builder()
@@ -159,7 +181,7 @@ class FixStrategyUtilsTest {
     private static List<RuleDto.Condition> extractForRuleAlone(
             SpecificationDto spec, RuleDto rule, Map<String, DeviceSmvData> deviceMap, int max) {
         return FixStrategyUtils.extractCandidateConditions(
-                spec, rule, CommandEffects.of(rule, List.of(rule), deviceMap), deviceMap, max);
+                spec, rule, new CommandEffects.Scene(List.of(rule), deviceMap, Set.of()).forRule(0), deviceMap, max);
     }
 
     /**
@@ -177,9 +199,11 @@ class FixStrategyUtilsTest {
         camera.setModes(List.of("MachineState"));
         camera.getModeStates().clear();
         camera.getModeStates().put("MachineState", new ArrayList<>(List.of("off", "on", "takingphoto")));
+        camera.setAuthoredStatesByMode(Map.of("MachineState", Map.of("takingphoto", "taking photo")));
         camera.setStates(List.of("off", "on", "takingphoto"));
         camera.setManifest(DeviceManifest.builder()
                 .name("Camera")
+                .modes(List.of("MachineState"))
                 .apis(List.of(DeviceManifest.API.builder()
                         .name("take photo").startState("on").endState("taking photo").signal(true).build()))
                 .build());
@@ -317,6 +341,7 @@ class FixStrategyUtilsTest {
         camera.setModes(List.of("MachineState"));
         camera.getModeStates().clear();
         camera.getModeStates().put("MachineState", new ArrayList<>(List.of("off", "on", "takingphoto")));
+        camera.setAuthoredStatesByMode(Map.of("MachineState", Map.of("takingphoto", "taking photo")));
         camera.setStates(List.of("off", "on", "takingphoto"));
         camera.setManifest(DeviceManifest.builder()
                 .name("Camera")
@@ -423,6 +448,17 @@ class FixStrategyUtilsTest {
         assertEquals("turnOn", candidates.get(0).getAttribute());
         assertNull(candidates.get(0).getRelation());
         assertNull(candidates.get(0).getValue());
+
+        for (List<String> comparison : List.of(
+                List.of("=", "FALSE"),
+                List.of("IN", "true, false"),
+                List.of("NOT_IN", "true, false"),
+                List.of("=", "true, true"),
+                List.of("IN", "true, unknown"))) {
+            SpecificationDto excluded = buildSpec(
+                    buildSpecCond("sensor", "api", "turnOn", comparison.get(0), comparison.get(1)));
+            assertTrue(extractForRuleAlone(excluded, rule, deviceMap, 5).isEmpty(), comparison::toString);
+        }
     }
 
     @Test
@@ -520,13 +556,46 @@ class FixStrategyUtilsTest {
     }
 
     @Test
+    void authoredModePolicyYieldsARepairCandidateCompatibleWithTheCommand() {
+        Map<String, DeviceSmvData> devices = buildDeviceMap("light");
+        DeviceSmvData light = devices.get("light");
+        light.setModes(List.of("_Next"));
+        light.setModeStates(Map.of("_Next", List.of("off", "idle", "on")));
+        light.setStates(List.of("off", "idle", "on"));
+        var turnOn = DeviceManifest.API.builder().name("turnOn").startState("off").endState("on").build();
+        light.setManifest(DeviceManifest.builder().name("Light").modes(List.of("Next"))
+                .apis(List.of(turnOn)).build());
+        RuleDto rule = commandRule("light", "turnOn");
+        var effects = new CommandEffects.Scene(List.of(rule), devices, Set.of()).forRule(0);
+        var policy = buildSpec(buildSpecCond("light", "mode", "Next", "=", "on"));
+
+        var candidates = FixStrategyUtils.extractCandidateConditions(policy, rule, effects, devices, 5);
+
+        assertAll(
+                () -> assertEquals(List.of("Next"), candidates.stream().map(RuleDto.Condition::getAttribute).toList()),
+                () -> assertTrue(effects.establishes(RuleDto.Condition.builder()
+                        .deviceName("light").targetType("mode").attribute("Next").relation("=").value("on").build())),
+                () -> assertTrue(FixStrategyUtils.isCommandPrestateIncompatible(rule, RuleDto.Condition.builder()
+                        .deviceName("light").targetType("mode").attribute("Next").relation("=").value("idle").build(),
+                        devices)));
+        var domain = FixStrategyUtils.candidateConditionValueInfo(
+                candidates.get(0), rule, effects, devices, "condition_value_r0_c0");
+        assertNotNull(domain);
+        assertEquals(List.of("off"), domain.getValues());
+        assertTrue(FixStrategyUtils.extractCandidateConditions(
+                buildSpec(buildSpecCond("light", "mode", "_Next", "=", "off")), rule, effects, devices, 5).isEmpty());
+    }
+
+    @Test
     void extractCandidateConditions_prunesCommandOutcomeFromFreeModeDomain() {
         Map<String, DeviceSmvData> deviceMap = buildDeviceMap("camera");
         DeviceSmvData camera = deviceMap.get("camera");
         camera.getModeStates().put("default", new ArrayList<>(List.of("off", "on", "takingphoto")));
+        camera.setAuthoredStatesByMode(Map.of("default", Map.of("takingphoto", "taking photo")));
         camera.setStates(List.of("off", "on", "takingphoto"));
         camera.setManifest(DeviceManifest.builder()
                 .name("Camera")
+                .modes(List.of("default"))
                 .apis(List.of(DeviceManifest.API.builder()
                         .name("turn on")
                         .startState("_")
@@ -547,7 +616,7 @@ class FixStrategyUtilsTest {
                 "a single unsafe policy literal must not discard the entire free-Y candidate");
         ParameterizationConfig.ConditionValueInfo valueInfo =
                 FixStrategyUtils.candidateConditionValueInfo(
-                        candidates.get(0), rule, CommandEffects.of(rule, List.of(rule), deviceMap),
+                        candidates.get(0), rule, new CommandEffects.Scene(List.of(rule), deviceMap, Set.of()).forRule(0),
                         deviceMap, "condition_value_r0_c1");
         assertNotNull(valueInfo);
         assertEquals(List.of("off", "takingphoto"), valueInfo.getValues());
@@ -569,7 +638,7 @@ class FixStrategyUtilsTest {
                 buildSpecCond("bed", "state", null, "=", "on"));
 
         List<RuleDto.Condition> candidates = FixStrategyUtils.extractCandidateConditions(
-                spec, lightTheWay, CommandEffects.of(lightTheWay, board, deviceMap), deviceMap, 10);
+                spec, lightTheWay, new CommandEffects.Scene(board, deviceMap, Set.of()).forRule(0), deviceMap, 10);
 
         assertEquals(List.of("camera state != taking photo", "bed state = on"),
                 candidates.stream().map(c -> c.getDeviceName() + " " + c.getAttribute() + " "
@@ -586,7 +655,7 @@ class FixStrategyUtilsTest {
         DeviceSmvData relay = deviceMap.get("relay");
         relay.setStates(List.of("off", "on"));
         relay.getModeStates().put("default", new ArrayList<>(List.of("off", "on")));
-        relay.setManifest(DeviceManifest.builder().name("Relay")
+        relay.setManifest(DeviceManifest.builder().name("Relay").modes(List.of("default"))
                 .apis(List.of(
                         DeviceManifest.API.builder().name("on").startState("_").endState("on").signal(true).build(),
                         DeviceManifest.API.builder().name("off").startState("_").endState("off").signal(true).build()))
@@ -595,13 +664,17 @@ class FixStrategyUtilsTest {
         RuleDto turnOn = commandRule("relay", "on", stateIs("relay", "=", "off"));
         RuleDto turnOff = commandRule("relay", "off", stateIs("relay", "=", "on"));
         RuleDto downstream = commandRule("downstream", "on", stateIs("relay", "=", "off"));
-        CommandEffects effects = CommandEffects.of(turnOn, List.of(turnOn, turnOff, downstream), deviceMap);
+        List<RuleDto> board = List.of(turnOn, turnOff, downstream);
+        CommandEffects effects = new CommandEffects.Scene(board, deviceMap, Set.of()).forRule(0);
 
         assertFalse(effects.establishes(stateIs("relay", "=", "on")));
         assertFalse(effects.establishes(stateIs("relay", "=", "off")));
         assertTrue(effects.establishes(stateIs("relay", "in", "on,off")));
         assertTrue(effects.establishes(stateIs("downstream", "=", "on")),
                 "Possible propagation must continue beyond conflicting effects in the loop");
+        assertFalse(new CommandEffects.Scene(board, deviceMap, Set.of(0)).forRule(0)
+                        .establishes(stateIs("downstream", "=", "on")),
+                "An adjustable blocker may lose the guard that makes the two writers mutually exclusive");
         RuleDto.Condition candidate = RuleDto.Condition.builder().deviceName("relay")
                 .targetType("mode").attribute("default").relation("=").value("on").build();
         ParameterizationConfig.ConditionValueInfo values = FixStrategyUtils.candidateConditionValueInfo(
@@ -619,7 +692,8 @@ class FixStrategyUtilsTest {
                 .deviceName("camera").targetType("mode").attribute("MachineState").relation("=").value("on").build();
 
         ParameterizationConfig.ConditionValueInfo valueInfo = FixStrategyUtils.candidateConditionValueInfo(
-                cameraMode, lightTheWay, CommandEffects.of(lightTheWay, List.of(lightTheWay, takePhoto), deviceMap),
+                cameraMode, lightTheWay,
+                new CommandEffects.Scene(List.of(lightTheWay, takePhoto), deviceMap, Set.of()).forRule(0),
                 deviceMap, "condition_value_r0_c0");
 
         assertNotNull(valueInfo);
@@ -634,8 +708,8 @@ class FixStrategyUtilsTest {
         RuleDto photoOnFalseEvent = commandRule("camera", "take photo", RuleDto.Condition.builder()
                 .deviceName("lamp").targetType("api").attribute("on").relation("=").value("FALSE").build());
 
-        CommandEffects effects = CommandEffects.of(
-                lightTheWay, List.of(lightTheWay, photoWhenDark, photoOnFalseEvent), deviceMap);
+        CommandEffects effects = new CommandEffects.Scene(
+                List.of(lightTheWay, photoWhenDark, photoOnFalseEvent), deviceMap, Set.of()).forRule(0);
 
         assertTrue(effects.establishes(stateIs("lamp", "in", "on,off")));
         assertTrue(effects.establishes(RuleDto.Condition.builder()
@@ -885,6 +959,105 @@ class FixStrategyUtilsTest {
     }
 
     @Test
+    void wildcardStartRejectsNotInOnlyWhenTheWholeSetExcludesEveryExecutableTuple() {
+        var devices = buildMultiModeDeviceMap("hvac");
+        devices.get("hvac").setManifest(DeviceManifest.builder().name("Hvac")
+                .apis(List.of(DeviceManifest.API.builder().name("heat")
+                        .startState("off;_").endState("heat;").build()))
+                .build());
+        var rule = RuleDto.builder().conditions(List.of())
+                .command(RuleDto.Command.builder().deviceName("hvac").action("heat").build()).build();
+
+        var unreachable = buildSpec(buildSpecCond("hvac", "state", null, "not in",
+                "off;high, off;low, off;off"));
+        var reachable = buildSpec(buildSpecCond("hvac", "state", null, "not in",
+                "off;high, off;low"));
+        assertTrue(extractForRuleAlone(unreachable, rule, devices, 1).isEmpty());
+        assertEquals(1, extractForRuleAlone(reachable, rule, devices, 1).size());
+    }
+
+    @Test
+    void partialCommandKeepsAnInGuardThatAllowsAStateChange() {
+        var devices = buildMultiModeDeviceMap("hvac");
+        devices.get("hvac").setManifest(DeviceManifest.builder().name("Hvac")
+                .apis(List.of(DeviceManifest.API.builder().name("heat")
+                        .startState("_;_").endState("heat;").build()))
+                .build());
+        var rule = RuleDto.builder().conditions(List.of())
+                .command(RuleDto.Command.builder().deviceName("hvac").action("heat").build()).build();
+
+        var established = buildSpec(buildSpecCond("hvac", "state", null, "in",
+                "heat;high, heat;low, heat;off"));
+        var uncertain = buildSpec(buildSpecCond("hvac", "state", null, "in",
+                "heat;high, heat;low"));
+        var usefulGuard = buildSpec(buildSpecCond("hvac", "state", null, "in",
+                "heat;high, heat;low, heat;off, off;low"));
+        assertTrue(extractForRuleAlone(established, rule, devices, 1).isEmpty());
+        assertEquals(1, extractForRuleAlone(uncertain, rule, devices, 1).size());
+        assertEquals(1, extractForRuleAlone(usefulGuard, rule, devices, 1).size(),
+                "The guard allows heating from off;low even though every heating outcome satisfies it");
+    }
+
+    @Test
+    void triggeredCommandCarriesAnUnchangedStartModeOnlyWhenNoOtherActionCanWriteIt() {
+        var devices = buildMultiModeDeviceMap("hvac");
+        devices.putAll(buildDeviceMap("lamp"));
+        devices.get("lamp").setManifest(DeviceManifest.builder().name("Lamp")
+                .apis(List.of(DeviceManifest.API.builder().name("turnOn")
+                        .startState("off").endState("on").build()))
+                .build());
+        devices.get("hvac").setManifest(DeviceManifest.builder().name("Hvac")
+                .apis(List.of(
+                        DeviceManifest.API.builder().name("heat").startState("off;low").endState("heat;").build(),
+                        DeviceManifest.API.builder().name("intensify").startState("_;low").endState(";high").build(),
+                        DeviceManifest.API.builder().name("heatAndIntensify")
+                                .startState("off;low").endState("heat;high").build()))
+                .build());
+        var light = RuleDto.builder().conditions(List.of())
+                .command(RuleDto.Command.builder().deviceName("lamp").action("turnOn").build()).build();
+        var heat = RuleDto.builder().conditions(List.of(RuleDto.Condition.builder()
+                        .deviceName("lamp").targetType("state").attribute(" State ").relation("=").value("on").build()))
+                .command(RuleDto.Command.builder().deviceName("hvac").action("heat").build()).build();
+        var fan = RuleDto.builder().conditions(List.of(RuleDto.Condition.builder()
+                        .deviceName("lamp").targetType("state").attribute("state").relation("=").value("off").build()))
+                .command(RuleDto.Command.builder().deviceName("hvac").action("intensify").build()).build();
+        var postcondition = stateIs("hvac", "in", "heat;low");
+        var overlapping = commandRule("hvac", "heatAndIntensify", stateIs("lamp", "=", "off"));
+
+        assertTrue(new CommandEffects.Scene(List.of(light, heat), devices, Set.of()).forRule(0).establishes(postcondition));
+        assertFalse(new CommandEffects.Scene(List.of(light, heat, fan), devices, Set.of()).forRule(0)
+                .establishes(postcondition));
+        assertTrue(new CommandEffects.Scene(List.of(light, heat, overlapping), devices, Set.of()).forRule(0)
+                .establishes(postcondition), "A shadowed command cannot write even its non-overlapping mode");
+    }
+
+    @Test
+    void possiblePartialOutcomeAloneCannotPruneAGuardOnTheDownstreamDevice() {
+        var devices = buildMultiModeDeviceMap("hvac");
+        devices.putAll(buildDeviceMap("lamp"));
+        devices.get("hvac").setManifest(DeviceManifest.builder().name("Hvac")
+                .apis(List.of(
+                        DeviceManifest.API.builder().name("heat").startState("off;").endState("heat;").build(),
+                        DeviceManifest.API.builder().name("intensify").startState(";low").endState(";high").build()))
+                .build());
+        devices.get("lamp").setManifest(DeviceManifest.builder().name("Lamp")
+                .apis(List.of(DeviceManifest.API.builder().name("turnOn").startState("off").endState("on").build()))
+                .build());
+
+        var heat = commandRule("hvac", "heat", stateIs("hvac", "=", "off;low"));
+        var fan = commandRule("hvac", "intensify", stateIs("hvac", "=", "off;low"));
+        var possible = commandRule("lamp", "turnOn", stateIs("hvac", "in", "heat;high"));
+        var established = commandRule("lamp", "turnOn", stateIs("hvac", "=", "heat;_"));
+        var candidate = stateIs("lamp", "=", "on");
+
+        assertFalse(new CommandEffects.Scene(List.of(heat, fan, possible), devices, Set.of()).forRule(0)
+                .establishes(candidate));
+        assertTrue(new CommandEffects.Scene(List.of(heat, fan, possible, established), devices, Set.of()).forRule(0)
+                        .establishes(candidate),
+                "The same outcome can later be supported by a guaranteed trigger");
+    }
+
+    @Test
     void validateCandidateCondition_multiModeStateIn_semicolonPreserved() {
         // Multi-mode device: "cool;high" is a single tuple value, NOT two values
         Map<String, DeviceSmvData> deviceMap = buildMultiModeDeviceMap("hvac");
@@ -1001,9 +1174,50 @@ class FixStrategyUtilsTest {
     // ======================== conditionFingerprint: multi-mode mode-aware ========================
 
     @Test
+    void conditionFingerprint_preservesTheSignOfNumericVariableValues() {
+        Map<String, DeviceSmvData> devices = buildDeviceMap("sensor");
+        DeviceSmvData sensor = devices.get("sensor");
+        DeviceManifest.InternalVariable temperature = sensor.getVariables().get(0);
+        temperature.setIsInside(true);
+        temperature.setLowerBound(-20);
+        sensor.getManifest().setInternalVariables(List.of(temperature));
+        var condition = RuleDto.Condition.builder().deviceName("sensor").targetType("variable")
+                .attribute("temperature").relation("in").value("-1,2").build();
+
+        String negative = FixStrategyUtils.conditionFingerprint(condition, devices);
+        condition.setValue("+1,2");
+        String positive = FixStrategyUtils.conditionFingerprint(condition, devices);
+        condition.setValue("1,2");
+        String unsigned = FixStrategyUtils.conditionFingerprint(condition, devices);
+
+        assertAll(() -> assertNotEquals(negative, positive), () -> assertEquals(positive, unsigned));
+    }
+
+    @Test
+    void conditionFingerprint_doesNotTreatAnAuthoredModeNamedStateAsAStateTuple() {
+        Map<String, DeviceSmvData> devices = buildDeviceMap("light");
+        DeviceSmvData light = devices.get("light");
+        light.setModes(List.of("state", "Fan"));
+        light.setModeStates(Map.of("state", List.of("off", "on", "offon"), "Fan", List.of("slow", "fast")));
+        light.getManifest().setModes(light.getModes());
+        var condition = RuleDto.Condition.builder().deviceName("light").targetType("mode")
+                .attribute("state").relation("in").value("off;on").build();
+
+        String fingerprint = FixStrategyUtils.conditionFingerprint(condition, devices);
+        condition.setValue("off,on");
+        String commaSeparated = FixStrategyUtils.conditionFingerprint(condition, devices);
+        condition.setValue("offon");
+        String singleValue = FixStrategyUtils.conditionFingerprint(condition, devices);
+
+        assertAll(() -> assertEquals(commaSeparated, fingerprint), () -> assertNotEquals(singleValue, fingerprint));
+    }
+
+    @Test
     void conditionFingerprint_multiModeStateIn_preservesSemicolonInTuple() {
         // Multi-mode device: "cool;high" is a single tuple, ";" must NOT be used as a split delimiter
         Map<String, DeviceSmvData> deviceMap = buildMultiModeDeviceMap("hvac");
+        deviceMap.get("hvac").getModeStates().get("power").add("coolh");
+        deviceMap.get("hvac").getModeStates().get("fan").add("igh");
 
         // IN with two tuples separated by comma: "cool;high,heat;low"
         RuleDto.Condition c = RuleDto.Condition.builder()
@@ -1012,16 +1226,9 @@ class FixStrategyUtilsTest {
         String fp = FixStrategyUtils.conditionFingerprint(c, deviceMap);
 
         assertNotNull(fp, "fingerprint should not be null for valid multi-mode state IN");
-        // cleanRuleValueByRelation with modeCount=2 splits by [,|] only → ["cool;high","heat;low"]
-        // Each part cleaned via cleanStateName: "cool;high"→"coolhigh", "heat;low"→"heatlow"
-        // Joined with "," → "coolhigh,heatlow"
-        // Wrong (modeCount=1) would split by [,;|] → ["cool","high","heat","low"]
-        // → cleanStateName each → "cool,high,heat,low"
-        assertTrue(fp.contains("coolhigh,heatlow"),
-                "Multi-mode IN fingerprint must preserve ; within tuples, got: " + fp);
-        // Verify it does NOT contain the broken single-mode split pattern
-        assertFalse(fp.contains("|cool,high,heat,low"),
-                "Must not split ; as delimiter for multi-mode device, got: " + fp);
+        c.setValue("coolh;igh,heat;low");
+        assertNotEquals(fp, FixStrategyUtils.conditionFingerprint(c, deviceMap),
+                "Moving letters across mode boundaries changes the predicate");
     }
 
     @Test
@@ -1034,8 +1241,6 @@ class FixStrategyUtilsTest {
         String fp = FixStrategyUtils.conditionFingerprint(c, deviceMap);
 
         assertNotNull(fp);
-        // Single tuple "off;off" → cleanStateName → "offoff" or "off_off"
-        // Wrong split would give "off,off" (two separate entries)
         String[] parts = fp.split("\\|");
         assertEquals(5, parts.length, "fingerprint must have 5 pipe-separated segments: " + fp);
         assertEquals("not in", parts[3], "relation segment");
@@ -1043,6 +1248,39 @@ class FixStrategyUtilsTest {
         String valSegment = parts[4];
         assertFalse("off,off".equals(valSegment),
                 "NOT_IN fingerprint must not split ; into two entries for multi-mode, got: " + fp);
+    }
+
+    @Test
+    void conditionFingerprint_treatsReorderedWildcardMembersAsTheSameSet() {
+        var devices = buildMultiModeDeviceMap("hvac");
+        var condition = RuleDto.Condition.builder().deviceName("hvac").targetType("state")
+                .attribute("state").relation("not in").value("cool;_, _;low").build();
+        String original = FixStrategyUtils.conditionFingerprint(condition, devices);
+
+        condition.setValue("; low | cool ; | ; low");
+        assertEquals(original, FixStrategyUtils.conditionFingerprint(condition, devices));
+
+        condition.setValue("; high | cool ;");
+        assertNotEquals(original, FixStrategyUtils.conditionFingerprint(condition, devices));
+    }
+
+    @Test
+    void retainsStateCandidateThatNamesAnotherModeDespiteTheSameSolverAtom() {
+        var devices = buildMultiModeDeviceMap("lamp");
+        var lamp = devices.get("lamp");
+        lamp.setModes(List.of("Power", "Fan"));
+        lamp.setModeStates(Map.of("Power", List.of("_Case", "ready"), "Fan", List.of("_Case", "quiet")));
+        lamp.setStates(List.of("_Case", "ready", "quiet"));
+        lamp.setAuthoredStatesByMode(Map.of(
+                "Power", Map.of("_Case", "Case", "ready", "ready"),
+                "Fan", Map.of("_Case", "_Case", "quiet", "quiet")));
+        lamp.setManifest(DeviceManifest.builder().name("Lamp").modes(lamp.getModes()).build());
+        RuleDto rule = RuleDto.builder().conditions(List.of(RuleDto.Condition.builder().deviceName("lamp")
+                .attribute("state").targetType("state").relation("=").value("_Case").build())).build();
+        var spec = buildSpec(buildSpecCond("lamp", "state", "state", "=", "Case"));
+
+        assertEquals(List.of("Case"), FixStrategyUtils.extractCandidateConditions(
+                spec, rule, CommandEffects.NONE, devices, 1).stream().map(RuleDto.Condition::getValue).toList());
     }
 
     @Test
@@ -1057,8 +1295,8 @@ class FixStrategyUtilsTest {
 
         assertNotNull(fp);
         // modeCount=1 → splitStateRuleValues uses [,;|] → ["on","off"]
-        // cleanStateName each → "on","off" → joined "on,off"
-        assertTrue(fp.contains("on,off"),
+        // Both members remain distinct when canonicalizing membership order.
+        assertTrue(fp.contains("off,on"),
                 "Single-mode IN fingerprint must split ; as delimiter, got: " + fp);
     }
 

@@ -16,7 +16,6 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.*;
 
@@ -77,7 +76,7 @@ class ModelRunPreparationTest {
     }
 
     @Test
-    void invalidSpecificationStopsExpansionWhileRetainingCapturedTemplatesAndDefaults() {
+    void invalidSpecificationStopsPreparationWhileRetainingCapturedTemplatesAndDefaults() {
         SmvGenerator.CapturedDeviceModel captured = stubCapturedSensor();
         Map<String, String> errors = NusmvRequestValidator.newErrors();
 
@@ -96,7 +95,7 @@ class ModelRunPreparationTest {
     }
 
     @Test
-    void invalidRulePreventsModelExpansionAndProvenanceCapture() {
+    void invalidRulePreventsModelPreparationAndProvenanceCapture() {
         stubCapturedSensor();
         RuleDto rule = new RuleDto();
         rule.setCommand(RuleDto.Command.builder().deviceName("sensor_1").action("missing").build());
@@ -113,7 +112,7 @@ class ModelRunPreparationTest {
     }
 
     @Test
-    void verificationUsesExpandedDefaultsAndExactSpecCountWithoutChangingFrozenRequestDevices() {
+    void verificationKeepsSharedDefaultsInThePoolAndCapturesExactSpecCount() {
         SmvGenerator.CapturedDeviceModel captured = stubCapturedSensor();
         Map<String, String> errors = NusmvRequestValidator.newErrors();
 
@@ -121,12 +120,13 @@ class ModelRunPreparationTest {
                 List.of(), List.of(specification("temperature")), List.of(), false, templates, errors);
 
         assertTrue(errors.isEmpty(), errors.toString());
-        assertNotSame(device, prepared.devices().get(0));
+        assertSame(devices, prepared.devices());
         assertNull(device.getVariables());
-        assertEquals("temperature", prepared.devices().get(0).getVariables().get(0).getName());
-        assertEquals("15", prepared.devices().get(0).getVariables().get(0).getValue());
-        assertEquals("trusted", prepared.devices().get(0).getVariables().get(0).getTrust());
-        assertEquals("private", prepared.devices().get(0).getPrivacies().get(0).getPrivacy());
+        assertNull(device.getPrivacies());
+        assertEquals("temperature", prepared.environmentVariables().get(0).getName());
+        assertEquals("15", prepared.environmentVariables().get(0).getValue());
+        assertEquals("trusted", prepared.environmentVariables().get(0).getTrust());
+        assertEquals("private", prepared.environmentVariables().get(0).getPrivacy());
         assertSame(captured.templateManifests(), prepared.templateManifests());
         assertSame(captured.deviceSmvMap(), prepared.deviceSmvMap());
         assertTrue(prepared.modelSnapshot().isTemplatesFrozen());
@@ -138,8 +138,6 @@ class ModelRunPreparationTest {
         verify(provenance).collectEnvironmentProvenance(same(prepared.environmentVariables()),
                 same(prepared.devices()), same(prepared.deviceSmvMap()));
         verify(generator).captureDeviceModelFromTemplateSnapshots(devices, templates);
-        verify(generator).buildDeviceSmvMapFromTemplateSnapshots(
-                same(prepared.devices()), same(captured.templateManifests()));
         verifyNoMoreInteractions(generator);
     }
 
@@ -154,7 +152,7 @@ class ModelRunPreparationTest {
         assertTrue(errors.isEmpty(), errors.toString());
         assertEquals(0, prepared.modelSnapshot().getSpecificationCount());
         assertEquals("15", prepared.environmentVariables().get(0).getValue());
-        assertEquals("15", prepared.devices().get(0).getVariables().get(0).getValue());
+        assertNull(prepared.devices().get(0).getVariables());
     }
 
     private SmvGenerator.CapturedDeviceModel stubCapturedSensor() {
@@ -174,8 +172,6 @@ class ModelRunPreparationTest {
         SmvGenerator.CapturedDeviceModel captured = new SmvGenerator.CapturedDeviceModel(
                 Map.of("Sensor", manifest), Map.of("sensor_1", data));
         when(generator.captureDeviceModelFromTemplateSnapshots(devices, templates)).thenReturn(captured);
-        when(generator.buildDeviceSmvMapFromTemplateSnapshots(anyList(), same(captured.templateManifests())))
-                .thenReturn(captured.deviceSmvMap());
         return captured;
     }
 

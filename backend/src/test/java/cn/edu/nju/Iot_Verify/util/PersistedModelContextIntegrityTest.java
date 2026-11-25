@@ -5,6 +5,7 @@ import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
 import cn.edu.nju.Iot_Verify.dto.model.EnvironmentValueProvenanceDto;
 import cn.edu.nju.Iot_Verify.dto.model.ModelRunSnapshotDto;
 import cn.edu.nju.Iot_Verify.dto.model.ModelSemanticsDto;
+import cn.edu.nju.Iot_Verify.dto.model.ModelSemanticsVersion;
 import cn.edu.nju.Iot_Verify.exception.PersistedDataIntegrityException;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
@@ -46,6 +47,25 @@ class PersistedModelContextIntegrityTest {
         malformed.put("modelFingerprint", new java.math.BigInteger("1".repeat(64)));
         assertThrows(PersistedDataIntegrityException.class, () -> readVerification(
                 JsonUtils.toJson(NO_ATTACK_SEMANTICS), malformed.toString()));
+    }
+
+    @Test
+    void reportsHistoricalAndCurrentSemanticsEvenWhenTheInputFingerprintMatches() {
+        String fingerprint = "a".repeat(64);
+        String semantics = JsonUtils.toJson(NO_ATTACK_SEMANTICS);
+        ObjectNode saved = object(JsonUtils.toJson(VERIFICATION_SNAPSHOT.toBuilder()
+                .modelFingerprint(fingerprint).build()));
+        ObjectNode historical = saved.deepCopy();
+        historical.remove("modelSemanticsVersion");
+
+        ObjectNode currentResult = object(JsonUtils.toJson(readVerification(semantics, saved.toString()).modelSnapshot()));
+        ObjectNode historicalResult = object(JsonUtils.toJson(readVerification(semantics, historical.toString()).modelSnapshot()));
+
+        assertEquals(currentResult.get("modelFingerprint"), historicalResult.get("modelFingerprint"));
+        assertEquals(ModelSemanticsVersion.CURRENT, currentResult.path("modelSemanticsVersion").asInt(-1));
+        assertEquals(0, historicalResult.path("modelSemanticsVersion").asInt(-1));
+        saved.put("modelSemanticsVersion", "1");
+        assertThrows(PersistedDataIntegrityException.class, () -> readVerification(semantics, saved.toString()));
     }
 
     @Test

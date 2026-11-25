@@ -166,6 +166,7 @@ describe('run failure language and recovery', () => {
       cancellingVerificationTask: ref(false), cancellingSimulationTask: ref(false),
       closeHistoryPanel: vi.fn(), normalizeTaskProgress: () => 0, taskProgressStatusKey: () => 'app.taskInitializing',
       semanticSceneChangeCount: 0, isPollingAbortedError: () => true, boardLifecycleDisposed: false,
+      captureBoardRunOwner: () => () => !ports.boardLifecycleDisposed,
       loadTaskInbox: vi.fn(), [`pollAsync${kind === 'verification' ? 'Verification' : 'Simulation'}`]:
         () => new Promise((_resolve, reject) => { stop = () => reject(new Error('poll aborted')) })
     })

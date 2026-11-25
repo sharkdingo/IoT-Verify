@@ -2,6 +2,7 @@ package cn.edu.nju.Iot_Verify.component.nusmv.fixer.localize;
 
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceReferenceResolver;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvData;
+import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
@@ -22,12 +23,13 @@ import java.util.TreeSet;
  * camera-at-night property — cannot be part of any repair, yet every strategy used to spend full-model
  * verifications on it. This computes the fixpoint instead: the property's devices and environment
  * domains are relevant; a rule is relevant when its command writes a relevant device or a relevant
- * domain (through the target's declared impact); everything a relevant rule reads becomes relevant.
+ * domain (through the target's impact or autonomous assignment); everything a relevant rule reads becomes relevant.
  *
  * <p>Deliberately an over-approximation. A device in the scope brings every environment domain it
- * declares, because its own transitions and dynamics may read them, and a domain brings every device
- * that declares an impact on it. Missing a relevant rule would make a strategy report "no repair" for a
- * repairable model; including an irrelevant one only costs search time.
+ * can read, and a domain brings every device
+ * that writes it through a declared impact or an autonomous assignment. Missing a relevant rule would
+ * make a strategy report "no repair" for a repairable model; including an irrelevant one only costs
+ * search time.
  */
 public final class RuleInfluenceScope {
 
@@ -90,7 +92,7 @@ public final class RuleInfluenceScope {
                 changed = true;
             }
             if (!devices.contains(smv.getVarName())
-                    && impactedDomains(smv).stream().anyMatch(domains::contains)) {
+                    && writtenDomains(smv).stream().anyMatch(domains::contains)) {
                 devices.add(smv.getVarName());
                 changed = true;
             }
@@ -99,7 +101,7 @@ public final class RuleInfluenceScope {
     }
 
     /**
-     * A target that impacts a relevant domain is already a scope device: the closure adds it before the
+     * A target that writes a relevant domain is already a scope device: the closure adds it before the
      * rules are scanned, and the loop repeats until neither set grows.
      */
     private static boolean writesScopeDevice(RuleDto rule, Set<String> devices,
@@ -123,13 +125,25 @@ public final class RuleInfluenceScope {
         if (content != null) devices.add(content.getVarName());
     }
 
-    private static Set<String> impactedDomains(DeviceSmvData smv) {
-        Set<String> impacted = new HashSet<>();
-        if (smv.getImpactedVariables() != null) impacted.addAll(smv.getImpactedVariables());
+    private static Set<String> writtenDomains(DeviceSmvData smv) {
+        Set<String> written = new HashSet<>();
+        if (smv.getImpactedVariables() != null) written.addAll(smv.getImpactedVariables());
         if (smv.getImpactedEnvironmentVariables() != null) {
-            impacted.addAll(smv.getImpactedEnvironmentVariables().keySet());
+            written.addAll(smv.getImpactedEnvironmentVariables().keySet());
         }
-        return impacted;
+        DeviceManifest manifest = smv.getManifest();
+        if (manifest != null && manifest.getTransitions() != null && smv.getSharedDeclarations() != null) {
+            for (DeviceManifest.Transition transition : manifest.getTransitions()) {
+                if (transition.getAssignments() == null) continue;
+                for (DeviceManifest.Assignment assignment : transition.getAssignments()) {
+                    // An assignment to a local variable with the same name has no effect on the pool.
+                    if (smv.getSharedDeclarations().containsKey(assignment.getAttribute())) {
+                        written.add(assignment.getAttribute());
+                    }
+                }
+            }
+        }
+        return written;
     }
 
     private static List<SpecConditionDto> specConditions(SpecificationDto spec) {

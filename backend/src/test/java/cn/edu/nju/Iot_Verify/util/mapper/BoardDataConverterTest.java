@@ -6,6 +6,8 @@ import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
 import cn.edu.nju.Iot_Verify.dto.model.ModelTokenSource;
 import cn.edu.nju.Iot_Verify.service.BoardStorageService;
+import cn.edu.nju.Iot_Verify.util.ModelFingerprint;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -18,6 +20,30 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 class BoardDataConverterTest {
+
+    @Test
+    void freshModelFingerprintsIgnoreBoardDeviceOrderWhilePreservingRawNodeIds() {
+        BoardStorageService storage = mock(BoardStorageService.class);
+        var room2 = node("Room-2", "Light", "off");
+        var room10 = node("Room-10", "Light", "on");
+        var templates = List.of(template("Light", List.of("PowerMode"), List.of("off", "on")));
+        when(storage.getSemanticSnapshot(1L)).thenReturn(
+                snapshot(List.of(room2, room10), templates),
+                snapshot(List.of(room10, room2), templates));
+
+        BoardDataConverter converter = new BoardDataConverter(storage);
+        var first = converter.getModelInputSnapshot(1L);
+        var reversed = converter.getModelInputSnapshot(1L);
+        ModelFingerprint fingerprint = new ModelFingerprint(new ObjectMapper());
+
+        assertEquals(fingerprint.boardFingerprints(first), fingerprint.boardFingerprints(reversed));
+        assertEquals(fingerprint.paperDomainFingerprint(first, 5),
+                fingerprint.paperDomainFingerprint(reversed, 5));
+        assertEquals(List.of("room_10", "room_2"),
+                first.devices().stream().map(DeviceVerificationDto::getVarName).toList());
+        assertEquals(List.of("Room-2", "Room-10"), first.nodes().stream().map(DeviceNodeDto::getId).toList());
+        assertEquals(List.of("Room-10", "Room-2"), reversed.nodes().stream().map(DeviceNodeDto::getId).toList());
+    }
 
     @Test
     void getDevicesForVerification_omitsStateForModeLessTemplates() {

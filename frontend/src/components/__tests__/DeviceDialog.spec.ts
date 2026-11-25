@@ -1475,6 +1475,7 @@ describe('DeviceDialog template authority', () => {
    * rendering the raw token would give one operator two spellings in one product.
    */
   it('treats a blank change rate as absent and localizes an aliased trigger relation', () => {
+    i18n.global.locale.value = 'en'
     const manifest: DeviceManifest = {
       Name: 'Probe',
       Modes: ['ProbeMode'],

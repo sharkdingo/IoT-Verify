@@ -18,14 +18,19 @@ import cn.edu.nju.Iot_Verify.dto.fix.PreferredRange;
 import cn.edu.nju.Iot_Verify.dto.fix.PreferredRangeSelection;
 import cn.edu.nju.Iot_Verify.dto.fix.TemplateSnapshotComparison;
 import cn.edu.nju.Iot_Verify.dto.model.ModelGenerationIssueDto;
+import cn.edu.nju.Iot_Verify.dto.model.ModelRunSnapshotDto;
+import cn.edu.nju.Iot_Verify.dto.model.ModelSemanticsVersion;
+import cn.edu.nju.Iot_Verify.dto.model.AttackPointDto;
 import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
 import cn.edu.nju.Iot_Verify.dto.model.ModelTokenSource;
 import cn.edu.nju.Iot_Verify.dto.model.TemplateSnapshotBundleDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
+import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import cn.edu.nju.Iot_Verify.dto.trace.TraceDto;
 import cn.edu.nju.Iot_Verify.dto.verification.VerificationRequestDto;
 import cn.edu.nju.Iot_Verify.exception.BadRequestException;
+import cn.edu.nju.Iot_Verify.exception.ConflictException;
 import cn.edu.nju.Iot_Verify.exception.PersistedDataIntegrityException;
 import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
 import cn.edu.nju.Iot_Verify.exception.SmvGenerationException;
@@ -46,6 +51,8 @@ import cn.edu.nju.Iot_Verify.util.JsonUtils;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -113,6 +120,7 @@ class FixServiceImplTest {
     }
 
     private void stubPersistedTraceContext(TracePo po, TraceDto trace) {
+        trace.setModelSnapshot(currentModelEvidence());
         stubRunContext(po);
         when(traceMapper.readContext(po, runContext)).thenAnswer(invocation -> {
             VerificationRequestDto request = JsonUtils.readPersistedJsonRequired(
@@ -120,6 +128,10 @@ class FixServiceImplTest {
                     () -> JsonUtils.fromJson(persistedRequestJson, VerificationRequestDto.class));
             return new TraceMapper.PersistedContext(trace, request, persistedTemplateSnapshotsJson);
         });
+    }
+
+    private ModelRunSnapshotDto currentModelEvidence() {
+        return ModelRunSnapshotDto.builder().modelSemanticsVersion(ModelSemanticsVersion.CURRENT).build();
     }
 
     private void setRunRequest(String json) {
@@ -210,7 +222,7 @@ class FixServiceImplTest {
         po.setUserId(1L);
         attachTemplateSnapshot(po, "d1");
         setRunRequest("{\"devices\":[{\"varName\":\"d1\",\"templateName\":\"t1\"}],"
-                + "\"rules\":[],\"specs\":[],\"attackScenario\":{\"mode\":\"NONE\"},\"enablePrivacy\":false}");
+                + "\"environmentVariables\":[],\"rules\":[],\"specs\":[],\"attackScenario\":{\"mode\":\"NONE\"},\"enablePrivacy\":false}");
         when(traceRepository.findByIdAndUserId(1L, 1L)).thenReturn(Optional.of(po));
 
         TraceDto traceDto = new TraceDto();
@@ -223,6 +235,25 @@ class FixServiceImplTest {
     }
 
     @Test
+    void historicalModelCannotStartFixSearchOrLocalizeFaults() {
+        TraceDto trace = setupApplyContext(null);
+        trace.setModelSnapshot(new ModelRunSnapshotDto());
+        lenient().when(ruleFixer.fix(anyLong(), any(), any(), anyList(), anyList(), anyList(), anyList(),
+                        anyMap(), anyLong(), any(AttackScenarioDto.class), anyBoolean(), any(), anyInt(),
+                        any(), any(Runnable.class)))
+                .thenReturn(FixResultDto.builder().fixable(true)
+                        .suggestions(List.of(verifiedParameterSuggestion("40"))).build());
+
+        ConflictException searchError = assertThrows(ConflictException.class,
+                () -> fixService.fix(1L, 1L, List.of("parameter"), null));
+        assertEquals("MODEL_SEMANTICS_CHANGED", searchError.getReasonCode());
+        ConflictException localizationError = assertThrows(ConflictException.class,
+                () -> fixService.localizeFault(1L, 1L));
+        assertEquals("MODEL_SEMANTICS_CHANGED", localizationError.getReasonCode());
+        verifyNoInteractions(smvGenerator, ruleFixer, fixSuggestionTokenService, boardStorageService);
+    }
+
+    @Test
     void localizeFaultReusesDecodedRequestWithoutReadingRawJsonAgain() {
         TracePo po = spy(new TracePo());
         po.setId(1L);
@@ -230,13 +261,14 @@ class FixServiceImplTest {
         attachTemplateSnapshot(po, "d1");
         VerificationRequestDto request = JsonUtils.fromJson(
                 "{\"devices\":[{\"varName\":\"d1\",\"templateName\":\"t1\"}],"
-                        + "\"rules\":[],\"specs\":[],\"attackScenario\":{\"mode\":\"NONE\"}}",
+                        + "\"environmentVariables\":[],\"rules\":[],\"specs\":[],\"attackScenario\":{\"mode\":\"NONE\"}}",
                 VerificationRequestDto.class);
         setRunRequest(JsonUtils.toJson(request));
         TraceDto trace = new TraceDto();
         trace.setViolatedSpecId("s0");
         trace.setStates(List.of());
         trace.setModelComplete(true);
+        trace.setModelSnapshot(currentModelEvidence());
         when(traceRepository.findByIdAndUserId(1L, 1L)).thenReturn(Optional.of(po));
         stubRunContext(po);
         when(traceMapper.readContext(po, runContext)).thenReturn(new TraceMapper.PersistedContext(trace, request, persistedTemplateSnapshotsJson));
@@ -291,7 +323,7 @@ class FixServiceImplTest {
         po.setId(1L);
         po.setUserId(1L);
         setRunRequest("{\"devices\":[{\"varName\":\"sensor\",\"templateName\":\"t1\"}],"
-                + "\"rules\":[],\"specs\":[],\"enablePrivacy\":false}");
+                + "\"environmentVariables\":[],\"rules\":[],\"specs\":[],\"enablePrivacy\":false}");
         when(traceRepository.findByIdAndUserId(1L, 1L)).thenReturn(Optional.of(po));
         stubPersistedTraceContext(po, new TraceDto());
 
@@ -316,7 +348,7 @@ class FixServiceImplTest {
                 : JsonUtils.toJson(TemplateSnapshotBundleDto.captured(
                         Map.of("t1", manifest), tokenSources)));
         setRunRequest("{\"devices\":[{\"varName\":\"sensor\",\"templateName\":\"t1\"}],"
-                + "\"rules\":[],\"specs\":[],\"attackScenario\":{\"mode\":\"NONE\"},\"enablePrivacy\":false}");
+                + "\"environmentVariables\":[],\"rules\":[],\"specs\":[],\"attackScenario\":{\"mode\":\"NONE\"},\"enablePrivacy\":false}");
         when(traceRepository.findByIdAndUserId(1L, 1L)).thenReturn(Optional.of(po));
 
         TraceDto trace = new TraceDto();
@@ -423,7 +455,7 @@ class FixServiceImplTest {
         po.setUserId(1L);
         attachTemplateSnapshot(po, "d1");
         setRunRequest("{\"devices\":[{\"varName\":\"d1\",\"templateName\":\"t1\"}],"
-                + "\"rules\":[],\"specs\":[],\"attackScenario\":{\"mode\":\"NONE\"},\"enablePrivacy\":false}");
+                + "\"environmentVariables\":[],\"rules\":[],\"specs\":[],\"attackScenario\":{\"mode\":\"NONE\"},\"enablePrivacy\":false}");
         when(traceRepository.findByIdAndUserId(1L, 1L)).thenReturn(Optional.of(po));
 
         ModelGenerationIssueDto issue = ModelGenerationIssueDto.builder()
@@ -471,7 +503,7 @@ class FixServiceImplTest {
         po.setUserId(1L);
         attachTemplateSnapshot(po, "d1");
         setRunRequest("{\"devices\":[{\"varName\":\"d1\",\"templateName\":\"t1\"}],"
-                + "\"rules\":[],\"specs\":[],\"attackScenario\":{\"mode\":\"NONE\"},\"enablePrivacy\":false}");
+                + "\"environmentVariables\":[],\"rules\":[],\"specs\":[],\"attackScenario\":{\"mode\":\"NONE\"},\"enablePrivacy\":false}");
         when(traceRepository.findByIdAndUserId(1L, 1L)).thenReturn(Optional.of(po));
 
         TraceDto traceDto = new TraceDto();
@@ -507,6 +539,15 @@ class FixServiceImplTest {
         traceDto.setViolatedSpecId("s0");
         traceDto.setModelComplete(true);
         stubPersistedTraceContext(po, traceDto);
+        traceDto.getModelSnapshot().setEnvironmentVariableCount(1);
+        var temperature = DeviceManifest.InternalVariable.builder()
+                .name("temperature").isInside(false).lowerBound(10).upperBound(32).build();
+        DeviceSmvData device = new DeviceSmvData();
+        device.setVarName("d1");
+        device.getSharedDeclarations().put("temperature", temperature);
+        device.getEnvVariables().put("temperature", temperature);
+        when(smvGenerator.buildDeviceSmvMapFromTemplateSnapshots(anyList(), anyMap()))
+                .thenReturn(Map.of("d1", device));
         when(ruleFixer.fix(anyLong(), any(), any(), anyList(), anyList(), anyList(), anyList(),
                 anyMap(), anyLong(), any(AttackScenarioDto.class), anyBoolean(), any(), anyInt(), any(), any(Runnable.class)))
                 .thenReturn(FixResultDto.builder().fixable(false).build());
@@ -515,11 +556,17 @@ class FixServiceImplTest {
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<BoardEnvironmentVariableDto>> envCaptor = ArgumentCaptor.forClass(List.class);
-        verify(ruleFixer).fix(anyLong(), any(), any(), anyList(), anyList(), envCaptor.capture(), anyList(),
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<DeviceVerificationDto>> devicesCaptor = ArgumentCaptor.forClass(List.class);
+        verify(ruleFixer).fix(anyLong(), any(), any(), anyList(), devicesCaptor.capture(), envCaptor.capture(), anyList(),
                 anyMap(), anyLong(), any(AttackScenarioDto.class), anyBoolean(), any(), anyInt(), any(), any(Runnable.class));
+        assertNull(devicesCaptor.getValue().get(0).getVariables());
+        assertNull(devicesCaptor.getValue().get(0).getPrivacies());
         assertEquals(1, envCaptor.getValue().size());
         assertEquals("temperature", envCaptor.getValue().get(0).getName());
         assertEquals("28", envCaptor.getValue().get(0).getValue());
+        assertEquals("trusted", envCaptor.getValue().get(0).getTrust());
+        assertEquals("public", envCaptor.getValue().get(0).getPrivacy());
     }
 
     // ---- P3: preferred range target validation ----
@@ -570,7 +617,7 @@ class FixServiceImplTest {
         po.setUserId(1L);
         attachTemplateSnapshot(po, "d1");
         setRunRequest("{\"devices\":[{\"varName\":\"d1\",\"templateName\":\"t1\"}],"
-                + "\"rules\":[],\"specs\":[],\"attackScenario\":{\"mode\":\"NONE\"},\"enablePrivacy\":false}");
+                + "\"environmentVariables\":[],\"rules\":[],\"specs\":[],\"attackScenario\":{\"mode\":\"NONE\"},\"enablePrivacy\":false}");
         when(traceRepository.findByIdAndUserId(1L, 1L)).thenReturn(Optional.of(po));
 
         TraceDto traceDto = new TraceDto();
@@ -696,13 +743,13 @@ class FixServiceImplTest {
         setupApplyContext(LocalDateTime.now());
     }
 
-    private void setupApplyContext(LocalDateTime createdAt) {
+    private TraceDto setupApplyContext(LocalDateTime createdAt) {
         TracePo po = new TracePo();
         po.setId(1L);
         po.setUserId(1L);
         attachTemplateSnapshot(po, "sensor");
         setRunRequest("{\"devices\":[{\"varName\":\"sensor\",\"templateName\":\"t1\"}],"
-                + "\"rules\":[{\"conditions\":[{\"deviceName\":\"sensor\",\"attribute\":\"temperature\","
+                + "\"environmentVariables\":[],\"rules\":[{\"conditions\":[{\"deviceName\":\"sensor\",\"attribute\":\"temperature\","
                 + "\"relation\":\">\",\"value\":\"30\"}],\"command\":{\"deviceName\":\"sensor\",\"action\":\"on\"},"
                 + "\"ruleString\":\"r0\"}],\"specs\":[],\"attackScenario\":{\"mode\":\"NONE\"},\"enablePrivacy\":false}");
         when(traceRepository.findByIdAndUserId(1L, 1L)).thenReturn(Optional.of(po));
@@ -716,6 +763,7 @@ class FixServiceImplTest {
         // By default the current board matches the snapshot (no spec/device drift). Tests that exercise
         // drift override these stubs.
         stubNoSpecDeviceDrift();
+        return traceDto;
     }
 
     private RuleDto boardRuleMatchingSnapshot() {
@@ -739,6 +787,92 @@ class FixServiceImplTest {
 
     private FixApplyResultDto applySigned(String strategy, FixSuggestionDto suggestion) {
         return fixService.applyFix(1L, 1L, strategy, suggestion, "signed-token", null);
+    }
+
+    @Test
+    void applyFix_historicalModelRejectsEvenAVerifiedSuggestionBeforeWriting() {
+        TraceDto trace = setupApplyContext(null);
+        trace.setModelSnapshot(ModelRunSnapshotDto.builder().modelSemanticsVersion(1).build());
+        lenient().when(boardStorageService.updateRulesAgainstSnapshot(anyLong(), any()))
+                .thenAnswer(invocation -> fail("Applying historical evidence entered the write boundary"));
+
+        ConflictException error = assertThrows(ConflictException.class,
+                () -> applySigned("parameter", verifiedParameterSuggestion("40")));
+
+        assertEquals("MODEL_SEMANTICS_CHANGED", error.getReasonCode());
+        verifyNoInteractions(smvGenerator, ruleFixer, boardStorageService);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void applyFix_preservesTheExactSelectedRuleIdentity(boolean replacedOnBoard) {
+        var boardRules = setupExactRuleSelection(replacedOnBoard ? 43L : 41L);
+        stubUpdateRules(boardRules);
+        var suggestion = removeRuleAt(replacedOnBoard ? 1 : 0);
+
+        BadRequestException error = assertThrows(BadRequestException.class, () -> applySigned("remove", suggestion));
+
+        assertTrue(error.getMessage().toLowerCase(java.util.Locale.ROOT).contains("selected automation link"),
+                error::getMessage);
+    }
+
+    @Test
+    void applyFix_exactRuleSelectionAllowsARemovalOfAnUnrelatedRule() {
+        stubUpdateRules(setupExactRuleSelection(41L));
+
+        var result = applySigned("remove", removeRuleAt(1));
+
+        assertTrue(result.isVerificationEvidenceReused());
+        assertEquals(List.of(41L), result.getRules().stream().map(RuleDto::getId).toList());
+    }
+
+    @Test
+    void applyFix_exactDeviceSelectionResolvesCommandsWithPersistedDeviceIds() {
+        var boardRules = setupExactRuleSelection(41L);
+        String boardId = "Sensor-1";
+        String modelId = "sensor_1";
+        var request = JsonUtils.fromJson(persistedRequestJson.replace("\"sensor\"", "\"" + modelId + "\""),
+                VerificationRequestDto.class);
+        request.setAttackScenario(AttackScenarioDto.exactPoints(List.of(AttackPointDto.device(modelId))));
+        setRunRequest(JsonUtils.toJson(request));
+        setRunTemplates(JsonUtils.toJson(TemplateSnapshotBundleDto.captured(
+                currentTemplateManifests, Map.of(modelId, ModelTokenSource.BUNDLED))));
+        currentDevices = request.getDevices();
+        currentNodes.get(0).setId(boardId);
+        DeviceSmvData model = new DeviceSmvData();
+        model.setVarName(modelId);
+        when(smvGenerator.buildDeviceSmvMapFromTemplateSnapshots(anyList(), anyMap()))
+                .thenReturn(Map.of(modelId, model));
+        for (RuleDto rule : boardRules) {
+            rule.getCommand().setDeviceName(boardId);
+            rule.getConditions().get(0).setDeviceName(boardId);
+        }
+        stubUpdateRules(boardRules);
+
+        var result = applySigned("remove", removeRuleAt(1));
+
+        assertTrue(result.isVerificationEvidenceReused());
+        assertEquals(List.of(boardId), result.getRules().stream().map(rule -> rule.getCommand().getDeviceName()).toList());
+    }
+
+    private List<RuleDto> setupExactRuleSelection(long currentId) {
+        setupApplyContextSingleRule();
+        RuleDto selected = boardRuleMatchingSnapshot();
+        selected.setId(41L);
+        RuleDto unrelated = boardRuleMatchingSnapshot();
+        unrelated.getConditions().get(0).setValue("32");
+        var request = JsonUtils.fromJson(persistedRequestJson, VerificationRequestDto.class);
+        request.setRules(List.of(selected, unrelated));
+        request.setAttackScenario(AttackScenarioDto.exactPoints(List.of(AttackPointDto.automationLink(41L))));
+        setRunRequest(JsonUtils.toJson(request));
+
+        RuleDto current = boardRuleMatchingSnapshot();
+        current.setId(currentId);
+        return List.of(current, unrelated);
+    }
+
+    private FixSuggestionDto removeRuleAt(int position) {
+        return FixSuggestionDto.builder().strategy("remove").removedRuleIndices(List.of(position)).build();
     }
 
     @Test
@@ -878,6 +1012,36 @@ class FixServiceImplTest {
     //      spec/device edits on its own; the semantic fingerprint must catch them) ----
 
     @Test
+    void applyFix_equivalentApiComparisonStillApplies() {
+        setupApplyContextSingleRule();
+        setRunRequest(persistedRequestJson.replace("\"specs\":[]", """
+                "specs":[{"id":"s0","templateId":"1","name":"Original name","ifConditions":[{
+                "deviceId":"sensor","targetType":"api","key":"on","relation":"in","value":"TRUE, FALSE"}]}]
+                """));
+        SpecificationDto renamed = new SpecificationDto();
+        renamed.setId("s0");
+        renamed.setTemplateId("1");
+        renamed.setName("Renamed requirement");
+        SpecConditionDto signal = new SpecConditionDto();
+        signal.setDeviceId("sensor");
+        signal.setTargetType("api");
+        signal.setKey("on");
+        signal.setRelation("IN");
+        signal.setValue("false | true");
+        renamed.setIfConditions(List.of(signal));
+        currentSpecs = List.of(renamed);
+        stubUpdateRules(new java.util.ArrayList<>(List.of(boardRuleMatchingSnapshot())));
+
+        FixApplyResultDto result = applySigned("parameter", verifiedParameterSuggestion("40"));
+
+        assertTrue(result.isApplied());
+        assertEquals("40", result.getRules().get(0).getConditions().get(0).getValue());
+        signal.setValue("false");
+        assertThrows(BadRequestException.class,
+                () -> applySigned("parameter", verifiedParameterSuggestion("40")));
+    }
+
+    @Test
     void applyFix_specConditionAddedAfterVerify_rejectedAndNotSaved() {
         setupApplyContextSingleRule();
         // The user added a specification to the board after verifying. Rules/templates are unchanged,
@@ -977,7 +1141,7 @@ class FixServiceImplTest {
         po.setUserId(1L);
         attachTemplateSnapshot(po, "_1lamp");
         setRunRequest("{\"devices\":[{\"varName\":\"_1lamp\",\"templateName\":\"t1\"}],"
-                + "\"rules\":[{\"conditions\":[{\"deviceName\":\"_1lamp\",\"attribute\":\"state\","
+                + "\"environmentVariables\":[],\"rules\":[{\"conditions\":[{\"deviceName\":\"_1lamp\",\"attribute\":\"state\","
                 + "\"targetType\":\"state\",\"relation\":\"=\",\"value\":\"on\"}],\"command\":{\"deviceName\":\"_1lamp\",\"action\":\"off\"},"
                 + "\"ruleString\":\"r0\"}],\"specs\":[],\"attackScenario\":{\"mode\":\"NONE\"},\"enablePrivacy\":false}");
         when(traceRepository.findByIdAndUserId(1L, 1L)).thenReturn(Optional.of(po));
@@ -1016,7 +1180,7 @@ class FixServiceImplTest {
         po.setUserId(1L);
         attachTemplateSnapshot(po, "_1lamp");
         setRunRequest("{\"devices\":[{\"varName\":\"_1lamp\",\"templateName\":\"t1\"}],"
-                + "\"rules\":[{\"conditions\":[{\"deviceName\":\"_1lamp\",\"attribute\":\"state\","
+                + "\"environmentVariables\":[],\"rules\":[{\"conditions\":[{\"deviceName\":\"_1lamp\",\"attribute\":\"state\","
                 + "\"targetType\":\"state\",\"relation\":\"=\",\"value\":\"on\"}],\"command\":{\"deviceName\":\"_1lamp\",\"action\":\"off\"},"
                 + "\"ruleString\":\"r0\"}],\"specs\":[],\"attackScenario\":{\"mode\":\"NONE\"},\"enablePrivacy\":false}");
         when(traceRepository.findByIdAndUserId(1L, 1L)).thenReturn(Optional.of(po));

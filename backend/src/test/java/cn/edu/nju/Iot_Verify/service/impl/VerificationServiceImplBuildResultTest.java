@@ -1148,18 +1148,28 @@ class VerificationServiceImplBuildResultTest {
         VerificationServiceImpl capturingService = serviceWithVerificationExecutor(capturingExecutor);
         File smv = createTempModelFile();
         SpecificationDto spec = makeEffectiveSpec("s1");
+        spec.getAConditions().get(0).setKey("state");
         List<DeviceVerificationDto> devices = new ArrayList<>(singleDevice());
         RuleDto rule = makeRule();
         List<RuleDto> rules = new ArrayList<>(List.of(rule));
         List<SpecificationDto> specs = new ArrayList<>(List.of(spec));
         VerificationRequestDto request = makeRequest(devices, rules, specs, false, 0, false);
-        Map<String, DeviceSmvData> resolvedSubmissionModel = new LinkedHashMap<>();
-        resolvedSubmissionModel.put("testdevice", new DeviceSmvData());
+        var manifest = DeviceManifest.builder().name("light").modes(List.of("Power")).initState("on")
+                .workingStates(List.of(DeviceManifest.WorkingState.builder().name("on").build()))
+                .apis(List.of(DeviceManifest.API.builder().name("turnOn").endState("on").signal(false).build()))
+                .build();
+        var resolvedDevice = new DeviceSmvData();
+        resolvedDevice.setVarName("testdevice");
+        resolvedDevice.setManifest(manifest);
+        resolvedDevice.getModes().add("Power");
+        resolvedDevice.getModeStates().put("Power", List.of("on"));
+        var capturedModel = new SmvGenerator.CapturedDeviceModel(
+                Map.of("light", manifest), Map.of("testdevice", resolvedDevice));
 
-        when(smvGenerator.buildDeviceSmvMapFromTemplateSnapshots(anyList(), anyMap()))
-                .thenReturn(resolvedSubmissionModel);
-        when(smvGenerator.generateWithEnvironment(anyLong(), anyList(), anyList(), anyList(), anyList(), any(), anyBoolean(), any(), any()))
-                .thenReturn(generateResult(smv, List.of(spec)));
+        when(smvGenerator.captureDeviceModelFromTemplateSnapshots(anyList(), anyMap()))
+                .thenReturn(capturedModel);
+        doReturn(generateResult(smv, List.of(spec))).when(smvGenerator).generateWithResolvedDeviceModel(
+                anyLong(), anyList(), anyList(), anyList(), anyList(), any(), anyBoolean(), any(), any(), anyMap());
         when(nusmvExecutor.execute(any(File.class)))
                 .thenReturn(NusmvResult.success("output", List.of(new SpecCheckResult("expr", true, null))));
         when(taskRepository.startTaskIfStillPending(
@@ -1184,12 +1194,7 @@ class VerificationServiceImplBuildResultTest {
 
         capturingExecutor.capturedTask().run();
 
-        verify(smvGenerator).generateWithResolvedDeviceModel(eq(1L), anyList(), anyList(), anyList(), anyList(),
-                eq(AttackScenarioDto.none()), eq(false), eq(SmvGenerator.GeneratePurpose.VERIFICATION),
-                argThat(ctx -> "task".equals(ctx.scope()) && Objects.equals(14L, ctx.id())),
-                same(resolvedSubmissionModel));
-
-        verify(smvGenerator).generateWithEnvironment(eq(1L),
+        verify(smvGenerator).generateWithResolvedDeviceModel(eq(1L),
                 argThat(sentDevices -> sentDevices.size() == 1
                         && "testdevice".equals(sentDevices.get(0).getVarName())),
                 eq(List.of()),
@@ -1199,7 +1204,8 @@ class VerificationServiceImplBuildResultTest {
                         && "s1".equals(sentSpecs.get(0).getId())
                         && "on".equals(sentSpecs.get(0).getAConditions().get(0).getValue())),
                 eq(AttackScenarioDto.none()), eq(false), eq(SmvGenerator.GeneratePurpose.VERIFICATION),
-                argThat(ctx -> "task".equals(ctx.scope()) && Objects.equals(14L, ctx.id())));
+                argThat(ctx -> "task".equals(ctx.scope()) && Objects.equals(14L, ctx.id())),
+                same(capturedModel.deviceSmvMap()));
         JsonNode requestJson = readRequestJson(smv);
         assertEquals(0, requestJson.path("attackBudget").asInt());
         assertEquals("testdevice", requestJson.path("devices").get(0).path("varName").asText());

@@ -47,6 +47,10 @@ This is a deliberate choice among three candidates:
 The Environment Pool owns the **runtime state** of a shared value — its current value, trust, and
 privacy — not its contract. That split is why the pool table stores `value/trust/privacy` only.
 
+Each shared declaration on the board contributes a domain to both engines. This includes a device
+that declares `Reads: false` and only updates the value through an autonomous assignment. Pool
+membership is separate from the device's read and ongoing `Dynamics` capabilities.
+
 ### The scope of a security label
 
 A shared value's trust and privacy labels are **scenario-wide**: one label per name, owned by the pool,
@@ -109,7 +113,10 @@ Two independent booleans per (device, shared value):
 | yes | no | A sensor observes the value | `Reads: true` on the shared declaration |
 | no | yes | An actuator changes it without observing it | `Reads: false` + listed in `ImpactedVariables` |
 | yes | yes | Observes and changes it | `Reads: true` + listed in `ImpactedVariables` |
-| no | no | Not a participant | not declared at all |
+| no | no | No read or ongoing device effect | No declaration, or `Reads: false` with no `ImpactedVariables` entry |
+
+The affect column describes ongoing `Dynamics`. An [autonomous assignment](#6-device-effects) can
+write a declared shared value independently of that column.
 
 **[MEDIC]** supplies exactly this pair: Internal Variables are "variables that are supposed to be
 sensed by the related sensors", Impacted Variables are "the environment variables that can be
@@ -252,7 +259,7 @@ declared domain leaves room for it*; one that includes `0` permits holding still
 means no independent evolution.
 
 The domain qualifier is load-bearing, because the declared bound wins over the declared rate. Each
-candidate delta is clamped with `max(lower, min(upper, expr))`, so at a saturated boundary every
+candidate next value is limited to the declared range, so at a saturated boundary every
 candidate collapses to the same value: with domain `0..10` and rate `[2, 5]`, a value of `10` yields
 `10` for all four deltas and NuSMV *proves* `AG (v = 10)` — measured, not reasoned. No stutter is
 injected into the interval; the value holds because the domain has no room left. Stating the rate as
@@ -267,8 +274,8 @@ Discrete shared values have no natural-change interval: there is no ordering to 
 
 ## 6. Device effects
 
-A device's effect on a shared value comes from `WorkingStates[].Dynamics`, evaluated against the
-device's **current** state. **[MEDIC]** puts it in the device model — "a Variable `env.D.v` will be
+A device's ongoing effect on a shared value comes from `WorkingStates[].Dynamics`, evaluated against
+the device's **current** state. **[MEDIC]** puts it in the device model — "a Variable `env.D.v` will be
 generated to describe how the environment variable `v` will be changed by `D`" — so the effect is
 emitted as a `DEFINE` over the live state and applies in the same step the device is acting.
 **[EXACT]**
@@ -278,17 +285,30 @@ emitted as a `DEFINE` over the live state and applies in the same step the devic
 
 A state with no matching `Dynamics` entry contributes no effect.
 
+An autonomous `Transition.Assignments` entry sets its target directly when its guard holds.
+The target is resolved in the assigning device's own `InternalVariables`: a shared declaration
+sets the pool value ahead of its ordinary evolution, and a local declaration sets just that
+device's variable. A same-named pool value from another template does not receive the local
+assignment. The bundled Clock uses a shared assignment to reset `time` from `23` to `0`.
+When multiple autonomous assignments to a shared value are active in one step, the first wins by
+ascending canonical model device ID and then by the assigning template's transition order.
+The Device ID survives a portable scene round trip, so file order and database read order do not
+change this precedence.
+
 ## 7. Composition, and what happens when nothing fires
 
-Per step, for a **numeric** shared value:
+Per step, for a **numeric** shared value without an active autonomous assignment:
 
 ```
 v' = clamp(v + Σ(active device effects) + δ),  δ ∈ declared NaturalChangeRate
 ```
 
 Summing concurrent device effects is **[MEDIC]**-faithful (`env.D.v` is additive) and **[EXACT]**.
+The sum and comparison against bounds occur before any narrowing to the stored integer domain,
+including near the signed integer limits and when large positive and negative effects cancel.
 
-For a **discrete** shared value the composition depends on who participates — this is **[EXT]**:
+For a **discrete** shared value without an active autonomous assignment, composition depends on
+which devices declare it in `ImpactedVariables` — this is **[EXT]**:
 
 | Situation | Behaviour |
 | :--- | :--- |
@@ -300,7 +320,7 @@ For a **discrete** shared value the composition depends on who participates — 
 
 ## 8. Conflicting discrete writers
 
-Two devices whose declared effects can be simultaneously active and assign different values to one
+Two devices whose `Dynamics` effects can be simultaneously active and assign different values to one
 discrete shared value is a **modelling contradiction**, not a resolvable merge. There is no additive
 composition for enums, so any resolution would be arbitrary.
 
@@ -312,7 +332,7 @@ Such a scene is therefore **[REJECTED]** with both device names, the value, and 
 user resolves the contradiction — by changing a declaration or removing a device — rather than
 receiving a verdict that depends on an internal ordering.
 
-Numeric writers are never in conflict: they compose additively by §7.
+Numeric `Dynamics` effects compose additively by §7.
 
 ## 9. Invariants
 
@@ -332,12 +352,16 @@ Checkable statements this model must satisfy. Each is enforced somewhere and tes
 6. **Exact interval.** The admitted numeric delta set equals the declared interval.
 7. **Contemporaneous effects.** A device's effect reaches the value in the step it is acting.
 8. **Additive numeric composition.** Concurrent numeric effects sum.
-9. **No uncaused discrete change.** A discrete value with a declared writer changes only when a
-   declared effect is active.
-10. **No order-dependent outcome.** No verdict depends on device iteration order.
-11. **Both engines agree.** NuSMV and the bounded explorer implement one transition relation.
-12. **Disclosure.** Every abstraction in this page appears in `modelSemantics`, and the rule that
-    applied to each individual value appears in that run's frozen provenance (§10).
+9. **No uncaused discrete change.** The formal model and Board-snapshot exploration hold a discrete
+   value declared in `ImpactedVariables` when neither an autonomous assignment nor a `Dynamics`
+   effect is active.
+10. **No order-dependent `Dynamics` conflict.** Conflicting discrete `Dynamics` effects are rejected
+    before execution.
+11. **Shared transition semantics.** NuSMV and Board-snapshot exploration use the same value-update
+    rules in their common supported model. [Paper-compatible inputs](fuzzing-flow.md#relationship-to-the-hafuzz-paper)
+    can add events beyond those rules.
+12. **Disclosure.** Every abstraction in this page appears in `modelSemantics`, and each value's
+    ordinary evolution rules appear in that run's frozen provenance (§10).
 13. **One label per value, on every declaring device.** The pool is the only writer of a shared
     value's trust/privacy, so all devices declaring the name carry identical labels in the generated
     model. A per-device label for a shared name is rejected, not merged (§2). The single exception is
@@ -345,13 +369,9 @@ Checkable statements this model must satisfy. Each is enforced somewhere and tes
 
 ## 10. How a stored run stays explainable
 
-A verdict is only actionable if the user can tell *why* a value moved. Reading the current Board to
-answer that is wrong: the Board may have changed since the run, so the explanation could contradict
-the trace it claims to explain.
-
-So each run freezes, per shared value, the rule this page assigned to it. That record is
-`EnvironmentValueProvenanceDto`, carried on `modelSnapshot.environmentProvenance`, captured at the
-model boundary before generation and persisted with the run. Its field-level contract lives in
+Each run freezes its ordinary shared-value evolution rules before generation, so the model context
+can be inspected independently of the current Board. The record is `EnvironmentValueProvenanceDto`,
+carried on `modelSnapshot.environmentProvenance` and persisted with the run. Its field-level contract lives in
 [../api/verification.md](../api/verification.md#environmentvalueprovenancedto); this section owns
 only the semantics it reports:
 
@@ -363,17 +383,13 @@ only the semantics it reports:
 | `semantics` = `ABSTRACTION` | the exogenous discrete case below, and only that case |
 | `semantics` = `EXACT` | every other combination |
 
-Note that `EXOGENOUS` splits on type, and the split is the whole point of the tag: an exogenous
-*numeric* value carries a declared `NaturalChangeRate`, so its movement is `EXACT`, while an
-exogenous *discrete* value has no such rule and is therefore `ABSTRACTION`. Both are common — a
-single temperature sensor produces the first — so a trace must name the cause in both cases. Showing
-a bare `20 -> 21` with no cause is the defect this section exists to prevent, and
-`SimulationTimeline.spec.ts` covers all four combinations.
+These categories describe the rule used when no autonomous assignment is active. An `EXOGENOUS`
+numeric value has an exact declared interval, and an `EXOGENOUS` discrete value has a free-input
+abstraction. The stored record does not identify which assignment or writer ran in an individual step.
 
-Because a conflicting discrete scene is rejected at board assembly (§8), a `COMPOSED` discrete value
-in a stored run is one whose writers agree. Provenance therefore never has to describe a winner, and
-must not: doing so would tell the user that a verdict invariant 10 guarantees is order-independent
-depends on ordering. `EnvironmentProvenanceCollectorTest` fails on that wording.
+Because a conflicting discrete `Dynamics` scene is rejected at board assembly (§8), the summary
+for a `COMPOSED` discrete value describes agreement between its `Dynamics` writers. Autonomous
+assignments remain governed by their separate ordering rule in §6.
 
 Editing the Board afterwards does not change a stored run's provenance, which is the point.
 

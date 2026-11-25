@@ -926,7 +926,8 @@ describe('FuzzingPanel', () => {
             specificationCount: 2,
             environmentVariableCount: 1,
             deviceTemplateCount: 2,
-            templatesFrozen: true
+            templatesFrozen: true,
+            modelSemanticsVersion: 1
           },
           maxIterations: 777,
           pathLength: 11,

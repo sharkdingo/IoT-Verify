@@ -19,6 +19,7 @@ import java.util.Set;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -931,6 +932,41 @@ class DeviceTemplateSchemaValidatorTest {
         org.assertj.core.api.Assertions.assertThat(invalidRelationException.getMessage())
                 .contains("ordering relation")
                 .contains("Use = or !=");
+    }
+
+    @Test
+    void numericTransitionLiteralsMustUseAsciiDigits() throws Exception {
+        var valid = (ObjectNode) objectMapper.readTree("""
+                {"Name":"Counter", "InternalVariables":[{
+                    "Name":"amount", "IsInside":true, "FalsifiableWhenCompromised":false,
+                    "Trust":"trusted", "Privacy":"public", "LowerBound":-2, "UpperBound":2}],
+                 "Transitions":[{"Name":"reset", "Trigger":{"Attribute":"amount","Relation":"=","Value":"+1"},
+                    "Assignments":[{"Attribute":"amount","Value":"-1"}]}]}
+                """);
+        var nonAsciiTrigger = valid.deepCopy();
+        ((ObjectNode) nonAsciiTrigger.at("/Transitions/0/Trigger")).put("Value", "+\u0661");
+        var nonAsciiAssignment = valid.deepCopy();
+        ((ObjectNode) nonAsciiAssignment.at("/Transitions/0/Assignments/0")).put("Value", "-\u0661");
+
+        assertAll(
+                () -> assertDoesNotThrow(() -> validator.validateRawManifest("Counter", valid)),
+                () -> assertTrue(assertThrows(BadRequestException.class,
+                        () -> validator.validateRawManifest("Counter", nonAsciiTrigger))
+                        .getMessage().contains("numeric trigger 'amount'")),
+                () -> assertTrue(assertThrows(BadRequestException.class,
+                        () -> validator.validateRawManifest("Counter", nonAsciiAssignment))
+                        .getMessage().contains("assigns non-integer value")));
+    }
+
+    @Test
+    void rejectsLowerBoundThatNuSmvCannotParse() throws Exception {
+        var manifest = (ObjectNode) objectMapper.readTree("""
+                {"Name":"Counter", "InternalVariables":[{
+                    "Name":"amount", "IsInside":true, "FalsifiableWhenCompromised":false,
+                    "Trust":"trusted", "Privacy":"public", "LowerBound":-2147483648, "UpperBound":-2147483646}]}
+                """);
+        var error = assertThrows(BadRequestException.class, () -> validator.validateRawManifest("Counter", manifest));
+        assertTrue(error.getMessage().contains("-2147483647"));
     }
 
     @Test

@@ -438,6 +438,59 @@ class ConditionAdjustStrategyTest {
     }
 
     @Test
+    void tryFix_materializesModeValueWithItsAuthoredSpelling() throws Exception {
+        DeviceSmvData lamp = new DeviceSmvData();
+        lamp.setVarName("lamp");
+        lamp.setModes(List.of("Power"));
+        lamp.setModeStates(Map.of("Power", List.of("_Case", "nightstandby")));
+        lamp.setAuthoredStatesByMode(Map.of("Power", Map.of("_Case", "Case", "nightstandby", "night standby")));
+        lamp.setManifest(DeviceManifest.builder().name("Lamp").modes(List.of("Power")).build());
+        RuleDto rule = RuleDto.builder().conditions(List.of(RuleDto.Condition.builder()
+                        .deviceName("room").attribute("comfort").targetType("variable").relation(">").value("5").build()))
+                .command(RuleDto.Command.builder().deviceName("heater").action("turnOn").build()).build();
+        SpecConditionDto condition = new SpecConditionDto();
+        condition.setDeviceId("lamp");
+        condition.setTargetType("mode");
+        condition.setKey("Power");
+        condition.setRelation("=");
+        condition.setValue("Case");
+        SpecificationDto spec = new SpecificationDto();
+        spec.setId("s1");
+        spec.setName("Comfort requirement");
+        spec.setTemplateId("3");
+        spec.setAConditions(List.of(condition));
+        var context = FixContext.builder().repairRuleIndices(List.of(0)).allRules(List.of(rule))
+                .devices(List.of()).deviceSmvMap(Map.of("lamp", lamp)).specs(List.of(spec)).violatedSpecIndex(0)
+                .userId(1L).attackScenario(AttackScenarioDto.none()).maxAttempts(1).build();
+
+        when(smvGenerator.generateParameterizedWithResolvedDeviceModel(
+                anyLong(), anyList(), anyList(), anyList(), anyList(), any(), anyBoolean(),
+                any(ParameterizationConfig.class), any(SmvGenerator.TempModelContext.class), anyMap()))
+                .thenReturn(createGenResult());
+        var checkedRules = new AtomicReference<List<RuleDto>>();
+        when(smvGenerator.generateWithResolvedDeviceModel(
+                anyLong(), anyList(), anyList(), anyList(), anyList(), any(), anyBoolean(),
+                any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class), anyMap(), anyList()))
+                .thenAnswer(invocation -> {
+                    checkedRules.set(invocation.getArgument(3));
+                    return createGenResult();
+                });
+        var solved = NusmvResult.success("""
+                  -> State: 1.1 <-
+                    lambda_r0_c0 = TRUE
+                    lambda_r0_c1 = TRUE
+                    condition_value_r0_c1 = nightstandby
+                """, List.of(new SpecCheckResult("AG safe", false, null)));
+        when(nusmvExecutor.executeRepairSearch(any(File.class), anyLong())).thenReturn(solved, forward(null));
+
+        var suggestion = strategy.tryFix(context).suggestions().get(0);
+
+        assertAll(
+                () -> assertEquals("night standby", suggestion.getConditionAdjustments().get(0).getValue()),
+                () -> assertEquals("night standby", checkedRules.get().get(0).getConditions().get(1).getValue()));
+    }
+
+    @Test
     void tryFix_removingOnlyConditionEmptiesRule_rejectedAndRetries() throws Exception {
         // Single-condition rule. NuSMV proposes removing that one condition (lambda=FALSE), which would
         // leave the rule with zero conditions. NuSMV treats an empty-condition rule as fail-closed so it

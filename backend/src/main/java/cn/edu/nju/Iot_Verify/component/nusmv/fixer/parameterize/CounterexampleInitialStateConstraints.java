@@ -135,7 +135,7 @@ public final class CounterexampleInitialStateConstraints {
             if (trace.getCompromised() == null) {
                 throw invalid("attack choice for device '" + smv.getVarName() + "' is missing");
             }
-            constraints.add(prefix + "is_attack = " + booleanLiteral(trace.getCompromised()));
+            constraints.add(prefix + SmvConstants.DEVICE_ATTACK_FLAG + " = " + booleanLiteral(trace.getCompromised()));
         }
     }
 
@@ -154,11 +154,13 @@ public final class CounterexampleInitialStateConstraints {
             throw invalid("trace device '" + smv.getVarName() + "' has an incomplete initial mode tuple");
         }
         for (int i = 0; i < modes.size(); i++) {
-            String value = states[i].trim();
-            if (!smv.getModeStates().getOrDefault(modes.get(i), List.of()).contains(value)) {
-                throw invalid("initial state '" + value + "' is outside mode '" + modes.get(i) + "'");
+            String authored = states[i].trim();
+            String mode = modes.get(i);
+            String value = smv.resolveAuthoredState(mode, authored);
+            if (value == null) {
+                throw invalid("initial state '" + authored + "' is outside mode '" + smv.authoredModeName(mode) + "'");
             }
-            constraints.add(prefix + modes.get(i) + " = " + value);
+            constraints.add(prefix + mode + " = " + value);
         }
     }
 
@@ -168,8 +170,10 @@ public final class CounterexampleInitialStateConstraints {
                                                     DeviceSmvData smv) {
         Map<String, TraceTrustPrivacyDto> indexed = indexProperties(properties, "trust", smv.getVarName());
         for (String mode : smv.getModes()) {
+            String authoredMode = smv.authoredModeName(mode);
             for (String state : smv.getModeStates().getOrDefault(mode, List.of())) {
-                TraceTrustPrivacyDto property = indexed.get(propertyKey("state", mode, state));
+                TraceTrustPrivacyDto property =
+                        indexed.get(propertyKey("state", authoredMode, smv.authoredStateName(mode, state)));
                 if (property == null || property.getTrust() == null) {
                     throw invalid("initial trust for state '" + smv.getVarName() + "." + mode
                             + "." + state + "' is missing");
@@ -193,8 +197,10 @@ public final class CounterexampleInitialStateConstraints {
                     .forEach(contents::add);
         }
         for (String mode : smv.getModes()) {
+            String authoredMode = smv.authoredModeName(mode);
             for (String state : smv.getModeStates().getOrDefault(mode, List.of())) {
-                appendRequiredPrivacy(constraints, prefix, indexed, "state", mode, state,
+                appendRequiredPrivacy(constraints, prefix, indexed, "state", authoredMode,
+                        smv.authoredStateName(mode, state),
                         mode + "_" + state, smv.getVarName());
             }
         }
@@ -249,8 +255,7 @@ public final class CounterexampleInitialStateConstraints {
         Map<String, DeviceManifest.InternalVariable> domains = new LinkedHashMap<>();
         for (DeviceSmvData smv : deviceSmvMap.values()) {
             if (smv == null) continue;
-            mergeDomains(domains, smv.getEnvVariables());
-            mergeDomains(domains, smv.getImpactedEnvironmentVariables());
+            smv.getSharedDeclarations().forEach(domains::putIfAbsent);
         }
         Map<String, TraceVariableDto> traceEnvironment = new LinkedHashMap<>();
         for (TraceVariableDto variable : environment == null ? List.<TraceVariableDto>of() : environment) {
@@ -267,14 +272,9 @@ public final class CounterexampleInitialStateConstraints {
             if (variable == null || variable.getValue() == null) {
                 throw invalid("trace environment variable '" + domain.getKey() + "' is missing from the first state");
             }
-            constraints.add("a_" + domain.getKey() + " = "
+            constraints.add(SmvConstants.ENVIRONMENT_POOL_PREFIX + domain.getKey() + " = "
                     + validatedVariableValue(variable.getValue(), domain.getValue(), domain.getKey()));
         }
-    }
-
-    private static void mergeDomains(Map<String, DeviceManifest.InternalVariable> target,
-                                     Map<String, DeviceManifest.InternalVariable> source) {
-        if (source != null) target.putAll(source);
     }
 
     private static void appendAutomationLinkConstraints(Set<String> constraints,

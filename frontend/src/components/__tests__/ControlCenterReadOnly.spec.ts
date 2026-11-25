@@ -73,6 +73,7 @@ const resetPreview = {
   blockers: [],
   environmentChanges: [],
   currentTemplates: [template],
+  currentNodes: [],
   environmentVariables: []
 }
 

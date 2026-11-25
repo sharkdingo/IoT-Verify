@@ -1,6 +1,9 @@
 package cn.edu.nju.Iot_Verify.component.aitool.rule;
 
 import cn.edu.nju.Iot_Verify.component.ai.PromptCompletionService;
+import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
+import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
+import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.exception.BadRequestException;
 import cn.edu.nju.Iot_Verify.security.UserContextHolder;
@@ -61,14 +64,14 @@ class CheckDuplicateRuleToolTest {
 
     @Test
     void typedDuplicateCheckUsesExplicitOwnerAndNeverCallsTheProvider() {
-        when(boardStorageService.getRules(7L)).thenReturn(List.of());
+        stubRules(List.of());
 
         var result = service.checkDuplicate(7L, validCandidate());
 
         assertFalse(result.isDuplicate());
         assertFalse(result.isRequiresReview());
         assertEquals("NO_EXISTING_RULES", result.getReasonCode());
-        verify(boardStorageService).getRules(7L);
+        verify(boardStorageService).getSemanticSnapshot(7L);
         verifyNoInteractions(promptCompletionService);
     }
 
@@ -76,7 +79,7 @@ class CheckDuplicateRuleToolTest {
     void typedDuplicateCheckPreservesSelfIdAndSkipsTheRuleBeingEdited() {
         RuleDto candidate = validCandidate();
         candidate.setId(9L);
-        when(boardStorageService.getRules(7L)).thenReturn(List.of(candidate));
+        stubRules(List.of(candidate));
 
         var result = service.checkDuplicate(7L, candidate);
 
@@ -117,7 +120,7 @@ class CheckDuplicateRuleToolTest {
         candidate.getConditions().get(0).setRelation(" EQ ");
         candidate.getConditions().get(0).setDeviceName(" Light_1 ");
         candidate.getCommand().setAction(" turnOn ");
-        when(boardStorageService.getRules(7L)).thenReturn(List.of(validCandidate()));
+        stubRules(List.of(validCandidate()));
 
         ObjectMapper mapper = new ObjectMapper();
         var typedResult = service.checkDuplicate(7L, candidate);
@@ -132,8 +135,43 @@ class CheckDuplicateRuleToolTest {
         assertEquals(" STATE ", candidate.getConditions().get(0).getTargetType());
         assertEquals(" EQ ", candidate.getConditions().get(0).getRelation());
         assertEquals(" turnOn ", candidate.getCommand().getAction());
-        verify(boardStorageService, org.mockito.Mockito.times(2)).getRules(7L);
+        verify(boardStorageService, org.mockito.Mockito.times(2)).getSemanticSnapshot(7L);
         verifyNoInteractions(promptCompletionService);
+    }
+
+    @Test
+    void comparesStateMembershipAsASetButRetainsRepeatedConditions() {
+        RuleDto stored = validCandidate();
+        stored.getConditions().get(0).setRelation("in");
+        stored.getConditions().get(0).setValue("On;Off");
+        stubRules(List.of(stored));
+        RuleDto candidate = validCandidate();
+        var condition = candidate.getConditions().get(0);
+        condition.setRelation("IN");
+        condition.setValue("Off,On,Off");
+
+        assertEquals("EXACT_MATCH", service.checkDuplicate(7L, candidate).getReasonCode());
+        RuleDto repeated = validCandidate();
+        repeated.setConditions(List.of(condition, condition));
+        assertFalse(service.checkDuplicate(7L, repeated).isDuplicate());
+
+        stubRules(List.of(repeated, stored));
+        assertEquals("EXACT_MATCH", service.checkDuplicate(7L, candidate).getReasonCode());
+    }
+
+    private void stubRules(List<RuleDto> rules) {
+        stubRules(7L, rules);
+    }
+
+    private void stubRules(long userId, List<RuleDto> rules) {
+        var node = new DeviceNodeDto();
+        node.setId("Light_1");
+        node.setTemplateName("Lamp");
+        var template = new DeviceTemplateDto();
+        template.setName("Lamp");
+        template.setManifest(DeviceTemplateDto.DeviceManifest.builder().modes(List.of("Power")).build());
+        when(boardStorageService.getSemanticSnapshot(userId)).thenReturn(
+                new BoardSemanticSnapshotDto(List.of(node), List.of(), rules, List.of(), List.of(template)));
     }
 
     private static Stream<Arguments> invalidTypedCandidates() {
@@ -178,7 +216,7 @@ class CheckDuplicateRuleToolTest {
         assertTrue(unknown.path("error").asText().contains("deviceLabel"));
         assertEquals("VALIDATION_ERROR", wrongType.path("errorCode").asText());
         assertTrue(wrongType.path("error").asText().contains("value must be a string"));
-        verify(boardStorageService, never()).getRules(anyLong());
+        verify(boardStorageService, never()).getSemanticSnapshot(anyLong());
     }
 
     /**
@@ -190,7 +228,7 @@ class CheckDuplicateRuleToolTest {
      */
     @Test
     void checkDuplicate_whenNoExistingRules_returnsNotDuplicateWithoutError() throws Exception {
-        when(boardStorageService.getRules(anyLong())).thenReturn(List.of());
+        stubRules(1L, List.of());
 
         String argsJson = """
                 {
@@ -215,7 +253,7 @@ class CheckDuplicateRuleToolTest {
         assertTrue(json.path("matchedRule").isNull(), "matchedRule should be JSON null");
         assertTrue(json.path("message").asText().contains("first rule"));
 
-        verify(boardStorageService).getRules(anyLong());
+        verify(boardStorageService).getSemanticSnapshot(1L);
     }
 
     @Test
@@ -232,7 +270,7 @@ class CheckDuplicateRuleToolTest {
                         .action("on")
                         .build())
                 .build();
-        when(boardStorageService.getRules(anyLong())).thenReturn(List.of(existing));
+        stubRules(1L, List.of(existing));
 
         String result = tool.execute("""
                 {
@@ -271,7 +309,7 @@ class CheckDuplicateRuleToolTest {
                         .action("cool")
                         .build())
                 .build();
-        when(boardStorageService.getRules(anyLong())).thenReturn(List.of(existing));
+        stubRules(1L, List.of(existing));
 
         String result = tool.execute("""
                 {
@@ -309,7 +347,7 @@ class CheckDuplicateRuleToolTest {
                         .action("siren")
                         .build())
                 .build();
-        when(boardStorageService.getRules(anyLong())).thenReturn(List.of(existing));
+        stubRules(1L, List.of(existing));
 
         String result = tool.execute("""
                 {

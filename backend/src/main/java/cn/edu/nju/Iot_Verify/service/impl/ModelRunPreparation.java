@@ -57,17 +57,12 @@ final class ModelRunPreparation {
                 return new PreparedModel(devices, mergedEnvironmentVariables, attackSurface,
                         Map.of(), capturedDeviceModel.templateManifests(), null);
             }
-            List<DeviceVerificationDto> expandedDevices = NusmvEnvironmentPool.expandDevices(
-                    devices, mergedEnvironmentVariables, deviceSmvMap);
-            Map<String, DeviceSmvData> expandedDeviceSmvMap =
-                    smvGenerator.buildDeviceSmvMapFromTemplateSnapshots(
-                            expandedDevices, capturedDeviceModel.templateManifests());
             List<EnvironmentValueProvenanceDto> environmentProvenance =
                     provenanceCollector.collectEnvironmentProvenance(
-                            mergedEnvironmentVariables, expandedDevices, expandedDeviceSmvMap);
+                            mergedEnvironmentVariables, devices, deviceSmvMap);
             ModelRunSnapshotDto modelSnapshot = ModelRunSnapshotDto.captured(
                     capturedAt,
-                    expandedDevices.size(),
+                    devices.size(),
                     rules != null ? rules.size() : 0,
                     specs != null ? specs.size() : 0,
                     mergedEnvironmentVariables.size(),
@@ -75,8 +70,8 @@ final class ModelRunPreparation {
                     .toBuilder()
                     .environmentProvenance(environmentProvenance)
                     .build();
-            return new PreparedModel(expandedDevices, mergedEnvironmentVariables, attackSurface,
-                    expandedDeviceSmvMap, capturedDeviceModel.templateManifests(), modelSnapshot);
+            return new PreparedModel(devices, mergedEnvironmentVariables, attackSurface,
+                    deviceSmvMap, capturedDeviceModel.templateManifests(), modelSnapshot);
         } catch (SmvGenerationException e) {
             errors.putIfAbsent("devices", e.getMessage());
             return new PreparedModel(devices, environmentVariables, new AttackSurface(Set.of(), 0, 0),

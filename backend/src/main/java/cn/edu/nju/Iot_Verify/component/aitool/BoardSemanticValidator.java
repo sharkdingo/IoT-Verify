@@ -1,6 +1,7 @@
 package cn.edu.nju.Iot_Verify.component.aitool;
 
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvRelationUtils;
+import cn.edu.nju.Iot_Verify.component.template.DeviceManifestModes;
 import cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics;
 
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvDataFactory;
@@ -22,7 +23,9 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.function.UnaryOperator;
 
+import static cn.edu.nju.Iot_Verify.component.template.DeviceManifestModes.modeNames;
 import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics.cleanEnumLiteral;
 import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics.findApi;
 import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics.findConditionVariable;
@@ -279,7 +282,8 @@ public final class BoardSemanticValidator {
             if (!hasSignalApi(template.getManifest(), key)) {
                 return prefix + " references unknown or non-signal API '" + key + "'.";
             }
-            return validateLiteralValue(prefix, relation, value, Set.of("TRUE", "FALSE"), "TRUE or FALSE");
+            return validateLiteralValue(prefix, relation, value,
+                    ManifestConditionSemantics.API_SIGNAL_LITERALS, "TRUE or FALSE");
         }
         if ("state".equals(targetType)) {
             if (!"state".equalsIgnoreCase(key)) {
@@ -366,12 +370,16 @@ public final class BoardSemanticValidator {
             SpecConditionDto first = group.get(0);
             String targetType = normalize(first.getTargetType());
             Set<String> domain = switch (targetType) {
-                case "api" -> Set.of("true", "false");
+                case "api" -> ManifestConditionSemantics.API_SIGNAL_LITERALS;
                 case "trust" -> Set.of("trusted", "untrusted");
                 case "privacy" -> Set.of("public", "private");
                 default -> Set.of();
             };
-            if (!hasSatisfyingLiteral(domain, group, SpecConditionDto::getRelation, SpecConditionDto::getValue)) {
+            UnaryOperator<String> normalizeLiteral = "api".equals(targetType)
+                    ? ManifestConditionSemantics::canonicalApiSignalValue
+                    : value -> cleanEnumLiteral(value).toLowerCase(Locale.ROOT);
+            if (!hasSatisfyingLiteral(domain, group, SpecConditionDto::getRelation, SpecConditionDto::getValue,
+                    normalizeLiteral)) {
                 return withSpecSide(new GroupValidationIssue(
                         "CONTRADICTORY_CONDITION_GROUP",
                         "Conditions for " + targetType + " '" + first.getKey() + "' on device '"
@@ -498,10 +506,11 @@ public final class BoardSemanticValidator {
                 Set<String> domain = new LinkedHashSet<>();
                 for (String value : variable.getValues()) {
                     if (hasText(value)) {
-                        domain.add(cleanEnumLiteral(value).toLowerCase(Locale.ROOT));
+                        domain.add(cleanEnumLiteral(value));
                     }
                 }
-                satisfiable = hasSatisfyingLiteral(domain, group, relationGetter, valueGetter);
+                satisfiable = hasSatisfyingLiteral(domain, group, relationGetter, valueGetter,
+                        ManifestConditionSemantics::cleanEnumLiteral);
             } else if (variable.getLowerBound() != null && variable.getUpperBound() != null) {
                 satisfiable = hasSatisfyingInteger(
                         variable.getLowerBound(), variable.getUpperBound(), group, relationGetter, valueGetter);
@@ -540,7 +549,7 @@ public final class BoardSemanticValidator {
                                                     String relation,
                                                     String value) {
         if (variable.getValues() != null && !variable.getValues().isEmpty()) {
-            return literalConditionMatches(candidate, relation, value);
+            return literalConditionMatches(candidate, relation, value, ManifestConditionSemantics::cleanEnumLiteral);
         }
         try {
             int numeric = Integer.parseInt(candidate.trim());
@@ -577,18 +586,23 @@ public final class BoardSemanticValidator {
     private static <T> boolean hasSatisfyingLiteral(Set<String> domain,
                                                     Collection<T> conditions,
                                                     Function<T, String> relationGetter,
-                                                    Function<T, String> valueGetter) {
+                                                    Function<T, String> valueGetter,
+                                                    UnaryOperator<String> normalizeLiteral) {
         return domain.stream().anyMatch(candidate -> conditions.stream().allMatch(condition ->
-                literalConditionMatches(candidate, relationGetter.apply(condition), valueGetter.apply(condition))));
+                literalConditionMatches(candidate, relationGetter.apply(condition), valueGetter.apply(condition),
+                        normalizeLiteral)));
     }
 
-    private static boolean literalConditionMatches(String candidate, String rawRelation, String rawValue) {
+    private static boolean literalConditionMatches(String candidate,
+                                                   String rawRelation,
+                                                   String rawValue,
+                                                   UnaryOperator<String> normalizeLiteral) {
         String relation = SmvRelationUtils.normalizeRelation(rawRelation);
         Set<String> values = new HashSet<>();
         for (String value : splitValues(rawValue, relation)) {
-            values.add(cleanEnumLiteral(value).toLowerCase(Locale.ROOT));
+            values.add(normalizeLiteral.apply(value));
         }
-        String normalizedCandidate = cleanEnumLiteral(candidate).toLowerCase(Locale.ROOT);
+        String normalizedCandidate = normalizeLiteral.apply(candidate);
         return switch (relation == null ? "" : relation) {
             case "=", "in" -> values.contains(normalizedCandidate);
             case "!=", "not in" -> !values.contains(normalizedCandidate);
@@ -708,44 +722,12 @@ public final class BoardSemanticValidator {
 
     private static boolean stateCandidateMatches(DeviceTemplateDto.DeviceManifest manifest,
                                                  StateTuple tuple,
-                                                 String rawCandidate) {
-        if (!hasText(rawCandidate)) {
-            return false;
-        }
-        List<String> modes = modeNames(manifest);
-        String candidate = rawCandidate.trim();
-        if (candidate.contains(";")) {
-            String[] parts = candidate.split(";", -1);
-            if (parts.length != modes.size()) {
-                return false;
-            }
-            boolean hasConcreteValue = false;
-            for (int i = 0; i < modes.size(); i++) {
-                String cleaned = DeviceSmvDataFactory.cleanStateName(parts[i]);
-                if (!hasText(cleaned) || "_".equals(cleaned)) {
-                    continue;
-                }
-                hasConcreteValue = true;
-                if (!cleaned.equals(tuple.valuesByMode().get(modes.get(i)))) {
-                    return false;
-                }
-            }
-            return hasConcreteValue;
-        }
-
-        String cleaned = DeviceSmvDataFactory.cleanStateName(candidate);
-        String matchedMode = null;
-        Map<String, List<String>> valuesByMode = modeValues(manifest);
-        for (String mode : modes) {
-            List<String> values = valuesByMode.get(mode);
-            if (values != null && values.contains(cleaned)) {
-                if (matchedMode != null) {
-                    return false;
-                }
-                matchedMode = mode;
-            }
-        }
-        return matchedMode != null && cleaned.equals(tuple.valuesByMode().get(matchedMode));
+                                                 String candidate) {
+        Map<String, List<String>> authored = DeviceManifestModes.authoredModeStates(manifest);
+        var pattern = ManifestConditionSemantics.resolveStatePattern(candidate, modeNames(manifest),
+                (mode, state) -> authored.getOrDefault(mode, List.of()).contains(state)
+                        ? DeviceSmvDataFactory.cleanStateName(state) : null);
+        return !pattern.isEmpty() && tuple.valuesByMode().entrySet().containsAll(pattern.entrySet());
     }
 
     private static List<StateTuple> legalStateTuples(DeviceTemplateDto.DeviceManifest manifest) {
@@ -966,11 +948,10 @@ public final class BoardSemanticValidator {
             String rawValue) {
         if (!hasText(rawValue)) return false;
         if (variable.getValues() != null && !variable.getValues().isEmpty()) {
-            String normalized = cleanEnumLiteral(rawValue).toLowerCase(Locale.ROOT);
+            String normalized = cleanEnumLiteral(rawValue);
             boolean legal = variable.getValues().stream()
                     .filter(BoardSemanticValidator::hasText)
                     .map(ManifestConditionSemantics::cleanEnumLiteral)
-                    .map(value -> value.toLowerCase(Locale.ROOT))
                     .anyMatch(normalized::equals);
             if (!legal) return false;
             target.add(normalized);
@@ -1078,14 +1059,13 @@ public final class BoardSemanticValidator {
         if (!SmvRelationUtils.isEnumRelation(relation)) {
             return prefix + " mode conditions support only =, !=, in, not in.";
         }
-        List<String> legalValues = modeValues(manifest).get(mode);
+        List<String> legalValues = DeviceManifestModes.authoredModeStates(manifest).get(mode);
         if (legalValues == null || legalValues.isEmpty()) {
             return prefix + " mode '" + mode + "' has no legal values.";
         }
         List<String> candidates = splitValues(value, relation);
         for (String candidate : candidates) {
-            String cleaned = DeviceSmvDataFactory.cleanStateName(candidate);
-            if (!hasText(cleaned) || !legalValues.contains(cleaned)) {
+            if (!legalValues.contains(candidate)) {
                 return prefix + " illegal value '" + candidate + "' for mode '" + mode + "'.";
             }
         }
@@ -1112,8 +1092,9 @@ public final class BoardSemanticValidator {
         if (("=".equals(relation) || "!=".equals(relation)) && candidates.size() != 1) {
             return prefix + " relation '" + relation + "' requires exactly one state value.";
         }
+        Map<String, List<String>> authored = DeviceManifestModes.authoredModeStates(manifest);
         for (String candidate : candidates) {
-            if (!ManifestConditionSemantics.isLegalState(candidate, modeNames(manifest), modeValues(manifest))) {
+            if (!ManifestConditionSemantics.isLegalState(candidate, modes, authored)) {
                 return prefix + " illegal state value '" + candidate + "'.";
             }
         }
@@ -1182,74 +1163,8 @@ public final class BoardSemanticValidator {
     }
 
     private static String resolveModeName(DeviceTemplateDto.DeviceManifest manifest, String rawMode) {
-        if (!hasText(rawMode)) {
-            return null;
-        }
-        String trimmed = rawMode.trim();
-        String cleaned = DeviceSmvDataFactory.cleanStateName(trimmed);
-        for (String mode : modeNames(manifest)) {
-            if (mode.equals(trimmed) || mode.equalsIgnoreCase(trimmed) || mode.equals(cleaned)) {
-                return mode;
-            }
-        }
-        return null;
-    }
-
-    private static List<String> modeNames(DeviceTemplateDto.DeviceManifest manifest) {
-        List<String> modes = new ArrayList<>();
-        if (manifest == null || manifest.getModes() == null) {
-            return modes;
-        }
-        for (String mode : manifest.getModes()) {
-            if (hasText(mode)) {
-                modes.add(mode.trim());
-            }
-        }
-        return modes;
-    }
-
-    private static Map<String, List<String>> modeValues(DeviceTemplateDto.DeviceManifest manifest) {
-        List<String> modes = modeNames(manifest);
-        Map<String, List<String>> result = new LinkedHashMap<>();
-        for (String mode : modes) {
-            result.put(mode, new ArrayList<>());
-        }
-        if (manifest == null || manifest.getWorkingStates() == null || modes.isEmpty()) {
-            return result;
-        }
-
-        for (DeviceTemplateDto.DeviceManifest.WorkingState state : manifest.getWorkingStates()) {
-            if (state == null || !hasText(state.getName())) {
-                continue;
-            }
-            if (modes.size() == 1) {
-                addModeValue(result, modes.get(0), state.getName());
-                continue;
-            }
-            String[] parts = state.getName().split(";", -1);
-            if (parts.length == modes.size()) {
-                for (int i = 0; i < modes.size(); i++) {
-                    addModeValue(result, modes.get(i), parts[i]);
-                }
-            }
-        }
-        return result;
-    }
-
-    private static void addModeValue(Map<String, List<String>> valuesByMode,
-                                     String mode,
-                                     String rawValue) {
-        if (!hasText(rawValue)) {
-            return;
-        }
-        String clean = DeviceSmvDataFactory.cleanStateName(rawValue);
-        if (!hasText(clean) || "_".equals(clean)) {
-            return;
-        }
-        List<String> values = valuesByMode.get(mode);
-        if (values != null && !values.contains(clean)) {
-            values.add(clean);
-        }
+        String mode = rawMode == null ? null : rawMode.trim();
+        return mode != null && modeNames(manifest).contains(mode) ? mode : null;
     }
 
     private static List<String> splitValues(String value, String relation) {

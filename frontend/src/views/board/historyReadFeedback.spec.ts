@@ -617,6 +617,7 @@ describe('Board authoritative read feedback', () => {
       replaceNodesFromServer: (nodes: unknown) => { ports.nodes.value = nodes },
       reconcileDanglingBoardFocus: vi.fn(), syncRuleDerivedEdges: vi.fn(), loadBoardUndoAvailability: vi.fn()
     })
+    ports.adoptBoardSnapshot = bind('adoptBoardSnapshot', ports)
     ports.boardApi.getSnapshot = vi.fn().mockRejectedValue(failure('Snapshot service unavailable'))
     const load = bind('refreshBoardSnapshot', ports)
     const bannerIndex = board.indexOf('data-testid="board-data-load-error"')

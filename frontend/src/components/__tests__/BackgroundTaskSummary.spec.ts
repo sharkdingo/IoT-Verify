@@ -12,7 +12,7 @@ const task: SimulationTaskSummary = {
   isAttack: false, attackBudget: 0, enablePrivacy: false,
   modelSnapshot: { capturedAt: '2026-10-17T12:00:00', deviceCount: 2, ruleCount: 1,
     specificationCount: 1, environmentVariableCount: 0, deviceTemplateCount: 1,
-    modelFingerprint: 'a'.repeat(64), templatesFrozen: true },
+    modelFingerprint: 'a'.repeat(64), modelSemanticsVersion: 1, templatesFrozen: true },
   modelSemantics: { attackPointUnit: 'BEHAVIOR_CHANGING_DEVICE_INSTANCE_OR_AUTOMATION_LINK',
     attackSelectionPolicy: 'NOT_MODELED', attackEffects: [], modeledDeviceAttackPointCount: 0,
     modeledFalsifiableReadingDeviceCount: 0, modeledAutomationLinkAttackPointCount: 0, modeledAttackPointCount: 0,

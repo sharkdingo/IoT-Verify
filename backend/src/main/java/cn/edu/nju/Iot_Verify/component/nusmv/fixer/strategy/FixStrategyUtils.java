@@ -16,6 +16,8 @@ import cn.edu.nju.Iot_Verify.component.nusmv.generator.AttackSurface;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceReferenceResolver;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvData;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvDataFactory;
+import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvNamespace;
+import cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
@@ -24,6 +26,7 @@ import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import cn.edu.nju.Iot_Verify.dto.verification.AntecedentReachability;
 import cn.edu.nju.Iot_Verify.exception.SmvGenerationException;
 import cn.edu.nju.Iot_Verify.util.RuleSemanticSignature;
+import cn.edu.nju.Iot_Verify.util.SmvIntegerLiteral;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.File;
@@ -39,6 +42,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.ToIntFunction;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -137,7 +141,7 @@ public final class FixStrategyUtils {
                                              FixContext ctx, List<RuleDto> modifiedRules,
                                              String strategyName, List<GuardProbe> guardProbes) {
         if (ctx.isExpired()) return Verification.inconclusive();
-        if (!candidateRulesPersistable(modifiedRules)) {
+        if (!candidateRulesPersistable(modifiedRules, ctx.getDeviceSmvMap())) {
             ctx.addDiagnostic("A candidate was rejected because it would create an identical automation rule.");
             log.info("Forward verification rejected a candidate containing identical automation rules");
             return Verification.rejected();
@@ -397,16 +401,42 @@ public final class FixStrategyUtils {
         ctx.recordStrategySolverFailure(strategyName, reason);
     }
 
-    static boolean candidateRulesPersistable(List<RuleDto> rules) {
+    static boolean candidateRulesPersistable(List<RuleDto> rules, Map<String, DeviceSmvData> deviceSmvMap) {
         List<RuleDto> safeRules = rules == null ? List.of() : rules;
+        ToIntFunction<String> modeCountForDevice = device -> {
+            DeviceSmvData smv = DeviceReferenceResolver.resolve(device, deviceSmvMap);
+            return smv == null ? 0 : smv.getModes().size();
+        };
         for (int left = 0; left < safeRules.size(); left++) {
             for (int right = 0; right < left; right++) {
-                if (RuleSemanticSignature.exactlyMatches(safeRules.get(left), safeRules.get(right))) {
+                if (RuleSemanticSignature.exactlyMatches(safeRules.get(left), safeRules.get(right), modeCountForDevice)) {
                     return false;
                 }
             }
         }
         return true;
+    }
+
+    static Set<String> occupiedRepairSymbols(FixContext ctx) {
+        Map<String, DeviceManifest> manifests = new LinkedHashMap<>();
+        Set<String> occupied = new HashSet<>();
+        ctx.getDeviceSmvMap().forEach((device, smv) -> {
+            if (smv == null) return;
+            if (smv.getManifest() != null) manifests.put(device, smv.getManifest());
+            // Generated repair names are lowercase and the main namespace compares instances case-insensitively.
+            if (smv.getVarName() != null) occupied.add(smv.getVarName().trim().toLowerCase(Locale.ROOT));
+        });
+        occupied.addAll(DeviceSmvNamespace.sceneConstants(manifests, ctx.isEnablePrivacy()).keySet());
+        return occupied;
+    }
+
+    static String freshSolverName(String requested, Set<String> occupied) {
+        String name = requested;
+        int suffix = 1;
+        while (occupied.contains(name)) {
+            name = requested + "_" + suffix++;
+        }
+        return name;
     }
 
     public static SmvGenerator.GenerateResult generateResolved(
@@ -667,7 +697,7 @@ public final class FixStrategyUtils {
             RuleDto.Condition candidate;
             if ("api".equals(targetType)) {
                 String relation = SmvRelationUtils.normalizeRelation(sc.getRelation());
-                if (!"=".equals(relation) || !"TRUE".equalsIgnoreCase(sc.getValue())) {
+                if (!assertsSignal(relation, sc.getValue())) {
                     continue;
                 }
                 candidate = RuleDto.Condition.builder()
@@ -712,7 +742,7 @@ public final class FixStrategyUtils {
             if (freeValueInfo == null) {
                 // Fixed-value postconditions can make the useful automation unreachable. A free-Y
                 // candidate is handled differently: its domain has already had those values removed.
-                if (effects.establishes(candidate)) {
+                if (isPostconditionOnly(rule, candidate, effects, deviceSmvMap)) {
                     log.debug("extractCandidates: skipped condition established by rule command {} or a rule it triggers",
                             rule.getCommand() != null ? rule.getCommand().getAction() : "<none>");
                     continue;
@@ -781,8 +811,8 @@ public final class FixStrategyUtils {
         String relation = SmvRelationUtils.normalizeRelation(candidate.getRelation());
         if ("mode".equals(targetType)) {
             if (!List.of("=", "!=", "in", "not in").contains(relation)) return null;
-            List<String> values = smv.getModeStates() == null
-                    ? null : smv.getModeStates().get(candidate.getAttribute());
+            String mode = DeviceSmvDataFactory.resolveModeIdentifier(smv, candidate.getAttribute());
+            List<String> values = mode == null || smv.getModeStates() == null ? null : smv.getModeStates().get(mode);
             return filterCommandIncompatibleValues(candidate, rule, effects, deviceSmvMap,
                     discreteConditionValueInfo(frozenVarName, values));
         }
@@ -829,8 +859,9 @@ public final class FixStrategyUtils {
         }
         List<String> allowedValues = valueInfo.getValues().stream()
                 .filter(value -> {
-                    RuleDto.Condition selected = copyConditionWithValue(candidate, value);
-                    return !effects.establishes(selected)
+                    RuleDto.Condition selected = copyConditionWithValue(candidate,
+                            authoredCandidateValue(candidate, value, deviceSmvMap));
+                    return !isPostconditionOnly(rule, selected, effects, deviceSmvMap)
                             && !isCommandPrestateIncompatible(rule, selected, deviceSmvMap);
                 })
                 .toList();
@@ -839,6 +870,15 @@ public final class FixStrategyUtils {
                 .frozenVarName(valueInfo.getFrozenVarName())
                 .values(new ArrayList<>(allowedValues))
                 .build();
+    }
+
+    /** Candidate domains contain solver atoms; rule operands use the declared state spelling. */
+    static String authoredCandidateValue(
+            RuleDto.Condition condition, String solverValue, Map<String, DeviceSmvData> deviceSmvMap) {
+        if (!"mode".equals(condition.getTargetType())) return solverValue;
+        DeviceSmvData device = DeviceReferenceResolver.resolve(condition.getDeviceName(), deviceSmvMap);
+        String mode = DeviceSmvDataFactory.resolveModeIdentifier(device, condition.getAttribute());
+        return device.authoredStateName(mode, solverValue);
     }
 
     private static RuleDto.Condition copyConditionWithValue(
@@ -868,133 +908,191 @@ public final class FixStrategyUtils {
                 .build();
     }
 
+    enum EffectMatch { GUARANTEED, POSSIBLE }
+
     /**
-     * Whether calling {@code api} on {@code device} definitely makes {@code candidate}, a condition on
-     * that same device, hold: the API's end state satisfies a positive state or mode condition, or its
-     * event satisfies an API condition that asserts the event. Negative state and mode conditions (for
-     * example {@code != taking_photo}) are never established; they are legitimate guards against
-     * repeating a command. Internal variables are never established, since commands do not assign them.
+     * Guaranteed positive outcomes can prune guards. Possible outcomes, including newly enabled
+     * negative predicates, only trace potential feedback through other rules.
      */
-    static boolean apiOutcomeSatisfies(
+    static boolean matchesApiOutcome(
             DeviceSmvData commandDevice,
             DeviceManifest.API api,
-            RuleDto.Condition candidate) {
+            Set<String> writableModes,
+            RuleDto.Condition candidate,
+            EffectMatch match) {
         if (commandDevice == null || api == null || candidate == null) return false;
-        String targetType = candidate.getTargetType() == null
-                ? ""
-                : candidate.getTargetType().trim().toLowerCase(Locale.ROOT);
+        String targetType = normalizedTargetType(candidate);
         String relation = SmvRelationUtils.normalizeRelation(candidate.getRelation());
         if ("api".equals(targetType)) {
             return Boolean.TRUE.equals(api.getSignal())
                     && candidate.getAttribute() != null
                     && candidate.getAttribute().trim().equals(api.getName())
-                    && assertsSignal(relation, candidate.getValue());
+                    && (relation == null ? candidate.getValue() == null : assertsSignal(relation, candidate.getValue()));
         }
         if (api.getEndState() == null || api.getEndState().isBlank()) {
             return false;
         }
-        // Only positive membership can be guaranteed by an action's result.
-        if (!"=".equals(relation) && !"in".equals(relation)) {
-            return false;
-        }
+        boolean positive = "=".equals(relation) || "in".equals(relation);
+        boolean negative = "!=".equals(relation) || "not in".equals(relation);
+        if (!positive && (match == EffectMatch.GUARANTEED || !negative)) return false;
 
-        if ("mode".equals(targetType)) {
-            int modeIndex = commandDevice.getModes() == null
-                    ? -1
-                    : commandDevice.getModes().indexOf(candidate.getAttribute());
-            if (modeIndex < 0) return false;
-            String endState = endStateForMode(commandDevice, api.getEndState(), modeIndex);
-            return endState != null && positiveValueContains(relation, candidate.getValue(), endState);
-        }
-        if (!"state".equals(targetType) || !"state".equals(candidate.getAttribute())) {
-            return false;
-        }
-
+        List<Map<String, String>> patterns = conditionStatePatterns(commandDevice, candidate, targetType, relation);
         Map<String, String> endTuple = concreteEndState(commandDevice, api.getEndState());
         if (endTuple.isEmpty()) return false;
-        List<String> candidateValues = "in".equals(relation)
-                ? SmvRelationUtils.splitStateRuleValues(candidate.getValue(), commandDevice.getModes().size())
-                : candidate.getValue() == null ? List.of() : List.of(candidate.getValue());
-        return candidateValues.stream().anyMatch(value -> stateConditionMatchesTuple(
-                commandDevice, value, endTuple));
+        Set<String> relevantModes = new LinkedHashSet<>(endTuple.keySet());
+        if (match == EffectMatch.POSSIBLE) relevantModes.addAll(writableModes);
+        List<Map<String, String>> affectedPatterns = patterns.stream()
+                .filter(pattern -> !Collections.disjoint(pattern.keySet(), relevantModes)).toList();
+        if (affectedPatterns.isEmpty()) return false;
+        if (match == EffectMatch.GUARANTEED && coversStateDomain(commandDevice, endTuple, patterns)) return true;
+
+        // A disjoint command or autonomous transition can still write an untouched mode on this tick.
+        Map<String, String> startTuple = concreteStartState(commandDevice, api.getStartState());
+        Map<String, String> postState = new LinkedHashMap<>(endTuple);
+        startTuple.forEach((mode, state) -> {
+            if (!writableModes.contains(mode)) postState.putIfAbsent(mode, state);
+        });
+        if (match == EffectMatch.GUARANTEED) {
+            return postState.size() > endTuple.size()
+                    && coversStateDomain(commandDevice, postState, patterns)
+                    && patterns.stream().noneMatch(pattern -> overlapsStatePattern(startTuple, pattern));
+        }
+        if (positive) {
+            return affectedPatterns.stream().anyMatch(pattern -> overlapsStatePattern(postState, pattern));
+        }
+        return affectedPatterns.stream().anyMatch(pattern -> overlapsStatePattern(startTuple, pattern))
+                && !coversStateDomain(commandDevice, postState, patterns);
     }
 
-    /**
-     * Whether an API condition with this normalized relation and value is exactly "the event
-     * happened", as the generator renders it: a bare condition is {@code <api>_a=TRUE}.
-     */
+    /** Whether a Boolean comparison is true exactly when the API signal is active. */
     private static boolean assertsSignal(String relation, String value) {
-        if (relation == null) return true;
-        List<String> values = SmvRelationUtils.splitRuleValues(value);
-        if (values.isEmpty()) return false;
-        return switch (relation) {
-            case "=", "in" -> values.stream().allMatch("TRUE"::equalsIgnoreCase);
-            case "!=", "not in" -> values.stream().allMatch("FALSE"::equalsIgnoreCase);
-            default -> false;
+        if (relation == null || value == null) return false;
+        String requiredOperand = switch (relation) {
+            case "=", "in" -> "TRUE";
+            case "!=", "not in" -> "FALSE";
+            default -> null;
         };
+        if (requiredOperand == null) return false;
+        List<String> values = "in".equals(relation) || "not in".equals(relation)
+                ? SmvRelationUtils.splitRuleValues(value) : List.of(value);
+        return !values.isEmpty() && values.stream()
+                .map(ManifestConditionSemantics::canonicalApiSignalValue)
+                .allMatch(requiredOperand::equals);
+    }
+
+    private static boolean isPostconditionOnly(
+            RuleDto rule,
+            RuleDto.Condition candidate,
+            CommandEffects effects,
+            Map<String, DeviceSmvData> deviceSmvMap) {
+        if (!effects.establishes(candidate)) return false;
+        CommandApiContext command = commandApiContext(rule, candidate, deviceSmvMap);
+        if (command == null) return true;
+
+        DeviceSmvData device = command.device();
+        List<Map<String, String>> patterns = conditionStatePatterns(
+                device, candidate, normalizedTargetType(candidate), SmvRelationUtils.normalizeRelation(candidate.getRelation()));
+        Map<String, String> start = concreteStartState(device, command.api().getStartState());
+        Map<String, String> end = concreteEndState(device, command.api().getEndState());
+
+        // A predicate can cover every outcome and still admit a source state from which the command makes a change.
+        return patterns.stream().filter(pattern -> overlapsStatePattern(start, pattern))
+                .noneMatch(pattern -> end.entrySet().stream().anyMatch(write -> {
+                    String mode = write.getKey();
+                    String before = start.getOrDefault(mode, pattern.get(mode));
+                    if (before != null) return !before.equals(write.getValue());
+                    return device.getModeStates().getOrDefault(mode, List.of()).stream()
+                            .anyMatch(state -> !state.equals(write.getValue()));
+                }));
     }
 
     /**
      * Whether a candidate condition is provably false whenever the command API is executable.
-     * Wildcard API start-state segments remain eligible: they leave at least one model state in
-     * which the condition and command can both hold, so this guard never rejects on uncertainty.
+     * Wildcard start-state segments range over their declared mode domains.
      */
     static boolean isCommandPrestateIncompatible(
             RuleDto rule,
             RuleDto.Condition candidate,
             Map<String, DeviceSmvData> deviceSmvMap) {
         CommandApiContext command = commandApiContext(rule, candidate, deviceSmvMap);
-        if (command == null || command.api().getStartState() == null
-                || command.api().getStartState().isBlank()) {
-            return false;
-        }
+        if (command == null) return false;
         DeviceSmvData commandDevice = command.device();
         String relation = SmvRelationUtils.normalizeRelation(candidate.getRelation());
-        String targetType = candidate.getTargetType() == null
-                ? ""
-                : candidate.getTargetType().trim().toLowerCase(Locale.ROOT);
+        String targetType = normalizedTargetType(candidate);
 
-        if ("mode".equals(targetType)) {
-            int modeIndex = commandDevice.getModes() == null
-                    ? -1
-                    : commandDevice.getModes().indexOf(candidate.getAttribute());
-            if (modeIndex < 0) return false;
-            String startState = startStateForMode(commandDevice, command.api().getStartState(), modeIndex);
-            if (startState == null) return false;
-            List<String> values = "in".equals(relation) || "not in".equals(relation)
-                    ? SmvRelationUtils.splitRuleValues(candidate.getValue())
-                    : candidate.getValue() == null ? List.of() : List.of(candidate.getValue());
-            boolean containsStart = values.stream()
-                    .map(DeviceSmvDataFactory::cleanStateName)
-                    .anyMatch(startState::equals);
-            return switch (relation) {
-                case "=" -> !containsStart;
-                case "!=" -> containsStart;
-                case "in" -> !containsStart;
-                case "not in" -> containsStart;
-                default -> false;
-            };
-        }
-        if (!"state".equals(targetType) || !"state".equals(candidate.getAttribute())) {
-            return false;
-        }
-
+        if (relation == null) return false;
+        List<Map<String, String>> patterns = conditionStatePatterns(commandDevice, candidate, targetType, relation);
+        if (patterns.isEmpty()) return false;
         Map<String, String> startTuple = concreteStartState(commandDevice, command.api().getStartState());
-        if (startTuple.isEmpty()) return false;
-        List<String> values = "in".equals(relation) || "not in".equals(relation)
-                ? SmvRelationUtils.splitStateRuleValues(candidate.getValue(), commandDevice.getModes().size())
-                : candidate.getValue() == null ? List.of() : List.of(candidate.getValue());
-        List<TupleMatch> matches = values.stream()
-                .map(value -> compareCandidateToKnownState(commandDevice, value, startTuple))
-                .toList();
-        if (matches.isEmpty()) return false;
         return switch (relation) {
-            case "=" -> matches.get(0) == TupleMatch.IMPOSSIBLE;
-            case "!=" -> matches.get(0) == TupleMatch.DEFINITE;
-            case "in" -> matches.stream().allMatch(match -> match == TupleMatch.IMPOSSIBLE);
-            case "not in" -> matches.stream().anyMatch(match -> match == TupleMatch.DEFINITE);
+            case "=", "in" -> patterns.stream().noneMatch(pattern -> overlapsStatePattern(startTuple, pattern));
+            case "!=", "not in" -> coversStateDomain(commandDevice, startTuple, patterns);
             default -> false;
         };
+    }
+
+    /** Prove that two fixed authored state guards cannot both be true in the source state. */
+    static boolean stateConditionsDisjoint(RuleDto.Condition left, RuleDto.Condition right,
+                                           Map<String, DeviceSmvData> deviceSmvMap) {
+        if (left == null || right == null) return false;
+        String deviceVar = resolveVarNameSafe(left.getDeviceName(), deviceSmvMap);
+        if (deviceVar == null || !deviceVar.equals(resolveVarNameSafe(right.getDeviceName(), deviceSmvMap))) return false;
+
+        DeviceSmvData device = deviceSmvMap.get(deviceVar);
+        String leftRelation = SmvRelationUtils.normalizeRelation(left.getRelation());
+        String rightRelation = SmvRelationUtils.normalizeRelation(right.getRelation());
+        if (leftRelation == null || rightRelation == null) return false;
+        boolean leftPositive = "=".equals(leftRelation) || "in".equals(leftRelation);
+        boolean rightPositive = "=".equals(rightRelation) || "in".equals(rightRelation);
+        if ((!leftPositive && !"!=".equals(leftRelation) && !"not in".equals(leftRelation))
+                || (!rightPositive && !"!=".equals(rightRelation) && !"not in".equals(rightRelation))) return false;
+
+        List<Map<String, String>> leftPatterns = conditionStatePatterns(device, left, normalizedTargetType(left), leftRelation);
+        List<Map<String, String>> rightPatterns = conditionStatePatterns(device, right, normalizedTargetType(right), rightRelation);
+        if (leftPatterns.isEmpty() || rightPatterns.isEmpty()) return false;
+        if (leftPositive && rightPositive) {
+            return leftPatterns.stream().noneMatch(first -> rightPatterns.stream()
+                    .anyMatch(second -> overlapsStatePattern(first, second)));
+        }
+        if (leftPositive) return leftPatterns.stream().allMatch(pattern -> coversStateDomain(device, pattern, rightPatterns));
+        if (rightPositive) return rightPatterns.stream().allMatch(pattern -> coversStateDomain(device, pattern, leftPatterns));
+        List<Map<String, String>> excluded = new ArrayList<>(leftPatterns);
+        excluded.addAll(rightPatterns);
+        return coversStateDomain(device, Map.of(), excluded);
+    }
+
+    private static String normalizedTargetType(RuleDto.Condition condition) {
+        return condition.getTargetType() == null ? "" : condition.getTargetType().trim().toLowerCase(Locale.ROOT);
+    }
+
+    private static List<Map<String, String>> conditionStatePatterns(
+            DeviceSmvData device, RuleDto.Condition condition, String targetType, String relation) {
+        if (device.getModes() == null || condition.getValue() == null) return List.of();
+        if ("mode".equals(targetType)) {
+            String mode = DeviceSmvDataFactory.resolveModeIdentifier(device, condition.getAttribute());
+            if (mode == null) return List.of();
+            List<Map<String, String>> patterns = new ArrayList<>();
+            for (String authored : splitModeValues(condition.getValue(), relation)) {
+                String state = device.resolveAuthoredState(mode, authored);
+                if (state == null) return List.of();
+                patterns.add(Map.of(mode, state));
+            }
+            return patterns;
+        }
+        String attribute = condition.getAttribute();
+        if (!"state".equals(targetType) || attribute == null || !"state".equalsIgnoreCase(attribute.trim())) {
+            return List.of();
+        }
+        List<String> values = SmvRelationUtils.stateConditionValues(
+                condition.getValue(), relation, device.getModes().size());
+        List<Map<String, String>> patterns = new ArrayList<>();
+        for (String value : values) {
+            Map<String, String> pattern = ManifestConditionSemantics.resolveStatePattern(
+                    value, device.getModes(), device::resolveAuthoredState);
+            if (pattern.isEmpty()) return List.of();
+            patterns.add(pattern);
+        }
+        return patterns;
     }
 
     private static CommandApiContext commandApiContext(
@@ -1019,27 +1117,11 @@ public final class FixStrategyUtils {
 
     private record CommandApiContext(DeviceSmvData device, DeviceManifest.API api) {}
 
-    private enum TupleMatch {
-        DEFINITE,
-        POSSIBLE,
-        IMPOSSIBLE
-    }
-
-    private static boolean positiveValueContains(String relation, String rawValue, String endState) {
-        if (rawValue == null || endState == null) return false;
-        if ("=".equals(relation)) {
-            return Objects.equals(DeviceSmvDataFactory.cleanStateName(rawValue), endState);
-        }
-        return SmvRelationUtils.splitStateRuleValues(rawValue, 1).stream()
-                .map(DeviceSmvDataFactory::cleanStateName)
-                .anyMatch(endState::equals);
-    }
-
-    private static Map<String, String> concreteEndState(DeviceSmvData smv, String rawEndState) {
+    static Map<String, String> concreteEndState(DeviceSmvData smv, String rawEndState) {
         return concreteApiState(smv, rawEndState, false);
     }
 
-    private static Map<String, String> concreteStartState(DeviceSmvData smv, String rawStartState) {
+    static Map<String, String> concreteStartState(DeviceSmvData smv, String rawStartState) {
         return concreteApiState(smv, rawStartState, true);
     }
 
@@ -1049,96 +1131,57 @@ public final class FixStrategyUtils {
             boolean allowWildcard) {
         List<String> modes = smv.getModes();
         if (modes == null || modes.isEmpty() || rawState == null) return Map.of();
-        String[] parts = rawState.split(";", -1);
-        if (modes.size() == 1) {
-            String state = allowWildcard
-                    ? DeviceSmvDataFactory.cleanStartState(rawState)
-                    : DeviceSmvDataFactory.cleanStateName(rawState);
-            return state == null || state.isBlank() || "_".equals(state)
-                    ? Map.of()
-                    : Map.of(modes.get(0), state);
-        }
-        if (parts.length != modes.size()) return Map.of();
         Map<String, String> result = new LinkedHashMap<>();
         for (int i = 0; i < modes.size(); i++) {
-            String state = allowWildcard
-                    ? DeviceSmvDataFactory.cleanStartState(parts[i])
-                    : DeviceSmvDataFactory.cleanStateName(parts[i]);
-            if (state == null || state.isBlank() || "_".equals(state)) continue;
+            String state = DeviceSmvDataFactory.getStateForMode(rawState, i, allowWildcard);
+            if (state == null || state.isBlank()) continue;
             result.put(modes.get(i), state);
         }
         return result;
     }
 
-    private static String endStateForMode(DeviceSmvData smv, String rawEndState, int modeIndex) {
-        Map<String, String> endTuple = concreteEndState(smv, rawEndState);
-        if (endTuple.isEmpty() || smv.getModes() == null || modeIndex >= smv.getModes().size()) return null;
-        return endTuple.get(smv.getModes().get(modeIndex));
+    static boolean overlapsStatePattern(Map<String, String> known, Map<String, String> pattern) {
+        return pattern.entrySet().stream().allMatch(entry -> !known.containsKey(entry.getKey())
+                || entry.getValue().equals(known.get(entry.getKey())));
     }
 
-    private static String startStateForMode(DeviceSmvData smv, String rawStartState, int modeIndex) {
-        Map<String, String> startTuple = concreteStartState(smv, rawStartState);
-        if (startTuple.isEmpty() || smv.getModes() == null || modeIndex >= smv.getModes().size()) return null;
-        return startTuple.get(smv.getModes().get(modeIndex));
+    private static boolean coversStateDomain(DeviceSmvData device, Map<String, String> known,
+                                             List<Map<String, String>> patterns) {
+        return new StateSetCoverage(device.getModeStates()).covers(new LinkedHashMap<>(known), patterns);
     }
 
-    private static boolean stateConditionMatchesTuple(
-            DeviceSmvData smv,
-            String rawCandidate,
-            Map<String, String> endTuple) {
-        return compareCandidateToKnownState(smv, rawCandidate, endTuple) == TupleMatch.DEFINITE;
-    }
+    private static final class StateSetCoverage {
+        private final Map<String, List<String>> domains;
+        // Repair pruning must not spend its deadline proving a large union. An unfinished proof leaves the candidate.
+        private int remainingBranches = 1024;
 
-    private static TupleMatch compareCandidateToKnownState(
-            DeviceSmvData smv,
-            String rawCandidate,
-            Map<String, String> knownState) {
-        Map<String, String> candidateTuple = resolveCandidateStateTuple(smv, rawCandidate);
-        if (candidateTuple.isEmpty()) return TupleMatch.POSSIBLE;
-        boolean hasUnknownState = false;
-        for (Map.Entry<String, String> entry : candidateTuple.entrySet()) {
-            String actual = knownState.get(entry.getKey());
-            if (actual == null) {
-                hasUnknownState = true;
-            } else if (!Objects.equals(actual, entry.getValue())) {
-                return TupleMatch.IMPOSSIBLE;
+        private StateSetCoverage(Map<String, List<String>> domains) {
+            this.domains = domains;
+        }
+
+        private boolean covers(Map<String, String> known, List<Map<String, String>> patterns) {
+            if (remainingBranches-- <= 0) return false;
+            List<Map<String, String>> compatible = patterns.stream()
+                    .filter(pattern -> overlapsStatePattern(known, pattern)).toList();
+            if (compatible.isEmpty()) return false;
+            if (compatible.stream().anyMatch(pattern -> known.keySet().containsAll(pattern.keySet()))) return true;
+
+            String mode = compatible.get(0).keySet().stream()
+                    .filter(key -> !known.containsKey(key)).findFirst().orElseThrow();
+            List<String> domain = domains == null ? null : domains.get(mode);
+            if (domain == null || domain.isEmpty()) return false;
+            Set<String> branches = compatible.stream().map(pattern -> pattern.get(mode))
+                    .filter(Objects::nonNull).collect(Collectors.toCollection(LinkedHashSet::new));
+            // States unnamed by the remaining patterns match exactly the same wildcard branches.
+            domain.stream().filter(state -> !branches.contains(state)).findFirst().ifPresent(branches::add);
+            for (String state : branches) {
+                known.put(mode, state);
+                boolean covered = covers(known, compatible);
+                known.remove(mode);
+                if (!covered) return false;
             }
+            return true;
         }
-        return hasUnknownState ? TupleMatch.POSSIBLE : TupleMatch.DEFINITE;
-    }
-
-    private static Map<String, String> resolveCandidateStateTuple(
-            DeviceSmvData smv,
-            String rawCandidate) {
-        if (smv == null || smv.getModes() == null || smv.getModes().isEmpty()
-                || rawCandidate == null || rawCandidate.isBlank()) {
-            return Map.of();
-        }
-        List<String> modes = smv.getModes();
-        String candidate = rawCandidate.trim();
-        if (candidate.contains(";") && modes.size() > 1) {
-            String[] parts = candidate.split(";", -1);
-            if (parts.length != modes.size()) return Map.of();
-            Map<String, String> tuple = new LinkedHashMap<>();
-            for (int i = 0; i < modes.size(); i++) {
-                String state = DeviceSmvDataFactory.cleanStateName(parts[i]);
-                if (state == null || state.isBlank() || "_".equals(state)) continue;
-                List<String> legalStates = smv.getModeStates().get(modes.get(i));
-                if (legalStates == null || !legalStates.contains(state)) return Map.of();
-                tuple.put(modes.get(i), state);
-            }
-            return tuple;
-        }
-
-        String state = DeviceSmvDataFactory.cleanStateName(candidate);
-        if (state == null || state.isBlank()) return Map.of();
-        if (modes.size() == 1) {
-            return Map.of(modes.get(0), state);
-        }
-        List<String> matchedModes = modes.stream()
-                .filter(mode -> smv.getModeStates().getOrDefault(mode, List.of()).contains(state))
-                .toList();
-        return matchedModes.size() == 1 ? Map.of(matchedModes.get(0), state) : Map.of();
     }
 
     /**
@@ -1184,14 +1227,12 @@ public final class FixStrategyUtils {
         String normalizedRel = SmvRelationUtils.normalizeRelation(candidate.getRelation());
 
         if ("state".equals(targetType)) {
-            if (!"state".equals(attr)) return false;
+            if (!"state".equalsIgnoreCase(attr)) return false;
             // State only allows = != in not_in (SmvMainModuleBuilder.buildRuleStateCondition:595-600)
             if (!"=".equals(normalizedRel) && !"!=".equals(normalizedRel)
                     && !"in".equals(normalizedRel) && !"not in".equals(normalizedRel)) {
                 return false;
             }
-            // Validate each state value exists in the device
-            if (smv.getStates() == null || smv.getStates().isEmpty()) return false;
             if ("in".equals(normalizedRel) || "not in".equals(normalizedRel)) {
                 // Mode-aware split: multi-mode devices use ; inside tuples (e.g. "cool;off")
                 int modeCount = (smv.getModes() != null) ? smv.getModes().size() : 1;
@@ -1205,7 +1246,8 @@ public final class FixStrategyUtils {
                 return isValidStateValue(smv, candidate.getValue());
             }
         } else if ("mode".equals(targetType)) {
-            if (!isModeAttribute(smv, attr)) return false;
+            String mode = DeviceSmvDataFactory.resolveModeIdentifier(smv, attr);
+            if (mode == null) return false;
             if (!"=".equals(normalizedRel) && !"!=".equals(normalizedRel)
                     && !"in".equals(normalizedRel) && !"not in".equals(normalizedRel)) {
                 return false;
@@ -1215,15 +1257,7 @@ public final class FixStrategyUtils {
             if (("=".equals(normalizedRel) || "!=".equals(normalizedRel)) && values.size() != 1) {
                 return false;
             }
-            List<String> legalValues = smv.getModeStates() != null ? smv.getModeStates().get(attr) : null;
-            if (legalValues == null || legalValues.isEmpty()) return false;
-            for (String value : values) {
-                String cleanValue = DeviceSmvDataFactory.cleanStateName(value);
-                if (cleanValue == null || cleanValue.isBlank() || !legalValues.contains(cleanValue)) {
-                    return false;
-                }
-            }
-            return true;
+            return values.stream().allMatch(value -> smv.resolveAuthoredState(mode, value) != null);
         } else if ("variable".equals(targetType)) {
             // Non-state: general relation validation
             if (!SmvRelationUtils.isSupportedRelation(normalizedRel)) return false;
@@ -1243,85 +1277,9 @@ public final class FixStrategyUtils {
         }
     }
 
-    /**
-     * Check if a raw state value is valid for the given device.
-     * Mirrors SmvMainModuleBuilder.resolveStateTupleCandidate() semantics:
-     * <ul>
-     *   <li>No modes: reject (buildRuleStateCondition:591 requires modes)</li>
-     *   <li>Multi-mode tuple (contains ;): split by ; → check each segment per-mode;
-     *       all-wildcard tuple rejected (resolveStateTupleCandidate:697)</li>
-     *   <li>Single-mode: cleanStateName → check against mode's state list</li>
-     *   <li>Multi-mode single value (no ;): cleanStateName → valid if exactly one mode contains it</li>
-     * </ul>
-     */
     private static boolean isValidStateValue(DeviceSmvData smv, String rawValue) {
-        if (rawValue == null || rawValue.isBlank()) return false;
-        String trimmed = rawValue.trim();
-        List<String> modes = smv.getModes();
-        Map<String, List<String>> modeStates = smv.getModeStates();
-
-        // No modes → state conditions cannot be resolved (SmvMainModuleBuilder:591-593)
-        if (modes == null || modes.isEmpty()) return false;
-
-        // Multi-mode tuple resolution: "cool;high" → split by ; → check per-mode
-        /*
-         * The `modes.size() > 1` term differs from the three sibling implementations, which gate on `contains(";")`
-         * alone — and that difference is unreachable, which is why it can stay.
-         *
-         * An audit flagged it as a live divergence: for a single-mode device given `"off;"` this takes the
-         * single-value path while `NusmvRequestValidator:1306` takes the tuple path and rejects on segment count.
-         * Measured against the running API, `"off;"` never gets that far — `/api/board/nodes` answers **422
-         * "Illegal state value for device template: off;"** at the write boundary, so no persisted device can carry
-         * it. Verified alongside `"off"` (200) to rule out the template itself being at fault.
-         *
-         * Left as-is deliberately: aligning four implementations to remove a difference no input can reach would
-         * be change without a defect behind it.
-         */
-        if (trimmed.contains(";") && modes.size() > 1) {
-            String[] segments = trimmed.split(";", -1);
-            if (segments.length != modes.size()) return false;
-            if (modeStates == null) return false;
-            boolean anyNonWildcard = false;
-            for (int i = 0; i < modes.size(); i++) {
-                if (DeviceSmvDataFactory.isWildcardStateSegment(segments[i])) continue;
-                String cleanSeg = DeviceSmvDataFactory.cleanStateName(segments[i]);
-                if (cleanSeg == null || cleanSeg.isBlank()) continue; // wildcard
-                anyNonWildcard = true;
-                List<String> modeStateList = modeStates.get(modes.get(i));
-                if (modeStateList == null || !modeStateList.contains(cleanSeg)) return false;
-            }
-            // All-wildcard tuple → empty map → null in generator (line 697)
-            return anyNonWildcard;
-        }
-
-        // Single value
-        String cleanValue = DeviceSmvDataFactory.cleanStateName(trimmed);
-        if (cleanValue == null || cleanValue.isEmpty()) return false;
-
-        // Single-mode: check against that mode's state list
-        if (modes.size() == 1) {
-            List<String> modeStateList = modeStates != null ? modeStates.get(modes.get(0)) : null;
-            return modeStateList != null && modeStateList.contains(cleanValue);
-        }
-
-        // Multi-mode single value (no ;): valid if exactly one mode contains it
-        // (SmvMainModuleBuilder:716-728 — ambiguous match → null)
-        if (modeStates != null) {
-            int matchCount = 0;
-            for (String mode : modes) {
-                List<String> modeStateList = modeStates.get(mode);
-                if (modeStateList != null && modeStateList.contains(cleanValue)) {
-                    matchCount++;
-                }
-            }
-            return matchCount == 1;
-        }
-
-        return false;
-    }
-
-    private static boolean isModeAttribute(DeviceSmvData smv, String attr) {
-        return smv != null && smv.getModes() != null && smv.getModes().contains(attr);
+        return !ManifestConditionSemantics.resolveStatePattern(
+                rawValue, smv.getModes(), smv::resolveAuthoredState).isEmpty();
     }
 
     private static List<String> splitModeValues(String rawValue, String normalizedRel) {
@@ -1340,9 +1298,8 @@ public final class FixStrategyUtils {
 
     /**
      * Fingerprint = "varName|targetType|attribute|normalizedRelation|normalizedValue".
-     * [C2] normalizedValue uses SmvRelationUtils.cleanRuleValueByRelation()
-     * to match SmvMainModuleBuilder's normalization semantics exactly.
-     * Mode-aware: for state IN/NOT_IN on multi-mode devices, preserves ; within tuples.
+     * Uses the condition's type to match the generated predicate: state tuples keep their
+     * semicolons, mode membership splits on them, and numeric variables preserve signed values.
      * Returns null if device resolution fails.
      */
     static String conditionFingerprint(
@@ -1351,9 +1308,10 @@ public final class FixStrategyUtils {
         String varName = resolveVarNameSafe(c.getDeviceName(), deviceSmvMap);
         if (varName == null) return null;
         String normRel = SmvRelationUtils.normalizeRelation(c.getRelation());
+        String targetType = c.getTargetType() != null ? c.getTargetType().trim().toLowerCase(Locale.ROOT) : "";
         // Resolve mode count for mode-aware value normalization
         int modeCount = 1;
-        if ("state".equals(c.getAttribute())) {
+        if ("state".equals(targetType)) {
             DeviceSmvData smv = deviceSmvMap.get(varName);
             if (smv == null) {
                 // Fallback: try resolving from device name
@@ -1365,11 +1323,49 @@ public final class FixStrategyUtils {
                 modeCount = smv.getModes().size();
             }
         }
-        String normVal = SmvRelationUtils.cleanRuleValueByRelation(normRel, c.getValue(), modeCount);
+        String normVal = switch (targetType) {
+            case "variable" -> variableFingerprintValue(c, normRel, deviceSmvMap.get(varName));
+            case "state", "mode" -> authoredStateFingerprintValue(c.getValue(), normRel, modeCount);
+            default -> SmvRelationUtils.cleanRuleValueByRelation(normRel, c.getValue(), modeCount);
+        };
         if (normVal == null) normVal = "";
         String attr = c.getAttribute() != null ? c.getAttribute() : "";
-        String targetType = c.getTargetType() != null ? c.getTargetType().toLowerCase(Locale.ROOT) : "";
         return varName + "|" + targetType + "|" + attr + "|" + normRel + "|" + normVal;
+    }
+
+    private static String authoredStateFingerprintValue(String value, String relation, int modeCount) {
+        if ("in".equals(relation) || "not in".equals(relation)) {
+            return SmvRelationUtils.canonicalStateMembershipValue(value, modeCount);
+        }
+        List<String> operands = SmvRelationUtils.stateConditionValues(value, relation, modeCount);
+        return operands.stream().map(operand -> {
+            if (modeCount <= 1 || !operand.contains(";")) return operand.trim();
+            return Arrays.stream(operand.split(";", -1))
+                    .map(segment -> DeviceSmvDataFactory.isWildcardStateSegment(segment) ? "" : segment.trim())
+                    .collect(Collectors.joining(";"));
+        }).collect(Collectors.joining(","));
+    }
+
+    private static String variableFingerprintValue(RuleDto.Condition condition, String relation, DeviceSmvData smv) {
+        if (condition.getValue() == null) return "";
+        DeviceManifest.InternalVariable variable = smv != null
+                ? ManifestConditionSemantics.findConditionVariable(smv.getManifest(), condition.getAttribute()) : null;
+        Stream<String> values = "in".equals(relation) || "not in".equals(relation)
+                ? SmvRelationUtils.splitRuleValues(condition.getValue()).stream() : Stream.of(condition.getValue());
+        return values.map(value -> {
+            if (variable != null && variable.getValues() != null && !variable.getValues().isEmpty()) {
+                return ManifestConditionSemantics.cleanEnumLiteral(value);
+            }
+            if (variable != null && variable.getLowerBound() != null && variable.getUpperBound() != null) {
+                try {
+                    return Integer.toString(SmvIntegerLiteral.parse(value));
+                } catch (NumberFormatException invalid) {
+                    // Preserve malformed operands literally on stale snapshots instead of merging them.
+                    return value.trim();
+                }
+            }
+            return value.trim();
+        }).collect(Collectors.joining(","));
     }
 
     /** Fingerprint for a candidate whose value is a free NuSMV parameter. */

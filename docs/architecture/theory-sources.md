@@ -30,7 +30,8 @@ their own copy; the citations below are precise enough to check against any copy
 
 - **FSM per device** — WorkingStates → states, InternalVariables → variables, APIs → transitions
   carrying a `Signal_Device_API` label. MEDIC §3.1, Fig. 1. Implementation:
-  `SmvDeviceModuleBuilder`, `DeviceSmvDataFactory`.
+  `SmvDeviceModuleBuilder`, `DeviceSmvDataFactory`. Observable command events follow the executed
+  transition as in the FSM thesis §3.2. See [rule semantics](nusmv-model.md#rule-semantics).
 - **Rule execution** — MEDIC §3.2, Def. 3.2, Fig. 3 introduces a two-state handling node
   (`Ready`/`Waiting`). IoT-Verify collapses that internal handling step: IF reads the current state and
   the command writes the target's next state, matching HAFuzz §3.3, Fig. 5 and the product's Immediate
@@ -68,6 +69,8 @@ their own copy; the citations below are precise enough to check against any copy
   variable. A stored rate is read unprimed while it is itself computed from the current mode, which
   delayed every effect by one step and made a device that started in an acting mode contribute
   nothing on the first transition. The bounded explorer derives the same effect from the live state.
+  Autonomous direct assignments are a project extension to MEDIC §3.1's additive environment
+  model. Their [scope and precedence](shared-value-semantics.md#6-device-effects) apply to both engines.
 - **Trust and privacy propagation** — `trust`/`privacy` labels belong to states and variables. Under
   MEDIC §3.3, Def. 3.3, Fig. 4, a target becomes untrusted only when every contributing trigger source
   is untrusted, while any private source makes the target private. Implementation:

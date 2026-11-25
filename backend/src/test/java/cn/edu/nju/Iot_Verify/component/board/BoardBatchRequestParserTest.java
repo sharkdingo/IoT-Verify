@@ -53,6 +53,30 @@ class BoardBatchRequestParserTest {
     }
 
     @Test
+    void numberUsedAsConditionTextIsRejectedBeforeServiceInvocation() throws Exception {
+        JsonNode body = objectMapper.readTree("""
+                {
+                  "impactToken": "confirmed-current-board",
+                  "templateSnapshots": [],
+                  "nodes": [],
+                  "environmentVariables": [],
+                  "rules": [{
+                    "conditions": [{
+                      "deviceName": "sensor_1", "attribute": "temperature",
+                      "targetType": "variable", "relation": ">", "value": 28
+                    }],
+                    "command": {"deviceName": "fan_1", "action": "turnOn"}
+                  }],
+                  "specs": []
+                }
+                """);
+
+        BadRequestException error = assertThrows(BadRequestException.class, () -> parser.parse(body));
+
+        assertThat(error.getErrors()).containsKey("rules[0].conditions[0].value");
+    }
+
+    @Test
     void unknownManifestField_isValidatedBeforeTypedDtoCanDropIt() throws Exception {
         JsonNode body = objectMapper.readTree("""
                 {

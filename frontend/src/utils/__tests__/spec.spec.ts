@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { buildSpecFormula, isSameSpecification, specFormulaKindFromTemplate } from '../spec'
 import type { DeviceNode } from '@/types/node'
 import type { DeviceTemplate } from '@/types/device'
-import type { Specification } from '@/types/spec'
+import type { SpecCondition, Specification } from '@/types/spec'
 
 describe('spec formula preview', () => {
   const nodes: DeviceNode[] = [
@@ -63,7 +63,13 @@ describe('spec formula preview', () => {
     }
   ]
 
-  const context = { nodes, deviceTemplates }
+  const context = {
+    nodes,
+    modeCount: (deviceId: string) => {
+      const node = nodes.find(item => item.id === deviceId)
+      return deviceTemplates.find(template => template.name === node?.templateName)?.manifest.Modes?.length
+    }
+  }
 
   it('expands full-state conditions using the selected device template modes', () => {
     const formula = buildSpecFormula({
@@ -326,7 +332,7 @@ describe('spec formula preview', () => {
       ifConditions: [],
       thenConditions: []
     } satisfies Pick<Specification, 'templateId' | 'templateLabel' | 'aConditions' | 'ifConditions' | 'thenConditions'>, {
-      nodes
+      nodes, modeCount: () => undefined
     })
 
     expect(formula).toBe('CTL AG NOT (Environment."a_temperature" > 28 AND controlSource("Temperature Sensor"."a_temperature") = untrusted)')
@@ -454,6 +460,20 @@ describe('spec formula preview', () => {
     expect(isSameSpecification(first, second)).toBe(true)
   })
 
+  it('compares multi-mode membership by its authored values and wildcard positions', () => {
+    const spec = (value: string, relation = 'not in'): Specification => ({
+      id: 'state-spec', name: 'State requirement', templateId: '1', templateLabel: 'Always',
+      aConditions: [{ id: 'a', side: 'a', deviceId: 'ac-1', deviceLabel: 'AC',
+        targetType: 'state', key: 'state', relation, value }], ifConditions: [], thenConditions: []
+    })
+    const modeCount = () => 2
+    const original = spec('idle;_, _;warm')
+    expect(isSameSpecification(original, spec('; warm | idle ; | idle;_'), modeCount)).toBe(true)
+    expect(isSameSpecification(original, spec(';warm, Idle;'), modeCount)).toBe(false)
+    expect(isSameSpecification(original, spec(';warm, ;idle'), modeCount)).toBe(false)
+    expect(isSameSpecification(spec('idle;_', '='), spec('idle;', '='), modeCount)).toBe(false)
+  })
+
   it.each(['in', 'not in'])('compares API %s sets independently of case, order and separators', relation => {
     const spec = (value: string): Specification => ({
       id: 'event-spec', name: 'Event requirement', templateId: '1', templateLabel: 'Always',
@@ -469,14 +489,8 @@ describe('spec formula preview', () => {
     expect(isSameSpecification(spec('TRUE, FALSE'), opposite)).toBe(false)
   })
 
-  it('spells boolean and label literals the way the backend preview does', () => {
-    /*
-     * The backend renders NuSMV booleans uppercase and trust/privacy labels lowercase
-     * (`SpecificationFormulaPreview.value`). Folding all six to lowercase here made the same condition
-     * display as `true` in the client and `TRUE` in a verdict — one formula, two spellings, from the two
-     * halves of one feature. These strings are the contract; if the backend's change, this reddens.
-     */
-    const preview = (value: string) => buildSpecFormula({
+  const previewCondition = (condition: Omit<SpecCondition, 'id' | 'side' | 'deviceId' | 'deviceLabel'>) =>
+    buildSpecFormula({
       templateId: '1',
       templateLabel: 'Always',
       aConditions: [{
@@ -484,18 +498,29 @@ describe('spec formula preview', () => {
         side: 'a',
         deviceId: 'sensor-1',
         deviceLabel: 'Temperature Sensor',
-        targetType: 'mode',
-        key: 'Enabled',
-        relation: '=',
-        value
+        ...condition
       }],
       ifConditions: [],
       thenConditions: []
-    } satisfies Pick<Specification, 'templateId' | 'templateLabel' | 'aConditions' | 'ifConditions' | 'thenConditions'>, context)
+    }, context)
 
-    expect(preview('true')).toBe('CTL AG("Temperature Sensor"."Enabled" = TRUE)')
-    expect(preview('TRUE')).toBe('CTL AG("Temperature Sensor"."Enabled" = TRUE)')
-    expect(preview('Untrusted')).toBe('CTL AG("Temperature Sensor"."Enabled" = untrusted)')
+  it('canonicalizes API booleans and property labels in their own conditions', () => {
+    expect(previewCondition({ targetType: 'api', key: 'notify', relation: '=', value: 'true' }))
+      .toBe('CTL AG(actionEvent("Temperature Sensor", "notify") = TRUE)')
+    expect(previewCondition({ targetType: 'api', key: 'notify', relation: 'in', value: 'false|true' }))
+      .toBe('CTL AG(actionEvent("Temperature Sensor", "notify") in {FALSE, TRUE})')
+    expect(previewCondition({ targetType: 'trust', propertyScope: 'variable', key: 'temperature', relation: '=', value: 'Untrusted' }))
+      .toBe('CTL AG(controlSource("Temperature Sensor"."temperature") = untrusted)')
+    expect(previewCondition({ targetType: 'privacy', propertyScope: 'variable', key: 'temperature', relation: '=', value: 'PUBLIC' }))
+      .toBe('CTL AG(sensitivity("Temperature Sensor"."temperature") = public)')
+  })
+
+  it.each([
+    { relation: '=', value: 'True', expected: '= "True"' },
+    { relation: 'in', value: 'True|true|Public', expected: 'in {"True", "true", "Public"}' }
+  ])('preserves case-sensitive enum values with $relation', ({ relation, value, expected }) => {
+    expect(previewCondition({ targetType: 'variable', variableSource: 'environment', key: 'weather', relation, value }))
+      .toBe(`CTL AG(Environment."weather" ${expected})`)
   })
 })
 

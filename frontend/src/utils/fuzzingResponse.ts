@@ -263,6 +263,7 @@ const validateSnapshot = (value: unknown, context: string) => {
   integer(snapshot.ruleCount, 'ruleCount', context)
   integer(snapshot.specificationCount, 'specificationCount', context)
   integer(snapshot.environmentVariableCount, 'environmentVariableCount', context)
+  integer(snapshot.modelSemanticsVersion, 'modelSemanticsVersion', context)
   const deviceTemplateCount = integer(
     snapshot.deviceTemplateCount,
     'deviceTemplateCount',

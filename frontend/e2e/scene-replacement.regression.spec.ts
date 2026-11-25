@@ -1,7 +1,15 @@
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
-import type { APIRequestContext, Page } from '@playwright/test'
+import type { APIRequestContext, APIResponse, Page } from '@playwright/test'
+import type { DeviceManifest, DeviceTemplate } from '../src/types/device'
+import type { PortableSceneFile } from '../src/types/scene'
+import type { SimulationResult } from '../src/types/simulation'
+import type { BoardModelFingerprints } from '../src/types/modelSemantics'
+import type { RuleDto } from '../src/types/rule'
+import { validateSimulationTrace, validateVerificationResult } from '../src/utils/runResponse'
 import { apiBaseURL, createAuthenticatedUser, expect, test, type AuthUser } from './support/auth'
+import { expectSameBoardSnapshot } from './support/boardSnapshot'
+import { expandControlTool } from './support/controlCenter'
 import { clickUnderTooltip } from './support/tooltips'
 
 const examples = path.resolve(process.cwd(), '..', 'docs', 'examples')
@@ -61,6 +69,113 @@ const readAccountScene = async (request: APIRequestContext, auth: AuthUser) => {
     return (await response.json()).data
   }))
 }
+
+const data = async (response: Pick<APIResponse, 'json' | 'ok'>) => {
+  const body = await response.json()
+  expect(response.ok(), JSON.stringify(body)).toBe(true)
+  return body.data
+}
+
+const shadowDefaultTemplate = async (
+  request: APIRequestContext, auth: AuthUser, name: string, edit: (manifest: DeviceManifest) => void
+) => {
+  const headers = { Authorization: `Bearer ${auth.token}` }
+  const boardUrl = `${apiBaseURL}/api/board`
+  const templates: DeviceTemplate[] = await data(await request.get(`${boardUrl}/templates`, { headers }))
+  const original = templates.find(template => template.name === name)!
+  expect(original?.defaultTemplate).toBe(true)
+  const deletion = `${boardUrl}/templates/${original.id}`
+  const preview = await data(await request.get(`${deletion}/deletion-preview`, { headers }))
+  await data(await request.post(`${deletion}/delete`, { headers, data: { impactToken: preview.impactToken } }))
+  const custom = structuredClone(original.manifest)
+  edit(custom)
+  await data(await request.post(`${boardUrl}/templates`, { headers, data: { name: original.name, manifest: custom } }))
+  return original.manifest
+}
+
+test('adopts device values from a committed default template reset without reloading the Board', async ({ page, request }) => {
+  const auth = await createAuthenticatedUser(request)
+  const headers = { Authorization: `Bearer ${auth.token}` }
+  const boardUrl = `${apiBaseURL}/api/board`
+  await shadowDefaultTemplate(request, auth, 'Car', custom => {
+    const location = custom.WorkingStates?.find(state => state.Name === 'away')?.Dynamics
+      ?.find(dynamic => dynamic.VariableName === 'location')
+    expect(location).toBeDefined()
+    location!.Value = 'garage'
+  })
+  await data(await request.post(`${boardUrl}/nodes`, { headers, data: { devices: [{
+    id: 'reset_car', label: 'Reset test car', templateName: 'Car', state: 'away',
+    position: { x: 120, y: 120 }, width: 176, height: 128,
+    variables: [{ name: 'location', value: 'garage', trust: 'untrusted' }]
+  }] } }))
+
+  await openBoard(page, auth)
+  const expectLocation = (devices: PortableSceneFile['devices'], value: string) =>
+    expect(devices.find(device => device.id === 'reset_car')).toMatchObject({ state: 'away',
+      variables: expect.arrayContaining([expect.objectContaining({ name: 'location', value })]) })
+  expectLocation((await exportFile(page)).devices, 'garage')
+  await page.getByTestId('control-tab-templates').click()
+  await expandControlTool(page, 'control-template-repository')
+  const previewResponse = page.waitForResponse(response =>
+    new URL(response.url()).pathname === '/api/board/templates/defaults/reset-preview')
+  await page.getByTestId('reset-default-templates').click()
+  const resetPreview = await data(await previewResponse)
+  expectLocation(resetPreview.currentNodes, 'garage')
+  const runtimeChange = { field: 'VARIABLE_VALUE', itemName: 'location', previousValue: 'garage', currentValue: 'away' }
+  expect(resetPreview.affectedDevices).toContainEqual(expect.objectContaining({
+    deviceId: 'reset_car',
+    runtimeChanges: [runtimeChange]
+  }))
+  await expect(page.getByTestId('default-template-reset-device-changes'))
+    .toContainText('location value from "garage" to "away"')
+
+  const resetResponse = page.waitForResponse(response =>
+    new URL(response.url()).pathname === '/api/board/templates/defaults/reset')
+  await page.getByTestId('default-template-reset-confirm').click()
+  const reset = await data(await resetResponse)
+  expect(reset.affectedDevices).toEqual(resetPreview.affectedDevices)
+  expectLocation(reset.currentNodes, 'away')
+  await expect(page.getByText(/^Default templates reset:/)).toBeVisible()
+  expectLocation((await exportFile(page)).devices, 'away')
+})
+
+test('shows the shared variable conflict before a default template reset', async ({ page, request }) => {
+  const auth = await createAuthenticatedUser(request)
+  const headers = { Authorization: `Bearer ${auth.token}` }
+  const boardUrl = `${apiBaseURL}/api/board`
+  const bundled = await shadowDefaultTemplate(request, auth, 'Light', custom => {
+    custom.InternalVariables = []
+    custom.ImpactedVariables = []
+    custom.WorkingStates?.forEach(state => { state.Dynamics = [] })
+  })
+  const shared = bundled.InternalVariables?.find(variable => variable.Name === 'illuminance')
+  expect(shared).toBeDefined()
+  const meter = {
+    Name: 'Narrow Light Meter',
+    InternalVariables: [{ ...shared, Reads: true, UpperBound: 50 }]
+  }
+  await data(await request.post(`${boardUrl}/templates`, { headers, data: { name: meter.Name, manifest: meter } }))
+  const devices = [
+    { id: 'reset_light', label: 'Reset test light', templateName: 'Light', state: 'on' },
+    { id: 'reset_meter', label: 'Reset test meter', templateName: meter.Name, state: 'Working' }
+  ].map((device, index) => ({ ...device, position: { x: 120 + index * 200, y: 120 }, width: 176, height: 128 }))
+  await data(await request.post(`${boardUrl}/nodes`, { headers, data: { devices } }))
+
+  await openBoard(page, auth)
+  await page.getByTestId('control-tab-templates').click()
+  await expandControlTool(page, 'control-template-repository')
+  const response = page.waitForResponse(reply =>
+    new URL(reply.url()).pathname === '/api/board/templates/defaults/reset-preview')
+  await page.getByTestId('reset-default-templates').click()
+  const preview = await data(await response)
+  expect(preview.canApply).toBe(false)
+  expect(preview.blockers).toEqual(expect.arrayContaining([
+    expect.objectContaining({ reason: expect.stringContaining('illuminance') })
+  ]))
+  const dialog = page.getByRole('dialog', { name: 'Reset default templates?' })
+  await expect(dialog.getByRole('alert').filter({ hasText: 'The current scene is incompatible' })).toBeVisible()
+  await expect(dialog.getByTestId('default-template-reset-confirm')).toBeDisabled()
+})
 
 test('exported scenes round-trip repeatedly across accounts without template accumulation or changing references', async ({ page, browser, request }) => {
   test.setTimeout(120_000)
@@ -123,6 +238,218 @@ test('exported scenes round-trip repeatedly across accounts without template acc
   }
 })
 
+test('a portable round trip preserves the winning autonomous shared write in NuSMV', async ({ page, request }) => {
+  const auth = await createAuthenticatedUser(request, { usernamePrefix: 'writerPriority' })
+  await openBoard(page, auth)
+  const templateName = 'Shared Light Control'
+  const scene: PortableSceneFile = {
+    schema: 'iot-verify.board-scene', version: 6,
+    templates: [{
+      name: templateName,
+      manifest: {
+        Name: templateName, Modes: ['PowerMode'], InitState: 'off', APIs: [],
+        WorkingStates: ['off', 'on'].map(Name => ({ Name, Trust: 'trusted', Privacy: 'public' })),
+        InternalVariables: [{
+          Name: 'roomLight', IsInside: false, Reads: false, Values: ['dim', 'dark', 'bright'],
+          FalsifiableWhenCompromised: false, Trust: 'trusted', Privacy: 'public'
+        }],
+        Transitions: [
+          { Name: 'dark when off', Trigger: { Attribute: 'PowerMode', Relation: '=', Value: 'off' },
+            Assignments: [{ Attribute: 'roomLight', Value: 'dark' }] },
+          { Name: 'bright when on', Trigger: { Attribute: 'PowerMode', Relation: '=', Value: 'on' },
+            Assignments: [{ Attribute: 'roomLight', Value: 'bright' }] }
+        ]
+      }
+    }],
+    devices: [
+      { id: 'Room-10', label: 'Room 10', templateName, state: 'on', position: { x: 320, y: 50 }, width: 176, height: 128 },
+      { id: 'Room-2', label: 'Room 2', templateName, state: 'off', position: { x: 60, y: 50 }, width: 176, height: 128 }
+    ],
+    environmentVariables: [{ name: 'roomLight', value: 'dim', trust: 'trusted', privacy: 'public' }],
+    rules: [], specs: []
+  }
+  const importScene = (content: PortableSceneFile) => importFile(page, {
+    name: 'shared-writers.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(content))
+  })
+  const simulateFirstStep = async () => {
+    const response = await request.post(`${apiBaseURL}/api/simulate`, {
+      headers: { Authorization: `Bearer ${auth.token}` },
+      data: { steps: 1, attackScenario: { mode: 'NONE' } }
+    })
+    const { data }: { data: SimulationResult } = await response.json()
+    expect(response.status()).toBe(200)
+    expect(data.modelComplete).toBe(true)
+    return data.states.map(state => state.envVariables?.find(value => value.name === 'roomLight')?.value)
+  }
+
+  expect((await importScene(scene)).status).toBe(200)
+  expect(await simulateFirstStep()).toEqual(['dim', 'bright'])
+  const exported: PortableSceneFile = await exportFile(page)
+  expect(exported.devices.map(device => device.id)).toEqual(['Room-2', 'Room-10'])
+  expect((await importScene(exported)).status).toBe(200)
+  expect(await simulateFirstStep()).toEqual(['dim', 'bright'])
+})
+
+test('distinct devices can share mode names and retain repair evidence after an equivalent set edit', async ({ page, request }) => {
+  const auth = await createAuthenticatedUser(request)
+  await openBoard(page, auth)
+  const modeledDevices = [
+    { id: 'source_lamp', name: 'Source Lamp', modes: ['Power'], states: ['on', 'off'] },
+    { id: 'reserve_lamp', name: 'Reserve Lamp', modes: ['Power'], states: ['off', 'on'] },
+    { id: 'shade', name: 'Entry Shade Control', modes: ['private', 'FanMode'], states: ['Case;ready', 'slow heat;_Case'] }
+  ] as const
+  const shadeState = 'Case;_Case'
+  const ruleStates = [shadeState, 'slow heat;_']
+  const excludedStates = ['Case;ready', 'slow heat;']
+  const scene: PortableSceneFile = {
+    schema: 'iot-verify.board-scene', version: 6,
+    templates: modeledDevices.map(device => ({ name: device.name, manifest: {
+      Name: device.name, Modes: [...device.modes], InitState: device.states[0],
+      WorkingStates: device.states.map(Name => ({ Name, Trust: 'trusted', Privacy: 'public' })),
+      APIs: device.id === 'reserve_lamp' ? [{ Name: 'switchOn', StartState: 'off', EndState: 'on', Signal: false }] : [],
+      Transitions: device.id === 'shade' ? [{ Name: 'Set auxiliary state', StartState: 'Case;ready', EndState: ';_Case',
+        Trigger: { Attribute: 'FanMode', Relation: '=', Value: 'ready' } }] : []
+    } })),
+    devices: modeledDevices.map((device, index) => ({ id: device.id, label: device.name, templateName: device.name,
+      state: device.states[0], position: { x: 60 + index * 220, y: 150 }, width: 176, height: 128 })),
+    environmentVariables: [],
+    rules: [{ name: 'Turn on the reserve when the source is on', toId: 'reserve_lamp', toApi: 'switchOn',
+      sources: [{ fromId: 'source_lamp', fromApi: 'Power', itemType: 'mode', relation: '=', value: 'on' },
+        { fromId: 'shade', fromApi: 'state', itemType: 'state', relation: 'IN', value: ruleStates.join(' | ') }] }],
+    specs: [{ name: 'Keep the reserve off', templateId: '3', ifConditions: [], thenConditions: [],
+      aConditions: [{ deviceId: 'reserve_lamp', targetType: 'mode', key: 'Power', relation: '=', value: 'on' },
+        { deviceId: 'shade', targetType: 'state', key: 'state', relation: 'NOT_IN', value: excludedStates.join(' | ') }] }]
+  }
+  const imported = await importFile(page, {
+    name: 'cross-device-modes.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(scene))
+  })
+  expect(imported.status, JSON.stringify(imported.body)).toBe(200)
+  await expect(page.getByText(/^Scene replaced:/)).toBeVisible()
+
+  const exported: PortableSceneFile = await exportFile(page)
+  expect(exported.rules[0]?.sources.find(source => source.fromId === 'shade')).toMatchObject({
+    relation: 'in', value: ruleStates.join(' | ')
+  })
+  expect(exported.specs[0]?.aConditions.find(condition => condition.deviceId === 'shade')).toMatchObject({
+    relation: 'not in', value: excludedStates.join(' | ')
+  })
+
+  await page.getByTestId('inspector-tab-rules').click()
+  await page.getByTestId(`edit-rule-${imported.body.data.rules[0].id}`).click()
+  await page.getByTestId('rule-edit-source-1').click()
+  const ruleValues = page.locator('#rule-source-value')
+  await expect(ruleValues).toHaveValues(ruleStates)
+  await ruleValues.selectOption([shadeState])
+  await ruleValues.selectOption(ruleStates)
+  await expect(ruleValues).toHaveValues(ruleStates)
+  await page.getByTestId('rule-add-source').click()
+  await page.getByTestId('rule-reset').click()
+
+  await page.getByTestId('inspector-tab-specs').click()
+  await page.getByTestId(`edit-spec-${imported.body.data.specs[0].id}`).click()
+  await page.getByRole('button', { name: 'Edit condition 2', exact: true }).click()
+  const specValues = page.getByTestId('spec-condition-value')
+  await expect(specValues).toHaveValues(excludedStates)
+  await specValues.selectOption([excludedStates[0]!])
+  await specValues.selectOption(excludedStates)
+  await expect(specValues).toHaveValues(excludedStates)
+  await page.getByTestId('spec-condition-save').click()
+  await expect(page.getByTestId('spec-create')).toBeEnabled()
+  await page.getByTestId('spec-cancel-edit').click()
+
+  const simulationResponse = page.waitForResponse(response => response.request().method() === 'POST'
+    && new URL(response.url()).pathname === '/api/simulate/traces')
+  await page.getByTestId('open-simulation-panel').click()
+  await clickUnderTooltip(page, page.getByTestId('simulation-mode-sync'))
+  await page.getByTestId('simulation-steps-input').fill('2')
+  await clickUnderTooltip(page, page.getByTestId('run-simulation'))
+  const simulated = await simulationResponse
+  expect(simulated.ok(), await simulated.text()).toBe(true)
+  const simulation = validateSimulationTrace((await simulated.json()).data)
+  expect(simulation.enablePrivacy).toBe(false)
+  expect(simulation.modelComplete).toBe(true)
+  expect(simulation.states[0]?.devices).toEqual(expect.arrayContaining([
+    expect.objectContaining({ deviceId: 'source_lamp', mode: 'Power', state: 'on' }),
+    expect.objectContaining({ deviceId: 'reserve_lamp', mode: 'Power', state: 'off' }),
+    expect.objectContaining({ deviceId: 'shade', mode: 'private;FanMode', state: 'Case;ready' })
+  ]))
+  expect(simulation.states[1]?.devices).toEqual(expect.arrayContaining([
+    expect.objectContaining({ deviceId: 'shade', mode: 'private;FanMode', state: shadeState }),
+    expect.objectContaining({ deviceId: 'reserve_lamp', mode: 'Power', state: 'off' })
+  ]))
+  expect(simulation.states[2]?.devices).toEqual(expect.arrayContaining([
+    expect.objectContaining({ deviceId: 'reserve_lamp', mode: 'Power', state: 'on' })
+  ]))
+  await expect(page.getByTestId('simulation-timeline')).toBeVisible()
+  await clickUnderTooltip(page, page.getByTestId('simulation-timeline-state-1'))
+  await page.getByTestId('simulation-timeline-details-tab').click()
+  const shadeReadings = page.getByTestId('playback-state-devices').getByRole('article').filter({ hasText: 'Entry Shade Control' })
+  await expect(shadeReadings.locator('dt')).toHaveText(['private', 'FanMode'])
+  await expect(shadeReadings.locator('dd')).toHaveText(['Case', '_Case'])
+  await page.getByTestId('simulation-timeline-close').click()
+
+  const verificationResponse = page.waitForResponse(response => response.request().method() === 'POST'
+    && new URL(response.url()).pathname === '/api/verify')
+  await page.getByTestId('open-verification-panel').click()
+  await clickUnderTooltip(page, page.getByTestId('verification-mode-sync'))
+  await clickUnderTooltip(page, page.getByTestId('run-verification'))
+  const verified = await verificationResponse
+  expect(verified.ok(), await verified.text()).toBe(true)
+  const verification = validateVerificationResult((await verified.json()).data)
+  expect(verification.enablePrivacy).toBe(false)
+  expect(verification.modelComplete).toBe(true)
+  expect(verification.outcome).toBe('VIOLATED')
+  const traceId = verification.traces[0]?.id
+  expect(traceId).toBeGreaterThan(0)
+  const repairPath = `/api/verify/traces/${traceId}/fix`
+  await page.getByTestId('verification-trace-fix').click()
+  await page.getByTestId('fix-strategy-remove').click()
+  const searched = page.waitForResponse(response => response.request().method() === 'POST'
+    && new URL(response.url()).pathname === repairPath)
+  await page.getByTestId('fix-try-current').click()
+  const proposal = await searched
+  expect(proposal.ok(), await proposal.text()).toBe(true)
+  const signed = (await proposal.json()).data.suggestions[0]?.suggestionToken
+  expect(signed).toEqual(expect.any(String))
+  const apply = page.getByTestId('fix-apply-current')
+  await expect(apply).toBeEnabled()
+
+  const headers = { Authorization: `Bearer ${auth.token}` }
+  const currentModels = async (): Promise<BoardModelFingerprints> => {
+    const response = await request.get(`${apiBaseURL}/api/board/model-fingerprints`, { headers })
+    expect(response.ok(), await response.text()).toBe(true)
+    return (await response.json()).data
+  }
+  const beforeEdit = await currentModels()
+  expect(beforeEdit.modelSemanticsVersion).toBe(verification.modelSnapshot.modelSemanticsVersion)
+  expect(beforeEdit.verification).toBe(verification.modelSnapshot.modelFingerprint)
+  const original: RuleDto = imported.body.data.rules[0]
+  const revisedName = 'Turn on the reserve after the specified shade states'
+  const equivalentStates = ['slow heat;', shadeState]
+  const desired: RuleDto = { ...original, ruleString: revisedName, conditions: original.conditions.map(condition =>
+    condition.deviceName === 'shade' ? { ...condition, value: equivalentStates.join(' | ') } : condition) }
+  const edited = await request.put(`${apiBaseURL}/api/board/rules/${original.id}`, { headers, data: { expected: original, desired } })
+  expect(edited.ok(), await edited.text()).toBe(true)
+  expect((await edited.json()).data.affectedItem.ruleString).toBe(revisedName)
+  expect(await currentModels()).toEqual(beforeEdit)
+
+  const refreshed = page.waitForResponse(response => response.request().method() === 'GET'
+    && new URL(response.url()).pathname === '/api/board/model-fingerprints')
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+  expect((await refreshed).ok()).toBe(true)
+  await expect(page.getByTestId('verification-result-stale-banner')).toHaveCount(0)
+  await expect(page.getByTestId('verification-trace-fix')).toBeVisible()
+
+  await apply.click()
+  const applied = page.waitForResponse(response => response.request().method() === 'POST'
+    && new URL(response.url()).pathname === `${repairPath}/apply`)
+  await page.locator('.el-message-box').getByRole('button', { name: 'Remove Rules and Apply', exact: true }).click()
+  const appliedResult = await applied
+  expect(appliedResult.request().postDataJSON().suggestionToken).toBe(signed)
+  expect(appliedResult.ok(), await appliedResult.text()).toBe(true)
+  expect((await appliedResult.json()).data).toMatchObject({ applied: true, verificationEvidenceReused: true, rules: [] })
+})
+
 for (const collision of ['different definition']) {
   test(`a ${collision} conflict rolls back and offers a confirmed reusable copy without overwriting templates`, async ({ page, request }, testInfo) => {
     const auth = await createAuthenticatedUser(request, { usernamePrefix: 'templateConflict' })
@@ -162,6 +489,7 @@ for (const collision of ['different definition']) {
       await expect(dialog.getByTestId('scene-import-repairs')).toContainText('Door Access Request → Door Access Request (imported)')
       const confirm = dialog.getByRole('button', { name: 'Apply changes and replace' })
       await expect(confirm).toBeInViewport()
+      await expect(dialog.getByTestId('scene-import-consequence')).toBeInViewport({ ratio: 1 })
       expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
       await page.screenshot({ path: testInfo.outputPath(`keep-both-${theme}-${viewport.width}.png`) })
       const cancel = dialog.getByRole('button', { name: 'Cancel', exact: true })
@@ -227,7 +555,8 @@ test('a rejected incoming environment preserves the complete previous scene and 
   await page.reload()
   await expect(page.getByTestId('scene-import')).toBeEnabled({ timeout: 30_000 })
   const after = await readState()
-  expect(after).toEqual(before)
+  expectSameBoardSnapshot(after[0], before[0])
+  expect(after[1]).toEqual(before[1])
   await expect(page.getByTestId('board-undo')).toBeEnabled()
   await expect(page.locator('.device-node').filter({ hasText: 'Retained care lamp' })).toBeVisible()
   await testInfo.attach('rejected-scene-replacement', {

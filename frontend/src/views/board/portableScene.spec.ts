@@ -99,7 +99,7 @@ describe('scene file envelope validation', () => {
     })
 })
 
-describe('scene specification variable conditions', () => {
+describe('scene specification conditions', () => {
   // A specification condition is reference-checked against the scene's devices, so the fixture
   // carries the device it names and the template that device instantiates.
   const sceneWithCondition = (condition: Record<string, unknown>) => ({
@@ -157,6 +157,19 @@ describe('scene specification variable conditions', () => {
   it('keeps an explicit variable source through import', () => {
     const scene = codec.normalizeSceneFile(sceneWithCondition(variableCondition('reported')))
     expect(scene.specs[0].aConditions[0]).toMatchObject({ variableSource: 'reported' })
+  })
+
+  it('uses the imported device template to preview a single-mode state set', () => {
+    const file = sceneWithCondition({
+      deviceId: 'sensor-1', targetType: 'state', key: 'state', relation: 'in', value: 'working;standby'
+    })
+    file.templates[0].manifest.WorkingStates.push({
+      Name: 'standby', Dynamics: [], Description: '', Trust: 'trusted', Privacy: 'public'
+    })
+
+    const scene = codec.normalizeSceneFile(file)
+    expect(scene.specs[0].formula).toContain('state in {"working", "standby"}')
+    expect(codec.serializeSceneFile(scene).specs[0].aConditions[0].value).toBe('working;standby')
   })
 
   it('refuses the field on a condition type that has no such question', () => {
@@ -247,6 +260,59 @@ describe('scene device identity', () => {
       { id: 'b', label: 'B' }
     ] as any
     expect(() => codec.assertUniqueSceneDeviceIds(devices)).not.toThrow()
+  })
+})
+
+describe('concrete device states in portable scenes', () => {
+  const sceneWithThermostatState = (state: string) => ({
+    ...minimalScene(),
+    devices: [{
+      id: 'hall-thermostat', templateName: 'Thermostat', label: 'Hall thermostat',
+      position: { x: 0, y: 0 }, state, width: 120, height: 100
+    }],
+    templates: [{
+      name: 'Thermostat',
+      manifest: {
+        Name: 'Thermostat', Modes: ['FanMode', 'HeatingMode'], InitState: 'auto;cool',
+        WorkingStates: ['auto;cool', 'high;emergency heat'].map(Name => ({ Name, Trust: 'trusted', Privacy: 'public' }))
+      }
+    }]
+  })
+
+  it('blocks export of a saved solver spelling and identifies the device and state to change', () => {
+    const scene = codec.normalizeSceneFile(sceneWithThermostatState('auto;cool'))
+    scene.devices[0].state = 'auto;emergencyheat'
+
+    expect(() => codec.canonicalizeSceneFile(scene)).toThrow(
+      'app.sceneExportDeviceStateUnavailable:{"label":"Hall thermostat","state":"auto;emergencyheat"}'
+    )
+  })
+
+  it('reports an invalid authored state at its original file position', () => {
+    const file = sceneWithThermostatState('auto;emergencyheat')
+    file.devices.unshift({ ...file.devices[0], id: 'z-first', label: 'Upstairs thermostat', state: 'auto;cool' })
+
+    expect(() => codec.normalizeSceneFile(file)).toThrow(
+      'app.sceneImportDeviceStateUnavailable:{"index":2,"label":"Hall thermostat","state":"auto;emergencyheat","field":"devices[1].state"}'
+    )
+  })
+
+  it('round-trips a complete composition of authored mode values with segment spaces', () => {
+    const state = 'auto; emergency heat'
+    const scene = codec.normalizeSceneFile(sceneWithThermostatState(state))
+
+    expect(codec.canonicalizeSceneFile(scene).devices[0].state).toBe(state)
+  })
+
+  it('round-trips a mode segment with ASCII padding accepted by the backend', () => {
+    const state = 'auto;\u001fcool'
+    const file = sceneWithThermostatState(state)
+    file.templates[0].manifest.InitState = state
+    file.templates[0].manifest.WorkingStates[0].Name = state
+
+    const scene = codec.normalizeSceneFile(file)
+    expect(scene.devices[0].state).toBe(state)
+    expect(codec.canonicalizeSceneFile(scene).devices[0].state).toBe(state)
   })
 })
 

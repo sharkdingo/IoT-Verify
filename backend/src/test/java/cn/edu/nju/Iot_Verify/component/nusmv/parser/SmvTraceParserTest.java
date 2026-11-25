@@ -72,6 +72,7 @@ class SmvTraceParserTest {
         smv.getStates().addAll(List.of("idle", "active"));
         smv.getVariables().add(internalVariable("temperature"));
         smv.getEnvVariables().put("temperature", internalVariable("temperature"));
+        smv.getSharedDeclarations().put("temperature", internalVariable("temperature"));
         smv.getContents().add(content("photo"));
 
         String counterexample = """
@@ -113,6 +114,22 @@ class SmvTraceParserTest {
                 findGlobalVariable(states.get(2), "compromisedPointCount").getModelTokenSource());
         assertEquals("1", findGlobalValue(states.get(2), "compromisedPointCount"));
         assertNotSame(secondDevice, thirdDevice, "Each API state must be an independent snapshot");
+    }
+
+    @Test
+    void parseCounterexample_preservesAuthoredVariableNamedLikeTheOptionalAttackFlag() {
+        DeviceSmvData sensor = new DeviceSmvData();
+        sensor.setVarName("sensor_1");
+        sensor.getVariables().add(DeviceManifest.InternalVariable.builder().name("is_attack").isInside(true).build());
+
+        List<TraceStateDto> states = parser.parseCounterexampleStates("""
+                -> State: 1.1 <-
+                  sensor_1.is_attack = TRUE
+                """, Map.of("sensor_1", sensor));
+
+        TraceDeviceDto device = states.get(0).getDevices().get(0);
+        assertNull(device.getCompromised());
+        assertEquals("TRUE", findVariable(device, "is_attack").getValue());
     }
 
     /**
@@ -324,6 +341,7 @@ class SmvTraceParserTest {
         smv.getModeStates().put("HvacMode", List.of("cool", "heat"));
         smv.getStates().addAll(List.of("cool", "heat"));
         smv.getEnvVariables().put("temperature", null);
+        smv.getSharedDeclarations().put("temperature", internalVariable("temperature"));
         smv.getContents().add(content("photo"));
 
         Map<String, DeviceSmvData> deviceMap = new LinkedHashMap<>();
@@ -389,8 +407,8 @@ class SmvTraceParserTest {
         DeviceSmvData smv = new DeviceSmvData();
         smv.setVarName("sensor_1");
         smv.setTemplateName("Sensor");
-        smv.getEnvVariables().put("temperature", null);
-        smv.getEnvVariables().put("a_noise", null);
+        smv.getSharedDeclarations().put("temperature", internalVariable("temperature"));
+        smv.getSharedDeclarations().put("a_noise", internalVariable("a_noise"));
 
         Map<String, DeviceSmvData> deviceMap = new LinkedHashMap<>();
         deviceMap.put("sensor_1", smv);
@@ -416,10 +434,10 @@ class SmvTraceParserTest {
     void parseCounterexample_usesUnknownForEnvironmentTokensWithMixedTemplateSources() {
         DeviceSmvData bundled = new DeviceSmvData();
         bundled.setModelTokenSource(ModelTokenSource.BUNDLED);
-        bundled.getEnvVariables().put("temperature", internalVariable("temperature"));
+        bundled.getSharedDeclarations().put("temperature", internalVariable("temperature"));
         DeviceSmvData custom = new DeviceSmvData();
         custom.setModelTokenSource(ModelTokenSource.CUSTOM);
-        custom.getImpactedVariables().add("temperature");
+        custom.getSharedDeclarations().put("temperature", internalVariable("temperature"));
 
         List<TraceStateDto> states = parser.parseCounterexampleStates("""
                 -> State: 1.1 <-
@@ -435,7 +453,7 @@ class SmvTraceParserTest {
         DeviceSmvData smv = new DeviceSmvData();
         smv.setVarName("sensor_1");
         smv.setTemplateName("Sensor");
-        smv.getEnvVariables().put("attackBudget", internalVariable("attackBudget"));
+        smv.getSharedDeclarations().put("attackBudget", internalVariable("attackBudget"));
 
         Map<String, DeviceSmvData> deviceMap = new LinkedHashMap<>();
         deviceMap.put("sensor_1", smv);

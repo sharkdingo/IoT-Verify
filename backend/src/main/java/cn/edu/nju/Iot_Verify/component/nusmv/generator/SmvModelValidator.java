@@ -2,6 +2,8 @@ package cn.edu.nju.Iot_Verify.component.nusmv.generator;
 
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvData;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvDataFactory;
+import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvNamespace;
+import cn.edu.nju.Iot_Verify.component.template.DeviceManifestModes;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
 import cn.edu.nju.Iot_Verify.dto.device.VariableStateDto;
@@ -9,6 +11,7 @@ import cn.edu.nju.Iot_Verify.dto.RequestLimits;
 import cn.edu.nju.Iot_Verify.exception.SmvGenerationException;
 import cn.edu.nju.Iot_Verify.util.EnvironmentDomainUtils;
 import cn.edu.nju.Iot_Verify.util.NaturalChangeRateParser;
+import cn.edu.nju.Iot_Verify.util.SmvIntegerLiteral;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -30,7 +33,13 @@ public class SmvModelValidator {
      * （deviceSmvMap 中可能存在多个 key 指向同一对象的别名条目）。
      */
     public void validate(Map<String, DeviceSmvData> deviceSmvMap) {
+        validate(deviceSmvMap, 0, false, false, Set.of());
+    }
+
+    void validate(Map<String, DeviceSmvData> deviceSmvMap, int ruleCount, boolean enablePrivacy,
+                  boolean enableAttack, Set<String> devicesWithAttackFlag) {
         Set<DeviceSmvData> validated = Collections.newSetFromMap(new IdentityHashMap<>());
+        Map<String, DeviceManifest> manifests = new LinkedHashMap<>();
         for (DeviceSmvData smv : deviceSmvMap.values()) {
             if (smv.getManifest() == null) continue;
             if (!validated.add(smv)) continue;
@@ -42,7 +51,10 @@ public class SmvModelValidator {
             validatePropertyValues(smv);
             validateImpactedEnvironmentDefinitions(smv);
             validateVariableDomainsAndDynamics(smv);
+            manifests.put(smv.getVarName(), smv.getManifest());
         }
+        DeviceSmvNamespace.validateScene(manifests, ruleCount, enablePrivacy, enableAttack, devicesWithAttackFlag,
+                (device, reason) -> SmvGenerationException.templateInvalid(device != null ? device : "main", reason));
         validateEnvVarConflicts(deviceSmvMap);
     }
 
@@ -187,13 +199,16 @@ public class SmvModelValidator {
                                       DeviceManifest.Trigger trigger) {
         String attribute = trigger.getAttribute();
         String relation = normalizeTriggerRelation(trigger.getRelation());
-        String normalizedValue = trigger.getValue().trim().replace(" ", "");
-        List<String> modeValues = smv.getModeStates().get(attribute);
-        if (modeValues != null) {
-            validateEnumeratedTriggerValue(smv.getVarName(), context, attribute, relation,
-                    normalizedValue, modeValues, "mode");
+        String mode = DeviceSmvDataFactory.resolveModeIdentifier(smv, attribute);
+        if (mode != null) {
+            validateEnumeratedTriggerRelation(smv.getVarName(), context, attribute, relation, "mode");
+            if (smv.resolveAuthoredState(mode, trigger.getValue()) == null) {
+                throw SmvGenerationException.templateInvalid(smv.getVarName(), context + " compares mode '"
+                        + attribute + "' with undeclared state '" + trigger.getValue().trim() + "'");
+            }
             return;
         }
+        String normalizedValue = trigger.getValue().trim().replace(" ", "");
         DeviceManifest.InternalVariable variable = findTriggerValueDomain(smv, attribute);
         if (variable == null) {
             return;
@@ -206,11 +221,11 @@ public class SmvModelValidator {
         if (variable.getLowerBound() != null && variable.getUpperBound() != null) {
             final int numericValue;
             try {
-                numericValue = Integer.parseInt(trigger.getValue().trim());
+                numericValue = SmvIntegerLiteral.parse(trigger.getValue());
             } catch (NumberFormatException exception) {
                 throw SmvGenerationException.templateInvalid(smv.getVarName(), context
                         + " compares numeric trigger '" + attribute + "' with non-integer value '"
-                        + trigger.getValue() + "'");
+                        + trigger.getValue() + "'. Use digits 0-9 with an optional sign.");
             }
             if (numericValue < variable.getLowerBound() || numericValue > variable.getUpperBound()) {
                 throw SmvGenerationException.templateInvalid(smv.getVarName(), context
@@ -230,10 +245,7 @@ public class SmvModelValidator {
                                                 String normalizedValue,
                                                 List<String> values,
                                                 String domainKind) {
-        if (!"=".equals(relation) && !"!=".equals(relation)) {
-            throw SmvGenerationException.templateInvalid(deviceName, context + " uses ordering relation '"
-                    + relation + "' on " + domainKind + " '" + attribute + "'; use = or !=");
-        }
+        validateEnumeratedTriggerRelation(deviceName, context, attribute, relation, domainKind);
         boolean allowed = values.stream()
                 .filter(Objects::nonNull)
                 .map(value -> value.replace(" ", ""))
@@ -241,6 +253,14 @@ public class SmvModelValidator {
         if (!allowed) {
             throw SmvGenerationException.templateInvalid(deviceName, context + " compares '"
                     + attribute + "' with unknown value '" + normalizedValue + "'; allowed values are " + values);
+        }
+    }
+
+    private void validateEnumeratedTriggerRelation(String deviceName, String context, String attribute,
+                                                   String relation, String domainKind) {
+        if (!"=".equals(relation) && !"!=".equals(relation)) {
+            throw SmvGenerationException.templateInvalid(deviceName, context + " uses ordering relation '"
+                    + relation + "' on " + domainKind + " '" + attribute + "'; use = or !=");
         }
     }
 
@@ -386,10 +406,11 @@ public class SmvModelValidator {
         if (domain.getLowerBound() != null && domain.getUpperBound() != null) {
             final int numeric;
             try {
-                numeric = Integer.parseInt(value);
+                numeric = SmvIntegerLiteral.parse(value);
             } catch (NumberFormatException e) {
                 throw SmvGenerationException.templateInvalid(deviceName, context + " assigns non-integer '"
-                        + value + "' to numeric variable '" + assignment.getAttribute() + "'");
+                        + value + "' to numeric variable '" + assignment.getAttribute()
+                        + "'. Use digits 0-9 with an optional sign.");
             }
             if (numeric < domain.getLowerBound() || numeric > domain.getUpperBound()) {
                 throw SmvGenerationException.templateInvalid(deviceName, context + " assigns " + numeric
@@ -422,7 +443,7 @@ public class SmvModelValidator {
      */
     private Set<String> buildLegalAttributeSet(DeviceSmvData smv) {
         Set<String> attrs = new LinkedHashSet<>();
-        attrs.addAll(smv.getModes());
+        attrs.addAll(DeviceManifestModes.modeNames(smv.getManifest()));
         if (smv.getManifest().getInternalVariables() != null) {
             for (DeviceManifest.InternalVariable iv : smv.getManifest().getInternalVariables()) {
                 if (iv.getName() == null) continue;
@@ -439,64 +460,29 @@ public class SmvModelValidator {
 
     private void validateStartEndStates(DeviceSmvData smv) {
         DeviceManifest manifest = smv.getManifest();
-        boolean multiMode = smv.getModes().size() > 1;
-        int modeCount = smv.getModes().size();
+        List<String> modes = DeviceManifestModes.modeNames(manifest);
+        Map<String, List<String>> authoredStates = DeviceManifestModes.authoredModeStates(manifest);
 
         if (manifest.getApis() != null) {
             for (DeviceManifest.API api : manifest.getApis()) {
-                validateStateString(smv, api.getName(), "API", api.getStartState(), multiMode, modeCount, true);
-                validateStateString(smv, api.getName(), "API", api.getEndState(), multiMode, modeCount, false);
+                validateStateString(smv, api.getName(), "API", api.getStartState(), modes, authoredStates, true);
+                validateStateString(smv, api.getName(), "API", api.getEndState(), modes, authoredStates, false);
             }
         }
         if (manifest.getTransitions() != null) {
             for (DeviceManifest.Transition trans : manifest.getTransitions()) {
-                validateStateString(smv, trans.getName(), "Transition", trans.getStartState(), multiMode, modeCount, true);
-                validateStateString(smv, trans.getName(), "Transition", trans.getEndState(), multiMode, modeCount, false);
+                validateStateString(smv, trans.getName(), "Transition", trans.getStartState(), modes, authoredStates, true);
+                validateStateString(smv, trans.getName(), "Transition", trans.getEndState(), modes, authoredStates, false);
             }
         }
     }
 
     private void validateStateString(DeviceSmvData smv, String itemName, String itemType,
-                                     String stateStr, boolean multiMode, int modeCount, boolean isStartState) {
-        if (stateStr == null || stateStr.isBlank()) return;
-
-        // Special case: StartState="_" is a global wildcard for all modes
-        if (isStartState && stateStr.trim().equals("_")) return;
-
-        if (!multiMode) {
-            if (stateStr.contains(";")) {
-                throw SmvGenerationException.invalidStateFormat(smv.getVarName(), itemType, itemName, stateStr,
-                        "contains ';' but device is single-mode");
-            }
-            if (!smv.getModes().isEmpty()) {
-                String mode = smv.getModes().get(0);
-                String clean = isStartState ? DeviceSmvDataFactory.cleanStartState(stateStr)
-                                            : DeviceSmvDataFactory.cleanStateName(stateStr);
-                List<String> legal = smv.getModeStates().get(mode);
-                if (legal != null && !legal.isEmpty() && !clean.isEmpty() && !legal.contains(clean)) {
-                    throw SmvGenerationException.invalidStateFormat(smv.getVarName(), itemType, itemName, clean,
-                            "not in legal values " + legal + " for mode '" + mode + "'");
-                }
-            }
-        } else {
-            String[] parts = stateStr.split(";", -1);
-            if (parts.length != modeCount) {
-                throw SmvGenerationException.invalidStateFormat(smv.getVarName(), itemType, itemName, stateStr,
-                        parts.length + " segments, expected " + modeCount + " (modes=" + smv.getModes() + ")");
-            }
-            for (int i = 0; i < parts.length; i++) {
-                String rawSeg = parts[i].trim();
-                if (rawSeg.isEmpty()) continue;
-                // For StartState, "_" is treated as wildcard and skipped
-                if (isStartState && rawSeg.equals("_")) continue;
-                String seg = DeviceSmvDataFactory.cleanStateName(rawSeg);
-                String mode = smv.getModes().get(i);
-                List<String> legal = smv.getModeStates().get(mode);
-                if (legal != null && !legal.isEmpty() && !legal.contains(seg)) {
-                    throw SmvGenerationException.invalidStateFormat(smv.getVarName(), itemType, itemName, stateStr,
-                            "segment[" + i + "]='" + seg + "' not in legal values " + legal + " for mode '" + mode + "'");
-                }
-            }
+                                     String stateStr, List<String> modes, Map<String, List<String>> authoredStates,
+                                     boolean isStartState) {
+        String issue = DeviceManifestModes.endpointIssue(stateStr, modes, authoredStates, isStartState);
+        if (issue != null) {
+            throw SmvGenerationException.invalidStateFormat(smv.getVarName(), itemType, itemName, stateStr, issue);
         }
     }
 
@@ -510,13 +496,9 @@ public class SmvModelValidator {
             if (smv.getManifest() == null) continue;
             if (!entry.getKey().equals(smv.getVarName())) continue;
 
-            for (Map.Entry<String, DeviceManifest.InternalVariable> ev : smv.getEnvVariables().entrySet()) {
+            for (Map.Entry<String, DeviceManifest.InternalVariable> ev : smv.getSharedDeclarations().entrySet()) {
                 envSources.computeIfAbsent(ev.getKey().toLowerCase(Locale.ROOT), k -> new ArrayList<>())
-                        .add(new EnvVarSource(ev.getKey(), smv.getVarName(), "read", ev.getValue()));
-            }
-            for (Map.Entry<String, DeviceManifest.InternalVariable> ev : smv.getImpactedEnvironmentVariables().entrySet()) {
-                envSources.computeIfAbsent(ev.getKey().toLowerCase(Locale.ROOT), k -> new ArrayList<>())
-                        .add(new EnvVarSource(ev.getKey(), smv.getVarName(), "impact", ev.getValue()));
+                        .add(new EnvVarSource(ev.getKey(), smv.getVarName(), ev.getValue()));
             }
         }
 
@@ -601,8 +583,7 @@ public class SmvModelValidator {
         String mismatch = EnvironmentDomainUtils.incompatibility(a.var, b.var);
         if (mismatch != null) {
             throw SmvGenerationException.envVarConflict(varName,
-                    mismatch + ": device '" + a.device + "' (" + a.role + ") versus device '"
-                            + b.device + "' (" + b.role + ")");
+                    mismatch + ": device '" + a.device + "' versus device '" + b.device + "'");
         }
     }
 
@@ -714,8 +695,13 @@ public class SmvModelValidator {
                                         String context,
                                         DeviceManifest.InternalVariable variable,
                                         boolean sharedEnvironment) {
-        if (variable.getLowerBound() != null && variable.getUpperBound() != null
-                && variable.getLowerBound() > variable.getUpperBound()) {
+        boolean numeric = variable.getLowerBound() != null && variable.getUpperBound() != null;
+        if (numeric && (variable.getLowerBound() < SmvIntegerLiteral.MIN_RANGE_BOUND
+                || variable.getUpperBound() < SmvIntegerLiteral.MIN_RANGE_BOUND)) {
+            throw SmvGenerationException.templateInvalid(deviceName, context + " must use integers from "
+                    + SmvIntegerLiteral.MIN_RANGE_BOUND + " to " + Integer.MAX_VALUE + " for LowerBound and UpperBound");
+        }
+        if (numeric && variable.getLowerBound() > variable.getUpperBound()) {
             throw SmvGenerationException.templateInvalid(deviceName, context + " has LowerBound "
                     + variable.getLowerBound() + " greater than UpperBound " + variable.getUpperBound());
         }
@@ -730,7 +716,6 @@ public class SmvModelValidator {
             }
         }
         String naturalRate = variable.getNaturalChangeRate();
-        boolean numeric = variable.getLowerBound() != null && variable.getUpperBound() != null;
         boolean hasRateDeclaration = naturalRate != null;
         if (numeric && sharedEnvironment && !hasRateDeclaration) {
             throw SmvGenerationException.templateInvalid(deviceName, context
@@ -780,12 +765,10 @@ public class SmvModelValidator {
     private static class EnvVarSource {
         final String name;
         final String device;
-        final String role;
         final DeviceManifest.InternalVariable var;
-        EnvVarSource(String name, String device, String role, DeviceManifest.InternalVariable var) {
+        EnvVarSource(String name, String device, DeviceManifest.InternalVariable var) {
             this.name = name;
             this.device = device;
-            this.role = role;
             this.var = var;
         }
     }

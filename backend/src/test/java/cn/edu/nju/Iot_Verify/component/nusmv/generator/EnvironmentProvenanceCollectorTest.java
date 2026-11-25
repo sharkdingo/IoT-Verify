@@ -19,9 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Provenance is the only thing that keeps a stored counterexample explainable after the Board
- * changes, and its {@code evolutionSummary} is shown to users verbatim. So a wrong rule here is
- * not a cosmetic defect: it tells the user their verdict follows a rule the verifier never used.
+ * Frozen provenance lets trace tools explain the ordinary update rules even after the Board changes.
  *
  * <p>These tests pin the classification against
  * {@code docs/architecture/shared-value-semantics.md} §7, and specifically guard the composed
@@ -61,6 +59,20 @@ class EnvironmentProvenanceCollectorTest {
         assertEquals("[-1, 1]", temperature.getNaturalChangeRate());
         assertEquals(15, temperature.getLowerBound());
         assertEquals(35, temperature.getUpperBound());
+    }
+
+    @Test
+    void theClockRateSummaryOnlyDescribesEvolutionOutsideItsReset() {
+        DeviceSmvData clock = numericSensor("clock_1", "Clock", "time", 0, 23, "1");
+        clock.getManifest().setTransitions(List.of(DeviceManifest.Transition.builder()
+                .name("reset")
+                .trigger(DeviceManifest.Trigger.builder().attribute("time").relation("=").value("23").build())
+                .assignments(List.of(DeviceManifest.Assignment.builder().attribute("time").value("0").build()))
+                .build()));
+
+        String summary = single(collect(clock)).getEvolutionSummary();
+        assertTrue(summary.contains("autonomous assignment"), summary);
+        assertFalse(summary.contains("no device control"), summary);
     }
 
     @Test

@@ -568,8 +568,11 @@ public class SmvGenerator {
             devices.size(), rules != null ? rules.size() : 0, specs != null ? specs.size() : 0,
             safeAttackScenario.isEnabled(), safeAttackScenario.effectiveBudget(), enablePrivacy);
 
+        AttackSurface attackSurface = AttackSurface.analyze(rules, deviceSmvMap);
+        Set<String> devicesWithAttackFlag = safeAttackScenario.isEnabled() ? attackSurface.deviceVarNames() : Set.of();
         // 前置校验：P1/P2/P3/P5 — 在生成 SMV 文本前检测模板数据不合法项
-        modelValidator.validate(deviceSmvMap);
+        modelValidator.validate(deviceSmvMap, rules != null ? rules.size() : 0, enablePrivacy,
+                safeAttackScenario.isEnabled(), devicesWithAttackFlag);
 
         // 前置校验：隐私规约需要 enablePrivacy=true
         if (!enablePrivacy && specs != null) {
@@ -580,13 +583,12 @@ public class SmvGenerator {
 
         content.append(ruleCommentWriter.build(rules));
 
-        AttackSurface attackSurface = AttackSurface.analyze(rules, deviceSmvMap);
         Set<String> generatedModules = new HashSet<>();
         for (DeviceVerificationDto device : devices) {
             DeviceSmvData smv = deviceSmvMap.get(device.getVarName());
             if (smv != null && generatedModules.add(smv.getModuleName())) {
                 content.append(deviceModuleBuilder.build(
-                        smv, deviceAttackActivation(safeAttackScenario, attackSurface, smv.getVarName()),
+                        smv, deviceAttackActivation(safeAttackScenario, devicesWithAttackFlag, smv.getVarName()),
                         enablePrivacy));
             }
         }
@@ -609,9 +611,9 @@ public class SmvGenerator {
     }
 
     private AttackActivation deviceAttackActivation(AttackScenarioDto attackScenario,
-                                                      AttackSurface attackSurface,
+                                                      Set<String> devicesWithAttackFlag,
                                                       String deviceId) {
-        if (!attackScenario.isEnabled() || !attackSurface.includesDevice(deviceId)) {
+        if (!devicesWithAttackFlag.contains(deviceId)) {
             return AttackActivation.DISABLED;
         }
         if (attackScenario.getMode() == AttackScenarioDto.Mode.ANY_UP_TO_BUDGET) {

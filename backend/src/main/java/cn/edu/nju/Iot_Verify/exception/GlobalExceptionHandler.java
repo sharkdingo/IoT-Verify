@@ -106,6 +106,14 @@ public class GlobalExceptionHandler {
                 .body(result);
     }
 
+    @ExceptionHandler(FixSuggestionStaleException.class)
+    public ResponseEntity<Result<Map<String, Object>>> handleFixSuggestionStaleException(FixSuggestionStaleException e) {
+        log.warn("Automatic-fix suggestion rejected as stale or invalid");
+        Result<Map<String, Object>> result = Result.badRequest(e.getMessage());
+        result.setData(Map.of("reasonCode", FixSuggestionStaleException.REASON_CODE));
+        return json(HttpStatus.BAD_REQUEST).body(result);
+    }
+
     @ExceptionHandler(UnauthorizedException.class)
     public ResponseEntity<Result<Void>> handleUnauthorizedException(UnauthorizedException e) {
         log.warn("Unauthorized: {}", e.getMessage());

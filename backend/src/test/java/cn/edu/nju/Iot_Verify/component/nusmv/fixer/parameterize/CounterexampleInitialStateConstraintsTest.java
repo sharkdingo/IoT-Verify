@@ -35,6 +35,7 @@ class CounterexampleInitialStateConstraintsTest {
         smv.getModeStates().put("Power", List.of("on", "off"));
         smv.setVariables(List.of(local, environment));
         smv.getEnvVariables().put("temperature", environment);
+        smv.getSharedDeclarations().put("temperature", environment);
 
         TraceVariableDto localTrace = variable("level", "7");
         localTrace.setTrust("trusted");

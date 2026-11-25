@@ -2,6 +2,7 @@ package cn.edu.nju.Iot_Verify.component.template;
 
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvGenerator;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvDataFactory;
+import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvNamespace;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
 import cn.edu.nju.Iot_Verify.dto.RequestLimits;
@@ -12,6 +13,7 @@ import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
 import cn.edu.nju.Iot_Verify.util.DeviceNameNormalizer;
 import cn.edu.nju.Iot_Verify.util.EnvironmentDomainUtils;
 import cn.edu.nju.Iot_Verify.util.NaturalChangeRateParser;
+import cn.edu.nju.Iot_Verify.util.SmvConstants;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -76,10 +78,11 @@ public class DeviceTemplateNuSmvValidator {
                 // 1. `a_` prefix collision — user declares `a_temperature`, generator prepends again → `a_a_temperature`
                 //    collides with another device's shared `temperature` whose pool is `a_temperature`.
                 //    Case-insensitive check (round 11): 'A_temp' normalizes to 'a_a_temp', same collision.
-                if (iv.getName().toLowerCase(Locale.ROOT).startsWith("a_")) {
+                if (iv.getName().toLowerCase(Locale.ROOT).startsWith(SmvConstants.ENVIRONMENT_POOL_PREFIX)) {
                     throw new BadRequestException(
                             "Template '" + templateName + "': InternalVariable name '" + iv.getName()
-                                    + "' must not start with 'a_' in any letter case (reserved for environment pool identifiers).");
+                            + "' must not start with '" + SmvConstants.ENVIRONMENT_POOL_PREFIX
+                            + "' in any letter case (reserved for environment pool identifiers).");
                 }
 
                 // 2. Reserved-word collision — a variable named `INIT` or `case` breaks SMV parse.
@@ -568,7 +571,9 @@ public class DeviceTemplateNuSmvValidator {
             }
         }
 
-        checkGeneratedSmvIdentifierCollisions(templateName, manifest, modes);
+        DeviceSmvNamespace.validate(manifest, reason ->
+                new BadRequestException("Template '" + templateName + "': " + reason));
+        validateModeDomainSizes(templateName, manifest);
         checkLocalEnumVariablesHaveDrivers(templateName, manifest);
     }
 
@@ -656,193 +661,17 @@ public class DeviceTemplateNuSmvValidator {
         return false;
     }
 
-    /**
-     * User-authored identifiers are literal, but the NuSMV backend derives extra
-     * variables in the same module namespace. Reject only concrete generated-name
-     * collisions; do not reserve broad prefixes such as trust_ or privacy_.
-     */
-    private void checkGeneratedSmvIdentifierCollisions(String templateName, DeviceManifest manifest, List<String> modes) {
-        Map<String, String> identifiers = new LinkedHashMap<>();
-
-        registerSmvIdentifier(templateName, identifiers, "is_attack", "generated attack flag");
-
-        for (String mode : modes) {
-            // The *rescued* token, because that is what `SmvDeviceModuleBuilder.appendModeVariables`
-            // declares. `2e2b1e4` made this correction for the `trust_<mode>_<state>` leg below and left
-            // this one on `replace(" ", "")`, so two modes that differ only before rescue — `next` and
-            // `_next`, which `sanitizeSmvToken` folds to one token — registered as distinct here and then
-            // emitted the same identifier twice: `multiple declaration of identifier: _next`.
-            //
-            // Found by the property probe, not by reading: `ManifestAdmissionParsesInNuSmvPropertyTest`
-            // generates mode names from a pool of rescue-colliding tokens and parses each model with the
-            // real engine.
-            String emitted = mode == null ? "" : DeviceSmvDataFactory.sanitizeSmvToken(mode);
-            registerSmvIdentifier(templateName, identifiers, emitted, "mode '" + mode + "'");
-        }
-
-        // A state name is emitted as an enum constant inside some mode's domain, and NuSMV keeps constants
-        // and variables in one module namespace. So a mode whose rescued token equals any rescued state name
-        // declares the same identifier twice. Measured on 2.7.1:
-        //
-        //     FanMode: {_next, idle};   _next: {on, auto};
-        //       line 4: multiple declaration of identifier: _next        (exit 1)
-        //
-        // Checked one-way against a de-duplicated set rather than registered into `identifiers`, because two
-        // *modes* legitimately share a state name — the bundled `Thermostat` has `auto` in both
-        // `ThermostatFanMode` and `ThermostatMode`, and that model is accepted (verified). Registering state
-        // names would reject it.
-        //
-        // Found by `ManifestAdmissionParsesInNuSmvPropertyTest`: `2e2b1e4` closed mode-vs-mode and
-        // `trust_<mode>_<state>` collisions, and this namespace pair had no counterpart.
-        Set<String> emittedStateTokens = new LinkedHashSet<>();
-        for (List<String> states : DeviceManifestModes.modeStates(manifest).values()) {
-            if (states == null) {
-                continue;
-            }
-            for (String state : states) {
-                if (hasText(state)) {
-                    emittedStateTokens.add(DeviceSmvDataFactory.sanitizeSmvToken(state)
-                            .toLowerCase(Locale.ROOT));
-                }
-            }
-        }
-        for (String mode : modes) {
-            if (mode == null) {
-                continue;
-            }
-            String emitted = DeviceSmvDataFactory.sanitizeSmvToken(mode);
-            if (emittedStateTokens.contains(emitted.toLowerCase(Locale.ROOT))) {
+    private void validateModeDomainSizes(String templateName, DeviceManifest manifest) {
+        // NuSMV stores one-value variables as constants, which cannot be assigned an initial value.
+        DeviceManifestModes.modeStates(manifest).forEach((mode, states) -> {
+            if (states.size() == 1) {
                 throw new BadRequestException("Template '" + templateName + "': mode '" + mode
-                        + "' generates the NuSMV identifier '" + emitted + "', which is also a working-state "
-                        + "value. A mode variable and an enumeration constant share one namespace, so the "
-                        + "generated model would declare '" + emitted + "' twice and the engine would refuse "
-                        + "it. Rename the mode or the state.");
-            }
-        }
-
-        if (manifest.getInternalVariables() != null) {
-            for (DeviceManifest.InternalVariable iv : manifest.getInternalVariables()) {
-                if (iv == null) {
-                    continue;
-                }
-                String name = iv.getName() == null ? "" : iv.getName().replace(" ", "");
-                registerSmvIdentifier(templateName, identifiers, name, "InternalVariable '" + iv.getName() + "'");
-                registerSmvIdentifier(templateName, identifiers, "trust_" + name,
-                        "generated trust for InternalVariable '" + iv.getName() + "'");
-                registerSmvIdentifier(templateName, identifiers, "privacy_" + name,
-                        "generated privacy for InternalVariable '" + iv.getName() + "'");
-            }
-        }
-
-        Map<String, List<String>> modeStates = DeviceManifestModes.modeStates(manifest);
-        for (String mode : modes) {
-            List<String> states = modeStates.get(mode);
-            if (states == null) {
-                continue;
-            }
-            // A mode whose WorkingStates give it exactly one distinct value is a constant to NuSMV, and a
-            // constant cannot be initialised — the same engine limitation a single-value
-            // `InternalVariables` domain hits, one field over. Measured on 2.7.1:
-            //
-            //     VAR Power: {on};  ASSIGN init(Power) := on;
-            //       WARNING: single-value variable 'p_1.Power' has been stored as a constant
-            //       line 6: A variable is expected in left-hand-side of assignment      (exit 1)
-            //
-            // Reachable with entirely ordinary names: modes ["Power","Fan"] with states `on;low` and
-            // `on;high` gives `Power` the single value `on`. Found by a property probe that generated
-            // manifests and parsed each with the real engine, not by reading — the field-by-field
-            // approach had closed the variable-domain case and missed this one.
-            //
-            // No bundled template has this shape (all 45 scanned), so nothing that ships is refused.
-            Set<String> distinctStates = new LinkedHashSet<>(states);
-            if (distinctStates.size() == 1) {
-                throw new BadRequestException("Template '" + templateName + "': mode '" + mode
-                        + "' has only one distinct working state ('" + distinctStates.iterator().next()
+                        + "' has only one distinct working state ('" + states.get(0)
                         + "'). NuSMV stores a single-value mode as a constant, which cannot be assigned an "
                         + "initial value, so the generated model would be rejected by the engine. Give "
                         + "this mode at least two states, or remove it.");
             }
-            // The mode leg must be the *rescued* token, because that is what the generator emits:
-            // `DeviceSmvDataFactory.extractModes` stores `sanitizeSmvToken(rawMode)` and
-            // `SmvDeviceModuleBuilder.appendStatePropertyVariables` builds `trust_<mode>_<state>` from
-            // that. `DeviceManifestModes.modeNames` only trims, so this comparison used the pre-rescue
-            // name and could not see a collision against the post-rescue one.
-            //
-            // Measured: mode `Next` passes the schema (its reserved-word enum is case-*sensitive*) while
-            // `sanitizeSmvToken` rejects case-*insensitively* and rescues to `_Next`. A template with
-            // that mode plus an InternalVariable named `trust__Next_cold` was admitted here, emitted
-            // `trust__Next_cold` twice, and NuSMV refused the model with
-            // `multiple declaration of identifier`. The control — mode `Power`, needing no rescue — was
-            // correctly rejected, so the rescue was the whole difference.
-            //
-            // The state leg already sanitises (`DeviceManifestModes.modeStates` routes each segment
-            // through `cleanStateName`), which is why only the mode component was wrong. This is also
-            // the other half of the fix documented above `generatedToken`: that one routed
-            // *mode-uniqueness* through the emitted token and left this registration on raw names.
-            String emittedMode = DeviceSmvDataFactory.sanitizeSmvToken(mode);
-            for (String state : states) {
-                String suffix = emittedMode + "_" + state;
-                registerSmvIdentifier(templateName, identifiers, "trust_" + suffix,
-                        "generated trust for state '" + suffix + "'");
-                registerSmvIdentifier(templateName, identifiers, "privacy_" + suffix,
-                        "generated privacy for state '" + suffix + "'");
-            }
-        }
-
-        if (manifest.getImpactedVariables() != null) {
-            for (String impacted : manifest.getImpactedVariables()) {
-                if (isNumericTemplateVariable(manifest, impacted)) {
-                    registerSmvIdentifier(templateName, identifiers, impacted + "_rate",
-                            "generated rate for ImpactedVariable '" + impacted + "'");
-                }
-            }
-        }
-
-        if (manifest.getApis() != null) {
-            for (DeviceManifest.API api : manifest.getApis()) {
-                if (api != null && Boolean.TRUE.equals(api.getSignal())) {
-                    registerSmvIdentifier(templateName, identifiers,
-                            DeviceSmvDataFactory.formatApiSignalName(api.getName()),
-                            "generated signal for API '" + api.getName() + "'");
-                }
-            }
-        }
-
-        if (manifest.getContents() != null) {
-            for (DeviceManifest.Content content : manifest.getContents()) {
-                if (content != null && hasText(content.getName())) {
-                    registerSmvIdentifier(templateName, identifiers, "privacy_" + content.getName(),
-                            "generated privacy for Content '" + content.getName() + "'");
-                }
-            }
-        }
-    }
-
-    private void registerSmvIdentifier(String templateName,
-                                       Map<String, String> identifiers,
-                                       String rawIdentifier,
-                                       String source) {
-        if (!hasText(rawIdentifier)) {
-            return;
-        }
-        String identifier = rawIdentifier.trim();
-        String normalized = identifier.toLowerCase(Locale.ROOT);
-        String previous = identifiers.putIfAbsent(normalized, source);
-        if (previous != null) {
-            throw new BadRequestException("Template '" + templateName
-                    + "': generated NuSMV identifier '" + identifier
-                    + "' from " + source + " collides with " + previous
-                    + ". Rename the user-authored item so generated internals do not share a namespace.");
-        }
-    }
-
-    private boolean isNumericTemplateVariable(DeviceManifest manifest, String rawName) {
-        if (!hasText(rawName) || manifest == null) {
-            return false;
-        }
-        DeviceManifest.InternalVariable domain =
-                EnvironmentDomainUtils.resolveImpactDomain(manifest, rawName.trim());
-        return domain != null && domain.getLowerBound() != null && domain.getUpperBound() != null;
+        });
     }
 
     /**

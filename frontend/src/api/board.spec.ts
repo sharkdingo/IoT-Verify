@@ -251,12 +251,24 @@ const completeTemplateResetPreview = () => ({
   blockers: [],
   environmentChanges: [],
   currentTemplates: [template],
+  currentNodes: [device],
   environmentVariables: []
 })
 
 describe('board mutation response contracts', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+  })
+
+  it('preserves the current modeling version and rejects a missing or historical version in board comparison', async () => {
+    const fingerprints = { verification: 'a'.repeat(64), simulation: 'b'.repeat(64) }
+    vi.mocked(http.get)
+      .mockResolvedValueOnce(resultEnvelope({ ...fingerprints, modelSemanticsVersion: 2 }))
+      .mockResolvedValueOnce(resultEnvelope(fingerprints))
+      .mockResolvedValueOnce(resultEnvelope({ ...fingerprints, modelSemanticsVersion: 0 }))
+    await expect(boardApi.getModelFingerprints()).resolves.toEqual({ ...fingerprints, modelSemanticsVersion: 2 })
+    await expect(boardApi.getModelFingerprints()).rejects.toMatchObject({ code: BOARD_RESPONSE_INCOMPLETE_CODE })
+    await expect(boardApi.getModelFingerprints()).rejects.toMatchObject({ code: BOARD_RESPONSE_INCOMPLETE_CODE })
   })
 
   it('pins a layout save to the initiating session token', async () => {
@@ -1876,6 +1888,24 @@ describe('board mutation response contracts', () => {
     await expect(boardApi.previewDefaultTemplateReset()).resolves.toEqual(completeTemplateResetPreview())
   })
 
+  it('rejects a reset receipt with an undisclosed value on an affected device', async () => {
+    const response = {
+      ...completeTemplateResetPreview(),
+      operation: 'reset',
+      affectedDevices: [{
+        deviceId: device.id,
+        deviceLabel: device.label,
+        templateName: device.templateName,
+        runtimeChanges: [{ field: 'STATE', currentValue: 'on' }]
+      }]
+    }
+    vi.mocked(http.post).mockResolvedValue(resultEnvelope(response))
+
+    await expect(boardApi.resetDefaultTemplates('reset-impact-token')).rejects.toMatchObject({
+      code: BOARD_RESPONSE_INCOMPLETE_CODE
+    })
+  })
+
   it('rejects a reset preview containing a null environment value', async () => {
     const response = {
       ...completeTemplateResetPreview(),
@@ -1951,6 +1981,15 @@ describe('board mutation response contracts', () => {
     await expect(boardApi.resetDefaultTemplates('reset-impact-token')).resolves.toEqual(response)
   })
 
+  it('rejects a reset preview or receipt without authoritative devices', async () => {
+    const { currentNodes: _nodes, ...preview } = completeTemplateResetPreview()
+    vi.mocked(http.get).mockResolvedValue(resultEnvelope(preview))
+    vi.mocked(http.post).mockResolvedValue(resultEnvelope({ ...preview, operation: 'reset' }))
+
+    await expect(boardApi.previewDefaultTemplateReset()).rejects.toMatchObject({ code: BOARD_RESPONSE_INCOMPLETE_CODE })
+    await expect(boardApi.resetDefaultTemplates('reset-impact-token')).rejects.toMatchObject({ code: BOARD_RESPONSE_INCOMPLETE_CODE })
+  })
+
   it('rejects a committed reset for a different confirmed impact token', async () => {
     vi.mocked(http.post).mockResolvedValue(resultEnvelope({
       ...completeTemplateResetPreview(),
@@ -2000,7 +2039,8 @@ describe('board mutation response contracts', () => {
     })
   })
 
-  it('maps the authoritative automatic-fix rule snapshot into Board rules', async () => {
+  it('maps the authoritative automatic-fix rules without rewriting wildcard membership operands', async () => {
+    const stateSet = 'Case;_ | ;_Case'
     vi.mocked(http.post).mockResolvedValue(resultEnvelope({
       applied: true,
       strategy: 'remove',
@@ -2024,6 +2064,10 @@ describe('board mutation response contracts', () => {
           deviceName: 'sensor_1',
           attribute: 'motion',
           targetType: 'api'
+        }, {
+          deviceName: 'light_1', attribute: 'state', targetType: 'state', relation: 'IN', value: stateSet
+        }, {
+          deviceName: 'light_1', attribute: 'state', targetType: 'state', relation: 'NOT_IN', value: 'ready;_ | slow heat;'
         }],
         command: {
           deviceName: 'light_1',
@@ -2048,7 +2092,12 @@ describe('board mutation response contracts', () => {
     expect(result.rules).toEqual([expect.objectContaining({
       id: '9',
       name: 'Motion turns on the light',
-      toId: 'light_1'
+      toId: 'light_1',
+      sources: [
+        expect.objectContaining({ fromId: 'sensor_1', fromApi: 'motion', itemType: 'api' }),
+        { fromId: 'light_1', fromApi: 'state', itemType: 'state', relation: 'in', value: stateSet },
+        { fromId: 'light_1', fromApi: 'state', itemType: 'state', relation: 'not in', value: 'ready;_ | slow heat;' }
+      ]
     })])
   })
 

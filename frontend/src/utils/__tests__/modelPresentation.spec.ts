@@ -9,11 +9,12 @@ import { buildSpecFormulaPreview } from '../spec'
 
 const node: DeviceNode = { id: 'light', label: 'Desk light', templateName: 'Light', state: 'off',
   position: { x: 0, y: 0 }, width: 176, height: 128 }
+const formulaContext = { nodes: [node], modeCount: () => 1 }
 const context = () => ({
   t: i18n.global.t,
   resolveDevice: (id: string) => id === node.id ? node : undefined,
   formatToken: (_id: string, value: unknown) => formatBuiltInModelToken(value, i18n.global.t),
-  modeCount: () => 1
+  modeCount: formulaContext.modeCount
 })
 const condition = (overrides: Partial<SpecCondition> = {}): SpecCondition => ({
   id: 'condition', side: 'a', deviceId: node.id, deviceLabel: 'Old light name',
@@ -40,7 +41,7 @@ describe('shared model explanations', () => {
     for (const [relation, value, formulaTerm, descriptionTerm] of cases) {
       const spec = specification('1')
       spec.aConditions = [condition({ targetType: 'api', key: 'on', relation, value })]
-      expect(buildSpecFormulaPreview(spec, { nodes: [node] }).expression)
+      expect(buildSpecFormulaPreview(spec, formulaContext).expression)
         .toBe(`AG(actionEvent("Desk light", "on") ${formulaTerm})`)
       expect(describeSpecification(spec, context())).toContain(descriptionTerm)
     }
@@ -99,7 +100,7 @@ describe('shared model explanations', () => {
       expect(description).toContain(words[index])
       expect(description).toContain('Desk light')
       expect(description).not.toContain('Old light name')
-      const preview = buildSpecFormulaPreview(spec, { nodes: [node] })
+      const preview = buildSpecFormulaPreview(spec, formulaContext)
       expect(preview.kind).toBe(index === 5 ? 'LTL' : 'CTL')
       expect(preview.expression).not.toMatch(/^(CTL|LTL) /)
       expect(preview.expression).toContain('"Desk light".state')
@@ -115,7 +116,7 @@ describe('shared model explanations', () => {
     expect(describeSpecification(spec, context())).toContain('the Temperature Desk light reports')
     delete spec.aConditions[0].variableSource
     expect(describeSpecification(spec, context())).toContain('which value it means is not chosen yet')
-    expect(buildSpecFormulaPreview(spec, { nodes: [node] }).expression).toContain('<unresolved>')
+    expect(buildSpecFormulaPreview(spec, formulaContext).expression).toContain('<unresolved>')
   })
 
   it('localizes set values individually and preserves all simultaneous conditions', () => {
@@ -146,8 +147,8 @@ describe('shared model explanations', () => {
     const response = specification('5')
     response.thenConditions = [condition({ side: 'then' })]
     const immediate: Specification = { ...response, templateId: '4' }
-    expect(buildSpecFormulaPreview(response, { nodes: [node] }).expression).toContain('-> AF(')
-    expect(buildSpecFormulaPreview(immediate, { nodes: [node] }).expression).toContain('-> AX(')
+    expect(buildSpecFormulaPreview(response, formulaContext).expression).toContain('-> AF(')
+    expect(buildSpecFormulaPreview(immediate, formulaContext).expression).toContain('-> AX(')
     expect(describeSpecification(response, context())).toContain(locale === 'en' ? 'same state' : '同一状态')
     expect(i18n.global.t('app.specTemplates.response.description')).toContain(locale === 'en' ? 'same state' : '同一状态')
     expect(describeSpecification(immediate, context())).toContain(locale === 'en' ? 'next state' : '下一状态')
@@ -158,7 +159,7 @@ describe('shared model explanations', () => {
     i18n.global.locale.value = locale
     const spec = specification('7')
     spec.aConditions.push(condition({ targetType: 'variable', variableSource: 'environment', key: 'temperature', relation: '>', value: '25' }))
-    const formula = buildSpecFormulaPreview(spec, { nodes: [node] }).expression
+    const formula = buildSpecFormulaPreview(spec, formulaContext).expression
     // All protected conditions must hold, but a single untrusted source suffices for the violation.
     expect(formula).toContain(' AND Environment.')
     expect(formula).toContain('controlSource("Desk light".state) = untrusted OR controlSource("Desk light"."temperature") = untrusted')

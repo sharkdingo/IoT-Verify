@@ -5,6 +5,7 @@ import cn.edu.nju.Iot_Verify.component.fuzz.FuzzInputEventSource;
 import cn.edu.nju.Iot_Verify.component.fuzz.FuzzLimitationContract;
 import cn.edu.nju.Iot_Verify.component.fuzz.FuzzMetadataPolicy;
 import cn.edu.nju.Iot_Verify.util.ModelFingerprint;
+import cn.edu.nju.Iot_Verify.util.PersistedModelContextIntegrity;
 import cn.edu.nju.Iot_Verify.component.fuzz.FuzzModelInputSnapshotCodec;
 import cn.edu.nju.Iot_Verify.dto.RequestLimits;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
@@ -439,20 +440,16 @@ public class FuzzMapper {
     }
 
     private ModelRunSnapshotDto readModelSnapshot(FuzzTaskPo task) {
-        ModelRunSnapshotDto snapshot = JsonUtils.readPersistedJsonRequired(
-                "FuzzTask", task.getId(), "modelSnapshotJson",
-                task.getModelSnapshotJson(), () -> JsonUtils.fromJson(
-                        task.getModelSnapshotJson(), ModelRunSnapshotDto.class));
-        requireModelSnapshotShape(task.getId(), snapshot);
-        return snapshot;
+        return readModelSnapshot(task.getId(), task.getModelSnapshotJson());
     }
 
     private ModelRunSnapshotDto readModelSnapshot(FuzzTaskSummaryProjection task) {
-        ModelRunSnapshotDto snapshot = JsonUtils.readPersistedJsonRequired(
-                "FuzzTask", task.getId(), "modelSnapshotJson",
-                task.getModelSnapshotJson(), () -> JsonUtils.fromJson(
-                        task.getModelSnapshotJson(), ModelRunSnapshotDto.class));
-        requireModelSnapshotShape(task.getId(), snapshot);
+        return readModelSnapshot(task.getId(), task.getModelSnapshotJson());
+    }
+
+    private ModelRunSnapshotDto readModelSnapshot(Long taskId, String snapshotJson) {
+        ModelRunSnapshotDto snapshot = PersistedModelContextIntegrity.readSnapshot("FuzzTask", taskId, snapshotJson);
+        requireModelSnapshotShape(taskId, snapshot);
         return snapshot;
     }
 

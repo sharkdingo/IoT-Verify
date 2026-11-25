@@ -1,5 +1,6 @@
 package cn.edu.nju.Iot_Verify.component.aitool.verification;
 
+import cn.edu.nju.Iot_Verify.dto.model.ModelSemanticsVersion;
 import cn.edu.nju.Iot_Verify.component.ai.model.LlmToolSpec;
 import cn.edu.nju.Iot_Verify.component.aitool.AbstractAiTool;
 import cn.edu.nju.Iot_Verify.component.aitool.ModelTraceToolPresenter;
@@ -50,7 +51,9 @@ public class GetTraceTool extends AbstractAiTool {
         );
 
         return LlmToolSpec.of(getName(),
-                "Get a saved verification trace by traceId with a bounded state window. The default value view includes every device state, variable, environment value, compromised flag and loop boundary; use it for trigger timing and liveness analysis. Each state begins with valueSnapshot, a small same-state view of device states and shared environment values. Read it with stateIndex and make a compact table before explaining temporal causes; never merge changes from different indices or infer duration from one snapshot. Full variables, reported readings and labels remain in the detailed fields. Set includePropertyLabels=true only when inspecting state/content source or sensitivity labels, not merely a state/value prohibition; propertyLabelsIncluded identifies the view. In the label view, propertyLabelsFromStateIndex reuses the identical trust/privacy lists for the same device and mode in that earlier state of this returned page. Changed labels and every page's first state carry full lists; resolve references before interpreting labels. changesFromPreviousState gives exact observed changes from the named predecessor. When hasMoreStates is true, read nextStateOffset before claiming a full trajectory or explaining a liveness cycle. loopStart and loopBack mark an infinite cycle; for liveness specifications (templateId 2, 5, 6) the cycle itself is the violation. loopBack repeats loopStart, not necessarily its preceding state. Rely on the flags rather than value comparison; neither a one-state nor a longer cycle is a truncated path.",
+                "Get a saved verification trace by traceId with a bounded state window. The default value view includes every device state, variable, environment value, compromised flag and loop boundary; use it for trigger timing and liveness analysis. Each state begins with valueSnapshot, a small same-state view of device states and shared environment values. Read it with stateIndex and make a compact table before explaining temporal causes; never merge changes from different indices or infer duration from one snapshot. Full variables, reported readings and labels remain in the detailed fields. Set includePropertyLabels=true only when inspecting state/content source or sensitivity labels, not merely a state/value prohibition; propertyLabelsIncluded identifies the view. In the label view, propertyLabelsFromStateIndex reuses the identical trust/privacy lists for the same device and mode in that earlier state of this returned page. Changed labels and every page's first state carry full lists; resolve references before interpreting labels. changesFromPreviousState gives exact observed changes from the named predecessor. When hasMoreStates is true, read nextStateOffset before claiming a full trajectory or explaining a liveness cycle. loopStart and loopBack mark an infinite cycle; for liveness specifications (templateId 2, 5, 6) the cycle itself is the violation. loopBack repeats loopStart, not necessarily its preceding state. Rely on the flags rather than value comparison; neither a one-state nor a longer cycle is a truncated path. "
+                        + ModelTraceToolPresenter.ENVIRONMENT_PROVENANCE_GUIDANCE + " "
+                        + VerificationToolPresenter.MODEL_COMPARISON_GUIDANCE,
                 schema);
     }
 
@@ -90,6 +93,7 @@ public class GetTraceTool extends AbstractAiTool {
             body.put("enablePrivacy", trace.getEnablePrivacy());
             body.put("modelSemantics", trace.getModelSemantics());
             body.put("modelSnapshot", trace.getModelSnapshot());
+            body.put("modelSemanticsCurrent", ModelSemanticsVersion.isCurrent(trace.getModelSnapshot()));
             body.put("createdAt", trace.getCreatedAt());
             String message = Boolean.FALSE.equals(trace.getModelComplete())
                     ? "Counterexample trace loaded, but its source verification used an incomplete generated model."

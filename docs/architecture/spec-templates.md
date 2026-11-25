@@ -146,13 +146,15 @@ device state. The editor offers **occurred** (`TRUE`) and **did not occur** (`FA
 including equality, inequality and set membership. Editing preserves the selected
 comparison and values. Frontend natural-language explanations and both client/server
 formula previews retain that comparison, including negative and two-value set conditions.
+Both formula previews preserve the case of declared enum values in scalar and set comparisons.
 Template `7` still requires API conditions to use `= TRUE`, because it protects the
 event that occurred. Pulse generation is defined in [nusmv-model.md](nusmv-model.md#rule-semantics).
 
 API-set identity ignores Boolean case, list separators and member order in both frontend
 and backend comparisons. Changing only `false | true` to `TRUE, FALSE` therefore does not
 change the check target or create a distinct specification. Different members and operators
-remain distinct; repeated conditions still participate in authored identity.
+remain distinct. Verification emits accepted API Boolean literals as NuSMV `TRUE` and `FALSE`.
+Repeated conditions still participate in authored identity.
 
 Frontend property references, value domains, operator eligibility and domain validation belong
 to `specConditionDomain.ts`. Its functions receive a condition, a manifest and a template ID;
@@ -165,10 +167,14 @@ cannot retain an ordering operator after its declaration becomes an enum, and a 
 variable cannot retain an environment-value condition after a declaration change. Invalid
 saved draft rows block submission without changing the author's selected predicate.
 
-Conditions in a group are joined with `&`. `IN` / `NOT_IN` take a set value: enum-like
-mode/variable/API/trust/privacy values may be comma-, semicolon-, or pipe-separated,
-while multi-mode `state` values use semicolon inside each tuple and therefore separate
-tuples with comma or pipe (`home;idle,sleep;idle`). `deviceId` is the canonical model
+Conditions in a group are joined with `&`. `IN` matches any candidate and `NOT_IN`
+matches only when none of the candidates matches. Single-mode state and enum-like
+mode/variable/API/trust/privacy values may be comma-, semicolon-, or pipe-separated.
+In a multi-mode state condition, semicolons keep tuple positions and commas or pipes
+separate candidates. For example, `home;_, ;idle` matches when the first mode is
+`home` or the second mode is `idle`, including when both match. The Board and
+verification previews use the device's mode count to format the same set.
+`deviceId` is the canonical model
 `varName` derived from the board node id; display labels and template names are not
 identity fallbacks.
 

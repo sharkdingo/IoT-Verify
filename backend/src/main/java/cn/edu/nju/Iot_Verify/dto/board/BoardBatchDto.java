@@ -30,28 +30,15 @@ import java.util.List;
  * "patch the supplied collections and preserve the omitted ones".</p>
  *
  * <p>The opaque {@code impactToken} binds the destructive command to the exact current board
- * preview that the user confirmed. Supplying {@code templateSnapshots} makes the replacement
- * self-contained: every referenced template must have exactly one matching snapshot;
- * every environment variable required by the snapshots must have an explicit non-blank value,
- * trust, and privacy.
- * Every submitted node template must have exactly a matching snapshot, unreferenced snapshots are
- * rejected, existing templates must have the same manifest, and missing templates are created in the
- * same transaction. The response reports templates created in {@code createdTemplates}.</p>
+ * preview that the user confirmed. Each referenced template must have exactly one snapshot.
+ * Existing templates must have the same manifest and missing templates are created in the same
+ * transaction. Each required environment variable must have a value, trust, and privacy.
+ * The response reports templates created in {@code createdTemplates}.</p>
  */
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
 public class BoardBatchDto {
-
-    public BoardBatchDto(
-            List<@Valid @NotNull(message = "Node item cannot be null") DeviceNodeDto> nodes,
-            List<@Valid @NotNull(message = "Rule item cannot be null") RuleDto> rules,
-            List<@Valid @NotNull(message = "Specification item cannot be null") SpecificationDto> specs) {
-        this.nodes = nodes;
-        this.environmentVariables = List.of();
-        this.rules = rules;
-        this.specs = specs;
-    }
 
     public BoardBatchDto(
             List<@Valid @NotNull(message = "Node item cannot be null") DeviceNodeDto> nodes,

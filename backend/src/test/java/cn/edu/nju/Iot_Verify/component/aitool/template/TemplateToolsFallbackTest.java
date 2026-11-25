@@ -368,6 +368,18 @@ class TemplateToolsFallbackTest {
     }
 
     @Test
+    void addTemplate_guidesModelToUseCaseSensitiveEnumValues() {
+        AddTemplateTool tool = new AddTemplateTool(boardStorageService, objectMapper, deviceTemplateSchemaValidator);
+
+        JsonNode manifest = objectMapper.valueToTree(tool.getDefinition().parameters().properties.get("manifest"));
+        String guidance = manifest.path("description").asText();
+
+        assertTrue(guidance.contains("case-sensitive enum tokens"));
+        assertTrue(guidance.contains("[on, off]"));
+        assertFalse(guidance.contains("[TRUE,FALSE]"));
+    }
+
+    @Test
     void addTemplate_invalidJsonArgs_shouldReturnValidationError() throws Exception {
         AddTemplateTool tool = new AddTemplateTool(boardStorageService, objectMapper, deviceTemplateSchemaValidator);
         tool.initTolerantMapper();

@@ -396,6 +396,9 @@ Non-exhaustive:
   the range boundaries.
   The canvas may hold `Working` as a stateless rendering placeholder, but version 6 export
   omits it together with current-state trust/privacy; import restores it only internally.
+  Export and import check device initial states against the modes in their template snapshots.
+  If export stops on an unsupported state, open the named device and save a supported initial
+  state before downloading. If import stops, correct the reported `devices[].state` field in the file.
   Specification `templateLabel`, formula/device caches, and condition display metadata
   are excluded and rebuilt from `templateId` plus conditions. The environment pool is
   exact: every variable required by the referenced templates must appear once with
@@ -984,8 +987,8 @@ before DTO mapping, so schema violations return a `400` instead of being silentl
 ignored. Every `InternalVariables[]` item must explicitly set `IsInside` and
 `FalsifiableWhenCompromised`; `IsInside=true` is device-local and `false` is scene-shared,
 and omission is rejected rather than silently selecting shared scope. Each variable also
-declares `Values` (including `TRUE/FALSE` for booleans) or complete numeric bounds; an
-omitted domain is invalid. `FalsifiableWhenCompromised` controls whether a compromised
+declares a domain according to the [device template contract](../api/board.md#devicetemplatedto).
+`FalsifiableWhenCompromised` controls whether a compromised
 instance may falsify that reading within its declared domain. API presence is not a
 sensor/actuator classifier.
 

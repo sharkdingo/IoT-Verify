@@ -16,9 +16,8 @@ import java.util.Map;
 /**
  * Collects per-value semantic provenance for environment variables at model generation time.
  *
- * <p>This metadata makes historical counterexamples self-explanatory: every transition can be
- * attributed to either a user declaration or a disclosed abstraction, without consulting the
- * current Board.
+ * <p>This metadata captures the run's ordinary evolution rules. It does not record which
+ * transition, including an autonomous assignment, produced a particular value change.
  */
 @Slf4j
 @Component
@@ -229,19 +228,17 @@ public class EnvironmentProvenanceCollector {
             EnvironmentValueProvenanceDto.AuthorshipCategory authorship,
             List<EnvironmentValueProvenanceDto.DeviceWriter> writers) {
 
-        StringBuilder sb = new StringBuilder();
+        StringBuilder sb = new StringBuilder("Ordinary evolution applies when no autonomous assignment is active. ");
 
         switch (authorship) {
             case EXOGENOUS:
                 if (domain.isDiscrete()) {
-                    sb.append("External input with no device control. ");
                     sb.append("May change to any declared value each step (deliberate conservative abstraction).");
                 } else {
-                    sb.append("External input with no device control. ");
                     if (domain.naturalChangeRate != null && !domain.naturalChangeRate.isBlank()) {
                         sb.append("Evolves naturally (").append(domain.naturalChangeRate).append(").");
                     } else {
-                        sb.append("Holds its value when no external cause applies.");
+                        sb.append("Holds its value.");
                     }
                 }
                 break;

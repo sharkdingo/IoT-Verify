@@ -5,13 +5,14 @@ import { reactive, computed, watch, ref, nextTick, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAuth } from '@/stores/auth'
 import type { DeviceNode } from '../types/node'
-import type { DeviceManifest, DeviceTemplate } from '../types/device'
+import type { DeviceTemplate } from '../types/device'
 import type { RuleForm, RuleSourceItemType } from '../types/rule'
 import boardApi, { type DuplicateRuleCheckResult } from '../api/board'
 import { duplicateRuleReasonKey, ruleSimilarityReasonKey } from '@/utils/rule'
 import { REQUEST_LIMITS } from '@/constants/requestLimits'
 import { formatBuiltInModelToken } from '@/utils/modelTokenDisplay'
 import { validateNumericConditionValue } from '@/utils/deviceRuntime'
+import { getModeStateValues, getStateConditionOptions, splitConditionValueList } from '@/utils/stateConditionDomain'
 import type { ApiErrorDetails } from '@/utils/userMessage'
 import FailureDetails from '@/components/FailureDetails.vue'
 import {
@@ -153,22 +154,8 @@ const formatTargetModelToken = (value: unknown) =>
 const formatContentModelToken = (value: unknown) =>
   formatTemplateModelToken(resolveDeviceNode(ruleData.contentDevice)?.templateName || '', value)
 
-const splitStateTuple = (stateName: string) =>
-  String(stateName || '').split(';').map(part => part.trim()).filter(Boolean)
-
 const uniqueStrings = (values: string[]) =>
   Array.from(new Set(values.filter(value => value !== '')))
-
-const getModeValues = (manifest: DeviceManifest, modeName: string): string[] => {
-  const modeIndex = (manifest.Modes || []).findIndex(mode => mode === modeName)
-  if (modeIndex < 0) return []
-
-  const values = (manifest.WorkingStates || [])
-    .map(state => splitStateTuple(state.Name)[modeIndex])
-    .filter(Boolean)
-
-  return uniqueStrings(values)
-}
 
 const getDeviceApis = (templateName: string, signalOnly = false): SourceOption[] => {
   const template = resolveDeviceTemplate(templateName)
@@ -225,7 +212,7 @@ const getDeviceModes = (templateName: string): SourceOption[] => {
   return manifest.Modes.map(mode => ({
     name: mode,
     type: 'mode' as const,
-    values: getModeValues(manifest, mode)
+    values: getModeStateValues(manifest, mode)
   }))
 }
 
@@ -280,6 +267,7 @@ const selectedTargetAcceptsContent = computed(() => {
 const currentSourceNode = computed(() =>
   currentSource.fromId ? resolveDeviceNode(currentSource.fromId) : undefined
 )
+const currentSourceManifest = computed(() => resolveDeviceTemplate(currentSourceNode.value?.templateName || '')?.manifest)
 
 const sourceItemTypeOptions = computed(() => {
   const templateName = currentSourceNode.value?.templateName || ''
@@ -314,7 +302,7 @@ const selectedSourceOption = computed(() =>
 )
 
 const selectedSourceVariable = computed(() => currentSource.itemType === 'variable'
-  ? resolveDeviceTemplate(currentSourceNode.value?.templateName || '')?.manifest?.InternalVariables
+  ? currentSourceManifest.value?.InternalVariables
     ?.find(variable => variable.Name === currentSource.fromApi)
   : undefined)
 
@@ -322,9 +310,16 @@ const sourceValueFailure = computed(() => selectedSourceVariable.value && curren
   ? validateNumericConditionValue(selectedSourceVariable.value, currentSource.value, currentSource.relation, t)
   : '')
 
+const ruleSourceOperands = (source: { value?: string; relation?: string }): string[] =>
+  source.relation === 'in' || source.relation === 'not in'
+    ? splitRuleValueList(source.value) : [source.value?.trim() || '']
+
 const currentValueOptions = computed(() => {
   if (currentSource.itemType === 'state') {
-    return filteredSourceItems.value.map((item: SourceOption) => item.name)
+    const original = editingSourceIndex.value === null ? undefined : ruleData.sources[editingSourceIndex.value]
+    const retained = original?.itemType === 'state' && original.fromId === currentSource.fromId
+      ? ruleSourceOperands(original) : []
+    return getStateConditionOptions(currentSourceManifest.value, [...retained, ...ruleSourceOperands(currentSource)])
   }
   return selectedSourceOption.value?.values || []
 })
@@ -333,14 +328,8 @@ const isSetRelation = computed(() =>
   currentSource.relation === 'in' || currentSource.relation === 'not in'
 )
 
-const splitRuleValueList = (value: unknown): string[] => {
-  if (!hasSourceValue(value)) return []
-  const delimiter = currentSource.itemType === 'state' ? /[,|]/ : /[,;|]/
-  return String(value)
-    .split(delimiter)
-    .map(part => part.trim())
-    .filter(Boolean)
-}
+const splitRuleValueList = (value: unknown): string[] => splitConditionValueList(value, currentSource.itemType,
+  currentSourceManifest.value?.Modes?.length)
 
 const currentSourceValueList = computed<string[]>({
   get: () => splitRuleValueList(currentSource.value),
@@ -374,6 +363,12 @@ const sourceDraftBlockedReason = computed(() => {
   if (isValueBasedSourceType(currentSource.itemType)) {
     if (!currentSource.relation || !currentSource.value.trim()) {
       return t(currentValueOptions.value.length ? 'app.selectValue' : 'app.enterValue')
+    }
+    if (currentSource.itemType === 'mode' || currentSource.itemType === 'state') {
+      const values = ruleSourceOperands(currentSource)
+      if (!values.length || values.some(value => !currentValueOptions.value.includes(value))) {
+        return t('app.specConditionValueUnavailable')
+      }
     }
     return sourceValueFailure.value
   }
@@ -518,12 +513,13 @@ const clearSourceDraft = () => {
 const editSource = (index: number) => {
   const source = ruleData.sources[index]
   if (!source) return
+  const value = source.value || ''
   Object.assign(currentSource, {
     fromId: source.fromId,
     itemType: source.itemType,
     fromApi: source.fromApi,
     relation: source.relation || '=',
-    value: source.value || ''
+    value: source.itemType === 'mode' || source.itemType === 'state' ? value.trim() : value
   })
   editingSourceIndex.value = index
   nextTick(() => document.getElementById('rule-source-device')?.focus())

@@ -18,8 +18,6 @@ import java.util.List;
 
 public interface FuzzService {
 
-    String getCurrentModelFingerprint(Long userId);
-
     FuzzPaperDomainPreviewDto previewPaperDomain(
             Long userId, FuzzPaperDomainPreviewRequestDto request);
 

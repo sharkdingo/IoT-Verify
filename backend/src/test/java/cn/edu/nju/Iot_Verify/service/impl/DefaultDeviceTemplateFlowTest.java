@@ -61,12 +61,10 @@ class DefaultDeviceTemplateFlowTest {
                     Map<String, DeviceSmvData> rawMap = generator.buildDeviceSmvMap(USER_ID, List.of(rawDevice));
                     List<BoardEnvironmentVariableDto> environment =
                             NusmvEnvironmentPool.mergeWithDefaults(List.of(), rawMap);
-                    List<DeviceVerificationDto> expanded =
-                            NusmvEnvironmentPool.expandDevices(List.of(rawDevice), environment, rawMap);
 
                     SmvGenerator.GenerateResult generated = generator.generateWithEnvironment(
                             USER_ID,
-                            expanded,
+                            List.of(rawDevice),
                             environment,
                             List.of(),
                             List.of(),
@@ -103,12 +101,11 @@ class DefaultDeviceTemplateFlowTest {
         List<BoardEnvironmentVariableDto> environment = NusmvEnvironmentPool.mergeWithDefaults(
                 List.of(new BoardEnvironmentVariableDto("temperature", "30", "trusted", "public")),
                 rawMap);
-        List<DeviceVerificationDto> expanded = NusmvEnvironmentPool.expandDevices(rawDevices, environment, rawMap);
         List<RuleDto> rules = List.of(rule(
                 condition("temp_sensor_1", "temperature", "variable", ">", "28"),
                 command("ac_1", "cool")));
 
-        String smv = generateSmv(generator, expanded, environment, rules);
+        String smv = generateSmv(generator, rawDevices, environment, rules);
 
         assertTrue(smv.contains("a_temperature: 0..100;"), smv);
         assertTrue(smv.contains("init(a_temperature) := 30;"), smv);
@@ -132,9 +129,8 @@ class DefaultDeviceTemplateFlowTest {
                 List.of(new BoardEnvironmentVariableDto("airQuality", "80", "trusted", "private"),
                         new BoardEnvironmentVariableDto("carbonDioxide", "70", "trusted", "private")),
                 rawMap);
-        List<DeviceVerificationDto> expanded = NusmvEnvironmentPool.expandDevices(rawDevices, environment, rawMap);
 
-        String smv = generateSmv(generator, expanded, environment, List.of());
+        String smv = generateSmv(generator, rawDevices, environment, List.of());
 
         assertTrue(smv.contains("a_airQuality: 0..100;"), smv);
         assertTrue(smv.contains("a_carbonDioxide: 0..100;"), smv);
@@ -156,9 +152,8 @@ class DefaultDeviceTemplateFlowTest {
         List<BoardEnvironmentVariableDto> environment = NusmvEnvironmentPool.mergeWithDefaults(
                 List.of(new BoardEnvironmentVariableDto("illuminance", "40", "trusted", "public")),
                 rawMap);
-        List<DeviceVerificationDto> expanded = NusmvEnvironmentPool.expandDevices(rawDevices, environment, rawMap);
 
-        String smv = generateSmv(generator, expanded, environment, List.of());
+        String smv = generateSmv(generator, rawDevices, environment, List.of());
 
         assertTrue(smv.contains("a_illuminance: 0..100;"), smv);
         // The sensor reads the shared value, so it gets a read mirror.

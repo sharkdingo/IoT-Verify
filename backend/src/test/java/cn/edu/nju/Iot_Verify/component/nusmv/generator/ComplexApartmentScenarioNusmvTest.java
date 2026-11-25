@@ -92,7 +92,7 @@ class ComplexApartmentScenarioNusmvTest {
         assertFalse(states.isEmpty(), "Counterexample should be parseable for animation/history replay");
         assertTrue(states.stream()
                 .flatMap(state -> state.getDevices().stream())
-                .anyMatch(device -> isState(device, "camera_1", "takingphoto")
+                .anyMatch(device -> isState(device, "camera_1", "taking photo")
                         || isState(device, "thermostat_1", "cool")));
     }
 

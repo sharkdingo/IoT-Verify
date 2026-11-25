@@ -1,11 +1,14 @@
 package cn.edu.nju.Iot_Verify.util;
 
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
+import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
+import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -21,11 +24,11 @@ class SpecificationFormulaPreviewTest {
     @Test
     void preservesApiBooleanComparisonsRatherThanAlwaysShowingThePositiveEvent() {
         String[][] cases = {
-                {"=", "TRUE", "= TRUE"},
+                {"=", "true", "= TRUE"},
                 {"=", "FALSE", "= FALSE"},
                 {"!=", "TRUE", "!= TRUE"},
                 {"!=", "FALSE", "!= FALSE"},
-                {"in", "FALSE|TRUE", "in {FALSE, TRUE}"},
+                {"in", "fAlSe|true", "in {FALSE, TRUE}"},
                 {"not in", "TRUE;FALSE", "not in {TRUE, FALSE}"}
         };
         for (String[] test : cases) {
@@ -39,6 +42,57 @@ class SpecificationFormulaPreviewTest {
             assertEquals("CTL AG(actionEvent(\"Hall sensor\", \"Open\") " + test[2] + ")",
                     SpecificationFormulaPreview.format(spec("1", condition), context()));
         }
+    }
+
+    @Test
+    void stateMembershipUsesTheModeCountInBoardAndFrozenRunPreviews() {
+        DeviceNodeDto node = new DeviceNodeDto();
+        node.setId("sensor_1");
+        node.setLabel("Hall sensor");
+        node.setTemplateName("Sensor");
+        DeviceVerificationDto device = new DeviceVerificationDto();
+        device.setVarName("sensor_1");
+        device.setDeviceLabel("Hall sensor");
+        device.setTemplateName("Sensor");
+        DeviceTemplateDto template = new DeviceTemplateDto();
+        template.setName("Sensor");
+        SpecConditionDto state = new SpecConditionDto();
+        state.setDeviceId("sensor_1");
+        state.setTargetType("state");
+        state.setKey("state");
+        state.setRelation("NOT_IN");
+        SpecificationDto spec = spec("1", state);
+
+        template.setManifest(DeviceTemplateDto.DeviceManifest.builder().modes(List.of("Power")).build());
+        state.setValue("night standby;Case");
+        String single = "CTL AG(\"Hall sensor\".state not in {\"night standby\", \"Case\"})";
+        assertEquals(single, SpecificationFormulaPreview.format(spec,
+                SpecificationFormulaPreview.context(List.of(node), List.of(template))));
+        assertEquals(single, SpecificationFormulaPreview.format(spec,
+                SpecificationFormulaPreview.modelContext(List.of(device), Map.of("Sensor", template.getManifest()))));
+
+        template.setManifest(DeviceTemplateDto.DeviceManifest.builder().modes(List.of("Power", "Fan")).build());
+        state.setValue("night standby;_|;Case");
+        String multi = "CTL AG(\"Hall sensor\".state not in {\"night standby;_\", \";Case\"})";
+        assertEquals(multi, SpecificationFormulaPreview.format(spec,
+                SpecificationFormulaPreview.context(List.of(node), List.of(template))));
+        assertEquals(multi, SpecificationFormulaPreview.format(spec,
+                SpecificationFormulaPreview.modelContext(List.of(device), Map.of("Sensor", template.getManifest()))));
+    }
+
+    @Test
+    void preservesTheCaseOfBooleanAndLabelLikeEnumLiterals() {
+        SpecConditionDto condition = variableCondition("environment");
+        condition.setKey("weather");
+        condition.setRelation("=");
+        condition.setValue("True");
+        assertEquals("CTL AG(Environment.\"weather\" = \"True\")",
+                SpecificationFormulaPreview.format(spec("1", condition), context()));
+
+        condition.setRelation("in");
+        condition.setValue("True|true|Private");
+        assertEquals("CTL AG(Environment.\"weather\" in {\"True\", \"true\", \"Private\"})",
+                SpecificationFormulaPreview.format(spec("1", condition), context()));
     }
 
     private static SpecificationFormulaPreview.Context context() {

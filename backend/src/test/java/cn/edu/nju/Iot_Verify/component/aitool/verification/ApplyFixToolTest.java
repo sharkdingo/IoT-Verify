@@ -12,6 +12,7 @@ import cn.edu.nju.Iot_Verify.dto.fix.PreferredRangeSelection;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.exception.BadRequestException;
 import cn.edu.nju.Iot_Verify.exception.FixApplyPreflightUnavailableException;
+import cn.edu.nju.Iot_Verify.exception.ModelSemanticsChangedException;
 import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
 import cn.edu.nju.Iot_Verify.security.UserContextHolder;
 import cn.edu.nju.Iot_Verify.po.ChatMessagePo;
@@ -49,6 +50,7 @@ import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -107,7 +109,7 @@ class ApplyFixToolTest {
         assertFalse(preview.path("suggestion").has("suggestionToken"));
         assertEquals(String.join(", ", suggestion.getRemovedRuleDescriptions()),
                 guard.pendingContext(7L, "apply-fix-session").orElseThrow().displayTarget());
-        verifyNoInteractions(fixService);
+        verifyPreviewReadOnly();
 
         when(fixService.applyFix(
                 eq(7L), eq(31L), eq("remove"), eq(suggestion),
@@ -164,7 +166,7 @@ class ApplyFixToolTest {
 
         assertEquals("preview", result.path("operation").asText());
         assertTrue(result.path("requiresUserConfirmation").asBoolean());
-        verifyNoInteractions(fixService);
+        verifyPreviewReadOnly();
     }
 
     @Test
@@ -219,6 +221,19 @@ class ApplyFixToolTest {
     }
 
     @Test
+    void preview_historicalTraceDoesNotCreateConfirmation() throws Exception {
+        FixSuggestionDto suggestion = signedPublicRemovalSuggestion();
+        doThrow(new ModelSemanticsChangedException()).when(fixService).requireCurrentVerificationSource(7L, 31L);
+
+        JsonNode result = objectMapper.readTree(tool.execute(previewArgs(suggestion).toString()));
+
+        assertEquals("MODEL_SEMANTICS_CHANGED", result.path("errorCode").asText());
+        assertEquals(409, result.path("status").asInt());
+        assertTrue(guard.pendingContext(7L, "apply-fix-session").isEmpty());
+        verifyPreviewReadOnly();
+    }
+
+    @Test
     void preview_serializationFailureClearsTheUndeliveredConfirmation() throws Exception {
         ObjectMapper failingMapper = spy(new ObjectMapper());
         JwtConfig jwtConfig = new JwtConfig();
@@ -244,7 +259,7 @@ class ApplyFixToolTest {
         assertTrue(Set.of("PREVIEW_RESULT_INVALID", "").contains(result.path("errorCode").asText()));
         assertFalse(result.path("mutationMayHaveCommitted").asBoolean(true));
         assertTrue(localGuard.pendingContext(7L, "apply-fix-session").isEmpty());
-        verifyNoInteractions(fixService);
+        verifyPreviewReadOnly();
     }
 
     @Test
@@ -264,7 +279,7 @@ class ApplyFixToolTest {
         assertEquals("TOOL_RESULT_TOO_LARGE", result.path("errorCode").asText());
         assertFalse(result.path("mutationMayHaveCommitted").asBoolean(true));
         assertTrue(guard.pendingContext(7L, "apply-fix-session").isEmpty());
-        verifyNoInteractions(fixService);
+        verifyPreviewReadOnly();
     }
 
     @Test
@@ -323,7 +338,7 @@ class ApplyFixToolTest {
                 "{\"traceId\":31,\"confirmed\":true,\"impactToken\":\"wrong-token\"}"));
 
         assertEquals("CONFIRMATION_MISMATCH", mismatch.path("errorCode").asText());
-        verifyNoInteractions(fixService);
+        verifyPreviewReadOnly();
 
         when(fixService.applyFix(any(), any(), any(), any(), any(), any()))
                 .thenReturn(appliedResult(suggestion, 2, 1));
@@ -461,6 +476,22 @@ class ApplyFixToolTest {
     }
 
     @Test
+    void confirmedApply_historicalTraceRemainsADefinitiveRejection() throws Exception {
+        JsonNode preview = objectMapper.readTree(tool.execute(previewArgs(signedPublicRemovalSuggestion()).toString()));
+        when(fixService.applyFix(any(), any(), any(), any(), any(), any()))
+                .thenThrow(new ModelSemanticsChangedException());
+        UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", preview.path("impactToken").asText());
+
+        JsonNode result = objectMapper.readTree(tool.execute("""
+                {"traceId":31,"confirmed":true,"impactToken":"%s"}
+                """.formatted(preview.path("impactToken").asText())));
+
+        assertEquals("MODEL_SEMANTICS_CHANGED", result.path("errorCode").asText());
+        assertEquals(409, result.path("status").asInt());
+        assertFalse(result.has("mutationMayHaveCommitted"));
+    }
+
+    @Test
     void confirmedApply_inconsistentAppliedSuggestionReportsUnknownMutationOutcome() throws Exception {
         FixSuggestionDto suggestion = signedPublicRemovalSuggestion();
         JsonNode preview = objectMapper.readTree(tool.execute(previewArgs(suggestion).toString()));
@@ -505,7 +536,7 @@ class ApplyFixToolTest {
         assertEquals(suggestion.getDescription(), preview.path("suggestion").path("description").asText());
         assertEquals(canonicalBefore, stored.getContent());
         assertFalse(preview.toString().contains(suggestion.getSuggestionToken()));
-        verifyNoInteractions(fixService);
+        verifyPreviewReadOnly();
     }
 
     @Test
@@ -578,6 +609,11 @@ class ApplyFixToolTest {
             assertEquals(400, result.path("status").asInt());
         }
         verifyNoInteractions(fixService);
+    }
+
+    private void verifyPreviewReadOnly() {
+        verify(fixService).requireCurrentVerificationSource(7L, 31L);
+        verifyNoMoreInteractions(fixService);
     }
 
     private FixSuggestionDto signedPublicRemovalSuggestion() throws Exception {

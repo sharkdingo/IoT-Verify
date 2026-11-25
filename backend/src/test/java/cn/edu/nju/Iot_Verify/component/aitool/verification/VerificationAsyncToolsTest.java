@@ -130,7 +130,7 @@ class VerificationAsyncToolsTest {
         assertTrue(json.path("message").asText().contains("completion is not implied"));
         verify(verificationService).submitVerification(eq(1L), argThat(request ->
                 request.getDevices() == null && request.getPlaybackNodes() == null
-                        && request.getRules().isEmpty() && request.getEnvironmentVariables().isEmpty()
+                        && request.getRules().isEmpty() && request.getEnvironmentVariables() == null
                         && request.getAttackScenario() != null));
         verify(verificationService).getTask(1L, 100L);
     }

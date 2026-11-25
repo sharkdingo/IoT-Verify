@@ -28,6 +28,7 @@ const snapshot = {
   environmentVariableCount: 1,
   deviceTemplateCount: 2,
   modelFingerprint: 'a'.repeat(64),
+  modelSemanticsVersion: 1,
   templatesFrozen: true as const
 }
 
@@ -320,6 +321,13 @@ describe('fuzzing response contracts', () => {
       iterations: 0,
       generatedPaths: 0
     })).toMatchObject({ iterations: 0, generatedPaths: 0 })
+  })
+
+  it('requires exploration to identify its original modeling version', () => {
+    expect(validateFuzzingRun({ ...run, modelSnapshot: { ...snapshot, modelSemanticsVersion: 0 } })
+      .modelSnapshot.modelSemanticsVersion).toBe(0)
+    expect(() => validateFuzzingRun({ ...run, modelSnapshot: { ...snapshot, modelSemanticsVersion: undefined } }))
+      .toThrow(/modelSemanticsVersion/)
   })
 
   it('requires mode-specific limitation codes while allowing future additions', () => {

@@ -1,8 +1,11 @@
 package cn.edu.nju.Iot_Verify.component.nusmv.fixer;
 
+import cn.edu.nju.Iot_Verify.component.nusmv.generator.PropertyDimension;
+import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvRelationUtils;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvData;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceReferenceResolver;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvDataFactory;
+import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.ModeStateInitialLabels;
 import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
 import cn.edu.nju.Iot_Verify.component.template.DeviceManifestModes;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
@@ -12,6 +15,7 @@ import cn.edu.nju.Iot_Verify.dto.device.VariableStateDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import cn.edu.nju.Iot_Verify.util.DeviceNameNormalizer;
+import cn.edu.nju.Iot_Verify.util.SpecificationSemanticSignature;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -19,10 +23,10 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Produces a canonical, order-independent fingerprint of the <em>device instance state</em>,
+ * Produces a canonical fingerprint of the <em>device instance state</em>,
  * <em>board environment pool</em>, and <em>specifications</em> that feed NuSMV verification, so
  * the fix-apply flow can detect whether the user edited specs, environment values,
- * device variables/privacies, or device initial state after verifying — drifts
+ * device variables/privacies or device initial state after verifying — drifts
  * that the server recompute (which replays the trace's stored context) can <b>not</b> catch on its
  * own.
  *
@@ -35,7 +39,7 @@ import java.util.Map;
  *
  * <p>This class sidesteps that by running <b>both</b> sides through the <em>same</em> canonicalization
  * — normalize device names, derive the same effective variable/trust/privacy values as the NuSMV
- * generator, strip quotes from numeric values, lowercase trust/privacy — so any imperfection in the
+ * generator, normalize numeric variable values, lowercase trust/privacy — so any imperfection in the
  * transform cancels out. An untouched board and its snapshot canonicalize identically; a genuine edit
  * changes the fingerprint on exactly one side.</p>
  *
@@ -81,7 +85,8 @@ public final class BoardSemanticFingerprint {
     private static String deviceFingerprint(DeviceVerificationDto d,
                                             Map<String, DeviceSmvData> deviceSmvMap) {
         String varName = DeviceNameNormalizer.normalize(d.getVarName());
-        DeviceManifest manifest = manifestFor(varName, d.getVarName(), deviceSmvMap);
+        DeviceSmvData smv = deviceModelFor(varName, d.getVarName(), deviceSmvMap);
+        DeviceManifest manifest = smv != null ? smv.getManifest() : null;
         boolean hasModes = manifest == null
                 || (manifest.getModes() != null && !manifest.getModes().isEmpty()
                 && manifest.getWorkingStates() != null && !manifest.getWorkingStates().isEmpty());
@@ -90,14 +95,27 @@ public final class BoardSemanticFingerprint {
         sb.append(varName)
           .append('|').append(nullSafe(d.getTemplateName()))
           .append('|').append(hasModes ? nullSafe(d.getState()) : "")
-          .append('|').append(hasModes ? effectiveCurrentStateTrust(d, manifest) : "")
-          .append('|').append(hasModes ? effectiveCurrentStatePrivacy(d, manifest) : "");
+          .append("|labels[").append(stateLabelsFingerprint(smv)).append(']');
 
         // Variables — derive effective model values from manifest + explicit instance overrides.
         sb.append("|vars[").append(variablesFingerprint(d.getVariables(), manifest, d.getState())).append(']');
         // Privacies — manifest default plus explicit instance overrides.
         sb.append("|priv[").append(privaciesFingerprint(d.getPrivacies(), manifest)).append(']');
         return sb.toString();
+    }
+
+    private static String stateLabelsFingerprint(DeviceSmvData smv) {
+        if (smv == null) return "";
+        List<String> labels = new ArrayList<>();
+        for (String mode : smv.getModes()) {
+            List<String> states = smv.getModeStates().get(mode);
+            if (states == null) continue;
+            for (String state : states) {
+                labels.add(ModeStateInitialLabels.resolve(smv, mode, state, PropertyDimension.TRUST)
+                        + "/" + ModeStateInitialLabels.resolve(smv, mode, state, PropertyDimension.PRIVACY));
+            }
+        }
+        return String.join(",", labels);
     }
 
     private static String variablesFingerprint(List<VariableStateDto> variables, DeviceManifest manifest,
@@ -108,7 +126,7 @@ public final class BoardSemanticFingerprint {
                 if (iv == null || iv.getName() == null) continue;
                 if (isEnvironmentVariable(iv)) continue;
                 entries.put(iv.getName(), new VariableFingerprintEntry(
-                        effectiveDefaultVariableValue(iv, manifest, state),
+                        normalizeModelVariableValue(DeviceManifestModes.localInitialValue(manifest, iv, state), iv),
                         normalizeTrust(iv.getTrust())));
             }
         }
@@ -118,9 +136,9 @@ public final class BoardSemanticFingerprint {
                 DeviceManifest.InternalVariable iv = manifestVariable(manifest, v.getName());
                 if (isEnvironmentVariable(iv)) continue;
                 VariableFingerprintEntry base = entries.get(v.getName());
-                String value = v.getValue() != null
-                        ? normalizeModelVariableValue(v.getValue(), iv)
-                        : (base != null ? base.value() : "");
+                String effective = iv == null ? v.getValue()
+                        : DeviceManifestModes.localInitialValue(manifest, iv, state, v.getValue());
+                String value = normalizeModelVariableValue(effective, iv);
                 String trust = v.getTrust() != null
                         ? normalizeTrust(v.getTrust())
                         : (base != null ? base.trust() : normalizeTrust(null));
@@ -170,8 +188,7 @@ public final class BoardSemanticFingerprint {
         if (deviceSmvMap != null) {
             for (DeviceSmvData smv : deviceSmvMap.values()) {
                 if (smv == null || smv.getVarName() == null) continue;
-                collectRequiredEnvironment(required, smv.getEnvVariables());
-                collectRequiredEnvironment(required, smv.getImpactedEnvironmentVariables());
+                smv.getSharedDeclarations().forEach(required::putIfAbsent);
             }
         }
 
@@ -205,18 +222,6 @@ public final class BoardSemanticFingerprint {
         }
         parts.sort(String::compareTo);
         return String.join(",", parts);
-    }
-
-    private static void collectRequiredEnvironment(Map<String, DeviceManifest.InternalVariable> required,
-                                                   Map<String, DeviceManifest.InternalVariable> source) {
-        if (required == null || source == null) {
-            return;
-        }
-        for (Map.Entry<String, DeviceManifest.InternalVariable> entry : source.entrySet()) {
-            if (entry.getKey() != null && entry.getValue() != null) {
-                required.putIfAbsent(entry.getKey(), entry.getValue());
-            }
-        }
     }
 
     // ==================== specs ====================
@@ -253,6 +258,8 @@ public final class BoardSemanticFingerprint {
             if (c == null) continue;
             String device = DeviceReferenceResolver.canonicalReference(
                     c.getDeviceId(), deviceSmvMap);
+            String relation = SmvRelationUtils.normalizeRelation(c.getRelation());
+            DeviceSmvData smv = DeviceReferenceResolver.resolve(c.getDeviceId(), deviceSmvMap);
             parts.add(nullSafe(device)
                     + "#" + nullSafe(c.getTargetType())
                     + "#" + nullSafe(c.getPropertyScope())
@@ -262,22 +269,32 @@ public final class BoardSemanticFingerprint {
                     // whose question had changed under it.
                     + "#" + nullSafe(c.getVariableSource())
                     + "#" + nullSafe(c.getKey())
-                    + "#" + nullSafe(c.getRelation())
-                    + "#" + normalizeValue(c.getValue()));
+                    + "#" + nullSafe(relation)
+                    + "#" + specConditionValue(c, relation, smv));
         }
         parts.sort(String::compareTo);
         return String.join(",", parts);
     }
 
+    private static String specConditionValue(SpecConditionDto condition, String relation, DeviceSmvData smv) {
+        String type = condition.getTargetType();
+        String value = condition.getValue();
+        String membership = SmvRelationUtils.canonicalStateMembershipValue(
+                value, relation, type, smv == null ? 0 : smv.getModes().size());
+        if (membership != null) return membership;
+        if ("variable".equals(type)) value = normalizeValue(value);
+        return SpecificationSemanticSignature.canonicalConditionValue(value, relation, type);
+    }
+
     // ==================== helpers ====================
 
-    /** Look up the manifest for a device from the built SMV map, trying normalized then raw varName. */
-    private static DeviceManifest manifestFor(String normalizedVarName, String rawVarName,
-                                              Map<String, DeviceSmvData> deviceSmvMap) {
+    /** Look up the built SMV data using the normalized, then raw, device name. */
+    private static DeviceSmvData deviceModelFor(String normalizedVarName, String rawVarName,
+                                               Map<String, DeviceSmvData> deviceSmvMap) {
         if (deviceSmvMap == null) return null;
         DeviceSmvData smv = deviceSmvMap.get(normalizedVarName);
         if (smv == null && rawVarName != null) smv = deviceSmvMap.get(rawVarName);
-        return smv != null ? smv.getManifest() : null;
+        return smv;
     }
 
     private static DeviceManifest.InternalVariable manifestVariable(DeviceManifest manifest, String name) {
@@ -290,28 +307,6 @@ public final class BoardSemanticFingerprint {
 
     private static boolean isEnvironmentVariable(DeviceManifest.InternalVariable variable) {
         return variable != null && !Boolean.TRUE.equals(variable.getIsInside());
-    }
-
-    /**
-     * Effective value when the user did not provide an instance override.
-     * Mirrors generation, through the shared helper rather than by restating the rule:
-     * - external/env variables have no init(a_x) unless the user supplies one;
-     * - an internal variable takes the value its starting state declares in Dynamics;
-     * - failing that, an enum takes its first literal and a bounded number its lower bound;
-     * - bare variables keep NuSMV nondeterminism.
-     */
-    private static String effectiveDefaultVariableValue(DeviceManifest.InternalVariable iv,
-                                                       DeviceManifest manifest,
-                                                       String state) {
-        if (iv == null) return "";
-        if (iv.getIsInside() == null || !iv.getIsInside()) {
-            return "";
-        }
-        // Same derivation as generation, through the one helper that owns it. Re-deriving here is what
-        // let this mirror drift: a fingerprint computed from `Values[0]` would describe a step-0 state the
-        // generated model does not have, and the drift check exists to catch exactly that kind of gap.
-        String derived = DeviceManifestModes.localInitialValue(manifest, iv, state);
-        return derived != null ? cleanEnumLiteral(derived) : "";
     }
 
     private static String defaultEnvironmentValue(DeviceManifest.InternalVariable iv) {
@@ -363,45 +358,9 @@ public final class BoardSemanticFingerprint {
         return v != null ? v : "trusted";
     }
 
-    private static String effectiveCurrentStateTrust(DeviceVerificationDto device, DeviceManifest manifest) {
-        String override = DeviceSmvDataFactory.normalizeTrustPrivacy(device.getCurrentStateTrust());
-        if (override != null) {
-            return override;
-        }
-        if (manifest != null && manifest.getWorkingStates() != null && device.getState() != null) {
-            String currentState = device.getState().trim();
-            for (DeviceManifest.WorkingState state : manifest.getWorkingStates()) {
-                if (state == null || state.getName() == null) {
-                    continue;
-                }
-                if (state.getName().trim().equalsIgnoreCase(currentState)) {
-                    return normalizeTrust(state.getTrust());
-                }
-            }
-        }
-        return normalizeTrust(null);
-    }
-
     private static String normalizePrivacy(String value) {
         String v = DeviceSmvDataFactory.normalizeTrustPrivacy(value);
         return v != null ? v : "public";
-    }
-
-    private static String effectiveCurrentStatePrivacy(DeviceVerificationDto device, DeviceManifest manifest) {
-        String override = DeviceSmvDataFactory.normalizeTrustPrivacy(device.getCurrentStatePrivacy());
-        if (override != null) {
-            return override;
-        }
-        if (manifest != null && manifest.getWorkingStates() != null && device.getState() != null) {
-            String currentState = device.getState().trim();
-            for (DeviceManifest.WorkingState state : manifest.getWorkingStates()) {
-                if (state != null && state.getName() != null
-                        && state.getName().trim().equalsIgnoreCase(currentState)) {
-                    return normalizePrivacy(state.getPrivacy());
-                }
-            }
-        }
-        return normalizePrivacy(null);
     }
 
     private static String nullSafe(String value) {

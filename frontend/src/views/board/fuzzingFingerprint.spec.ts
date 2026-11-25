@@ -10,8 +10,8 @@ import { errorDetails } from '@/utils/userMessage'
 
 const board = readFileSync(join(__dirname, '../Board.vue'), 'utf8')
 const start = board.indexOf('const currentBoardModelFingerprints =')
-const end = board.indexOf('const fuzzRunHasBoardDrift =', start)
-const snapshotStart = board.indexOf('const refreshBoardSnapshot =')
+const end = board.indexOf('const fuzzingBoardComparison =', start)
+const snapshotStart = board.indexOf('const adoptBoardSnapshot =')
 const snapshotEnd = board.indexOf('let boardForegroundRefreshPromise', snapshotStart)
 if ([start, end, snapshotStart, snapshotEnd].some(index => index < 0)) {
   throw new Error('Board fingerprint or snapshot refresh state is missing')
@@ -61,7 +61,7 @@ const fingerprintState = () => {
   return { ...state, nodes, getModelFingerprints, getSnapshot, loadState, loadBoardUndoAvailability }
 }
 
-const models = (hex: string) => ({ verification: hex.repeat(64), simulation: hex.repeat(64) })
+const models = (hex: string) => ({ verification: hex.repeat(64), simulation: hex.repeat(64), modelSemanticsVersion: 1 })
 
 const comparisonAnchor = board.indexOf('const simulationBoardComparison =')
 const reconciliationStart = board.indexOf('\nwatch(', comparisonAnchor)
@@ -111,7 +111,7 @@ describe('Board current model fingerprints', () => {
     const state = fingerprintState()
     const snapshot: ModelRunSnapshot = { capturedAt: '2026-10-09T10:00:00', deviceCount: 1,
       ruleCount: 1, specificationCount: 1, environmentVariableCount: 0, deviceTemplateCount: 1,
-      templatesFrozen: true, modelFingerprint: 'a'.repeat(64) }
+      templatesFrozen: true, modelFingerprint: 'a'.repeat(64), modelSemanticsVersion: 1 }
     const comparison = computed(() => compareModelSnapshot(snapshot, state.scope.value, 'verification'))
     await state.refresh()
     expect(comparison.value).toBe('UNCHANGED')

@@ -1,16 +1,24 @@
 package cn.edu.nju.Iot_Verify.service.impl;
 
 import cn.edu.nju.Iot_Verify.component.nusmv.executor.NusmvExecutor;
+import cn.edu.nju.Iot_Verify.component.nusmv.fixer.RuleFixer;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvGenerator;
 import cn.edu.nju.Iot_Verify.component.nusmv.parser.SmvTraceParser;
 import cn.edu.nju.Iot_Verify.configure.AsyncTaskAdmissionConfig;
+import cn.edu.nju.Iot_Verify.configure.FixConfig;
+import cn.edu.nju.Iot_Verify.configure.JwtConfig;
 import cn.edu.nju.Iot_Verify.configure.NusmvConfig;
+import cn.edu.nju.Iot_Verify.dto.fix.FixSuggestionDto;
 import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
 import cn.edu.nju.Iot_Verify.dto.model.ModelRunSnapshotDto;
 import cn.edu.nju.Iot_Verify.dto.model.ModelSemanticsDto;
+import cn.edu.nju.Iot_Verify.dto.model.ModelSemanticsVersion;
+import cn.edu.nju.Iot_Verify.dto.model.ModelTokenSource;
+import cn.edu.nju.Iot_Verify.dto.trace.TraceDeviceDto;
 import cn.edu.nju.Iot_Verify.dto.trace.TraceDto;
 import cn.edu.nju.Iot_Verify.dto.trace.TraceStateDto;
 import cn.edu.nju.Iot_Verify.dto.verification.VerificationOutcome;
+import cn.edu.nju.Iot_Verify.exception.ModelSemanticsChangedException;
 import cn.edu.nju.Iot_Verify.po.TracePo;
 import cn.edu.nju.Iot_Verify.po.UserPo;
 import cn.edu.nju.Iot_Verify.po.VerificationTaskPo;
@@ -18,6 +26,8 @@ import cn.edu.nju.Iot_Verify.repository.TraceRepository;
 import cn.edu.nju.Iot_Verify.repository.UserRepository;
 import cn.edu.nju.Iot_Verify.repository.VerificationTaskRepository;
 import cn.edu.nju.Iot_Verify.service.ChatExecutionLeaseGuard;
+import cn.edu.nju.Iot_Verify.service.BoardStorageService;
+import cn.edu.nju.Iot_Verify.service.FixSuggestionTokenService;
 import cn.edu.nju.Iot_Verify.service.FormalOperationAdmission;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.EnvironmentProvenanceCollector;
 import cn.edu.nju.Iot_Verify.util.JsonUtils;
@@ -26,9 +36,12 @@ import cn.edu.nju.Iot_Verify.util.mapper.SpecificationMapper;
 import cn.edu.nju.Iot_Verify.util.mapper.TraceMapper;
 import cn.edu.nju.Iot_Verify.util.mapper.VerificationTaskMapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
@@ -43,9 +56,14 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 @DataJpaTest(properties = {
         "spring.jpa.database-platform=org.hibernate.dialect.H2Dialect",
@@ -114,6 +132,83 @@ class VerificationTraceAuthorityIntegrationTest {
                 "generationIssuesJson", "requestJson", "templateSnapshotsJson")) {
             assertThrows(NoSuchFieldException.class, () -> TracePo.class.getDeclaredField(field));
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 3, 5, ModelSemanticsVersion.CURRENT - 1})
+    void historicalCompletedTraceStillReplaysButCannotAuthorizeRepair(int archivedVersion) {
+        VerificationTaskPo task = task(VerificationTaskPo.TaskStatus.RUNNING, """
+                {
+                  "devices":[{"varName":"lamp_1","deviceLabel":"Desk lamp","templateName":"Light","state":"off"}],
+                  "playbackNodes":[{"id":"lamp_1","label":"Desk lamp","templateName":"Light","state":"off",
+                    "position":{"x":25,"y":30},"width":160,"height":120}],
+                  "rules":[],
+                  "attackScenario":{"mode":"NONE"}
+                }
+                """, """
+                {"schemaVersion":1,"manifests":{"Light":{"Name":"Light"}},
+                 "modelTokenSourcesByDeviceId":{"lamp_1":"CUSTOM"}}
+                """);
+        TraceDto recorded = trace("s1");
+        recorded.setViolatedSpecJson("{\"id\":\"s1\",\"name\":\"Desk lamp must be on\",\"templateId\":\"1\"}");
+        TraceDeviceDto lamp = new TraceDeviceDto();
+        lamp.setDeviceId("lamp_1");
+        lamp.setDeviceLabel("Desk lamp");
+        lamp.setTemplateName("Light");
+        lamp.setState("off");
+        lamp.setModelTokenSource(ModelTokenSource.CUSTOM);
+        lamp.setVariables(List.of());
+        recorded.getStates().get(0).setDevices(List.of(lamp));
+        assertTrue(complete(task, List.of(recorded), 0, 0));
+        // Store the evidence documents as JSON values, matching the production database.
+        assertEquals(1, jdbc.update("UPDATE trace SET violated_spec_json = ? FORMAT JSON, "
+                        + "states_json = ? FORMAT JSON WHERE id = ?",
+                recorded.getViolatedSpecJson(), JsonUtils.toJson(recorded.getStates()), recorded.getId()));
+
+        TraceDto current = service.getTrace(user.getId(), recorded.getId());
+        assertEquals(ModelSemanticsVersion.CURRENT, current.getModelSnapshot().getModelSemanticsVersion());
+        assertTrue(current.getModelComplete());
+        ObjectNode archivedSnapshot = JsonUtils.fromJson(
+                tasks.findById(task.getId()).orElseThrow().getModelSnapshotJson(), ObjectNode.class);
+        if (archivedVersion == 0) {
+            assertNotNull(archivedSnapshot.remove("modelSemanticsVersion"));
+        } else {
+            archivedSnapshot.put("modelSemanticsVersion", archivedVersion);
+        }
+        assertEquals(1, jdbc.update("UPDATE verification_task SET model_snapshot_json = ? WHERE id = ?",
+                JsonUtils.toJson(archivedSnapshot), task.getId()));
+
+        TraceDto historical = service.getTrace(user.getId(), recorded.getId());
+        assertEquals(archivedVersion, historical.getModelSnapshot().getModelSemanticsVersion());
+        assertEquals(current.getStates(), historical.getStates());
+        assertEquals(current.getPlaybackScene(), historical.getPlaybackScene());
+        assertEquals("off", historical.getStates().get(0).getDevices().get(0).getState());
+
+        SmvGenerator generator = mock(SmvGenerator.class);
+        when(generator.buildDeviceSmvMapFromTemplateSnapshots(any(), any()))
+                .thenThrow(new AssertionError("Historical trace reached model generation"));
+        BoardStorageService board = mock(BoardStorageService.class);
+        FormalOperationAdmission admission = mock(FormalOperationAdmission.class);
+        when(admission.execute(eq(user.getId()), any()))
+                .thenAnswer(call -> call.<Supplier<?>>getArgument(1).get());
+        JwtConfig jwt = new JwtConfig();
+        jwt.setSecret("verification-trace-authority-fixture-key");
+        var tokens = new FixSuggestionTokenService(new ObjectMapper(), jwt);
+        FixServiceImpl fixes = new FixServiceImpl(traces, tasks, new TraceMapper(), generator,
+                mock(RuleFixer.class), new FixConfig(), board, mock(BoardDataConverter.class),
+                tokens, admission);
+
+        assertThrows(ModelSemanticsChangedException.class,
+                () -> fixes.fix(user.getId(), recorded.getId(), List.of("remove"), null));
+        assertThrows(ModelSemanticsChangedException.class,
+                () -> fixes.localizeFault(user.getId(), recorded.getId()));
+        assertThrows(ModelSemanticsChangedException.class,
+                () -> fixes.requireCurrentVerificationSource(user.getId(), recorded.getId()));
+        var suggestion = FixSuggestionDto.builder().strategy("remove").removedRuleIndices(List.of(0)).build();
+        String signed = tokens.issue(user.getId(), recorded.getId(), suggestion, null);
+        assertThrows(ModelSemanticsChangedException.class,
+                () -> fixes.applyFix(user.getId(), recorded.getId(), "remove", suggestion, signed, null));
+        verifyNoInteractions(generator, board);
     }
 
     @Test
@@ -188,6 +283,11 @@ class VerificationTraceAuthorityIntegrationTest {
     }
 
     private VerificationTaskPo task(VerificationTaskPo.TaskStatus status) {
+        return task(status, "{\"rules\":[]}",
+                "{\"schemaVersion\":1,\"manifests\":{},\"modelTokenSourcesByDeviceId\":{}}");
+    }
+
+    private VerificationTaskPo task(VerificationTaskPo.TaskStatus status, String frozenRequest, String frozenTemplates) {
         LocalDateTime now = tasks.currentDatabaseTime();
         VerificationTaskPo task = tasks.saveAndFlush(VerificationTaskPo.builder().userId(user.getId()).status(status)
                 .createdAt(now).startedAt(now)
@@ -196,8 +296,8 @@ class VerificationTraceAuthorityIntegrationTest {
                 .modelSnapshotJson(JsonUtils.toJson(ModelRunSnapshotDto.captured(now, 1, 0, 2, 0, 1)))
                 .modelSemanticsJson(JsonUtils.toJson(ModelSemanticsDto.forRun(
                         AttackScenarioDto.none(), false, 1, 0, 0)))
-                .requestJson("{\"rules\":[]}")
-                .templateSnapshotsJson("{\"schemaVersion\":1,\"manifests\":{},\"modelTokenSourcesByDeviceId\":{}}")
+                .requestJson(frozenRequest)
+                .templateSnapshotsJson(frozenTemplates)
                 .modeledDeviceAttackPointCount(1).build());
         // H2 inserts a JDBC VARCHAR into JSON as a string; FORMAT JSON matches MySQL's object storage.
         jdbc.update("UPDATE verification_task SET request_json = ? FORMAT JSON, "
@@ -214,9 +314,13 @@ class VerificationTraceAuthorityIntegrationTest {
     }
 
     private boolean complete(VerificationTaskPo task, List<TraceDto> evidence) {
+        return complete(task, evidence, 2, 1);
+    }
+
+    private boolean complete(VerificationTaskPo task, List<TraceDto> evidence, int disabledRules, int skippedSpecs) {
         return Boolean.TRUE.equals(ReflectionTestUtils.invokeMethod(service, "completeTaskAndSaveTraces",
                 task, evidence, user.getId(), task.getId(), VerificationOutcome.VIOLATED,
                 evidence.size(), List.of(), new ArrayList<>(List.of("done")), "", List.of(),
-                2, 1, "MODULE main"));
+                disabledRules, skippedSpecs, "MODULE main"));
     }
 }

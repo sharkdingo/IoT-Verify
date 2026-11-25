@@ -89,6 +89,7 @@ const snapshot = {
   environmentVariableCount: 0,
   deviceTemplateCount: 1,
   modelFingerprint: 'a'.repeat(64),
+  modelSemanticsVersion: 1,
   templatesFrozen: true as const
 }
 
@@ -296,6 +297,9 @@ describe('FuzzingResultDialog', () => {
     expect(warning().attributes('data-state')).toBe('UNAVAILABLE')
     expect(warning().text()).toContain('could not be read')
     expect(warning().text()).not.toContain('scope changed')
+    await wrapper.setProps({ boardComparison: 'SEMANTICS_CHANGED' })
+    expect(warning().attributes('data-state')).toBe('SEMANTICS_CHANGED')
+    expect(warning().text()).toContain('modeling version')
     await wrapper.setProps({ boardComparison: 'UNCHANGED' })
     expect(wrapper.find('[data-testid="fuzzing-board-drift-warning"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('Current Board model matches.')

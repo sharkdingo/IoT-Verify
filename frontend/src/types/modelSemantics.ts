@@ -54,6 +54,7 @@ export interface ModelRunSnapshot {
   specificationCount: number
   environmentVariableCount: number
   deviceTemplateCount: number
+  modelSemanticsVersion: number
   modelFingerprint?: string | null
   templatesFrozen: true
   environmentProvenance?: EnvironmentValueProvenance[]
@@ -63,7 +64,8 @@ export interface ModelRunSnapshot {
 export interface BoardModelFingerprints {
   verification: string
   simulation: string
+  modelSemanticsVersion: number
 }
 
 /** A run's captured model compared with the current persisted board. */
-export type RunBoardComparison = 'UNCHANGED' | 'CHANGED' | 'UNAVAILABLE' | 'NOT_COMPARED'
+export type RunBoardComparison = 'UNCHANGED' | 'CHANGED' | 'SEMANTICS_CHANGED' | 'UNAVAILABLE' | 'NOT_COMPARED'

@@ -9,10 +9,13 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
+import com.fasterxml.jackson.databind.cfg.CoercionAction;
+import com.fasterxml.jackson.databind.cfg.CoercionInputShape;
 import com.fasterxml.jackson.databind.exc.UnrecognizedPropertyException;
+import com.fasterxml.jackson.databind.type.LogicalType;
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.Validator;
-import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -24,7 +27,6 @@ import cn.edu.nju.Iot_Verify.util.JsonPointerPath;
 
 /** Strict request-boundary parser for the destructive board replacement command. */
 @Component
-@RequiredArgsConstructor
 public class BoardBatchRequestParser {
 
     private static final Set<String> INTERNAL_TEMPLATE_FIELDS = Set.of("id", "defaultTemplate");
@@ -32,6 +34,20 @@ public class BoardBatchRequestParser {
     private final ObjectMapper objectMapper;
     private final Validator validator;
     private final DeviceTemplateSchemaValidator templateSchemaValidator;
+    private final ObjectReader batchReader;
+
+    public BoardBatchRequestParser(
+            ObjectMapper objectMapper, Validator validator, DeviceTemplateSchemaValidator templateSchemaValidator) {
+        this.objectMapper = objectMapper;
+        this.validator = validator;
+        this.templateSchemaValidator = templateSchemaValidator;
+        ObjectMapper batchMapper = objectMapper.copy();
+        batchMapper.coercionConfigFor(LogicalType.Textual)
+                .setCoercion(CoercionInputShape.Integer, CoercionAction.Fail)
+                .setCoercion(CoercionInputShape.Float, CoercionAction.Fail)
+                .setCoercion(CoercionInputShape.Boolean, CoercionAction.Fail);
+        batchReader = batchMapper.readerFor(BoardBatchDto.class).with(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
+    }
 
     public BoardBatchDto parse(JsonNode body) {
         if (body == null || !body.isObject()) {
@@ -46,9 +62,7 @@ public class BoardBatchRequestParser {
 
         final BoardBatchDto batch;
         try {
-            batch = objectMapper.readerFor(BoardBatchDto.class)
-                    .with(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
-                    .readValue(objectMapper.treeAsTokens(body));
+            batch = batchReader.readValue(objectMapper.treeAsTokens(body));
         } catch (UnrecognizedPropertyException exception) {
             String path = JsonPointerPath.of(exception);
             throw new BadRequestException("Unknown field '" + exception.getPropertyName() + "' at '"

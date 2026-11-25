@@ -89,31 +89,18 @@ class NusmvEnvironmentPoolTest {
     }
 
     @Test
-    void expandDevices_appliesEnvironmentPoolOnlyToTemplatesThatDeclareReadPermission() {
-        DeviceManifest.InternalVariable temperature = envNumber("temperature", 15, 35);
-        Map<String, DeviceSmvData> smvMap = new LinkedHashMap<>();
-        smvMap.put("sensor_1", smv("sensor_1", "Temperature Sensor", Map.of("temperature", temperature)));
-        smvMap.put("light_1", smv("light_1", "Light", Map.of()));
+    void admitsAndDefaultsAStandaloneSharedDeclaration() {
+        var domain = impactNumber("roomLight", 15, 35);
+        var writer = smv("writer_1", "Light Control", Map.of());
+        writer.getSharedDeclarations().put("roomLight", domain);
+        var models = Map.of("writer_1", writer);
 
-        List<DeviceVerificationDto> expanded = NusmvEnvironmentPool.expandDevices(
-                List.of(device("sensor_1", "Temperature Sensor"), device("light_1", "Light")),
-                List.of(new BoardEnvironmentVariableDto("temperature", "28", "untrusted", "private")),
-                smvMap);
-
-        DeviceVerificationDto sensor = expanded.stream()
-                .filter(device -> "sensor_1".equals(device.getVarName()))
-                .findFirst()
-                .orElseThrow();
-        DeviceVerificationDto light = expanded.stream()
-                .filter(device -> "light_1".equals(device.getVarName()))
-                .findFirst()
-                .orElseThrow();
-
-        assertEquals("28", sensor.getVariables().get(0).getValue());
-        assertEquals("untrusted", sensor.getVariables().get(0).getTrust());
-        assertEquals("private", sensor.getPrivacies().get(0).getPrivacy());
-        assertNull(light.getVariables());
-        assertNull(light.getPrivacies());
+        var pool = NusmvEnvironmentPool.mergeWithDefaults(List.of(), models);
+        assertEquals(List.of("roomLight"), pool.stream().map(BoardEnvironmentVariableDto::getName).toList());
+        assertEquals("15", pool.get(0).getValue());
+        var errors = NusmvRequestValidator.newErrors();
+        NusmvRequestValidator.validateEnvironmentVariables(pool, models, errors);
+        assertTrue(errors.isEmpty(), errors::toString);
     }
 
     @Test
@@ -121,6 +108,7 @@ class NusmvEnvironmentPoolTest {
         DeviceManifest.InternalVariable temperature = envNumber("temperature", 15, 35);
         DeviceSmvData actuator = smv("ac_1", "Air Conditioner", Map.of());
         actuator.setEnvVariables(null);
+        actuator.setSharedDeclarations(Map.of("temperature", temperature));
         actuator.setImpactedEnvironmentVariables(Map.of("temperature", temperature));
 
         Map<String, DeviceSmvData> smvMap = new LinkedHashMap<>();
@@ -134,7 +122,7 @@ class NusmvEnvironmentPoolTest {
     }
 
     @Test
-    void expandedEnvironmentPoolInitializesSharedSmvVariable() throws Exception {
+    void environmentPoolInitializesSharedSmvVariable() throws Exception {
         DeviceManifest.InternalVariable temperature = envNumber("temperature", 15, 35);
         DeviceManifest manifest = DeviceManifest.builder()
                 .name("Temperature Sensor")
@@ -147,9 +135,8 @@ class NusmvEnvironmentPoolTest {
         List<BoardEnvironmentVariableDto> merged = NusmvEnvironmentPool.mergeWithDefaults(
                 List.of(new BoardEnvironmentVariableDto("temperature", "28", "trusted", "public")),
                 rawMap);
-        List<DeviceVerificationDto> expanded = NusmvEnvironmentPool.expandDevices(rawDevices, merged, rawMap);
         SmvGenerator.GenerateResult generated = generator.generateWithEnvironment(
-                USER_ID, expanded, merged, List.of(), List.of(), AttackScenarioDto.none(), true,
+                USER_ID, rawDevices, merged, List.of(), List.of(), AttackScenarioDto.none(), true,
                 SmvGenerator.GeneratePurpose.VERIFICATION);
 
         String smv = Files.readString(generated.smvFile().toPath());
@@ -191,10 +178,8 @@ class NusmvEnvironmentPoolTest {
         List<BoardEnvironmentVariableDto> merged = NusmvEnvironmentPool.mergeWithDefaults(
                 List.of(new BoardEnvironmentVariableDto("temperature", "28", "trusted", "public")),
                 rawMap);
-        List<DeviceVerificationDto> expanded = NusmvEnvironmentPool.expandDevices(rawDevices, merged, rawMap);
-        assertNull(expanded.get(0).getVariables());
         SmvGenerator.GenerateResult generated = generator.generateWithEnvironment(
-                USER_ID, expanded, merged, List.of(), List.of(), AttackScenarioDto.none(), true,
+                USER_ID, rawDevices, merged, List.of(), List.of(), AttackScenarioDto.none(), true,
                 SmvGenerator.GeneratePurpose.VERIFICATION);
 
         String smv = Files.readString(generated.smvFile().toPath());
@@ -251,9 +236,8 @@ class NusmvEnvironmentPoolTest {
         List<BoardEnvironmentVariableDto> merged = NusmvEnvironmentPool.mergeWithDefaults(
                 List.of(new BoardEnvironmentVariableDto("temperature", "28", "trusted", "private")),
                 rawMap);
-        List<DeviceVerificationDto> expanded = NusmvEnvironmentPool.expandDevices(rawDevices, merged, rawMap);
         SmvGenerator.GenerateResult generated = generator.generateWithEnvironment(
-                USER_ID, expanded, merged, List.of(), List.of(), AttackScenarioDto.none(), true,
+                USER_ID, rawDevices, merged, List.of(), List.of(), AttackScenarioDto.none(), true,
                 SmvGenerator.GeneratePurpose.VERIFICATION);
 
         String smv = Files.readString(generated.smvFile().toPath());
@@ -318,9 +302,8 @@ class NusmvEnvironmentPoolTest {
         List<BoardEnvironmentVariableDto> merged = NusmvEnvironmentPool.mergeWithDefaults(
                 List.of(new BoardEnvironmentVariableDto("temperature", "28", "trusted", "private")),
                 rawMap);
-        List<DeviceVerificationDto> expanded = NusmvEnvironmentPool.expandDevices(rawDevices, merged, rawMap);
         SmvGenerator.GenerateResult generated = generator.generateWithEnvironment(
-                USER_ID, expanded, merged, List.of(), List.of(), AttackScenarioDto.none(), true,
+                USER_ID, rawDevices, merged, List.of(), List.of(), AttackScenarioDto.none(), true,
                 SmvGenerator.GeneratePurpose.VERIFICATION);
 
         String smv = Files.readString(generated.smvFile().toPath());
@@ -389,7 +372,6 @@ class NusmvEnvironmentPoolTest {
         List<BoardEnvironmentVariableDto> merged = NusmvEnvironmentPool.mergeWithDefaults(
                 List.of(new BoardEnvironmentVariableDto("temperature", "28", "untrusted", "public")),
                 rawMap);
-        List<DeviceVerificationDto> expanded = NusmvEnvironmentPool.expandDevices(rawDevices, merged, rawMap);
 
         SpecConditionDto labelOfAffectOnly = new SpecConditionDto();
         labelOfAffectOnly.setDeviceId("ac_1");
@@ -407,7 +389,7 @@ class NusmvEnvironmentPoolTest {
         spec.setAConditions(List.of(labelOfAffectOnly));
 
         SmvGenerator.GenerateResult generated = generator.generateWithEnvironment(
-                USER_ID, expanded, merged, List.of(), List.of(spec), AttackScenarioDto.none(), true,
+                USER_ID, rawDevices, merged, List.of(), List.of(spec), AttackScenarioDto.none(), true,
                 SmvGenerator.GeneratePurpose.VERIFICATION);
 
         assertEquals(0, generated.skippedSpecCount(),
@@ -495,6 +477,7 @@ class NusmvEnvironmentPoolTest {
         smv.setModes(List.of());
         smv.setVariables(List.copyOf(envVariables.values()));
         smv.setEnvVariables(new LinkedHashMap<>(envVariables));
+        smv.setSharedDeclarations(new LinkedHashMap<>(envVariables));
         smv.setManifest(DeviceManifest.builder()
                 .name(templateName)
                 .internalVariables(List.copyOf(envVariables.values()))

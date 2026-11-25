@@ -80,6 +80,8 @@ const i18n = createI18n({
         defaultTemplateChangeRefresh: 'Refresh bundled definition',
         templateSemanticsChanged: 'semantics change',
         devicesUsingChangedTemplates: 'Affected devices',
+        defaultTemplateRuntimeVariableValue: '{item} value',
+        defaultTemplateDeviceRuntimeChange: '{field} from {before} to {after}',
         environmentVariablesWillChange: '{count} environment changes',
         environmentChangeAdded: 'Add: {item}',
         environmentChangeUpdated: 'Update: {before} -> {after}',
@@ -272,7 +274,17 @@ describe('ControlCenter model token display', () => {
         changeType: 'REFRESH_DEFAULT' as const,
         semanticsChanged: true
       }],
-      affectedDevices: [{ deviceId: 'switch-1', deviceLabel: 'Hall switch', templateName: 'Switch' }],
+      affectedDevices: [{
+        deviceId: 'switch-1',
+        deviceLabel: 'Hall switch',
+        templateName: 'Switch',
+        runtimeChanges: [{
+          field: 'VARIABLE_VALUE',
+          itemName: 'SwitchState',
+          previousValue: 'off',
+          currentValue: 'on'
+        }]
+      }],
       blockers: [],
       environmentChanges: [
         {
@@ -299,6 +311,7 @@ describe('ControlCenter model token display', () => {
         }
       ],
       currentTemplates: [{ id: 1, name: 'Switch', defaultTemplate: true, manifest }],
+      currentNodes: [],
       environmentVariables: []
     }
     boardApiMocks.previewDefaultTemplateReset.mockResolvedValue(preview)
@@ -316,6 +329,9 @@ describe('ControlCenter model token display', () => {
     await wrapper.get('[data-testid="reset-default-templates"]').trigger('click')
     await flushPromises()
 
+    const deviceChanges = document.querySelector('[data-testid="default-template-reset-device-changes"]')
+    expect(deviceChanges?.textContent).toContain('Hall switch')
+    expect(deviceChanges?.textContent).toContain('SwitchState value from "off" to "on"')
     const changes = document.querySelector('[data-testid="default-template-reset-environment-changes"]')
     expect(changes?.textContent).toContain('Add: Weather: Sunny · Trusted · Public')
     expect(changes?.textContent).toContain('Update: temperature: 20 · Trusted · Public -> Temperature: 22 · Untrusted · Private')

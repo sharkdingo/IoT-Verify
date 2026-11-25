@@ -159,6 +159,7 @@ class BoardSceneIdentityRegressionTest {
         service.renameNode(userId, acceptedId, "Renamed scene lamp", "Scene lamp");
         assertEquals(1L, users.findSceneRevision(userId).orElseThrow());
         var cleared = new BoardBatchDto(java.util.List.of(), java.util.List.of(), java.util.List.of(), java.util.List.of());
+        cleared.setTemplateSnapshots(java.util.List.of());
         cleared.setImpactToken(service.previewBoardReplacement(userId).getImpactToken());
         service.saveBoardBatch(userId, cleared);
         assertEquals(2L, users.findSceneRevision(userId).orElseThrow());

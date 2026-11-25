@@ -218,19 +218,6 @@ class FuzzServiceImplTest {
     }
 
     @Test
-    void currentModelFingerprintCapturesOneBoardSnapshotWithoutCreatingTaskState() {
-        ModelInputSnapshot snapshot = snapshot(List.of(specification("spec-1")));
-        when(boardDataConverter.getModelInputSnapshot(7L)).thenReturn(snapshot);
-
-        String fingerprint = service.getCurrentModelFingerprint(7L);
-
-        assertEquals(service.modelFingerprint(snapshot), fingerprint);
-        assertTrue(fingerprint.matches("[0-9a-f]{64}"));
-        verify(boardDataConverter).getModelInputSnapshot(7L);
-        verifyNoInteractions(taskRepository, findingRepository, transactionTemplate, fuzzTaskExecutor);
-    }
-
-    @Test
     void previewPaperDomainRejectsInvalidLengthBeforeReadingBoard() {
         FuzzPaperDomainPreviewRequestDto request =
                 FuzzPaperDomainPreviewRequestDto.builder().pathLength(51).build();

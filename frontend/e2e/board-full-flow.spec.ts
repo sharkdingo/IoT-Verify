@@ -456,11 +456,39 @@ test.describe('board full-stack NuSMV user flow', () => {
       const screenshot = testInfo.outputPath(`${scenario.strategy}-repair-preview.png`)
       await page.screenshot({ path: screenshot, fullPage: true })
       await testInfo.attach(`${scenario.strategy}-repair-preview`, { path: screenshot, contentType: 'image/png' })
+
+      const applyPath = `/api/verify/traces/${trace.id}/fix/apply`
+      // Exercise the server's signed-proposal rejection without waiting for the token to expire.
+      await page.route(`**${applyPath}`, route => route.continue({
+        postData: { ...route.request().postDataJSON(), suggestionToken: 'stale-fixture' }
+      }), { times: 1 })
+      const staleResponse = page.waitForResponse(response => response.request().method() === 'POST'
+        && new URL(response.url()).pathname === applyPath)
+      await dialog.getByTestId('fix-apply-current').click()
+      const rejected = await staleResponse
+      expect(rejected.status()).toBe(400)
+      expect((await rejected.json()).data).toMatchObject({ reasonCode: 'FIX_SUGGESTION_STALE' })
+      await expect(dialog.getByTestId('fix-apply-current')).toHaveCount(0)
+      expect(await snapshot()).toEqual(before)
+
+      const retryResponse = page.waitForResponse(response => response.request().method() === 'POST'
+        && new URL(response.url()).pathname === `/api/verify/traces/${trace.id}/fix`, { timeout: 180_000 })
+      await dialog.getByTestId('fix-try-current').click()
+      const retry = await retryResponse
+      expect(retry.request().postDataJSON().strategies).toEqual([scenario.strategy])
+      const refreshed = await unwrap<any>(retry as any)
+      const refreshedSuggestion = listedRepair(refreshed, scenario.strategy, scenario.isExpectedRepair)
+      const refreshedOptions = refreshed.suggestions.filter((item: any) => item.strategy === scenario.strategy)
+      if (refreshedOptions.length > 1) {
+        await dialog.getByTestId('fix-alternative').nth(refreshedOptions.indexOf(refreshedSuggestion))
+          .getByRole('radio').check()
+      }
+
       const applyResponse = page.waitForResponse(response => response.request().method() === 'POST'
-        && new URL(response.url()).pathname === `/api/verify/traces/${trace.id}/fix/apply`)
+        && new URL(response.url()).pathname === applyPath)
       await dialog.getByTestId('fix-apply-current').click()
       const write = await applyResponse
-      expect(write.request().postDataJSON().suggestion).toEqual(suggestion)
+      expect(write.request().postDataJSON().suggestion).toEqual(refreshedSuggestion)
       const applied = await unwrap<any>(write as any)
       await expect(dialog).toBeHidden()
       expect(applied).toMatchObject({
@@ -553,7 +581,7 @@ test.describe('board full-stack NuSMV user flow', () => {
     await expect(page.getByTestId('verification-result-stale-banner')).toBeVisible({ timeout: 30_000 })
     await expect(page.getByTestId('verification-trace-fix')).toHaveCount(0)
     await expect(page.getByTestId('verification-result-stale-banner')).toHaveCount(1)
-    await expect(page.getByTestId('verification-result-stale-banner')).toContainText(/changed after submission/i)
+    await expect(page.getByTestId('verification-result-stale-banner')).toContainText(/differs from the current Board model/i)
     await expect(page.getByTestId('verification-trace-fix-unavailable')).toHaveCount(0)
 
     // The stale result leads back to current-board settings, without resubmitting or reopening its URL.

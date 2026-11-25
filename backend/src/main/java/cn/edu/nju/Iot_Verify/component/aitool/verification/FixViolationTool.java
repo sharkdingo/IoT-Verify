@@ -8,6 +8,7 @@ import cn.edu.nju.Iot_Verify.dto.fix.FixResultDto;
 import cn.edu.nju.Iot_Verify.dto.fix.PreferredRange;
 import cn.edu.nju.Iot_Verify.dto.fix.PreferredRangeSelection;
 import cn.edu.nju.Iot_Verify.exception.BadRequestException;
+import cn.edu.nju.Iot_Verify.exception.ModelSemanticsChangedException;
 import cn.edu.nju.Iot_Verify.exception.BaseException;
 import cn.edu.nju.Iot_Verify.exception.ResourceNotFoundException;
 import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
@@ -81,7 +82,7 @@ public class FixViolationTool extends AbstractAiTool {
                 "and 'remove' (remove entire rules) strategies. This tool only analyzes and never applies a change. " +
                 "To preview or apply any returned option, including remove, use apply_fix with its suggestionId; " +
                 "do not recreate the edit with manage_rule or other manual mutation tools. " +
-                "Requires a traceId from a previous verification.", schema);
+                "Requires a traceId from a verification run performed under the current model semantics.", schema);
     }
 
     @Override
@@ -253,6 +254,8 @@ public class FixViolationTool extends AbstractAiTool {
 
         } catch (ResourceNotFoundException e) {
             return errorJson("Trace not found: " + e.getMessage(), "NOT_FOUND", 404);
+        } catch (ModelSemanticsChangedException e) {
+            return errorJson(e.getMessage(), e.getReasonCode(), e.getCode());
         } catch (BadRequestException e) {
             return errorJson(e.getMessage(), "BAD_REQUEST", 400);
         } catch (ArgValidationException e) {

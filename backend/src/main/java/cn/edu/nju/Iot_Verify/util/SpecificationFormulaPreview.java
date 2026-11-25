@@ -1,6 +1,8 @@
 package cn.edu.nju.Iot_Verify.util;
 
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvRelationUtils;
+import cn.edu.nju.Iot_Verify.component.template.DeviceManifestModes;
+import cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
@@ -21,6 +23,14 @@ public final class SpecificationFormulaPreview {
 
     public static Context context(List<DeviceNodeDto> nodes, List<DeviceTemplateDto> templates) {
         Map<String, String> labelsById = new LinkedHashMap<>();
+        Map<String, Integer> modeCountsById = new LinkedHashMap<>();
+        Map<String, DeviceTemplateDto.DeviceManifest> manifestsByName = new LinkedHashMap<>();
+        for (DeviceTemplateDto template : templates == null ? List.<DeviceTemplateDto>of() : templates) {
+            String name = template == null ? null : text(template.getName());
+            if (name != null && template.getManifest() != null) {
+                manifestsByName.putIfAbsent(name.toLowerCase(Locale.ROOT), template.getManifest());
+            }
+        }
         for (DeviceNodeDto node : nodes == null ? List.<DeviceNodeDto>of() : nodes) {
             String id = node == null ? null : text(node.getId());
             if (id == null) {
@@ -28,23 +38,17 @@ public final class SpecificationFormulaPreview {
             }
             String label = text(node.getLabel());
             labelsById.put(id, label != null ? label : "Unknown device");
+            addModeCount(modeCountsById, id, node.getTemplateName(), manifestsByName);
         }
 
-        Map<String, DeviceTemplateDto> templatesByName = new LinkedHashMap<>();
-        for (DeviceTemplateDto template : templates == null ? List.<DeviceTemplateDto>of() : templates) {
-            String name = template == null ? null : text(template.getName());
-            if (name != null) {
-                templatesByName.putIfAbsent(name.toLowerCase(Locale.ROOT), template);
-            }
-        }
-
-        return new Context(labelsById);
+        return new Context(labelsById, modeCountsById);
     }
     /** Builds a display context from the immutable model-boundary device/template snapshot. */
     public static Context modelContext(
             List<DeviceVerificationDto> devices,
             Map<String, DeviceTemplateDto.DeviceManifest> templateManifests) {
         Map<String, String> labelsById = new LinkedHashMap<>();
+        Map<String, Integer> modeCountsById = new LinkedHashMap<>();
         Map<String, DeviceTemplateDto.DeviceManifest> manifestsByName = new LinkedHashMap<>();
         for (Map.Entry<String, DeviceTemplateDto.DeviceManifest> entry :
                 templateManifests == null
@@ -64,8 +68,20 @@ public final class SpecificationFormulaPreview {
             }
             String label = text(device.getDeviceLabel());
             labelsById.put(id, label != null ? label : "Unknown device");
+            addModeCount(modeCountsById, id, device.getTemplateName(), manifestsByName);
         }
-        return new Context(labelsById);
+        return new Context(labelsById, modeCountsById);
+    }
+
+    private static void addModeCount(Map<String, Integer> counts, String id, String templateName,
+                                     Map<String, DeviceTemplateDto.DeviceManifest> manifests) {
+        String name = text(templateName);
+        if (name != null) {
+            DeviceTemplateDto.DeviceManifest manifest = manifests.get(name.toLowerCase(Locale.ROOT));
+            if (manifest != null) {
+                counts.put(id, DeviceManifestModes.modeNames(manifest).size());
+            }
+        }
     }
 
     public static String format(SpecificationDto spec, Context context) {
@@ -116,7 +132,7 @@ public final class SpecificationFormulaPreview {
             relation = "=";
         }
         return target + " " + relation + " "
-                + value(condition.getValue(), relation, condition.getTargetType());
+                + value(condition.getValue(), relation, condition.getTargetType(), context.modeCount(condition));
     }
 
     private static String target(SpecConditionDto condition, Context context) {
@@ -245,29 +261,33 @@ public final class SpecificationFormulaPreview {
         return sources.size() == 1 ? sources.get(0) : "(" + String.join(" OR ", sources) + ")";
     }
 
-    private static String value(String rawValue, String relation, String targetType) {
+    private static String value(String rawValue, String relation, String targetType, int modeCount) {
         String value = rawValue == null ? "" : rawValue.trim();
+        String type = text(targetType);
         if ("in".equals(relation) || "not in".equals(relation)) {
-            String separator = "state".equalsIgnoreCase(targetType) ? "[,|]" : "[,;|]";
-            List<String> values = java.util.Arrays.stream(value.split(separator))
-                    .map(String::trim)
-                    .filter(item -> !item.isEmpty())
-                    .map(SpecificationFormulaPreview::scalar)
+            List<String> candidates = "state".equalsIgnoreCase(type)
+                    ? SmvRelationUtils.splitStateRuleValues(value, modeCount)
+                    : SmvRelationUtils.splitRuleValues(value);
+            List<String> values = candidates.stream()
+                    .map(item -> scalar(item, type))
                     .toList();
             return "{" + String.join(", ", values) + "}";
         }
-        return scalar(value);
+        return scalar(value, type);
     }
 
-    private static String scalar(String value) {
+    private static String scalar(String value, String targetType) {
         if (value != null && value.matches("-?\\d+(?:\\.\\d+)?")) {
             return value;
         }
-        if ("TRUE".equalsIgnoreCase(value) || "FALSE".equalsIgnoreCase(value)) {
-            return value.toUpperCase(Locale.ROOT);
+        if ("api".equalsIgnoreCase(targetType) && ManifestConditionSemantics.matchesLiteral(
+                value, ManifestConditionSemantics.API_SIGNAL_LITERALS)) {
+            return ManifestConditionSemantics.canonicalApiSignalValue(value);
         }
-        if ("trusted".equalsIgnoreCase(value) || "untrusted".equalsIgnoreCase(value)
-                || "public".equalsIgnoreCase(value) || "private".equalsIgnoreCase(value)) {
+        if (("trust".equalsIgnoreCase(targetType)
+                && ("trusted".equalsIgnoreCase(value) || "untrusted".equalsIgnoreCase(value)))
+                || ("privacy".equalsIgnoreCase(targetType)
+                && ("public".equalsIgnoreCase(value) || "private".equalsIgnoreCase(value)))) {
             return value.toLowerCase(Locale.ROOT);
         }
         return quote(value);
@@ -282,15 +302,16 @@ public final class SpecificationFormulaPreview {
         return value == null || value.isBlank() ? null : value.trim();
     }
 
-    /**
-     * Display labels only. It also carried a per-device set of shared variable names, whose sole purpose was
-     * to infer whether a variable condition meant the pool value or the device's reading — the inference the
-     * condition's own {@code variableSource} replaced. Keeping it meant walking every device's manifest on
-     * every board read, spec write and verification result to populate a map nothing consulted.
-     */
-    public record Context(Map<String, String> labelsById) {
+    public record Context(Map<String, String> labelsById, Map<String, Integer> modeCountsById) {
         private static Context empty() {
-            return new Context(Map.of());
+            return new Context(Map.of(), Map.of());
+        }
+
+        private int modeCount(SpecConditionDto condition) {
+            String id = text(condition.getDeviceId());
+            Integer count = id == null ? null : modeCountsById.get(id);
+            // Preserve tuple boundaries if a preview has no manifest for this device.
+            return count == null ? 2 : count;
         }
 
         public String displayLabel(SpecConditionDto condition) {

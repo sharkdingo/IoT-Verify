@@ -1,11 +1,17 @@
 package cn.edu.nju.Iot_Verify.component.nusmv.generator;
 
+import cn.edu.nju.Iot_Verify.component.fuzz.FuzzEngine;
+import cn.edu.nju.Iot_Verify.component.fuzz.FuzzEngineConfig;
+import cn.edu.nju.Iot_Verify.component.fuzz.FuzzEngineInput;
+import cn.edu.nju.Iot_Verify.component.fuzz.FuzzFinding;
 import cn.edu.nju.Iot_Verify.component.nusmv.SpecResultAlignment;
 import cn.edu.nju.Iot_Verify.component.nusmv.executor.NusmvExecutor;
+import cn.edu.nju.Iot_Verify.component.nusmv.fixer.BoardSemanticFingerprint;
 import cn.edu.nju.Iot_Verify.component.nusmv.fixer.FixContext;
 import cn.edu.nju.Iot_Verify.component.nusmv.fixer.FixStrategy;
 import cn.edu.nju.Iot_Verify.component.nusmv.fixer.RuleFixer;
 import cn.edu.nju.Iot_Verify.component.nusmv.fixer.localize.FaultLocalizer;
+import cn.edu.nju.Iot_Verify.component.nusmv.fixer.parameterize.CounterexampleInitialStateConstraints;
 import cn.edu.nju.Iot_Verify.component.nusmv.fixer.strategy.ConditionAdjustStrategy;
 import cn.edu.nju.Iot_Verify.component.nusmv.fixer.strategy.FixStrategyApplier;
 import cn.edu.nju.Iot_Verify.component.nusmv.fixer.strategy.ParameterAdjustStrategy;
@@ -19,9 +25,11 @@ import cn.edu.nju.Iot_Verify.component.nusmv.parser.SmvTraceParser;
 import cn.edu.nju.Iot_Verify.component.board.PortableSceneTestImport;
 import cn.edu.nju.Iot_Verify.component.template.DeviceTemplateSchemaValidator;
 import cn.edu.nju.Iot_Verify.configure.FixConfig;
+import cn.edu.nju.Iot_Verify.configure.JwtConfig;
 import cn.edu.nju.Iot_Verify.configure.NusmvConfig;
 import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
+import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
 import cn.edu.nju.Iot_Verify.dto.device.PrivacyStateDto;
 import cn.edu.nju.Iot_Verify.dto.device.VariableStateDto;
@@ -34,8 +42,12 @@ import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import cn.edu.nju.Iot_Verify.dto.trace.TraceStateDto;
+import cn.edu.nju.Iot_Verify.exception.BaseException;
+import cn.edu.nju.Iot_Verify.exception.SmvGenerationException;
 import cn.edu.nju.Iot_Verify.po.DeviceTemplatePo;
 import cn.edu.nju.Iot_Verify.service.DeviceTemplateService;
+import cn.edu.nju.Iot_Verify.service.FixSuggestionTokenService;
+import cn.edu.nju.Iot_Verify.util.mapper.BoardDataConverter.ModelInputSnapshot;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -43,20 +55,27 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Predicate;
 
+import static cn.edu.nju.Iot_Verify.dto.RequestLimits.MAX_RULE_CONDITIONS;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -72,6 +91,906 @@ class AcceptanceDemoScenarioNusmvTest {
             Path.of("..", "docs", "examples", "default-climate-conflict-scene.json");
     private static final Path FIRE_SCENE_PATH =
             Path.of("..", "docs", "examples", "default-fire-evacuation-scene.json");
+
+    @Test
+    void standaloneAutonomousWriterSetsThePoolValueInNuSmv() throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required to verify a standalone autonomous write");
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode scene = mapper.readTree("""
+                {
+                  "devices":[{"id":"writer_1","templateName":"Light Control","state":"off"}],
+                  "templates":[{"name":"Light Control","manifest":{
+                    "Name":"Light Control","Description":"","Modes":["PowerMode"],"InitState":"off",
+                    "WorkingStates":[{"Name":"off","Trust":"trusted","Privacy":"public"},
+                                     {"Name":"on","Trust":"trusted","Privacy":"public"}],
+                    "InternalVariables":[{"Name":"roomLight","IsInside":false,"Reads":false,
+                      "FalsifiableWhenCompromised":false,"Trust":"trusted","Privacy":"public",
+                      "Values":["dark","bright"]}],
+                    "APIs":[],"Transitions":[{"Name":"publish brightness",
+                      "Trigger":{"Attribute":"PowerMode","Relation":"=","Value":"off"},
+                      "Assignments":[{"Attribute":"roomLight","Value":"bright"}]}]
+                  }}]
+                }
+                """);
+        var pool = List.of(new BoardEnvironmentVariableDto("roomLight", "dark", "trusted", "public"));
+        var generated = buildGenerator(mapper, scene).generateWithEnvironment(USER_ID, readDevices(scene),
+                pool, List.of(), List.of(), AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.SIMULATION);
+        assertCompleteModel(generated);
+        // Query the pool directly in the solver. No device in this scene has permission to read it.
+        Files.writeString(generated.smvFile().toPath(), "\nCTLSPEC (a_roomLight = dark) & AX (a_roomLight = bright)\n"
+                + "CTLSPEC AG (a_roomLight = dark)\n", StandardOpenOption.APPEND);
+        var result = buildExecutor(nusmvPath).execute(generated.smvFile());
+        assertTrue(result.isSuccess(), result::getErrorMessage);
+        assertEquals(2, result.getSpecResults().size());
+        assertEquals(1, violationCount(result));
+
+        var violation = result.getSpecResults().stream().filter(spec -> !spec.isPassed()).findFirst().orElseThrow();
+        var states = new SmvTraceParser().parseCounterexampleStates(
+                violation.getCounterexample(), generated.deviceSmvMap(), List.of());
+        assertEquals(List.of("dark", "bright"), states.stream().map(state -> state.getEnvVariables().stream()
+                .filter(variable -> "roomLight".equals(variable.getName())).findFirst().orElseThrow().getValue()).toList());
+        var declaration = states.get(0).getDevices().get(0).getVariables().stream()
+                .filter(variable -> "roomLight".equals(variable.getName())).findFirst().orElseThrow();
+        assertFalse(declaration.isObserved());
+        assertEquals("", declaration.getValue());
+        assertTrue(CounterexampleInitialStateConstraints.build(states.get(0), List.of(), generated.deviceSmvMap(),
+                AttackScenarioDto.none(), false).contains("a_roomLight = dark"));
+    }
+
+    @Test
+    void competingSharedAssignmentsUseCanonicalDeviceIdAndTemplateTransitionOrder() throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required to check shared write precedence");
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode scene = mapper.readTree("""
+                {
+                  "devices":[
+                    {"id":"room_2","templateName":"Light Control","state":"off"},
+                    {"id":"room_10","templateName":"Light Control","state":"on"}
+                  ],
+                  "templates":[{"name":"Light Control","manifest":{
+                    "Name":"Light Control","Modes":["PowerMode"],"InitState":"off",
+                    "WorkingStates":[{"Name":"off","Trust":"trusted","Privacy":"public"},
+                                     {"Name":"on","Trust":"trusted","Privacy":"public"}],
+                    "InternalVariables":[{"Name":"roomLight","IsInside":false,"Reads":false,
+                      "FalsifiableWhenCompromised":false,"Trust":"trusted","Privacy":"public",
+                      "Values":["dark","bright","dim"]}],
+                    "APIs":[],"Transitions":[
+                      {"Name":"switch off brightness",
+                       "Trigger":{"Attribute":"PowerMode","Relation":"=","Value":"off"},
+                       "Assignments":[{"Attribute":"roomLight","Value":"dark"}]},
+                      {"Name":"switch on brightness",
+                       "Trigger":{"Attribute":"PowerMode","Relation":"=","Value":"on"},
+                       "Assignments":[{"Attribute":"roomLight","Value":"bright"}]},
+                      {"Name":"switch on dimmer setting",
+                       "Trigger":{"Attribute":"PowerMode","Relation":"=","Value":"on"},
+                       "Assignments":[{"Attribute":"roomLight","Value":"dim"}]}
+                    ]
+                  }}]
+                }
+                """);
+        var pool = List.of(new BoardEnvironmentVariableDto("roomLight", "dim", "trusted", "public"));
+        var devices = readDevices(scene);
+        var generator = buildGenerator(mapper, scene);
+        var executor = buildExecutor(nusmvPath);
+        // Portable export can place room_2 first. Model IDs use lexical order for precedence.
+        for (var ordering : List.of(devices, List.of(devices.get(1), devices.get(0)))) {
+            var generated = generator.generateWithEnvironment(USER_ID, ordering,
+                    pool, List.of(), List.of(), AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.SIMULATION);
+            assertCompleteModel(generated);
+            Files.writeString(generated.smvFile().toPath(),
+                    "\nCTLSPEC a_roomLight = dim & AX (a_roomLight = bright)\n",
+                    StandardOpenOption.APPEND);
+            var result = executor.execute(generated.smvFile());
+            assertTrue(result.isSuccess(), result::getErrorMessage);
+            assertEquals(List.of(true), result.getSpecResults().stream()
+                    .map(NusmvExecutor.SpecCheckResult::isPassed).toList(), result::getOutput);
+        }
+    }
+
+    @Test
+    void localAssignmentDoesNotOverrideTheSharedClockRollover() throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required for this environment transition regression");
+
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode clock = (ObjectNode) mapper.readTree(Files.readString(
+                Path.of("src", "main", "resources", "deviceTemplate", "Clock.json")));
+        ObjectNode local = clock.deepCopy().put("Name", "Local Timer");
+        ObjectNode variable = (ObjectNode) local.path("InternalVariables").get(0);
+        variable.put("IsInside", true).put("UpperBound", 1);
+        variable.remove(List.of("Reads", "NaturalChangeRate"));
+        ObjectNode transition = (ObjectNode) local.path("Transitions").get(0);
+        ((ObjectNode) transition.path("Trigger")).put("Value", "0");
+        ((ObjectNode) transition.path("Assignments").get(0)).put("Value", "1");
+
+        ObjectNode scene = mapper.createObjectNode();
+        var templates = scene.putArray("templates");
+        templates.addObject().put("name", "Local Timer").set("manifest", local);
+        templates.addObject().put("name", "Clock").set("manifest", clock);
+        var nodes = scene.putArray("devices");
+        nodes.addObject().put("id", "timer_1").put("label", "Local Timer").put("templateName", "Local Timer")
+                .putArray("variables").addObject().put("name", "time").put("value", "0");
+        nodes.addObject().put("id", "clock_1").put("label", "Clock").put("templateName", "Clock");
+        var localZero = specCondition("timer_1", "variable", "time", "=", "0");
+        var localOne = specCondition("timer_1", "variable", "time", "=", "1");
+        localZero.setVariableSource("reported");
+        localOne.setVariableSource("reported");
+        var specs = List.of(immediateSpec("local-tick", "Local timer advances", localZero, localOne),
+                immediateSpec("clock-rollover", "Shared clock rolls over",
+                        specCondition("clock_1", "variable", "time", "=", "23"),
+                        specCondition("clock_1", "variable", "time", "=", "0")));
+        SmvGenerator.GenerateResult generated = buildGenerator(mapper, scene).generateWithEnvironment(
+                USER_ID, readDevices(scene), List.of(new BoardEnvironmentVariableDto("time", "23", null, null)),
+                List.of(), specs, AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
+        assertCompleteModel(generated);
+        var result = FormalCheckTestSupport.checkProperties(buildExecutor(nusmvPath), generated);
+        assertEquals(List.of(true, true), result.getSpecResults().stream()
+                .map(NusmvExecutor.SpecCheckResult::isPassed).toList(), result::getOutput);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "2147483646, 2147483647, 2147483647, '[1,1]', none, 2147483647",
+            "-2147483647, -2147483645, -2147483647, '[-2,-2]', none, -2147483647",
+            "0, 20, 3, '[2147483647,2147483647]', -2147483648, 2"
+    })
+    void localNumericRatesSaturateAfterExactComposition(int lower, int upper, int initial,
+                                                        String drift, String dynamic, int expected) throws Exception {
+        assertNumericRateStep(true, lower, upper, initial, drift, List.of(dynamic), expected);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"2147483647, 20", "-2147483648, 3"})
+    void sharedNumericRatesSaturateAfterExactComposition(String secondDynamic, int expected) throws Exception {
+        assertNumericRateStep(false, 0, 20, 3, "[1,1]", List.of("2147483647", secondDynamic), expected);
+    }
+
+    private void assertNumericRateStep(boolean local, int lower, int upper, int initial,
+                                       String drift, List<String> dynamics, int expected) throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required to check numeric saturation");
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode scene = mapper.createObjectNode();
+        var templates = scene.putArray("templates");
+        var devices = scene.putArray("devices");
+        for (int index = 0; index < dynamics.size(); index++) {
+            String templateName = "Light Control " + index;
+            ObjectNode manifest = mapper.createObjectNode().put("Name", templateName).put("Description", "")
+                    .put("InitState", "off");
+            manifest.putArray("Modes").add("PowerMode");
+            manifest.putArray("APIs");
+            manifest.putArray("Transitions");
+            var states = manifest.putArray("WorkingStates");
+            var off = states.addObject().put("Name", "off").put("Trust", "trusted").put("Privacy", "public");
+            states.addObject().put("Name", "on").put("Trust", "trusted").put("Privacy", "public");
+            var level = manifest.putArray("InternalVariables").addObject().put("Name", "lightLevel")
+                    .put("IsInside", local).put("FalsifiableWhenCompromised", false).put("Trust", "trusted")
+                    .put("Privacy", "public").put("LowerBound", lower).put("UpperBound", upper)
+                    .put("NaturalChangeRate", drift);
+            if (!local) {
+                level.put("Reads", false);
+                manifest.putArray("ImpactedVariables").add("lightLevel");
+            }
+            if (!"none".equals(dynamics.get(index))) {
+                off.putArray("Dynamics").addObject().put("VariableName", "lightLevel")
+                        .put("ChangeRate", dynamics.get(index));
+            }
+            templates.addObject().put("name", templateName).set("manifest", manifest);
+            var device = devices.addObject().put("id", "light_" + index).put("templateName", templateName)
+                    .put("state", "off");
+            if (local) {
+                device.putArray("variables").addObject().put("name", "lightLevel").put("value", String.valueOf(initial));
+            }
+        }
+        List<BoardEnvironmentVariableDto> pool = local ? List.of() : List.of(
+                new BoardEnvironmentVariableDto("lightLevel", String.valueOf(initial), "trusted", "public"));
+        var model = buildGenerator(mapper, scene).generateWithEnvironment(USER_ID, readDevices(scene), pool,
+                List.of(), List.of(), AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.SIMULATION);
+        assertCompleteModel(model);
+        String variable = local ? "light_0.lightLevel" : "a_lightLevel";
+        Files.writeString(model.smvFile().toPath(), "\nCTLSPEC (" + variable + " = " + initial
+                + ") & AX (" + variable + " = " + expected + ")\n", StandardOpenOption.APPEND);
+        var result = buildExecutor(nusmvPath).execute(model.smvFile());
+        assertTrue(result.isSuccess(), result::getErrorMessage);
+        assertEquals(List.of(true), result.getSpecResults().stream()
+                .map(NusmvExecutor.SpecCheckResult::isPassed).toList(), result::getOutput);
+    }
+
+    @Test
+    void signedAsciiTransitionLiteralsExecuteInNuSmv() throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required to check admitted signed literals");
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode scene = mapper.readTree("""
+                {"devices":[{"id":"counter_1","templateName":"Counter",
+                    "variables":[{"name":"amount","value":"1"}]}],
+                 "templates":[{"name":"Counter","manifest":{
+                    "Name":"Counter", "InternalVariables":[{
+                      "Name":"amount","IsInside":true,"FalsifiableWhenCompromised":false,
+                      "Trust":"trusted","Privacy":"public","LowerBound":-2,"UpperBound":2}],
+                    "Transitions":[{"Name":"reset","Trigger":{"Attribute":"amount","Relation":"=","Value":"+1"},
+                      "Assignments":[{"Attribute":"amount","Value":"-1"}]}]
+                  }}]}
+                """);
+        var model = buildGenerator(mapper, scene).generateWithEnvironment(USER_ID, readDevices(scene), List.of(),
+                List.of(), List.of(), AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.SIMULATION);
+        assertCompleteModel(model);
+        Files.writeString(model.smvFile().toPath(), "\nCTLSPEC (counter_1.amount = 1) & AX (counter_1.amount = -1)\n",
+                StandardOpenOption.APPEND);
+        var result = buildExecutor(nusmvPath).execute(model.smvFile());
+        assertTrue(result.isSuccess(), result::getErrorMessage);
+        assertEquals(List.of(true), result.getSpecResults().stream()
+                .map(NusmvExecutor.SpecCheckResult::isPassed).toList(), result::getOutput);
+    }
+
+    @Test
+    void frozenModeModelRejectsAnExactEnumCollisionAndKeepsCaseDistinctValues() throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required to check case-distinct symbol use");
+        ObjectMapper mapper = new ObjectMapper();
+        assertModeAndEnumStayDistinctInNuSmv(mapper, nusmvPath, modeEnumSnapshot(mapper, "_next", false), "light_1");
+
+        var conflict = assertThrows(SmvGenerationException.class,
+                () -> generateFrozenModel(mapper, modeEnumSnapshot(mapper, "_Next", false)));
+        assertTrue(conflict.getMessage().contains("_Next") && conflict.getMessage().contains("collides"),
+                conflict::getMessage);
+    }
+
+    @Test
+    void frozenBoardRejectsAnEnumCollisionBetweenDevicesInBothEngines() throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required to verify the separate-device enum control");
+        ObjectMapper mapper = new ObjectMapper();
+        assertModeAndEnumStayDistinctInNuSmv(mapper, nusmvPath, modeEnumSnapshot(mapper, "_next", true), "sensor_1");
+        var snapshot = modeEnumSnapshot(mapper, "_Next", true);
+        var exploration = new FuzzEngine().run(
+                new FuzzEngineInput(snapshot, new FuzzEngineConfig(List.of(), 1, 2, 1, 1L)), null, () -> false);
+        assertAll(
+                () -> {
+                    var conflict = assertThrows(SmvGenerationException.class, () -> generateFrozenModel(mapper, snapshot));
+                    assertTrue(conflict.getMessage().contains("_Next") && conflict.getMessage().contains("sensor_1"),
+                            conflict::getMessage);
+                },
+                () -> assertEquals("MODEL_INVALID", exploration.eligibility().get(0).reasonCode(), exploration::toString));
+    }
+
+    private void assertModeAndEnumStayDistinctInNuSmv(ObjectMapper mapper, String nusmvPath,
+                                                     ModelInputSnapshot snapshot, String enumDevice) throws Exception {
+        var model = generateFrozenModel(mapper, snapshot);
+        Files.writeString(model.smvFile().toPath(),
+                "\nCTLSPEC AG (light_1._Next = off & " + enumDevice + ".preset = _next)\n", StandardOpenOption.APPEND);
+        var result = buildExecutor(nusmvPath).execute(model.smvFile());
+        assertTrue(result.isSuccess(), result::getErrorMessage);
+        assertEquals(List.of(true), result.getSpecResults().stream()
+                .map(NusmvExecutor.SpecCheckResult::isPassed).toList(), result::getOutput);
+    }
+
+    private ModelInputSnapshot modeEnumSnapshot(ObjectMapper mapper, String preset, boolean separate) throws Exception {
+        ObjectNode scene = (ObjectNode) mapper.readTree("""
+                {"devices":[{"id":"light_1","templateName":"Light Control","state":"off"}],
+                 "templates":[{"name":"Light Control","manifest":{
+                    "Name":"Light Control", "Modes":["Next"], "InitState":"off",
+                    "WorkingStates":[{"Name":"off","Trust":"trusted","Privacy":"public",
+                        "Dynamics":[{"VariableName":"preset","Value":"%s"}]},
+                        {"Name":"on","Trust":"trusted","Privacy":"public"}],
+                    "InternalVariables":[{"Name":"preset","IsInside":true,"FalsifiableWhenCompromised":false,
+                        "Values":["%s","warm"],"Trust":"trusted","Privacy":"public"}]
+                  }}]}
+                """.formatted(preset, preset));
+        if (separate) {
+            var light = (ObjectNode) scene.withArray("templates").get(0).path("manifest");
+            ((ObjectNode) light.path("WorkingStates").get(0)).remove("Dynamics");
+            var sensor = scene.withArray("templates").addObject().put("name", "Sensor Preset")
+                    .putObject("manifest").put("Name", "Sensor Preset");
+            sensor.set("InternalVariables", light.remove("InternalVariables"));
+            var transition = sensor.putArray("Transitions").addObject().put("Name", "restorePreset");
+            transition.putObject("Trigger").put("Attribute", "preset").put("Relation", "=").put("Value", "warm");
+            transition.putArray("Assignments").addObject().put("Attribute", "preset").put("Value", preset);
+            scene.withArray("devices").addObject().put("id", "sensor_1").put("templateName", "Sensor Preset");
+        }
+        Map<String, DeviceManifest> manifests = new java.util.LinkedHashMap<>();
+        for (JsonNode template : scene.withArray("templates")) {
+            manifests.put(template.path("name").asText(), mapper.treeToValue(template.path("manifest"), DeviceManifest.class));
+        }
+        var specifications = List.of(neverSpec("never-on", "Light never turns on",
+                specCondition("light_1", "mode", "Next", "=", "on")));
+        return new ModelInputSnapshot(List.of(), readDevices(scene), List.of(), List.of(), specifications, manifests);
+    }
+
+    private SmvGenerator.GenerateResult generateFrozenModel(ObjectMapper mapper, ModelInputSnapshot snapshot)
+            throws Exception {
+        return generateFrozenModel(mapper, snapshot, false, AttackScenarioDto.none());
+    }
+
+    private SmvGenerator.GenerateResult generateFrozenModel(ObjectMapper mapper, ModelInputSnapshot snapshot,
+                                                            boolean privacy, AttackScenarioDto scenario) throws Exception {
+        var generator = buildGenerator(mapper, mapper.createObjectNode());
+        var resolved = generator.buildDeviceSmvMapFromTemplateSnapshots(snapshot.devices(), snapshot.templateManifests());
+        return generator.generateWithResolvedDeviceModel(USER_ID, snapshot.devices(), snapshot.environmentVariables(),
+                snapshot.rules(), List.of(), scenario, privacy, SmvGenerator.GeneratePurpose.SIMULATION, null, resolved);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "Power, privacy_Power_off, privacy_Power_off, true",
+            "private, cool, private, true",
+            "Power, is_attack, is_attack, false"
+    })
+    void optionalNamespaceCollisionOnlyAppliesToARunThatEmitsTheSymbol(
+            String mode, String literal, String collisionName, boolean privacy) throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required to check names with the model options disabled");
+        ObjectMapper mapper = new ObjectMapper();
+        var base = modeEnumSnapshot(mapper, literal, true);
+        DeviceManifest lamp = base.templateManifests().get("Light Control");
+        lamp.setModes(List.of(mode));
+        lamp.setApis(List.of(DeviceManifest.API.builder().name("turnOn").startState("off").endState("on")
+                .signal(false).build()));
+        var rules = List.of(rule(1L, "Turn the light on when off", command("light_1", "turnOn"),
+                ruleCondition("light_1", mode, "mode", "=", "off")));
+        var specs = List.of(neverSpec("never-on", "Light never turns on",
+                specCondition("light_1", "mode", mode, "=", "on")));
+        var snapshot = new ModelInputSnapshot(List.of(), base.devices(), List.of(), rules, specs,
+                base.templateManifests());
+
+        var explored = new FuzzEngine().run(
+                new FuzzEngineInput(snapshot, new FuzzEngineConfig(List.of(), 1, 2, 1, 1L)), null, () -> false);
+        assertEquals(List.of(1), explored.findings().stream().map(FuzzFinding::firstViolationStep).toList(),
+                explored::toString);
+        var model = generateFrozenModel(mapper, snapshot);
+        Files.writeString(model.smvFile().toPath(), "\nCTLSPEC AX (light_1." + mode + " = on)\n",
+                StandardOpenOption.APPEND);
+        var checked = buildExecutor(nusmvPath).execute(model.smvFile());
+        assertTrue(checked.isSuccess(), checked::getErrorMessage);
+        assertEquals(List.of(true), checked.getSpecResults().stream()
+                .map(NusmvExecutor.SpecCheckResult::isPassed).toList(), checked::getOutput);
+
+        AttackScenarioDto scenario = privacy ? AttackScenarioDto.none() : AttackScenarioDto.anyUpToBudget(1);
+        var conflict = assertThrows(SmvGenerationException.class,
+                () -> generateFrozenModel(mapper, snapshot, privacy, scenario));
+        assertTrue(conflict.getMessage().contains(collisionName) && conflict.getMessage().contains("collides"),
+                conflict::getMessage);
+    }
+
+    @Test
+    void authoredModeRuleSelectsTheSameFirstStepInBothEngines() throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required to compare the two engines");
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode scene = mapper.readTree("""
+                {"devices":[{"id":"light_1","templateName":"Light Control","state":"off"}],
+                 "templates":[{"name":"Light Control","manifest":{
+                    "Name":"Light Control", "Modes":["Next"], "InitState":"off",
+                    "InternalVariables":[{"Name":"localLevel","IsInside":true,
+                        "FalsifiableWhenCompromised":false,"Trust":"trusted","Privacy":"public",
+                        "LowerBound":0,"UpperBound":5,"NaturalChangeRate":"0"}],
+                    "WorkingStates":[{"Name":"off","Trust":"trusted","Privacy":"public"},
+                                     {"Name":"on","Trust":"trusted","Privacy":"public"}],
+                    "APIs":[{"Name":"turnOn","StartState":"off","EndState":"on","Signal":false}]
+                  }}]}
+                """);
+        var devices = readDevices(scene);
+        var rules = List.of(rule(1L, "Turn the light on when off", command("light_1", "turnOn"),
+                ruleCondition("light_1", "Next", "mode", "=", "off")));
+        var specs = List.of(neverSpec("never-on", "Light never turns on",
+                specCondition("light_1", "mode", "Next", "=", "on")));
+        assertBothEnginesFindFirstStep(mapper, scene, devices, rules, specs, List.of("off", "on"), nusmvPath);
+    }
+
+    @Test
+    void authoredModeTriggerSelectsTheSameFirstStepInBothEngines() throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required to compare the two engines");
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode scene = mapper.readTree("""
+                {"devices":[{"id":"light_1","templateName":"Light Control","state":"Case"}],
+                 "templates":[{"name":"Light Control","manifest":{
+                    "Name":"Light Control", "Modes":["Next"], "InitState":"Case",
+                    "WorkingStates":[{"Name":"Case","Trust":"trusted","Privacy":"public"},
+                                     {"Name":"ready","Trust":"trusted","Privacy":"public"}],
+                    "Transitions":[{"Name":"turnOn","Trigger":{"Attribute":"Next","Relation":"=","Value":"Case"},
+                        "EndState":"ready"}]
+                  }}]}
+                """);
+        var specs = List.of(neverSpec("never-ready", "Light never becomes ready",
+                specCondition("light_1", "mode", "Next", "=", "ready")));
+        assertBothEnginesFindFirstStep(
+                mapper, scene, readDevices(scene), List.of(), specs, List.of("Case", "ready"), nusmvPath);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void singleModeWhitespaceUsesTheSameAuthoredStatesInBothEngines(boolean useTemplateInitialState) throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required to compare the two engines");
+        String initialState = useTemplateInitialState ? "ready" : "off";
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode scene = mapper.readTree("""
+                {"devices":[{"id":"light_1","templateName":"Light Control"}],
+                 "templates":[{"name":"Light Control","manifest":{
+                    "Name":"Light Control", "Modes":["Power"], "InitState":"\\tready\\r",
+                    "WorkingStates":[{"Name":"on\\t","Trust":"trusted","Privacy":"public"},
+                                     {"Name":"off\\t","Trust":"trusted","Privacy":"public"},
+                                     {"Name":"\\tready","Trust":"trusted","Privacy":"public"}],
+                    "APIs":[{"Name":"turnOn","StartState":"\\t%s\\r","EndState":"\\ton\\t","Signal":false}]
+                  }}]}
+                """.formatted(initialState));
+        var devices = readDevices(scene);
+        devices.get(0).setState(useTemplateInitialState ? null : "\toff\r");
+        var rules = List.of(rule(1L, "Turn the light on", command("light_1", "turnOn"),
+                ruleCondition("light_1", "Power", "mode", "=", initialState)));
+        var specs = List.of(neverSpec("never-on", "Light never turns on",
+                specCondition("light_1", "mode", "Power", "=", "on")));
+        assertBothEnginesFindFirstStep(mapper, scene, devices, rules, specs,
+                List.of(initialState, "on"), nusmvPath);
+    }
+
+    @Test
+    void stateDerivedInitialValuesUseTheSameAuthorityInBothEnginesAndRepair() throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required to compare the two engines");
+        var mapper = new ObjectMapper();
+        var scene = mapper.createObjectNode();
+        scene.putArray("devices").addObject().put("id", "car_1").put("templateName", "Car").put("state", "away");
+        var template = scene.putArray("templates").addObject().put("name", "Car");
+        try (var resource = Objects.requireNonNull(getClass().getResourceAsStream("/deviceTemplate/Car.json"))) {
+            template.set("manifest", mapper.readTree(resource));
+        }
+        var manifest = mapper.treeToValue(template.path("manifest"), DeviceManifest.class);
+        var devices = readDevices(scene);
+        var car = devices.get(0);
+        car.setVariables(List.of(new VariableStateDto("location", "garage", "trusted")));
+        var away = specCondition("car_1", "variable", "location", "=", "away");
+        var garage = specCondition("car_1", "variable", "location", "=", "garage");
+        away.setVariableSource("reported");
+        garage.setVariableSource("reported");
+        var specs = List.of(neverSpec("never-away", "The car never leaves home", away),
+                neverSpec("never-garage", "The car never stays in the garage", garage));
+
+        var model = buildGenerator(mapper, scene).generateWithEnvironment(USER_ID, devices, List.of(), List.of(),
+                specs, AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
+        assertCompleteModel(model);
+        var verdicts = verdictsBySpecId(FormalCheckTestSupport.checkProperties(buildExecutor(nusmvPath), model), model);
+        assertFalse(verdicts.get("never-away").isPassed());
+        assertTrue(verdicts.get("never-garage").isPassed());
+        var snapshot = new ModelInputSnapshot(List.of(), devices, List.of(), List.of(), specs, Map.of("Car", manifest));
+        var finite = new FuzzEngine().run(
+                new FuzzEngineInput(snapshot, new FuzzEngineConfig(List.of(), 2, 2, 1, 1L)), null, () -> false);
+        String recordedFingerprint = BoardSemanticFingerprint.of(devices, specs, model.deviceSmvMap());
+        car.setVariables(List.of(new VariableStateDto("location", "away", "trusted")));
+        assertAll(
+                () -> assertEquals(List.of(List.of("never-away", 0)), finite.findings().stream()
+                        .map(finding -> List.of(finding.specification().getId(), finding.firstViolationStep())).toList()),
+                () -> assertEquals(recordedFingerprint, BoardSemanticFingerprint.of(devices, specs, model.deviceSmvMap())));
+    }
+
+    @Test
+    void multiModeConditionsResolveAuthoredStatesBeforeEscapingForNuSmv() throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required to compare the two engines");
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode scene = mapper.readTree("""
+                {"devices":[{"id":"light_1","templateName":"Light Control","state":"Case;fan idle"}],
+                 "templates":[{"name":"Light Control","manifest":{
+                    "Name":"Light Control","Modes":["Next","FanMode"],"InitState":"Case;fan idle",
+                    "WorkingStates":[
+                        {"Name":"Case;fan idle","Trust":"trusted","Privacy":"public"},
+                        {"Name":"night standby;_Case","Trust":"trusted","Privacy":"public"}],
+                    "APIs":[{"Name":"goToStandby","StartState":"Case;_","EndState":"night standby;","Signal":false}]
+                  }}]}
+                """);
+        var rules = List.of(rule(1L, "Enter standby while in Case", command("light_1", "goToStandby"),
+                ruleCondition("light_1", "STATE", "state", "=", "Case"),
+                ruleCondition("light_1", "FanMode", "mode", "not in", "_Case")));
+        var neverStandby = neverSpec("never-standby", "Never reaches standby with the fan idle",
+                specCondition("light_1", "state", "state", "in", "night standby;fan idle|Case;_Case"));
+
+        assertBothEnginesFindFirstStep(mapper, scene, readDevices(scene), rules, List.of(neverStandby),
+                List.of("Case;fan idle", "night standby;fan idle"), nusmvPath);
+    }
+
+    @Test
+    void wildcardMembershipAndItsComplementDriveTheSameTransitionsInBothEngines() throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required to compare the two engines");
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode scene = mapper.readTree("""
+                {"devices":[{"id":"light_1","templateName":"Light Control","state":"Case;fan idle"}],
+                 "templates":[{"name":"Light Control","manifest":{
+                    "Name":"Light Control","Modes":["Next","FanMode"],"InitState":"Case;fan idle",
+                    "WorkingStates":[
+                        {"Name":"Case;fan idle","Trust":"trusted","Privacy":"public"},
+                        {"Name":"night standby;_Case","Trust":"trusted","Privacy":"public"}],
+                    "APIs":[
+                        {"Name":"goToStandby","StartState":"Case;_","EndState":"night standby;","Signal":false},
+                        {"Name":"switchFan","StartState":";fan idle","EndState":";_Case","Signal":false}]
+                  }}]}
+                """);
+        var rules = List.of(
+                rule(1L, "Enter standby inside the selected set", command("light_1", "goToStandby"),
+                        ruleCondition("light_1", "state", "state", "IN", "Case;_, _;_Case")),
+                rule(2L, "Switch the fan outside the selected set", command("light_1", "switchFan"),
+                        ruleCondition("light_1", "state", "state", "NOT_IN", "Case; | ;_Case")));
+        var outside = neverSpec("outside", "Never leaves the set",
+                specCondition("light_1", "state", "state", "NOT_IN", "Case;_, ;_Case"));
+        var fan = neverSpec("fan", "The fan never switches",
+                specCondition("light_1", "mode", "FanMode", "=", "_Case"));
+        var exclusive = neverSpec("exclusive", "Membership and exclusion never overlap",
+                specCondition("light_1", "state", "state", "IN", "Case; | ;_Case"),
+                specCondition("light_1", "state", "state", "NOT_IN", "Case;_, _;_Case"));
+        var specs = List.of(outside, fan, exclusive);
+        var devices = readDevices(scene);
+        var manifest = mapper.treeToValue(scene.path("templates").get(0).path("manifest"), DeviceManifest.class);
+        var snapshot = new ModelInputSnapshot(List.of(), devices, List.of(), rules, specs, Map.of(manifest.getName(), manifest));
+        var finite = new FuzzEngine().run(
+                new FuzzEngineInput(snapshot, new FuzzEngineConfig(List.of(), 1, 3, 1, 1L)), null, () -> false);
+        assertEquals(Map.of("outside", 1, "fan", 2), finite.findings().stream()
+                .collect(java.util.stream.Collectors.toMap(finding -> finding.specification().getId(),
+                        FuzzFinding::firstViolationStep)), finite::toString);
+
+        var model = buildGenerator(mapper, scene).generateWithEnvironment(USER_ID, devices, List.of(), rules, specs,
+                AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
+        assertCompleteModel(model);
+        var verdicts = verdictsBySpecId(FormalCheckTestSupport.checkProperties(buildExecutor(nusmvPath), model), model);
+        assertTrue(verdicts.get("exclusive").isPassed());
+        for (var finding : finite.findings()) {
+            var violation = verdicts.get(finding.specification().getId());
+            assertFalse(violation.isPassed());
+            var trace = new SmvTraceParser().parseCounterexampleStates(
+                    violation.getCounterexample(), model.deviceSmvMap(), rules);
+            assertEquals(finding.states().stream().map(state -> state.getDevices().get(0).getState()).toList(),
+                    trace.stream().map(state -> state.getDevices().get(0).getState()).toList());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"on;low", "on; low"})
+    void derivedLocalValueUsesTheInitialModesRegardlessOfTupleSpacing(String startingState) throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required for the initial tuple regression");
+        var mapper = new ObjectMapper();
+        var scene = (ObjectNode) mapper.readTree("""
+                {"devices":[{"id":"panel","templateName":"Panel"}],
+                 "templates":[{"name":"Panel","manifest":{"Name":"Panel","Modes":["Power","Fan"],"InitState":"on;low",
+                  "WorkingStates":[{"Name":"on;low","Trust":"trusted","Privacy":"public",
+                                    "Dynamics":[{"VariableName":"preset","Value":"active"}]},
+                                   {"Name":"off;high","Trust":"trusted","Privacy":"public"}],
+                  "InternalVariables":[{"Name":"preset","IsInside":true,"FalsifiableWhenCompromised":false,
+                                        "Values":["idle","active"],"Trust":"trusted","Privacy":"public"}]}}]}
+                """);
+        ((ObjectNode) scene.path("devices").get(0)).put("state", startingState);
+        var devices = readDevices(scene);
+        var preset = specCondition("panel", "variable", "preset", "=", "idle");
+        preset.setVariableSource("reported");
+        var safety = neverSpec("never-idle", "Preset never idles in the starting modes", preset);
+        var specs = List.of(safety);
+        var manifest = mapper.treeToValue(scene.path("templates").get(0).path("manifest"), DeviceManifest.class);
+        var snapshot = new ModelInputSnapshot(List.of(), devices, List.of(), List.of(), specs,
+                Map.of(manifest.getName(), manifest));
+        var explored = new FuzzEngine().run(
+                new FuzzEngineInput(snapshot, new FuzzEngineConfig(List.of(), 1, 2, 1, 1L)), null, () -> false);
+
+        var model = buildGenerator(mapper, scene).generateWithEnvironment(USER_ID, devices, List.of(), List.of(), specs,
+                AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
+        assertCompleteModel(model);
+        var verdict = verdictsBySpecId(FormalCheckTestSupport.checkProperties(buildExecutor(nusmvPath), model), model)
+                .get(safety.getId());
+        assertAll(() -> assertTrue(verdict.isPassed()), () -> assertTrue(explored.findings().isEmpty()));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"api-start", "api-end", "transition-start", "transition-end", "mode-trigger", "short-endpoint"})
+    void endpointsAndTriggersRejectUndeclaredAuthoredStatesInBothEngines(String invalid) throws Exception {
+        var mapper = new ObjectMapper();
+        var scene = (ObjectNode) mapper.readTree("""
+                {"devices":[{"id":"panel","templateName":"Panel","state":"off;_Case"}],
+                 "templates":[{"name":"Panel","manifest":{"Name":"Panel","Modes":["Power","Fan"],"InitState":"off;_Case",
+                  "WorkingStates":[{"Name":"off;_Case","Trust":"trusted","Privacy":"public"},
+                                   {"Name":"Case;ready","Trust":"trusted","Privacy":"public"}]}}]}
+                """);
+        var manifestNode = (ObjectNode) scene.path("templates").get(0).path("manifest");
+        if (invalid.startsWith("api-") || "short-endpoint".equals(invalid)) {
+            manifestNode.putArray("APIs").addObject().put("Name", "start").put("Signal", false)
+                    .put("StartState", "api-start".equals(invalid) ? "off;Case" : "off;_Case")
+                    .put("EndState", switch (invalid) {
+                        case "api-end" -> "Case;Case";
+                        case "short-endpoint" -> "Case";
+                        default -> "Case;ready";
+                    });
+        } else {
+            var change = manifestNode.putArray("Transitions").addObject().put("Name", "change")
+                    .put("StartState", switch (invalid) {
+                        case "transition-start" -> "off;Case";
+                        case "transition-end" -> "off;ready";
+                        default -> "_";
+                    })
+                    .put("EndState", "transition-end".equals(invalid) ? ";Case" : "Case;");
+            change.putObject("Trigger").put("Attribute", "Fan").put("Relation", "=")
+                    .put("Value", switch (invalid) {
+                        case "mode-trigger" -> "Case";
+                        case "transition-end" -> "ready";
+                        default -> "_Case";
+                    });
+        }
+
+        var devices = readDevices(scene);
+        var specs = List.of(neverSpec("never-ready", "Never ready",
+                specCondition("panel", "state", "state", "=", "Case;ready")));
+        var manifest = mapper.treeToValue(manifestNode, DeviceManifest.class);
+        var snapshot = new ModelInputSnapshot(List.of(), devices, List.of(), List.of(), specs,
+                Map.of(manifest.getName(), manifest));
+        var explored = new FuzzEngine().run(
+                new FuzzEngineInput(snapshot, new FuzzEngineConfig(List.of(), 1, 2, 1, 1L)), null, () -> false);
+        String expected = "short-endpoint".equals(invalid) ? "segments" : "Fan";
+        assertAll(
+                () -> {
+                    var failure = assertThrows(BaseException.class, () ->
+                            buildGenerator(mapper, scene).generateWithEnvironment(USER_ID, devices, List.of(), List.of(),
+                                    specs, AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION));
+                    assertTrue(failure.getMessage().contains(expected), failure::getMessage);
+                },
+                () -> {
+                    var eligibility = explored.eligibility().get(0);
+                    assertEquals("MODEL_INVALID", eligibility.reasonCode());
+                    assertTrue(eligibility.reason().contains(expected), eligibility::reason);
+                });
+    }
+
+    private void assertBothEnginesFindFirstStep(ObjectMapper mapper, JsonNode scene,
+            List<DeviceVerificationDto> devices, List<RuleDto> rules, List<SpecificationDto> specs,
+            List<String> authoredStates, String nusmvPath) throws Exception {
+        var manifest = mapper.treeToValue(scene.path("templates").get(0).path("manifest"), DeviceManifest.class);
+        var snapshot = new ModelInputSnapshot(List.of(), devices, List.of(), rules, specs, Map.of(manifest.getName(), manifest));
+        var explored = new FuzzEngine().run(
+                new FuzzEngineInput(snapshot, new FuzzEngineConfig(List.of(), 1, 2, 1, 1L)), null, () -> false);
+        assertEquals(List.of(1), explored.findings().stream().map(FuzzFinding::firstViolationStep).toList(),
+                explored::toString);
+
+        var model = buildGenerator(mapper, scene).generateWithEnvironment(USER_ID, devices, List.of(), rules, specs,
+                AttackScenarioDto.none(), true, SmvGenerator.GeneratePurpose.VERIFICATION);
+        var verdicts = verdictsBySpecId(FormalCheckTestSupport.checkProperties(buildExecutor(nusmvPath), model), model);
+        var violation = verdicts.get(specs.get(0).getId());
+        assertAll(() -> assertCompleteModel(model), () -> assertFalse(violation.isPassed()));
+
+        var trace = new SmvTraceParser().parseCounterexampleStates(
+                violation.getCounterexample(), model.deviceSmvMap(), rules);
+        var finiteModes = explored.findings().get(0).states().stream()
+                .map(state -> state.getDevices().get(0).getMode()).toList();
+        assertEquals(finiteModes, trace.stream().map(state -> state.getDevices().get(0).getMode()).toList());
+        var finiteStates = explored.findings().get(0).states().stream()
+                .map(state -> state.getDevices().get(0).getState()).toList();
+        assertAll(
+                () -> assertEquals(authoredStates, finiteStates, "Fuzz playback state names"),
+                () -> assertEquals(authoredStates,
+                        trace.stream().map(state -> state.getDevices().get(0).getState()).toList(),
+                        "NuSMV playback state names"));
+        var initialDevice = trace.get(0).getDevices().get(0);
+        var finiteDevice = explored.findings().get(0).states().get(0).getDevices().get(0);
+        assertEquals(finiteDevice.getVariables().stream()
+                        .map(variable -> List.of(variable.getName(), variable.getValue())).toList(),
+                initialDevice.getVariables().stream()
+                        .map(variable -> List.of(variable.getName(), variable.getValue())).toList());
+        var constraints = CounterexampleInitialStateConstraints.build(
+                trace.get(0), rules, model.deviceSmvMap(), AttackScenarioDto.none(), true);
+        String[] initialStates = authoredStates.get(0).split(";");
+        for (int index = 0; index < manifest.getModes().size(); index++) {
+            String authoredMode = manifest.getModes().get(index);
+            String authoredState = initialStates[index];
+            String modeToken = DeviceSmvDataFactory.sanitizeSmvToken(authoredMode);
+            String stateToken = DeviceSmvDataFactory.sanitizeSmvToken(authoredState);
+            assertTrue(initialDevice.getTrustPrivacy().stream().anyMatch(label ->
+                    authoredMode.equals(label.getMode()) && authoredState.equals(label.getName())));
+            assertTrue(initialDevice.getPrivacies().stream().anyMatch(label -> "state".equals(label.getPropertyScope())
+                    && authoredMode.equals(label.getMode()) && authoredState.equals(label.getName())));
+            assertTrue(constraints.contains("light_1." + modeToken + " = " + stateToken));
+            assertTrue(constraints.stream().anyMatch(constraint -> constraint.startsWith("light_1.trust_" + modeToken + "_")));
+            assertTrue(constraints.stream().anyMatch(constraint -> constraint.startsWith("light_1.privacy_" + modeToken + "_")));
+        }
+    }
+
+    @Test
+    void onlyTheSelectedObservableActionProducesItsPulse() throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required to check observable action identity");
+
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode scene = mapper.readTree("""
+                {
+                  "devices": [{"id":"control_1", "templateName":"Two Controls", "state":"off;idle"}],
+                  "templates": [{"name":"Two Controls", "manifest":{
+                    "Name":"Two Controls", "Description":"", "InternalVariables":[],
+                    "Modes":["PowerMode","FanMode"], "InitState":"off;idle",
+                    "WorkingStates":[
+                      {"Name":"off;idle","Trust":"trusted","Privacy":"public"},
+                      {"Name":"on;idle","Trust":"trusted","Privacy":"public"},
+                      {"Name":"off;running","Trust":"trusted","Privacy":"public"},
+                      {"Name":"on;running","Trust":"trusted","Privacy":"public"}],
+                    "Transitions":[], "APIs":[
+                      {"Name":"both","StartState":"off;idle","EndState":"on;running","Signal":true},
+                      {"Name":"powerOn","StartState":"off;","EndState":"on;","Signal":false},
+                      {"Name":"startFan","StartState":";idle","EndState":";running","Signal":false}]
+                  }}]
+                }
+                """);
+        var generator = buildGenerator(mapper, scene);
+        var executor = buildExecutor(nusmvPath);
+        var devices = readDevices(scene);
+        var initialState = ruleCondition("control_1", "state", "state", "=", "off;idle");
+        var neverBoth = neverSpec("never-both", "Combined action never occurs",
+                specCondition("control_1", "api", "both", "=", "TRUE"));
+        var reachBothModes = immediateSpec("both-modes", "Both modes change on the first transition",
+                specCondition("control_1", "state", "state", "=", "off;idle"),
+                specCondition("control_1", "state", "state", "=", "on;running"));
+        var specs = List.of(neverBoth, reachBothModes);
+        var separateCommands = List.of(
+                rule(1L, "Turn on power", command("control_1", "powerOn"), initialState),
+                rule(2L, "Start the fan", command("control_1", "startFan"), initialState));
+        var combinedCommand = List.of(rule(3L, "Run the combined command", command("control_1", "both"), initialState));
+
+        for (var rules : List.of(separateCommands, combinedCommand)) {
+            var model = generator.generateWithEnvironment(USER_ID, devices, List.of(), rules, specs,
+                    AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
+            assertCompleteModel(model);
+            var checks = verdictsBySpecId(FormalCheckTestSupport.checkProperties(executor, model), model);
+            assertTrue(checks.get("both-modes").isPassed());
+            assertEquals(rules.size() == 2, checks.get("never-both").isPassed(),
+                    "Disjoint actions can change both modes without executing the combined observable action");
+        }
+    }
+
+    @Test
+    void apiBooleanSpecificationsAcceptCaseInsensitiveScalarsAndMembership() throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required to check API Boolean literals");
+
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode scene = mapper.createObjectNode();
+        scene.putArray("devices").addObject().put("id", "light_1")
+                .put("templateName", "Light").put("state", "off");
+        scene.putArray("templates").addObject().put("name", "Light").set("manifest", mapper.readTree(
+                Files.readString(Path.of("src", "main", "resources", "deviceTemplate", "Light.json"))));
+        var specs = List.of(
+                neverSpec("eq", "The on event is never false",
+                        specCondition("light_1", "api", "on", "=", " false ")),
+                neverSpec("in", "The on event is never true",
+                        specCondition("light_1", "api", "on", "in", "true")),
+                neverSpec("not-in", "The on event is never outside the Boolean domain",
+                        specCondition("light_1", "api", "on", "not in", "fAlSe, TrUe")));
+
+        var model = buildGenerator(mapper, scene).generateWithEnvironment(USER_ID, readDevices(scene),
+                List.of(), List.of(), specs, AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
+        assertCompleteModel(model);
+        var checks = verdictsBySpecId(FormalCheckTestSupport.checkProperties(buildExecutor(nusmvPath), model), model);
+        assertFalse(checks.get("eq").isPassed());
+        assertTrue(checks.get("in").isPassed());
+        assertTrue(checks.get("not-in").isPassed());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"=, TRUE", "IN, true", "NOT_IN, false"})
+    void conditionRepairOffersTheSameApiEventGuardForEquivalentComparisons(String relation, String value)
+            throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required to verify the event guard");
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode scene = mapper.readTree("""
+                {"devices":[{"id":"lamp_1","templateName":"Ordinary Lamp","state":"dark"},
+                            {"id":"button_1","templateName":"Ordinary Button","state":"released"}],
+                 "templates":[{"name":"Ordinary Lamp","manifest":{
+                    "Name":"Ordinary Lamp","Modes":["LightState"],"InitState":"dark",
+                    "WorkingStates":[{"Name":"dark","Trust":"trusted","Privacy":"public"},
+                                     {"Name":"lit","Trust":"trusted","Privacy":"public"}],
+                    "APIs":[{"Name":"light","StartState":"dark","EndState":"lit","Signal":false}]}},
+                    {"name":"Ordinary Button","manifest":{
+                    "Name":"Ordinary Button","Modes":["ButtonState"],"InitState":"released",
+                    "WorkingStates":[{"Name":"released","Trust":"trusted","Privacy":"public"},
+                                     {"Name":"pressed","Trust":"trusted","Privacy":"public"}],
+                    "APIs":[{"Name":"press","StartState":"released","EndState":"pressed","Signal":true}]}}]}
+                """);
+        SmvGenerator generator = buildGenerator(mapper, scene);
+        NusmvExecutor executor = buildExecutor(nusmvPath);
+        var devices = readDevices(scene);
+        var rules = List.of(
+                rule(1L, "Turn on the lamp", command("lamp_1", "light"),
+                        ruleCondition("lamp_1", "state", "state", "=", "dark")),
+                rule(2L, "Press the button once", command("button_1", "press"),
+                        ruleCondition("button_1", "state", "state", "=", "released")));
+        var safety = neverSpec("never-simultaneous", "A press must not coincide with a lit lamp",
+                specCondition("lamp_1", "state", "state", "=", "lit"),
+                specCondition("button_1", "api", "press", relation, value));
+        var specs = List.of(safety);
+        var baseline = generator.generateWithEnvironment(USER_ID, devices, List.of(), rules, specs,
+                AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
+        assertCompleteModel(baseline);
+        var verdict = verdictsBySpecId(FormalCheckTestSupport.checkProperties(executor, baseline), baseline)
+                .get(safety.getId());
+        assertFalse(verdict.isPassed());
+        var states = new SmvTraceParser().parseCounterexampleStates(
+                verdict.getCounterexample(), baseline.deviceSmvMap(), rules);
+        var fixes = allStrategyFixer(generator, executor, 30_000).fix(
+                818L, safety.getId(), states, rules, devices, List.of(), specs,
+                baseline.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), false,
+                List.of("condition"), 8, Map.of());
+
+        var proposal = listedRepair(fixes, "condition", "the button event guarding the lamp",
+                candidate -> candidate.getConditionAdjustments().size() == 1
+                        && candidate.getConditionAdjustments().stream().anyMatch(change ->
+                        "add".equals(change.getAction()) && change.getRuleIndex() == 0
+                                && "button_1".equals(change.getDeviceName()) && "press".equals(change.getAttribute())
+                                && "api".equals(change.getTargetType())
+                                && change.getRelation() == null && change.getValue() == null));
+        assertEveryListedAlternativeHolds(List.of(proposal), safety.getId(), rules, devices, List.of(), specs,
+                baseline.deviceSmvMap(), generator, executor);
+    }
+
+    @Test
+    void variableWritesPreserveBooleanLikeEnumLiteralCase() throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required to distinguish case-sensitive enum literals");
+
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode scene = mapper.readTree("""
+                {
+                  "devices": [{"id":"control_1", "templateName":"Enum Control", "state":"idle",
+                    "variables":[{"name":"localFlag","value":"True"}]}],
+                  "templates": [{"name":"Enum Control", "manifest":{
+                    "Name":"Enum Control", "Description":"", "Modes":["ControlMode"], "InitState":"idle",
+                    "ImpactedVariables":["roomFlag"],
+                    "InternalVariables":[
+                      {"Name":"localFlag","IsInside":true,"FalsifiableWhenCompromised":false,
+                        "Trust":"trusted","Privacy":"public","Values":["True","true"]},
+                      {"Name":"roomFlag","IsInside":false,"Reads":true,"FalsifiableWhenCompromised":false,
+                        "Trust":"trusted","Privacy":"public","Values":["True","true"]}],
+                    "WorkingStates":[
+                      {"Name":"idle","Trust":"trusted","Privacy":"public",
+                        "Dynamics":[{"VariableName":"roomFlag","Value":"True"}]},
+                      {"Name":"active","Trust":"trusted","Privacy":"public"}],
+                    "APIs":[], "Transitions":[
+                      {"Name":"update flag", "Trigger":{"Attribute":"localFlag","Relation":"=","Value":"True"},
+                        "Assignments":[{"Attribute":"localFlag","Value":"true"}]}]
+                  }}]
+                }
+                """);
+        var localBefore = specCondition("control_1", "variable", "localFlag", "=", "True");
+        var localAfter = specCondition("control_1", "variable", "localFlag", "=", "true");
+        localBefore.setVariableSource("reported");
+        localAfter.setVariableSource("reported");
+        var specs = List.of(
+                immediateSpec("local", "Assignment writes the lowercase enum literal", localBefore, localAfter),
+                immediateSpec("shared", "Dynamics writes the title-case enum literal",
+                        specCondition("control_1", "variable", "roomFlag", "=", "true"),
+                        specCondition("control_1", "variable", "roomFlag", "=", "True")));
+
+        var model = buildGenerator(mapper, scene).generateWithEnvironment(USER_ID, readDevices(scene),
+                List.of(new BoardEnvironmentVariableDto("roomFlag", "true", "trusted", "public")),
+                List.of(), specs, AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
+        assertCompleteModel(model);
+        var checks = verdictsBySpecId(FormalCheckTestSupport.checkProperties(buildExecutor(nusmvPath), model), model);
+        assertTrue(checks.get("local").isPassed());
+        assertTrue(checks.get("shared").isPassed());
+    }
+
     @Test
     void documentedSceneTemplateSnapshots_matchBundledTemplates() throws Exception {
         ObjectMapper objectMapper = new ObjectMapper();
@@ -155,7 +1074,7 @@ class AcceptanceDemoScenarioNusmvTest {
         assertTrue(counterexampleStates.stream()
                 .flatMap(state -> state.getDevices().stream())
                 .anyMatch(device -> "camera_1".equals(device.getDeviceId())
-                        && "takingphoto".equals(device.getState())));
+                        && "taking photo".equals(device.getState())));
 
         SmvGenerator.GenerateResult simulationModel = generator.generateWithEnvironment(
                 USER_ID, devices, environment, rules, specs,
@@ -166,7 +1085,7 @@ class AcceptanceDemoScenarioNusmvTest {
         List<TraceStateDto> simulationStates = traceParser.parseCounterexampleStates(
                 simulation.getTraceText(), simulationModel.deviceSmvMap(), rules);
         assertTrue(simulationStates.size() >= 2, "Simulation must produce an animatable model trajectory");
-        assertTrue(hasDeviceState(simulationStates, "camera_1", "takingphoto"),
+        assertTrue(hasDeviceState(simulationStates, "camera_1", "taking photo"),
                 "The simulation should show the camera-photo step");
         assertTrue(hasDeviceState(simulationStates, "alarm_1", "siren"),
                 "The simulation should show the alarm step");
@@ -298,8 +1217,9 @@ class AcceptanceDemoScenarioNusmvTest {
                 "The parameter suggestion must satisfy both sides of the climate boundary");
     }
 
-    @Test
-    void occupancySafety_conditionStrategySolvesCandidateValueInsteadOfCopyingPolicyValue() throws Exception {
+    @ParameterizedTest
+    @ValueSource(ints = {MAX_RULE_CONDITIONS - 1, MAX_RULE_CONDITIONS})
+    void occupancySafety_conditionStrategySolvesCandidateValueWithinRuleLimit(int conditionCount) throws Exception {
         String nusmvPath = resolveNusmvPath();
         Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
                 "NuSMV executable is required for the free condition-value regression");
@@ -315,6 +1235,10 @@ class AcceptanceDemoScenarioNusmvTest {
                 rule(21L, "When it is cold, heat the room",
                         command("ac_1", "heat"),
                         ruleCondition("temperature_1", "temperature", "variable", "<=", "18")));
+        // Redundant conjuncts approach the authoring limit without changing the baseline behavior.
+        for (int index = 1; index < conditionCount; index++) {
+            rules.get(0).getConditions().add(ruleCondition("temperature_1", "temperature", "variable", "<=", "18"));
+        }
         SpecificationDto occupancySafety = neverSpec(
                 "occupancy-heating-safety",
                 "Do not heat an unoccupied room",
@@ -355,13 +1279,24 @@ class AcceptanceDemoScenarioNusmvTest {
         assertTrue(fixResult.isFixable(), fixResult::getSummary);
         assertEquals(1, fixResult.getFaultRules().size());
         assertVerifiedAttempt(fixResult, "condition");
+        Map<String, String> persistenceRefs = Map.of(
+                "occupancy_1", "occupancy_1", "ac_1", "ac_1", "temperature_1", "temperature_1");
+        for (FixSuggestionDto candidate : listed(fixResult, "condition")) {
+            List<RuleDto> candidateRules = FixStrategyApplier.apply(
+                    "condition", candidate, rules, baselineModel.deviceSmvMap(), persistenceRefs);
+            int repairedConditionCount = candidateRules.get(0).getConditions().size();
+            assertTrue(repairedConditionCount <= MAX_RULE_CONDITIONS,
+                    () -> "Listed an inapplicable repair with " + repairedConditionCount + " conditions");
+        }
+        boolean needsReplacement = conditionCount == MAX_RULE_CONDITIONS;
         FixSuggestionDto suggestion = listedRepair(fixResult, "condition",
                 "a solved guard requiring occupancy instead of copying occupied=absent",
-                candidate -> addsOccupancyGuard(candidate, 0));
+                candidate -> addsOccupancyGuard(candidate, 0)
+                        && needsReplacement == candidate.getConditionAdjustments().stream()
+                                .anyMatch(adjustment -> "remove".equals(adjustment.getAction())));
 
         List<RuleDto> repairedRules = FixStrategyApplier.apply(
-                "condition", suggestion, rules, baselineModel.deviceSmvMap(),
-                Map.of("occupancy_1", "occupancy_1"));
+                "condition", suggestion, rules, baselineModel.deviceSmvMap(), persistenceRefs);
         SmvGenerator.GenerateResult repairedModel = generator.generateWithEnvironment(
                 USER_ID, devices, environment, repairedRules, specs,
                 AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
@@ -606,6 +1541,24 @@ class AcceptanceDemoScenarioNusmvTest {
 
         ObjectMapper objectMapper = new ObjectMapper();
         ObjectNode scene = withOccupancySensor(objectMapper, "30");
+        ObjectNode occupancyManifest = (ObjectNode) scene.withArray("templates").get(
+                scene.withArray("templates").size() - 1).path("manifest");
+        var preset = occupancyManifest.withArray("InternalVariables").addObject().put("Name", "preset")
+                .put("IsInside", true).put("FalsifiableWhenCompromised", false)
+                .put("Trust", "trusted").put("Privacy", "public");
+        // The ordinary model is identical, but solver-only repair names must avoid these legal enum literals.
+        preset.putArray("Values").add("idle").add("param_r0_c0").add("param_r0_c0_1")
+                .add("lambda_r0_c0").add("condition_value_r0_c1").add("iot_verify_guard_probe_0");
+        var keepPreset = occupancyManifest.withArray("Transitions").addObject().put("Name", "holdPreset");
+        keepPreset.putObject("Trigger").put("Attribute", "preset").put("Relation", "=").put("Value", "idle");
+        keepPreset.putArray("Assignments").addObject().put("Attribute", "preset").put("Value", "idle");
+        // Device instances also occupy the suffixes available after skipping the enum literals.
+        var sceneDevices = scene.withArray("devices");
+        ObjectNode occupancyDevice = (ObjectNode) sceneDevices.get(sceneDevices.size() - 1);
+        for (String id : List.of("param_r0_c0_2", "lambda_r0_c0_1", "condition_value_r0_c1_1",
+                "iot_verify_guard_probe_1")) {
+            sceneDevices.add(occupancyDevice.deepCopy().put("id", id).put("label", id));
+        }
         SmvGenerator generator = buildGenerator(objectMapper, scene);
         NusmvExecutor executor = buildExecutor(nusmvPath);
         List<DeviceVerificationDto> devices = readDevices(scene);
@@ -776,6 +1729,381 @@ class AcceptanceDemoScenarioNusmvTest {
                 "Exactly the heating rule's two guards repair the violation without breaking the response");
         assertEveryListedAlternativeHolds(outcome.suggestions(), safety.getId(), rules, devices, environment, specs,
                 baselineModel.deviceSmvMap(), generator, executor);
+    }
+
+    @Test
+    void conditionRepairSignsAndAppliesTheAuthoredWildcardSet() throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required for the wildcard repair regression");
+
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode scene = withOccupancySensor(mapper, "30");
+        var templates = scene.withArray("templates");
+        ((ObjectNode) templates.get(templates.size() - 1)).set("manifest", mapper.readTree("""
+                {"Name":"Occupancy Sensor","Modes":["RoomPresence","PresencePhase"],"InitState":"present;entry",
+                 "WorkingStates":[
+                     {"Name":"present;entry","Trust":"trusted","Privacy":"public"},
+                     {"Name":"absent;entry","Trust":"trusted","Privacy":"public"},
+                     {"Name":"arrived;entry","Trust":"trusted","Privacy":"public"},
+                     {"Name":"arrived;boost","Trust":"trusted","Privacy":"public"}],
+                 "Transitions":[
+                     {"Name":"leaveRoom","StartState":"present;entry","EndState":"absent;",
+                      "Trigger":{"Attribute":"PresencePhase","Relation":"=","Value":"entry"}},
+                     {"Name":"returnToRoom","StartState":"absent;entry","EndState":"arrived;",
+                      "Trigger":{"Attribute":"PresencePhase","Relation":"=","Value":"entry"}}]}
+                """));
+        var sceneDevices = scene.withArray("devices");
+        ObjectNode occupancy = (ObjectNode) sceneDevices.get(sceneDevices.size() - 1);
+        occupancy.put("state", "present;entry").remove("variables");
+        SmvGenerator generator = buildGenerator(mapper, scene);
+        NusmvExecutor executor = buildExecutor(nusmvPath);
+        var devices = readDevices(scene);
+        var environment = readEnvironment(scene);
+        var rules = List.of(rule(83L, "Heat the room while the temperature is at least 28",
+                command("ac_1", "heat"), ruleCondition("temperature_1", "temperature", "variable", ">=", "28")));
+        String authoredSet = "absent;_ | arrived;boost";
+        var safety = neverSpec("heat-during-absence", "Do not heat while the room is briefly empty",
+                specCondition("occupancy_1", "state", "state", "in", authoredSet),
+                specCondition("ac_1", "mode", "HvacMode", "=", "heat"));
+        var specs = List.of(safety);
+        var baseline = generator.generateWithEnvironment(USER_ID, devices, environment, rules, specs,
+                AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
+        assertCompleteModel(baseline);
+        var verdict = verdictsBySpecId(FormalCheckTestSupport.checkProperties(executor, baseline), baseline)
+                .get(safety.getId());
+        assertFalse(verdict.isPassed());
+        var states = new SmvTraceParser().parseCounterexampleStates(
+                verdict.getCounterexample(), baseline.deviceSmvMap(), rules);
+
+        long traceId = 315L;
+        var fixes = allStrategyFixer(generator, executor, 30_000).fix(
+                traceId, safety.getId(), states, rules, devices, environment, specs,
+                baseline.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), false,
+                List.of("condition"), 8, Map.of());
+        var proposal = listedRepair(fixes, "condition", "the original wildcard set as a trigger",
+                candidate -> candidate.getConditionAdjustments().stream()
+                        .anyMatch(change -> "add".equals(change.getAction()) && "state".equals(change.getTargetType())
+                                && "in".equals(change.getRelation()) && authoredSet.equals(change.getValue())));
+
+        JwtConfig jwt = new JwtConfig();
+        jwt.setSecret("test-secret-that-is-long-enough-for-hmac-signatures");
+        var tokens = new FixSuggestionTokenService(mapper, jwt);
+        String token = tokens.issue(USER_ID, traceId, proposal, Map.of());
+        var visibleProposal = mapper.readValue(mapper.writeValueAsBytes(proposal), FixSuggestionDto.class);
+        var trustedProposal = tokens.verify(USER_ID, traceId, "condition", visibleProposal, token, Map.of());
+        assertEveryListedAlternativeHolds(List.of(trustedProposal), safety.getId(), rules, devices, environment,
+                specs, baseline.deviceSmvMap(), generator, executor);
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '/', value = {
+            "false / in / on;running",
+            "true / not in / on;idle | off;_",
+            "true / in / _;running"
+    })
+    void repairKeepsAGuardWhenDisjointModeWritesCanTriggerConflictingFeedback(
+            boolean autonomousFan, String feedbackRelation, String feedbackValue) throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required for feedback pruning");
+
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode scene = (ObjectNode) mapper.readTree("""
+                {"devices":[{"id":"panel","templateName":"Panel","state":"off;idle"},
+                            {"id":"lamp","templateName":"Lamp","state":"off"},
+                            {"id":"gate","templateName":"Startup Gate","state":"opening"}],
+                 "templates":[
+                     {"name":"Panel","manifest":{"Name":"Panel","Modes":["PowerMode","FanMode"],
+                      "InitState":"off;idle","WorkingStates":[
+                       {"Name":"off;idle","Trust":"trusted","Privacy":"public"},
+                       {"Name":"on;idle","Trust":"trusted","Privacy":"public"},
+                       {"Name":"off;running","Trust":"trusted","Privacy":"public"},
+                       {"Name":"on;running","Trust":"trusted","Privacy":"public"}],
+                      "APIs":[{"Name":"powerOn","StartState":"off;","EndState":"on;","Signal":false},
+                              {"Name":"startFan","StartState":";idle","EndState":";running","Signal":false}]}},
+                     {"name":"Lamp","manifest":{"Name":"Lamp","Modes":["LampPower"],"InitState":"off",
+                      "WorkingStates":[{"Name":"off","Trust":"trusted","Privacy":"public"},
+                                       {"Name":"on","Trust":"trusted","Privacy":"public"}],
+                      "APIs":[{"Name":"turnOn","StartState":"off","EndState":"on","Signal":false},
+                              {"Name":"turnOff","StartState":"on","EndState":"off","Signal":false}]}},
+                     {"name":"Startup Gate","manifest":{"Name":"Startup Gate","Modes":["GatePhase"],
+                      "InitState":"opening","WorkingStates":[
+                       {"Name":"opening","Trust":"trusted","Privacy":"public"},
+                       {"Name":"waiting","Trust":"trusted","Privacy":"public"},
+                       {"Name":"settled","Trust":"trusted","Privacy":"public"}],
+                      "Transitions":[{"Name":"wait","EndState":"waiting",
+                                       "Trigger":{"Attribute":"GatePhase","Relation":"=","Value":"opening"}},
+                                     {"Name":"settle","EndState":"settled",
+                                       "Trigger":{"Attribute":"GatePhase","Relation":"=","Value":"waiting"}}]}}]}
+                """);
+        var opening = ruleCondition("gate", "state", "state", "=", "opening");
+        var primary = rule(84L, "Turn on panel power", command("panel", "powerOn"),
+                ruleCondition("panel", "PowerMode", "mode", "=", "off"));
+        var rules = new ArrayList<>(List.of(
+                primary,
+                rule(85L, "Turn on the lamp at startup", command("lamp", "turnOn"), opening),
+                rule(86L, "Illuminate when the panel is powered", command("lamp", "turnOn"),
+                        ruleCondition("panel", "PowerMode", "mode", "=", "on")),
+                rule(87L, "Turn off the lamp when the panel is running", command("lamp", "turnOff"),
+                        ruleCondition("panel", "state", "state", feedbackRelation, feedbackValue))));
+        if (autonomousFan) {
+            ObjectNode panelManifest = (ObjectNode) scene.withArray("templates").get(0).path("manifest");
+            var transition = panelManifest.putArray("Transitions").addObject()
+                    .put("Name", "autoFan").put("StartState", ";idle").put("EndState", ";running");
+            transition.putObject("Trigger").put("Attribute", "PowerMode").put("Relation", "=").put("Value", "off");
+        } else {
+            rules.add(rule(88L, "Start the fan at startup", command("panel", "startFan"), opening));
+        }
+
+        var safety = neverSpec("startup-safety", "Startup must leave the panel off while the lamp is lit",
+                specCondition("gate", "state", "state", "=", "waiting"),
+                specCondition("panel", "state", "state", "=", "on;running"),
+                specCondition("lamp", "state", "state", "=", "on"));
+        var feedback = neverSpec("feedback-reachability", "The startup feedback turns the lamp off",
+                specCondition("gate", "state", "state", "=", "settled"),
+                specCondition("panel", "state", "state", "=", "on;running"),
+                specCondition("lamp", "state", "state", "=", "off"));
+        var operation = responseSpec("startup-response", "The panel eventually powers on",
+                specCondition("gate", "state", "state", "=", "opening"),
+                specCondition("panel", "mode", "PowerMode", "=", "on"));
+        var specs = List.of(safety, feedback, operation);
+        var devices = readDevices(scene);
+        var generator = buildGenerator(mapper, scene);
+        var executor = buildExecutor(nusmvPath);
+        var baseline = generator.generateWithEnvironment(USER_ID, devices, List.of(), rules, specs,
+                AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
+        assertCompleteModel(baseline);
+        var verdicts = verdictsBySpecId(FormalCheckTestSupport.checkProperties(executor, baseline), baseline);
+        assertFalse(verdicts.get(safety.getId()).isPassed(), "Both panel modes change while startup lights the lamp");
+        assertFalse(verdicts.get(feedback.getId()).isPassed(), "The resulting tuple enables the lamp-off feedback");
+        assertTrue(verdicts.get(operation.getId()).isPassed(), "A repair must keep the panel operation available");
+        var states = new SmvTraceParser().parseCounterexampleStates(
+                verdicts.get(safety.getId()).getCounterexample(), baseline.deviceSmvMap(), rules);
+
+        FixContext ctx = FixContext.builder().traceId(316L).faultRules(List.of()).repairRuleIndices(List.of(0))
+                .allRules(rules).devices(devices).environmentVariables(List.of()).specs(specs)
+                .deviceSmvMap(baseline.deviceSmvMap()).violatedSpecIndex(0).userId(USER_ID)
+                .attackScenario(AttackScenarioDto.none()).enablePrivacy(false).maxAttempts(12)
+                .preferredRanges(Map.of()).counterexampleInitialState(states.get(0))
+                .requireCounterexampleReplay(true).build();
+        var outcome = new ConditionAdjustStrategy(generator, executor, new FixConfig()).tryFix(ctx);
+        var retainedGuard = outcome.suggestions().stream().filter(suggestion -> suggestion.getConditionAdjustments()
+                .stream().anyMatch(change -> "add".equals(change.getAction()) && "lamp".equals(change.getDeviceName())
+                        && "state".equals(change.getTargetType()) && "on".equals(change.getValue()))).findFirst();
+        assertTrue(retainedGuard.isPresent(), () -> "Expected the lamp-on repair, got " + outcome.suggestions());
+        assertEveryListedAlternativeHolds(List.of(retainedGuard.orElseThrow()), safety.getId(),
+                rules, devices, List.of(), specs, baseline.deviceSmvMap(), generator, executor);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"quiet-first", "loud-first", "incompatible-quiet", "autonomous-quiet", "raw-blocker",
+            "expired-gate", "separate-steps", "complete-guard"})
+    void repairUsesSameModeRulePriorityBeforeFollowingACommandOutcome(String scenario) throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required for competing repair effects");
+
+        boolean loudFirst = "loud-first".equals(scenario);
+        boolean incompatibleQuiet = "incompatible-quiet".equals(scenario);
+        boolean autonomousQuiet = "autonomous-quiet".equals(scenario);
+        boolean rawBlocker = "raw-blocker".equals(scenario);
+        boolean expiredGate = "expired-gate".equals(scenario);
+        boolean separateSteps = "separate-steps".equals(scenario);
+        boolean completeGuard = "complete-guard".equals(scenario);
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode scene = (ObjectNode) mapper.readTree("""
+                {"devices":[{"id":"panel","templateName":"Panel","state":"off"},
+                            {"id":"relay","templateName":"Relay","state":"ready"},
+                            {"id":"lamp","templateName":"Lamp","state":"off"},
+                            {"id":"gate","templateName":"Startup Gate","state":"opening"}],
+                 "templates":[
+                     {"name":"Panel","manifest":{"Name":"Panel","Modes":["PanelPower"],"InitState":"off",
+                      "WorkingStates":[{"Name":"off","Trust":"trusted","Privacy":"public"},
+                                       {"Name":"on","Trust":"trusted","Privacy":"public"}],
+                      "APIs":[{"Name":"powerOn","StartState":"off","EndState":"on","Signal":false}]}},
+                     {"name":"Relay","manifest":{"Name":"Relay","Modes":["RelayMode"],"InitState":"ready",
+                      "WorkingStates":[{"Name":"ready","Trust":"trusted","Privacy":"public"},
+                                       {"Name":"quiet","Trust":"trusted","Privacy":"public"},
+                                       {"Name":"loud","Trust":"trusted","Privacy":"public"}],
+                      "APIs":[{"Name":"selectQuiet","StartState":"ready","EndState":"quiet","Signal":false},
+                              {"Name":"selectLoud","StartState":"ready","EndState":"loud","Signal":false}]}},
+                     {"name":"Lamp","manifest":{"Name":"Lamp","Modes":["LampPower"],"InitState":"off",
+                      "WorkingStates":[{"Name":"off","Trust":"trusted","Privacy":"public"},
+                                       {"Name":"on","Trust":"trusted","Privacy":"public"}],
+                      "APIs":[{"Name":"turnOn","StartState":"off","EndState":"on","Signal":false},
+                              {"Name":"turnOff","StartState":"on","EndState":"off","Signal":false}]}},
+                     {"name":"Startup Gate","manifest":{"Name":"Startup Gate","Modes":["GatePhase"],
+                      "InitState":"opening","WorkingStates":[
+                       {"Name":"opening","Trust":"trusted","Privacy":"public"},
+                       {"Name":"waiting","Trust":"trusted","Privacy":"public"},
+                       {"Name":"settled","Trust":"trusted","Privacy":"public"}],
+                      "Transitions":[{"Name":"wait","EndState":"waiting",
+                                       "Trigger":{"Attribute":"GatePhase","Relation":"=","Value":"opening"}},
+                                     {"Name":"settle","EndState":"settled",
+                                       "Trigger":{"Attribute":"GatePhase","Relation":"=","Value":"waiting"}}]}}]}
+                """);
+        var panelOn = ruleCondition("panel", "state", "state", "=", "on");
+        var quiet = incompatibleQuiet
+                ? rule(91L, "Select quiet before power on", command("relay", "selectQuiet"),
+                        ruleCondition("panel", "state", "state", "not in", "on"),
+                        ruleCondition("gate", "state", "state", "not in", "opening"))
+                : rule(91L, "Select quiet", command("relay", "selectQuiet"), panelOn);
+        var loud = rule(92L, "Select loud", command("relay", "selectLoud"), rawBlocker
+                ? ruleCondition("panel", "state", "state", "not in", "off") : panelOn);
+        var rules = new ArrayList<>(List.of(rule(90L, "Power the panel", command("panel", "powerOn"),
+                ruleCondition("panel", "state", "state", "=", "off"))));
+        if (expiredGate) {
+            loud.getConditions().add(ruleCondition("gate", "state", "state", "=", "opening"));
+        }
+        ObjectNode panel = (ObjectNode) scene.withArray("templates").get(0).path("manifest");
+        if (separateSteps) {
+            panel.withArray("WorkingStates").addObject().put("Name", "cooled")
+                    .put("Trust", "trusted").put("Privacy", "public");
+            panel.withArray("APIs").addObject().put("Name", "coolDown").put("StartState", "on")
+                    .put("EndState", "cooled").put("Signal", false);
+            rules.add(rule(97L, "Cool the panel after it turns on", command("panel", "coolDown"), panelOn));
+            loud.getConditions().add(ruleCondition("panel", "state", "state", "=", "cooled"));
+        } else if (completeGuard) {
+            panel.withArray("Modes").add("PanelArmed");
+            panel.put("InitState", "off;dormant");
+            ((ObjectNode) scene.withArray("devices").get(0)).put("state", "off;dormant");
+            ((ObjectNode) panel.withArray("WorkingStates").get(0)).put("Name", "off;dormant");
+            ((ObjectNode) panel.withArray("WorkingStates").get(1)).put("Name", "on;armed");
+            ((ObjectNode) panel.withArray("APIs").get(0)).put("StartState", "off;dormant").put("EndState", "on;armed");
+            loud.getConditions().add(ruleCondition("panel", "PanelArmed", "mode", "in", "armed"));
+        }
+        ObjectNode relay = (ObjectNode) scene.withArray("templates").get(1).path("manifest");
+        if (rawBlocker) {
+            ((ObjectNode) scene.withArray("devices").get(1)).put("state", "ready;idle");
+            relay.setAll((ObjectNode) mapper.readTree("""
+                    {"Modes":["RelayPower","RelayFan"],"InitState":"ready;idle",
+                     "WorkingStates":[{"Name":"ready;idle","Trust":"trusted","Privacy":"public"},
+                                      {"Name":"quiet;softFan","Trust":"trusted","Privacy":"public"},
+                                      {"Name":"loud;boost","Trust":"trusted","Privacy":"public"},
+                                      {"Name":"quiet;loudFan","Trust":"trusted","Privacy":"public"}],
+                     "APIs":[{"Name":"selectQuiet","StartState":"ready;idle","EndState":"quiet;","Signal":false},
+                             {"Name":"selectLoud","StartState":"ready;idle","EndState":"loud;boost","Signal":false},
+                             {"Name":"runFan","StartState":"ready;idle","EndState":";loudFan","Signal":false}]}
+                    """));
+        }
+        if (autonomousQuiet || rawBlocker) {
+            relay.setAll((ObjectNode) mapper.readTree("""
+                    {"InternalVariables":[{"Name":"signalLevel","IsInside":true,"FalsifiableWhenCompromised":false,
+                      "Values":["coldSignal","readySignal"],"Trust":"trusted","Privacy":"public"}],
+                     "Transitions":[
+                       {"Name":"armRelay","Trigger":{"Attribute":"signalLevel","Relation":"=","Value":"coldSignal"},
+                        "Assignments":[{"Attribute":"signalLevel","Value":"readySignal"}]},
+                       {"Name":"fallBackToQuiet","StartState":"ready","EndState":"quiet",
+                        "Trigger":{"Attribute":"signalLevel","Relation":"=","Value":"readySignal"}}]}
+                    """));
+        }
+        if (rawBlocker) {
+            ObjectNode fallback = (ObjectNode) relay.withArray("Transitions").get(1);
+            fallback.put("StartState", "ready;idle").put("EndState", ";softFan");
+            rules.addAll(List.of(quiet, loud, rule(96L, "Run the relay fan", command("relay", "runFan"), panelOn)));
+        } else if (autonomousQuiet || expiredGate || separateSteps || completeGuard) {
+            rules.add(loud);
+        } else {
+            rules.add(loudFirst ? loud : quiet);
+            rules.add(loudFirst ? quiet : loud);
+        }
+        rules.addAll(List.of(
+                rule(93L, "Light the lamp at startup", command("lamp", "turnOn"),
+                        ruleCondition("gate", "state", "state", "=", "opening")),
+                rule(94L, "Turn off the startup lamp", command("lamp", "turnOff"),
+                        ruleCondition("gate", "state", "state", "=", "waiting")),
+                rule(95L, "Light the lamp when the relay is loud", command("lamp", "turnOn"),
+                        ruleCondition("relay", "state", "state", "in", rawBlocker ? "_;loudFan" : "loud"))));
+
+        var safety = neverSpec("competing-startup-safety", "Keep the panel off during the lit startup step",
+                specCondition("gate", "state", "state", "=", "waiting"),
+                specCondition("panel", "state", "state", "=", "on"),
+                specCondition("lamp", "state", "state", "=", "on"));
+        var operation = responseSpec("competing-startup-response", "The panel eventually powers on",
+                specCondition("gate", "state", "state", "=", "opening"),
+                specCondition("panel", "state", "state", "=", "on"));
+        boolean expectLoud = loudFirst || incompatibleQuiet || autonomousQuiet || completeGuard;
+        String selectedState = expiredGate || separateSteps ? "ready" : rawBlocker ? "quiet;softFan"
+                : expectLoud ? "loud" : "quiet";
+        var selected = neverSpec("relay-selected", "The expected relay state is unreachable",
+                specCondition("relay", "state", "state", "=", selectedState));
+        var downstream = neverSpec("relay-downstream", "Only the loud route relights the lamp",
+                specCondition("gate", "state", "state", "=", "settled"),
+                specCondition("lamp", "state", "state", "=", "on"));
+        var specs = List.of(safety, operation, selected, downstream);
+        var devices = readDevices(scene);
+        var generator = buildGenerator(mapper, scene);
+        var executor = buildExecutor(nusmvPath);
+        if (autonomousQuiet) {
+            var fallback = temporalSpec("relay-autonomous", "4", "The ready relay falls back to quiet at startup",
+                    List.of(specCondition("relay", "state", "state", "=", "ready"),
+                            specCondition("gate", "state", "state", "=", "waiting")),
+                    List.of(specCondition("relay", "state", "state", "=", "quiet")));
+            var rulesWithoutLoud = rules.stream().filter(rule -> rule != loud).toList();
+            var fallbackModel = generator.generateWithEnvironment(USER_ID, devices, List.of(), rulesWithoutLoud,
+                    List.of(fallback), AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
+            assertCompleteModel(fallbackModel);
+            assertTrue(verdictsBySpecId(FormalCheckTestSupport.checkProperties(executor, fallbackModel), fallbackModel)
+                    .get(fallback.getId()).isPassed(), "The autonomous write is active at the command's step");
+        }
+        if (rawBlocker) {
+            var fanControl = neverSpec("relay-fan-without-blocker", "The fan command's result is unreachable",
+                    specCondition("relay", "state", "state", "=", "quiet;loudFan"));
+            var rulesWithoutLoud = rules.stream().filter(rule -> rule != loud).toList();
+            var controlModel = generator.generateWithEnvironment(USER_ID, devices, List.of(), rulesWithoutLoud,
+                    List.of(fanControl), AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
+            assertCompleteModel(controlModel);
+            assertFalse(verdictsBySpecId(FormalCheckTestSupport.checkProperties(executor, controlModel), controlModel)
+                    .get(fanControl.getId()).isPassed(), "Without the raw blocker, the disjoint fan command runs");
+        }
+        var baseline = generator.generateWithEnvironment(USER_ID, devices, List.of(), rules, specs,
+                AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
+        assertCompleteModel(baseline);
+        var verdicts = verdictsBySpecId(FormalCheckTestSupport.checkProperties(executor, baseline), baseline);
+        assertFalse(verdicts.get(selected.getId()).isPassed(), "The expected relay state is reachable");
+        assertEquals(!expectLoud, verdicts.get(downstream.getId()).isPassed(), "Only the selected loud command relights the lamp");
+        assertFalse(verdicts.get(safety.getId()).isPassed());
+        assertTrue(verdicts.get(operation.getId()).isPassed());
+        var states = new SmvTraceParser().parseCounterexampleStates(
+                verdicts.get(safety.getId()).getCounterexample(), baseline.deviceSmvMap(), rules);
+
+        FixContext ctx = FixContext.builder().traceId(317L).faultRules(List.of()).repairRuleIndices(List.of(0))
+                .allRules(rules).devices(devices).environmentVariables(List.of()).specs(specs)
+                .deviceSmvMap(baseline.deviceSmvMap()).violatedSpecIndex(0).userId(USER_ID)
+                .attackScenario(AttackScenarioDto.none()).enablePrivacy(false).maxAttempts(12)
+                .preferredRanges(Map.of()).counterexampleInitialState(states.get(0))
+                .requireCounterexampleReplay(true).build();
+        var outcome = new ConditionAdjustStrategy(generator, executor, new FixConfig()).tryFix(ctx);
+        var independentStartupGuard = outcome.suggestions().stream().filter(suggestion ->
+                suggestion.getConditionAdjustments().stream().anyMatch(change ->
+                        "add".equals(change.getAction()) && "lamp".equals(change.getDeviceName())
+                                && "state".equals(change.getTargetType()) && "on".equals(change.getValue())))
+                .findFirst();
+        assertEquals(!expectLoud, independentStartupGuard.isPresent(),
+                () -> "Lamp guard eligibility must follow selected relay priority, got " + outcome.suggestions());
+        if (!expectLoud) {
+            assertEveryListedAlternativeHolds(List.of(independentStartupGuard.orElseThrow()), safety.getId(),
+                    rules, devices, List.of(), specs, baseline.deviceSmvMap(), generator, executor);
+        }
+        if (expiredGate) {
+            Map<String, DeviceManifest> manifests = new java.util.LinkedHashMap<>();
+            for (JsonNode template : scene.withArray("templates")) {
+                manifests.put(template.path("name").asText(),
+                        mapper.treeToValue(template.path("manifest"), DeviceManifest.class));
+            }
+            Map<String, String> persistenceDeviceRefs = baseline.deviceSmvMap().keySet().stream()
+                    .collect(java.util.stream.Collectors.toMap(ref -> ref, ref -> ref));
+            var repaired = FixStrategyApplier.apply("condition", independentStartupGuard.orElseThrow(),
+                    rules, baseline.deviceSmvMap(), persistenceDeviceRefs);
+            var config = new FuzzEngineConfig(List.of(), 1, 4, 1, 1L);
+            for (List<RuleDto> candidate : List.of(rules, repaired)) {
+                var snapshot = new ModelInputSnapshot(List.of(), devices, List.of(), candidate, List.of(safety), manifests);
+                var finite = new FuzzEngine().run(new FuzzEngineInput(snapshot, config), null, () -> false);
+                assertEquals(candidate == rules ? List.of(1) : List.of(),
+                        finite.findings().stream().map(FuzzFinding::firstViolationStep).toList());
+            }
+        }
     }
 
     @Test
@@ -1689,6 +3017,85 @@ class AcceptanceDemoScenarioNusmvTest {
         spec.setThenConditions(thenConditions);
         spec.setDevices(List.of());
         return spec;
+    }
+
+    @Test
+    void composedModeLabelsThatChangeFormalVerdictsInvalidateRepairEvidence() throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required to check two-mode labels");
+        var mapper = new ObjectMapper();
+        JsonNode scene = mapper.readTree("""
+                {"devices":[{"id":"fan_1","templateName":"Room Fan","state":"off;high"}],
+                 "templates":[{"name":"Room Fan","manifest":{
+                    "Name":"Room Fan","Modes":["Power","Speed"],"InitState":"off;low",
+                    "WorkingStates":[{"Name":"off;low","Trust":"trusted","Privacy":"public"},
+                                     {"Name":"on;high","Trust":"untrusted","Privacy":"private"}],
+                    "APIs":[{"Name":"boost","StartState":"off;low","EndState":"on;high","Signal":false}]
+                  }}]}
+                """);
+        var generator = buildGenerator(mapper, scene);
+        var original = readDevices(scene);
+        var explicit = readDevices(scene);
+        explicit.get(0).setCurrentStateTrust("trusted");
+        explicit.get(0).setCurrentStatePrivacy("public");
+        var trust = specCondition("fan_1", "trust", "Speed", "=", "trusted");
+        trust.setPropertyScope("state");
+        var privacy = specCondition("fan_1", "privacy", "Speed", "=", "public");
+        privacy.setPropertyScope("state");
+        var specs = List.of(neverSpec("trust", "High speed stays untrusted", trust),
+                neverSpec("privacy", "High speed stays private", privacy));
+        var originalModel = generator.generateWithEnvironment(USER_ID, original, List.of(), List.of(), specs,
+                AttackScenarioDto.none(), true, SmvGenerator.GeneratePurpose.VERIFICATION);
+        var editedModel = generator.generateWithEnvironment(USER_ID, explicit, List.of(), List.of(), specs,
+                AttackScenarioDto.none(), true, SmvGenerator.GeneratePurpose.VERIFICATION);
+        assertEquals(List.of(true, true), checkVerdicts(nusmvPath, originalModel, specs));
+        assertEquals(List.of(false, false), checkVerdicts(nusmvPath, editedModel, specs));
+        assertNotEquals(BoardSemanticFingerprint.of(original, specs, originalModel.deviceSmvMap()),
+                BoardSemanticFingerprint.of(explicit, specs, editedModel.deviceSmvMap()));
+    }
+
+    @Test
+    void quotedAuthoredStateDiffersFromNumericLookingStateInRepairEvidence() throws Exception {
+        String nusmvPath = resolveNusmvPath();
+        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
+                "NuSMV executable is required to check distinct authored states");
+        var mapper = new ObjectMapper();
+        JsonNode scene = mapper.readTree("""
+                {"devices":[{"id":"dial_1","templateName":"Room Dial","state":"30"}],
+                 "templates":[{"name":"Room Dial","manifest":{
+                    "Name":"Room Dial","Modes":["Setting"],"InitState":"30",
+                    "WorkingStates":[{"Name":"30","Trust":"trusted","Privacy":"public"},
+                                     {"Name":"second","Trust":"trusted","Privacy":"public"}]
+                  }}]}
+                """);
+        String quotedState = "\"30\"";
+        ((ObjectNode) scene.path("templates").get(0).path("manifest").path("WorkingStates").get(1))
+                .put("Name", quotedState);
+        var generator = buildGenerator(mapper, scene);
+        var devices = readDevices(scene);
+        var original = List.of(neverSpec("setting", "Keep the selected setting out",
+                specCondition("dial_1", "state", "state", "=", "30")));
+        var edited = List.of(neverSpec("setting", "Keep the selected setting out",
+                specCondition("dial_1", "state", "state", "=", quotedState)));
+        var originalModel = generator.generateWithEnvironment(USER_ID, devices, List.of(), List.of(), original,
+                AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
+        var editedModel = generator.generateWithEnvironment(USER_ID, devices, List.of(), List.of(), edited,
+                AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
+        assertEquals(List.of(false), checkVerdicts(nusmvPath, originalModel, original));
+        assertEquals(List.of(true), checkVerdicts(nusmvPath, editedModel, edited));
+        assertNotEquals(BoardSemanticFingerprint.of(devices, original, originalModel.deviceSmvMap()),
+                BoardSemanticFingerprint.of(devices, edited, editedModel.deviceSmvMap()));
+    }
+
+    private List<Boolean> checkVerdicts(String nusmvPath, SmvGenerator.GenerateResult model,
+                                         List<SpecificationDto> specs) throws Exception {
+        var checked = FormalCheckTestSupport.checkProperties(buildExecutor(nusmvPath), model);
+        assertTrue(checked.isSuccess(), checked::getErrorMessage);
+        var verdicts = verdictsBySpecId(checked, model);
+        assertEquals(specs.stream().map(SpecificationDto::getId).collect(java.util.stream.Collectors.toSet()),
+                verdicts.keySet());
+        return specs.stream().map(spec -> verdicts.get(spec.getId()).isPassed()).toList();
     }
 
     private SpecConditionDto specCondition(String deviceId, String targetType, String key,

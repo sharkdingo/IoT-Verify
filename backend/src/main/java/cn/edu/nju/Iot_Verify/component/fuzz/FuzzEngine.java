@@ -495,7 +495,8 @@ public final class FuzzEngine {
                 return trustPrivacyUnsupported();
             }
             if ("variable".equals(targetType)
-                    && "reported".equals(normalized(condition.getVariableSource()))) {
+                    && "reported".equals(normalized(condition.getVariableSource()))
+                    && model.isSharedReading(condition)) {
                 return reportedReadingUnsupported();
             }
         }

@@ -101,7 +101,7 @@ class DeviceTemplateNuSmvValidatorFrozenVariableTest {
         var.setName("externalInput");
         var.setIsInside(false);  // Shared
         var.setReads(true);
-        var.setValues(List.of("value1", "value2"));
+        var.setValues(List.of("on", "off"));
         var.setTrust("untrusted");
         var.setPrivacy("public");
         var.setFalsifiableWhenCompromised(true);

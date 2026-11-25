@@ -160,6 +160,65 @@ describe('specification condition editor accessibility', () => {
     expect(wrapper.find('[data-testid="spec-target-change-notice"]').exists()).toBe(false)
   })
 
+  it.each([
+    { modes: ['Power', 'Aux'], states: ['Case;ready', 'slow heat;_Case'], value: 'Case ; _Case | slow heat;_',
+      selected: ['Case ; _Case', 'slow heat;_'] },
+    { modes: ['Power'], states: ['Case', 'slow heat'], value: 'Case; slow heat', selected: ['Case', 'slow heat'] }
+  ])('preserves a saved state set when reopening it for $modes', async ({ modes, states, value, selected }) => {
+    await mountEditor()
+    await wrapper.setProps({
+      deviceTemplates: [{ name: 'AC', manifest: { Name: 'AC', Modes: modes, InitState: states[0],
+        WorkingStates: states.map(Name => ({ Name })), APIs: [], InternalVariables: [] } }] as any,
+      editSpecification: { id: 'existing', name: 'Keep this state set', templateId: '1', templateLabel: '',
+        aConditions: [{ id: 'state', side: 'a', deviceId: 'ac', deviceLabel: 'AC', targetType: 'state', key: 'state',
+          relation: 'in', value }], ifConditions: [], thenConditions: [] } as any
+    })
+    await wrapper.get(`button[aria-label="${i18n.global.t('app.editConditionNumbered', { number: 1 })}"]`).trigger('click')
+    const dialog = new DOMWrapper(document.querySelector('[data-testid="spec-condition-dialog"]')!)
+    const control = dialog.get<HTMLSelectElement>('[data-testid="spec-condition-value"]')
+    expect(Array.from(control.element.selectedOptions, option => option.value)).toEqual(selected)
+    await dialog.get('[data-testid="spec-condition-save"]').trigger('click')
+    expect(wrapper.get('[data-testid="spec-create"]').attributes('disabled')).toBeUndefined()
+    if (modes.length === 1) {
+      const edit = () => wrapper.get(`button[aria-label="${i18n.global.t('app.editConditionNumbered', { number: 1 })}"]`).trigger('click')
+      await edit()
+      const condition = new DOMWrapper(document.querySelector('[data-testid="spec-condition-dialog"]')!)
+      await condition.get('[data-testid="spec-condition-value"]').setValue([selected[0]])
+      await condition.get('[data-testid="spec-condition-value"]').setValue(selected)
+      await condition.get('[data-testid="spec-condition-save"]').trigger('click')
+      expect(wrapper.find('[data-testid="spec-target-change-notice"]').exists()).toBe(false)
+    }
+    await wrapper.get('[data-testid="spec-create"]').trigger('click')
+    const request = wrapper.emitted('add-spec')![0]![0] as any
+    expect(request.aConditions[0].value).toBe(modes.length === 1 ? selected.join(', ') : value)
+    request.complete(false)
+    await flushPromises()
+  })
+
+  it('keeps an excluded saved wildcard available after toggling it off in the specification editor', async () => {
+    const selected = ['Case;_', ';_Case']
+    await mountEditor()
+    await wrapper.setProps({
+      deviceTemplates: [{ name: 'AC', manifest: { Name: 'AC', Modes: ['Power', 'Aux'], InitState: 'Case;ready',
+        WorkingStates: ['Case;ready', 'slow heat;_Case'].map(Name => ({ Name })), APIs: [], InternalVariables: [] } }] as any,
+      editSpecification: { id: 'existing', name: 'Keep this state set', templateId: '1', templateLabel: '',
+        aConditions: [{ id: 'state', side: 'a', deviceId: 'ac', deviceLabel: 'AC', targetType: 'state', key: 'state',
+          relation: 'NOT_IN', value: selected.join(' | ') }], ifConditions: [], thenConditions: [] } as any
+    })
+    await wrapper.get(`button[aria-label="${i18n.global.t('app.editConditionNumbered', { number: 1 })}"]`).trigger('click')
+    const dialog = new DOMWrapper(document.querySelector('[data-testid="spec-condition-dialog"]')!)
+    const control = dialog.get<HTMLSelectElement>('[data-testid="spec-condition-value"]')
+    await control.setValue([selected[1]])
+    expect(control.findAll('option').map(option => option.attributes('value'))).toContain(selected[0])
+    await control.setValue(selected)
+    await dialog.get('[data-testid="spec-condition-save"]').trigger('click')
+    await wrapper.get('[data-testid="spec-create"]').trigger('click')
+    const request = wrapper.emitted('add-spec')![0]![0] as any
+    expect(request.aConditions[0]).toMatchObject({ relation: 'not in', value: selected.join(', ') })
+    request.complete(false)
+    await flushPromises()
+  })
+
   it('blocks an action event whose API is no longer observable without replacing the draft', async () => {
     const dialog = await mountEditor()
     const template = { name: 'AC', manifest: { Name: 'AC', Modes: ['AirState'], InitState: 'auto',

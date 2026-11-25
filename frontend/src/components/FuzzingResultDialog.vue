@@ -209,7 +209,8 @@ const targetScopeText = computed(() => requestedTargetIds.value.length > 0
             data-testid="fuzzing-board-drift-warning"
             :data-state="boardComparison || 'NOT_COMPARED'"
           >
-            {{ t(boardComparison === 'CHANGED' ? 'app.fuzzBoardScopeChanged'
+            {{ t(boardComparison === 'SEMANTICS_CHANGED' ? 'app.runBoardSemanticsChanged'
+              : boardComparison === 'CHANGED' ? 'app.fuzzBoardScopeChanged'
               : boardComparison === 'UNAVAILABLE' ? 'app.runBoardComparisonUnavailable' : 'app.runBoardNotCompared') }}
           </p>
           <p v-if="timeLimitReached" data-testid="fuzz-time-limit-warning"

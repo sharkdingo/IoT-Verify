@@ -45,8 +45,9 @@ the server owns the portable → internal mapping, so no client restates how por
 specifications become write DTOs. `POST /api/board/batch` takes the internal collections
 directly and is what scene clear uses, having no portable file behind it. All four semantic
 collections and the
-exact template-snapshot dependency set are required complete desired collections; omitted
-or `null` collections are rejected rather than interpreted as hidden partial preservation.
+exact template-snapshot dependency set are required complete desired collections. The
+replacement service rejects omitted or `null` collections for every caller. An empty scene
+supplies an empty template snapshot list.
 The submitted Environment Pool is checked against the incoming scene's device domains and
 replaces the previous values and labels. Saving the incoming nodes does not first project
 the old pool into those domains: a shared name may have different allowed values or bounds
@@ -75,6 +76,10 @@ Content conflicts retain `409` and include `data.reasonCode` plus `data.errors`:
 `DUPLICATE_RULE` identifies the duplicate rule and advises changing its trigger/action or removing
 it; `DUPLICATE_SPECIFICATION` identifies a repeated specification identity or semantics;
 `SCENE_TEMPLATE_MISMATCH` identifies the mismatched manifest and also returns `data.templateName`.
+Rule and specification comparisons use the referenced device's modes to interpret state
+membership. For a single-mode device, `on;off` and `off,on` describe the same set.
+In a multi-mode tuple, an empty segment and `_` are equivalent wildcards for that position.
+For example, `idle;` and `idle;_` constrain the same first mode.
 Clients select the conflict presentation from this code, keeping unrecognised conflicts generic and
 preserving their details. Template schema rejections report up to five detailed manifest fields;
 the message states when further schema errors remain. A template request body with an invalid
@@ -142,7 +147,8 @@ rule execution priority and server-managed `createdAt`. Only the requested recor
 written. The desired record passes the same reference, domain, size, and duplicate checks
 as creation, and specification previews and device labels are rebuilt by the server.
 Every edited variable condition must choose `variableSource`; an older unresolved
-condition is allowed in `expected`, so editing can supply the missing choice.
+condition is allowed in `expected`, so editing can supply the missing choice. Undo or
+redo returns `409` if its target would restore a specification without a valid choice.
 
 The result uses `operation: "updated"`, the canonical saved `affectedItem`, the complete
 authoritative `currentItems`/`currentCount`, and `canUndo`/`canRedo`. One edit records one
@@ -156,29 +162,33 @@ The required name contract is defined by [SpecificationDto](verification.md#spec
 
 ### Current model fingerprints
 
-`BoardModelFingerprintsDto` contains two required 64-character lowercase SHA-256 strings:
+`BoardModelFingerprintsDto` captures the current engine semantics and both Board input identities:
 
 | Field | Meaning |
 | :--- | :--- |
-| `verification` | Current modeled devices/runtime, environment, ordered rules, structured specifications, and referenced template manifests; also used for exploration history |
-| `simulation` | The same canonical input with an empty specification collection, because simulation does not consume specifications |
+| `modelSemanticsVersion` | Positive integer identifying the current execution semantics |
+| `verification` | 64-character lowercase SHA-256 of modeled devices/runtime, environment, ordered rules, structured specifications, and referenced template manifests. Also used for exploration history |
+| `simulation` | 64-character lowercase SHA-256 of the same input with the specification collection emptied |
 
 `ModelFingerprint` owns canonical serialization for both task capture and current-Board reads.
-It sorts object/map keys and environment entries; device and rule order remain meaningful
-because simultaneous writes use ordered priority. Canvas geometry, panel layout, display names,
+It sorts object/map keys and environment entries. New Board captures order modeled devices by
+canonical model ID. Saved inputs keep their captured order for integrity checks. Rule order retains
+its authored priority. Canvas geometry, panel layout, display names,
 descriptions, icons, formula previews, rule display strings, and creation timestamps do not enter
 the identity. Specification condition ids/sides and device-display caches are also excluded:
 the fingerprint uses the same structured logical signature as specification equality.
+For state and mode membership, model capture resolves the device's mode count and
+stores an unordered set of authored operands. The Board keeps the editor's saved
+text. Reordering members or changing an equivalent wildcard spelling preserves model fingerprints.
+Rule and condition positions still determine execution and repair coordinates.
 Referenced template content does; unused template-library entries do not.
 Presentation-field exclusions apply to manifest properties, never to template-name map keys:
 a template named `icon` or `description` retains its identity and semantic content in the hash.
 Run configuration such as attack/privacy settings, requested simulation steps, and search budgets
 is recorded separately and is not a claim about the current Board's content.
 
-Compare a run's frozen `modelSnapshot.modelFingerprint` with the appropriate current value,
-including after reload and undo. Matching item counts never establish a model match. Missing
-historical comparison evidence and a failed current read are different unknown states; neither
-may be presented as matching or changed. The endpoint reads one captured model for both values,
+Compare a run's [frozen model scope](verification.md#modelrunsnapshotdto) with this response,
+including after reload and undo. The endpoint reads one captured model for both identities,
 so a concurrent edit cannot mix two Board revisions in its response.
 Both hashes reuse one canonical model tree, replacing only its specification collection for the
 simulation identity. This does not mutate the captured snapshot or change canonical hash values.
@@ -308,6 +318,9 @@ non-null items. `state` accepts at most 50 characters, while `currentStateTrust`
 devices still require a legal `state`; no-mode devices use no modeled state and may be
 stored with the canvas-only `Working` placeholder. Shared environment values are not part
 of this subresource.
+
+A runtime update checks the target device's authored starting state. If several saved
+devices have invalid starting states, save a supported state on each device separately.
 
 The same runtime canonicalization runs before every complete device write, including
 targeted creation and full-scene replacement. A runtime compare-and-set also compares the
@@ -508,7 +521,8 @@ mutation and are never presented as a separate successful step.
 
 All typed board mutation bodies reject unknown JSON fields. The standard scene batch
 parser reports exact nested paths and validates template snapshots as raw schema objects,
-so a misspelled field cannot be discarded and then reported as a successful import.
+so a misspelled field cannot be discarded and then reported as a successful import. In a
+batch, text fields such as condition values require JSON strings.
 
 ### `BoardBatchDto` scene-import fields
 
@@ -952,8 +966,12 @@ Default reset is a two-step destructive command. The preview classifies every bu
 type as `RESTORE_MISSING`, `REFRESH_DEFAULT`, or
 `REPLACE_CUSTOM_NAME_COLLISION`, and reports obsolete bundled types as
 `REMOVE_OBSOLETE_DEFAULT`. Each row says whether the manifest semantics change. The
-preview also lists existing device instances that use changed definitions, itemized
-Environment Pool changes, and blockers caused by device/rule/spec incompatibility.
+preview lists devices that use changed definitions or will have their stored runtime
+values updated. It also reports itemized Environment Pool changes and blockers caused
+by device, rule, or specification incompatibility.
+Conflicting shared-variable declarations and a projected pool above the 200-variable limit
+both block reset. If the declarations prevent a pool projection, the preview reports the
+conflict and any other blockers with no projected pool changes.
 Each blocker carries a user-facing `itemLabel`, stable `reasonCode`, and English
 technical `reason`; ordinary UI localizes the reason code and keeps the diagnostic in a
 technical disclosure. `canApply=false` exactly when blockers are present.
@@ -964,12 +982,15 @@ provider or unresolved source prevents localization. This matters when a custom
 name-collision is replaced by a bundled definition: the old and new snapshots can have
 different provenance even though the variable name is unchanged.
 
-The POST accepts only the opaque `impactToken` from that preview. Under the per-user
-write lock it recomputes the preview; board/type/edit-history drift returns `409` and performs no
-write. It then deletes replaced/obsolete defaults, imports **all** bundled definitions,
+The POST accepts only the opaque `impactToken` from that preview, which binds the
+affected-device list. Under the per-user write lock it recomputes the preview.
+Board, type, or edit-history drift returns `409` before writing. It then deletes
+replaced/obsolete defaults, imports **all** bundled definitions,
 runs template and NuSMV pre-checks, validates the existing device instances, rules, and
-specifications against the new manifests, and updates the Environment Pool in one
-transaction. Existing environment values outside a new domain are reset to that
+specifications against the new manifests, recalculates state-derived local values on
+affected devices, and updates the Environment Pool in one transaction. Independent
+instance values remain subject to validation against the replacement manifest.
+Existing environment values outside a new domain are reset to that
 definition's explicit default and appear as `environmentChanges`; they are not silently
 retained or dropped. Any resource, validation, import, or pre-check failure rolls back
 the complete reset. A successful reset clears the previewed undo/redo journal in that
@@ -978,13 +999,19 @@ old manifest semantics and cannot safely be replayed under the refreshed definit
 
 `DefaultTemplateResetResultDto` contains `{ operation, impactToken, canApply,
 editHistoryEntryCount,
-templateChanges, affectedDevices, blockers, environmentChanges, currentTemplates,
-environmentVariables }`. `affectedDevices` carries stable `deviceId` plus the
-user-facing `deviceLabel` and `templateName`; the ordinary UI displays the labels, not
-the internal id. On a committed reset, `currentTemplates` and `environmentVariables`
-are authoritative post-transaction snapshots. On a lost/incomplete response, the
-frontend reads both collections and presents that reconciled current state without
-retrying the destructive request or claiming success.
+templateChanges, affectedDevices, blockers, environmentChanges, currentTemplates, currentNodes,
+environmentVariables }`. Each `affectedDevices` entry has `deviceId`, `deviceLabel`,
+`templateName`, and `runtimeChanges`. The list is empty for devices affected only by
+their template definition. Each runtime change reports the exact stored `previousValue`
+and planned `currentValue` as strings or explicit nulls for unset values. `field` is
+`STATE`, `STATE_TRUST`, `STATE_PRIVACY`, `VARIABLE_NAME`, `VARIABLE_VALUE`,
+`VARIABLE_TRUST`, `PRIVACY_NAME`, or `PRIVACY_LABEL`. Variable value/trust and
+privacy label changes also provide the `itemName` when the projected item has a name.
+The confirmation token binds these values, and the reset receipt repeats them.
+On a committed reset, `currentTemplates`, `currentNodes`, and
+`environmentVariables` are authoritative post-transaction snapshots. On a lost or
+incomplete response, the frontend reconciles those collections from a single Board
+snapshot. The original write remains unconfirmed.
 
 Blocker `reasonCode` is one of `DEVICE_INSTANCE_INCOMPATIBLE`,
 `AUTOMATION_RULE_INCOMPATIBLE`, `SPECIFICATION_INCOMPATIBLE`,
@@ -1082,9 +1109,10 @@ with `400`:
   (`IsInside=false`) and device-local (`IsInside=true`) readings, so API
   presence is not used to guess whether the value is sensor data. Use `false` for
   actuator progress/setpoints and other values outside that threat model. **Provide
-  exactly one explicit domain: `Values` (enum, including `TRUE`/`FALSE` for booleans)
+  exactly one explicit domain: `Values` (case-sensitive enum, for example `["present", "absent"]` for two-valued data)
   XOR `LowerBound`+`UpperBound` (numeric range); never omit the domain, provide both
   forms, or provide only one bound** (backend `@AssertTrue isValidVariableDefinition`).
+  `TRUE` and `FALSE` are reserved NuSMV literals for API signal conditions.
   Numeric bounds must be ascending. Enum values are emitted as bare SMV tokens, so after
   spaces are removed each must be distinct, must match `^[a-zA-Z_][a-zA-Z0-9_]*$`, and must
   not be a NuSMV reserved word (compared case-sensitively, matching the engine's lexer). `NaturalChangeRate` is valid only for numeric domains and accepts exactly

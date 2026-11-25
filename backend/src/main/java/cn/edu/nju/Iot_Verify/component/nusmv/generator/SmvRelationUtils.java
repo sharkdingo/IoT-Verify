@@ -3,8 +3,10 @@ package cn.edu.nju.Iot_Verify.component.nusmv.generator;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvDataFactory;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
+import java.util.stream.Collectors;
 
 /**
  * Shared relation normalization and validation logic for SMV generation.
@@ -139,7 +141,6 @@ public final class SmvRelationUtils {
      * Mode-aware split for state IN/NOT_IN values.
      * Multi-mode devices (modeCount &gt; 1) use `;` within tuple values (e.g. "cool;off"),
      * so only split by [,|]. Single-mode devices split by [,;|].
-     * Matches SmvMainModuleBuilder.splitStateRuleCandidates() semantics.
      */
     public static List<String> splitStateRuleValues(String value, int modeCount) {
         if (value == null) return List.of();
@@ -153,6 +154,42 @@ public final class SmvRelationUtils {
             }
         }
         return result;
+    }
+
+    /** Canonical set of authored operands, with wildcards kept in their original mode positions. */
+    public static String canonicalStateMembershipValue(String value, int modeCount) {
+        return splitStateRuleValues(value, modeCount).stream()
+                .map(operand -> {
+                    if (modeCount <= 1 || !operand.contains(";")) return operand;
+                    return Arrays.stream(operand.split(";", -1))
+                            .map(segment -> DeviceSmvDataFactory.isWildcardStateSegment(segment) ? "_" : segment.trim())
+                            .collect(Collectors.joining(";"));
+                })
+                .distinct()
+                .sorted()
+                .collect(Collectors.joining(","));
+    }
+
+    /**
+     * Canonical membership for a known authored state or mode condition.
+     * Returns null for other relations, other targets, or whole-state conditions without a resolved mode count.
+     */
+    public static String canonicalStateMembershipValue(
+            String value, String normalizedRelation, String targetType, int stateModeCount) {
+        if (!"in".equals(normalizedRelation) && !"not in".equals(normalizedRelation)) return null;
+        if ("mode".equals(targetType)) return canonicalStateMembershipValue(value, 1);
+        if ("state".equals(targetType) && stateModeCount > 0) {
+            return canonicalStateMembershipValue(value, stateModeCount);
+        }
+        return null;
+    }
+
+    /** Preserve an equality operand as one pattern, including its positional wildcards. */
+    public static List<String> stateConditionValues(String value, String normalizedRelation, int modeCount) {
+        if ("in".equals(normalizedRelation) || "not in".equals(normalizedRelation)) {
+            return splitStateRuleValues(value, modeCount);
+        }
+        return value == null || value.isBlank() ? List.of() : List.of(value.trim());
     }
 
     /**

@@ -14,6 +14,7 @@ import cn.edu.nju.Iot_Verify.component.nusmv.generator.AttackSurface;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.GuardProbe;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.PropertyDimension;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvRelationUtils;
+import cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics;
 import cn.edu.nju.Iot_Verify.exception.SmvGenerationException;
 import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
@@ -22,6 +23,8 @@ import org.springframework.stereotype.Component;
 
 import java.util.*;
 import java.util.stream.Collectors;
+
+import static cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvDataFactory.getStateForMode;
 
 @Slf4j
 @Component
@@ -316,7 +319,7 @@ public class SmvMainModuleBuilder {
                 continue;
             }
             declaredEnvVars.add(varName);
-            content.append("\n\ta_").append(varName).append(": ");
+            content.append("\n\t").append(SmvConstants.ENVIRONMENT_POOL_PREFIX).append(varName).append(": ");
             if (var.getValues() != null && !var.getValues().isEmpty()) {
                 List<String> cleanValues = new ArrayList<>();
                 for (String v : var.getValues()) {
@@ -349,7 +352,7 @@ public class SmvMainModuleBuilder {
 
         // Env variable init assignments
         for (Map.Entry<String, String> entry : envVarInitValues.entrySet()) {
-            content.append("\n\tinit(a_").append(entry.getKey()).append(") := ")
+            content.append("\n\tinit(").append(SmvConstants.ENVIRONMENT_POOL_PREFIX).append(entry.getKey()).append(") := ")
                    .append(entry.getValue()).append(";");
         }
 
@@ -368,7 +371,7 @@ public class SmvMainModuleBuilder {
                 DeviceSmvData smv = deviceSmvMap.get(device.getVarName());
                 if (smv != null && attackSurface.includesDevice(smv.getVarName())) {
                     String varName = smv.getVarName();
-                    content.append(" + toint(").append(varName).append(".is_attack)");
+                    content.append(" + toint(").append(varName).append('.').append(SmvConstants.DEVICE_ATTACK_FLAG).append(')');
                 }
             }
             if (rules != null) {
@@ -386,7 +389,7 @@ public class SmvMainModuleBuilder {
         appendStateTransitions(content, devices, rulesByTarget, deviceSmvMap, isAttack, paramCtx, context,
                 selectedBranchesByMode);
         appendEnvTransitions(content, devices, deviceSmvMap, environmentDomains);
-        appendApiSignalTransitions(content, devices, deviceSmvMap);
+        appendApiSignalTransitions(content, devices, deviceSmvMap, rulesByTarget, paramCtx.ruleIndexMap());
         appendPropertyTransitions(content, devices, rulesByTarget, deviceSmvMap, isAttack,
                 PropertyDimension.TRUST, paramCtx, context, selectedBranchesByMode);
         if (enablePrivacy) {
@@ -457,7 +460,7 @@ public class SmvMainModuleBuilder {
         }
 
         for (String envName : environmentDomains.keySet()) {
-            registerMainIdentifier(identifiers, "a_" + envName,
+            registerMainIdentifier(identifiers, SmvConstants.ENVIRONMENT_POOL_PREFIX + envName,
                     "generated environment variable for '" + envName + "'");
         }
         if (rules != null) {
@@ -485,19 +488,7 @@ public class SmvMainModuleBuilder {
         return new ParamCtx(current != null ? current.config() : null, indexes);
     }
 
-    /*
-     * The generated-name half of the main namespace — a backstop, not the first line of defence.
-     *
-     * `NusmvRequestValidator.validateMainNamespace` runs on every verify and simulate request and now also
-     * reserves the fix-generated prefixes (`SmvConstants.FIX_GENERATED_NAME_PREFIXES`) against device names, so a
-     * user learns about the clash at their first verification rather than when they later ask for a fix. Before
-     * that reservation existed, a device named `condition_value_r0_c1` saved and verified fine — confirmed
-     * against the running API — and only this throw stopped it, from a surface the user was not editing.
-     *
-     * This check stays because the exact names still are not known until a strategy has chosen them: only here
-     * can `param_<hash>` be compared against everything else in the module. It fails closed, naming the
-     * identifier and both colliding sources, rather than emitting a model where one name means two things.
-     */
+    // Actual repair names are available only at generation. Validate the resulting main declarations together.
     private void registerMainIdentifier(Map<String, String> identifiers, String identifier, String source) {
         if (identifier == null || identifier.isBlank()) {
             return;
@@ -536,12 +527,14 @@ public class SmvMainModuleBuilder {
                         content.append("\n\t").append(varName).append(".").append(var.getName()).append(" := ");
                         if (isAttack && Boolean.TRUE.equals(var.getFalsifiableWhenCompromised())) {
                             content.append("\n\tcase\n")
-                                    .append("\t\t").append(varName).append(".is_attack=TRUE: ")
+                                    .append("\t\t").append(varName).append('.').append(SmvConstants.DEVICE_ATTACK_FLAG)
+                                    .append("=TRUE: ")
                                     .append(variableDomainExpression(var)).append(";\n")
-                                    .append("\t\tTRUE: a_").append(var.getName()).append(";\n")
+                                    .append("\t\tTRUE: ").append(SmvConstants.ENVIRONMENT_POOL_PREFIX)
+                                    .append(var.getName()).append(";\n")
                                     .append("\tesac;");
                         } else {
-                            content.append("a_").append(var.getName()).append(";");
+                            content.append(SmvConstants.ENVIRONMENT_POOL_PREFIX).append(var.getName()).append(";");
                         }
                     }
                 }
@@ -617,7 +610,7 @@ public class SmvMainModuleBuilder {
             String rawCondition = buildRuleTransitionCondition(rule, targetSmv, deviceSmvMap,
                     targetVarName, api, isAttack, paramCtx, context);
             if (affectedModes.contains(modeIndex)) {
-                String endState = getStateForMode(api.getEndState(), modeIndex);
+                String endState = getStateForMode(api.getEndState(), modeIndex, false);
                 String selectedCondition = "(" + rawCondition + ")";
                 List<String> conflictingEarlierConditions = earlierActions.stream()
                         .filter(earlier -> !Collections.disjoint(earlier.affectedModes(), affectedModes))
@@ -640,7 +633,7 @@ public class SmvMainModuleBuilder {
             return result;
         }
         for (int modeIndex = 0; modeIndex < targetSmv.getModes().size(); modeIndex++) {
-            String endState = getStateForMode(api.getEndState(), modeIndex);
+            String endState = getStateForMode(api.getEndState(), modeIndex, false);
             if (endState != null && !endState.isEmpty()) {
                 result.add(modeIndex);
             }
@@ -685,7 +678,7 @@ public class SmvMainModuleBuilder {
                     if (smv.getManifest() != null && smv.getManifest().getTransitions() != null) {
                         for (DeviceManifest.Transition trans : smv.getManifest().getTransitions()) {
                             if (trans.getEndState() == null) continue;
-                            String endState = getStateForMode(trans.getEndState(), modeIdx);
+                            String endState = getStateForMode(trans.getEndState(), modeIdx, false);
                             if (endState == null || endState.isEmpty()) continue;
 
                             DeviceManifest.Trigger trigger = trans.getTrigger();
@@ -830,7 +823,7 @@ public class SmvMainModuleBuilder {
                                             String targetVarName,
                                             RuleDto rule,
                                             ParamCtx paramCtx) {
-        content.append(" & ").append(targetVarName).append(".is_attack=FALSE");
+        content.append(" & ").append(targetVarName).append('.').append(SmvConstants.DEVICE_ATTACK_FLAG).append("=FALSE");
         Integer ruleIndex = paramCtx != null && paramCtx.ruleIndexMap() != null
                 ? paramCtx.ruleIndexMap().get(rule)
                 : null;
@@ -982,12 +975,12 @@ public class SmvMainModuleBuilder {
         }
         String attr = condition.getAttribute().trim();
         String targetType = condition.getTargetType().trim().toLowerCase(Locale.ROOT);
-        boolean resolves = switch (targetType) {
-            case "mode" -> smv.getModes() != null && smv.getModes().contains(attr);
-            case "variable" -> findInternalVariableByName(smv, attr) != null;
-            default -> false;
+        String operand = switch (targetType) {
+            case "mode" -> DeviceSmvDataFactory.resolveModeIdentifier(smv, attr);
+            case "variable" -> findInternalVariableByName(smv, attr) != null ? attr : null;
+            default -> null;
         };
-        return resolves ? smv.getVarName() + "." + attr : null;
+        return operand != null ? smv.getVarName() + "." + operand : null;
     }
 
     private void recordDisabledRule(SmvGenerationContext context,
@@ -1053,22 +1046,21 @@ public class SmvMainModuleBuilder {
                 return null;
             }
             if ("state".equals(targetType)) {
-                if (!"state".equals(attr)) {
+                if (!"state".equalsIgnoreCase(attr)) {
                     log.warn("Rule state condition on device '{}' must use attribute 'state', got '{}'", deviceId, attr);
                     return null;
                 }
                 return buildRuleStateCondition(condition, condSmv, normalizedRel, effectiveUseNext);
             }
 
-            boolean isModeAttr = "mode".equals(targetType)
-                    && condSmv.getModes() != null && condSmv.getModes().contains(attr);
+            String mode = "mode".equals(targetType) ? DeviceSmvDataFactory.resolveModeIdentifier(condSmv, attr) : null;
             DeviceManifest.InternalVariable internalVar = "variable".equals(targetType)
                     ? findInternalVariableByName(condSmv, attr)
                     : null;
             DeviceManifest.API signalApi = "api".equals(targetType)
                     ? findSignalApiByName(condSmv, attr)
                     : null;
-            if ("mode".equals(targetType) && !isModeAttr) {
+            if ("mode".equals(targetType) && mode == null) {
                 log.warn("Rule mode condition attribute '{}' on device '{}' is not a known mode", attr, deviceId);
                 return null;
             }
@@ -1081,7 +1073,7 @@ public class SmvMainModuleBuilder {
                 return null;
             }
 
-            String lhsAttr = attr;
+            String lhsAttr = mode != null ? mode : attr;
             if (signalApi != null) {
                 if (!isSupportedApiSignalRuleRelation(normalizedRel)) {
                     log.warn("Rule API signal condition on device '{}' attribute '{}' does not support relation '{}'",
@@ -1097,8 +1089,20 @@ public class SmvMainModuleBuilder {
             }
 
             String rhsValue = condition.getValue();
-            if (rhsValue != null && isModeAttr) {
-                rhsValue = cleanRuleValueByRelation(normalizedRel, rhsValue);
+            if (rhsValue != null && mode != null) {
+                List<String> candidates = "in".equals(normalizedRel) || "not in".equals(normalizedRel)
+                        ? SmvRelationUtils.splitRuleValues(rhsValue) : List.of(rhsValue);
+                List<String> tokens = new ArrayList<>();
+                for (String candidate : candidates) {
+                    String token = condSmv.resolveAuthoredState(mode, candidate);
+                    if (token == null) {
+                        log.warn("Rule mode condition value '{}' on device '{}' is not declared for mode '{}'",
+                                candidate, deviceId, attr);
+                        return null;
+                    }
+                    tokens.add(token);
+                }
+                rhsValue = String.join(",", tokens);
             }
             if (rhsValue != null && internalVar != null
                     && internalVar.getValues() != null && !internalVar.getValues().isEmpty()) {
@@ -1178,7 +1182,7 @@ public class SmvMainModuleBuilder {
                 condition.getAttribute(), deviceId);
         return null;
     }
-private String buildRuleStateCondition(RuleDto.Condition condition, DeviceSmvData condSmv,
+    private String buildRuleStateCondition(RuleDto.Condition condition, DeviceSmvData condSmv,
                                            String normalizedRel, boolean useNext) {
         String deviceId = condition.getDeviceName();
         if (condSmv.getModes() == null || condSmv.getModes().isEmpty()) {
@@ -1193,7 +1197,7 @@ private String buildRuleStateCondition(RuleDto.Condition condition, DeviceSmvDat
             return null;
         }
 
-        List<String> rawCandidates = splitStateRuleCandidates(condition.getValue(), normalizedRel, condSmv);
+        List<String> rawCandidates = SmvRelationUtils.stateConditionValues(condition.getValue(), normalizedRel, condSmv.getModes().size());
         if (rawCandidates.isEmpty()) {
             log.warn("Rule state condition has empty candidate set on device '{}'", deviceId);
             return null;
@@ -1240,88 +1244,8 @@ private String buildRuleStateCondition(RuleDto.Condition condition, DeviceSmvDat
         return negated.size() == 1 ? negated.get(0) : "(" + String.join(" & ", negated) + ")";
     }
 
-    private List<String> splitStateRuleCandidates(String value, String normalizedRel, DeviceSmvData condSmv) {
-        if (value == null) {
-            return List.of();
-        }
-        if ("in".equals(normalizedRel) || "not in".equals(normalizedRel)) {
-            String splitRegex = (condSmv.getModes() != null && condSmv.getModes().size() > 1) ? "[,|]" : "[,;|]";
-            String[] parts = value.split(splitRegex);
-            List<String> result = new ArrayList<>();
-            for (String part : parts) {
-                String trimmed = part.trim();
-                if (!trimmed.isEmpty()) {
-                    result.add(trimmed);
-                }
-            }
-            return result;
-        }
-        String trimmed = value.trim();
-        return trimmed.isEmpty() ? List.of() : List.of(trimmed);
-    }
-
-    private Map<String, String> resolveStateTupleCandidate(DeviceSmvData condSmv, String rawCandidate) {
-        if (condSmv == null || condSmv.getModes() == null || condSmv.getModes().isEmpty()
-                || rawCandidate == null || rawCandidate.isBlank()) {
-            return null;
-        }
-
-        List<String> modes = condSmv.getModes();
-        String candidate = rawCandidate.trim();
-
-        if (candidate.contains(";")) {
-            String[] segments = candidate.split(";", -1);
-            if (segments.length != modes.size()) {
-                return null;
-            }
-            Map<String, String> tuple = new LinkedHashMap<>();
-            for (int i = 0; i < modes.size(); i++) {
-                if (DeviceSmvDataFactory.isWildcardStateSegment(segments[i])) {
-                    continue;
-                }
-                String cleanSeg = DeviceSmvDataFactory.cleanStateName(segments[i]);
-                if (cleanSeg == null || cleanSeg.isBlank()) {
-                    continue;
-                }
-                String mode = modes.get(i);
-                List<String> legalStates = condSmv.getModeStates().get(mode);
-                if (legalStates == null || !legalStates.contains(cleanSeg)) {
-                    return null;
-                }
-                tuple.put(mode, cleanSeg);
-            }
-            return tuple.isEmpty() ? null : tuple;
-        }
-
-        String cleanState = DeviceSmvDataFactory.cleanStateName(candidate);
-        if (cleanState == null || cleanState.isBlank()) {
-            return null;
-        }
-
-        if (modes.size() == 1) {
-            String mode = modes.get(0);
-            List<String> legalStates = condSmv.getModeStates().get(mode);
-            if (legalStates == null || !legalStates.contains(cleanState)) {
-                return null;
-            }
-            Map<String, String> tuple = new LinkedHashMap<>();
-            tuple.put(mode, cleanState);
-            return tuple;
-        }
-
-        List<String> matchedModes = new ArrayList<>();
-        for (String mode : modes) {
-            List<String> legalStates = condSmv.getModeStates().get(mode);
-            if (legalStates != null && legalStates.contains(cleanState)) {
-                matchedModes.add(mode);
-            }
-        }
-        if (matchedModes.size() != 1) {
-            return null;
-        }
-        Map<String, String> tuple = new LinkedHashMap<>();
-        tuple.put(matchedModes.get(0), cleanState);
-        return tuple;
+    private Map<String, String> resolveStateTupleCandidate(DeviceSmvData smv, String candidate) {
+        return ManifestConditionSemantics.resolveStatePattern(candidate, smv.getModes(), smv::resolveAuthoredState);
     }
 
     private String buildStateTupleExpr(String varName, DeviceSmvData condSmv,
@@ -1351,20 +1275,7 @@ private String buildRuleStateCondition(RuleDto.Condition condition, DeviceSmvDat
         for (DeviceVerificationDto device : devices) {
             DeviceSmvData smv = deviceSmvMap.get(device.getVarName());
             if (smv == null) continue;
-            if (smv.getEnvVariables() != null) {
-                for (Map.Entry<String, DeviceManifest.InternalVariable> env : smv.getEnvVariables().entrySet()) {
-                    if (env.getKey() != null && env.getValue() != null) {
-                        result.putIfAbsent(env.getKey(), env.getValue());
-                    }
-                }
-            }
-            if (smv.getImpactedEnvironmentVariables() != null) {
-                for (Map.Entry<String, DeviceManifest.InternalVariable> env : smv.getImpactedEnvironmentVariables().entrySet()) {
-                    if (env.getKey() != null && env.getValue() != null) {
-                        result.putIfAbsent(env.getKey(), env.getValue());
-                    }
-                }
-            }
+            smv.getSharedDeclarations().forEach(result::putIfAbsent);
         }
         return result;
     }
@@ -1375,6 +1286,12 @@ private String buildRuleStateCondition(RuleDto.Condition condition, DeviceSmvDat
                                      Map<String, DeviceManifest.InternalVariable> environmentDomains) {
 
         Set<String> processedVars = new HashSet<>();
+        // Portable files and Board reads can present a different order for the same model IDs.
+        List<DeviceSmvData> devicesByModelId = devices.stream()
+                .map(device -> deviceSmvMap.get(device.getVarName()))
+                .filter(Objects::nonNull)
+                .sorted(Comparator.comparing(DeviceSmvData::getVarName))
+                .toList();
 
         for (Map.Entry<String, DeviceManifest.InternalVariable> env : environmentDomains.entrySet()) {
                 String varName = env.getKey();
@@ -1382,15 +1299,13 @@ private String buildRuleStateCondition(RuleDto.Condition condition, DeviceSmvDat
                 processedVars.add(varName);
 
                 DeviceManifest.InternalVariable var = env.getValue();
-                String smvVarName = "a_" + varName;
+                String smvVarName = SmvConstants.ENVIRONMENT_POOL_PREFIX + varName;
 
                 content.append("\n\tnext(").append(smvVarName).append(") :=\n");
                 content.append("\tcase\n");
 
-                for (DeviceVerificationDto dev : devices) {
-                    DeviceSmvData transSmv = deviceSmvMap.get(dev.getVarName());
-                    if (transSmv == null || transSmv.getManifest() == null ||
-                        transSmv.getManifest().getTransitions() == null) continue;
+                for (DeviceSmvData transSmv : devicesByModelId) {
+                    if (transSmv.getManifest() == null || transSmv.getManifest().getTransitions() == null) continue;
 
                     for (DeviceManifest.Transition trans : transSmv.getManifest().getTransitions()) {
                         if (trans.getAssignments() == null) continue;
@@ -1401,7 +1316,9 @@ private String buildRuleStateCondition(RuleDto.Condition condition, DeviceSmvDat
                                         transSmv.getVarName(), "Transition '" + trans.getName() + "'",
                                         "assignment or assignment.attribute is null");
                             }
-                            if (varName.equals(assignment.getAttribute())) {
+                            // A local assignment cannot write a pool value declared by another device.
+                            if (varName.equals(assignment.getAttribute())
+                                    && transSmv.getSharedDeclarations().containsKey(varName)) {
                                 DeviceManifest.Trigger trigger = trans.getTrigger();
                                 if (trigger != null) {
                                     if (trigger.getAttribute() == null || trigger.getRelation() == null
@@ -1529,44 +1446,51 @@ private String buildRuleStateCondition(RuleDto.Condition condition, DeviceSmvDat
         NaturalChangeRateParser.RateRange rate =
                 parseNaturalChangeRate(var.getNaturalChangeRate(), "env:" + varName);
 
-        // Check if any device provides an impacted _rate expression for this variable
-        String rateExpr = findImpactRateExpression(varName, devices, deviceSmvMap);
+        List<ImpactRate> impactRates = findImpactRates(varName, devices, deviceSmvMap);
 
         // MEDIC §3.1, Fig. 2b constrains v' - v to the declared interval combined with the active
-        // device effect, so every integer in that interval is an admissible next value. Clamping to
-        // the declared domain already pins both boundaries, which is why no separate at-boundary
-        // branch is needed: at v = upper the ascending deltas simply saturate there.
+        // device effect, so every integer in that interval is an admissible next value.
         List<String> rateCandidates = new ArrayList<>();
         for (int delta : rate.admissibleDeltas()) {
-            String shifted = formatArithmeticExpr(smvVarName, delta);
-            rateCandidates.add(clampExpr(
-                    rateExpr == null ? shifted : shifted + " + " + rateExpr, lower, upper));
+            rateCandidates.add(clampNumericOffset(smvVarName, lower, upper, delta, impactRates));
         }
         content.append("\t\tTRUE: {").append(String.join(", ", rateCandidates)).append("};\n");
     }
 
-    /**
-     * Find all device rate expressions that impact the target variable.
-     * Example: "air_conditioner.temperature_rate"
-     */
-    private String findImpactRateExpression(String varName, List<DeviceVerificationDto> devices,
+    private List<ImpactRate> findImpactRates(String varName, List<DeviceVerificationDto> devices,
                                             Map<String, DeviceSmvData> deviceSmvMap) {
-        List<String> rateExprs = new ArrayList<>();
+        List<ImpactRate> rates = new ArrayList<>();
         for (DeviceVerificationDto dev : devices) {
             DeviceSmvData devSmv = deviceSmvMap.get(dev.getVarName());
             if (devSmv == null || devSmv.getImpactedVariables() == null) continue;
             if (devSmv.getImpactedVariables().contains(varName)) {
-                rateExprs.add(devSmv.getVarName() + "." + varName + "_rate");
+                rates.add(impactRate(devSmv, varName));
             }
         }
-        if (rateExprs.isEmpty()) return null;
-        // Multiple devices affecting the same variable are summed.
-        return String.join("+", rateExprs);
+        return rates;
+    }
+
+    private ImpactRate impactRate(DeviceSmvData smv, String variableName) {
+        long maxMagnitude = 0;
+        if (smv.getManifest() != null && smv.getManifest().getWorkingStates() != null) {
+            for (DeviceManifest.WorkingState state : smv.getManifest().getWorkingStates()) {
+                if (state.getDynamics() == null) continue;
+                for (DeviceManifest.Dynamic dynamic : state.getDynamics()) {
+                    if (variableName.equals(dynamic.getVariableName()) && dynamic.getChangeRate() != null) {
+                        int rate = parseDynamicChangeRate(smv.getVarName(), variableName, dynamic.getChangeRate());
+                        maxMagnitude = Math.max(maxMagnitude, Math.abs((long) rate));
+                    }
+                }
+            }
+        }
+        return new ImpactRate(smv.getVarName() + "." + variableName + "_rate", maxMagnitude);
     }
 
     private void appendApiSignalTransitions(StringBuilder content,
                                            List<DeviceVerificationDto> devices,
-                                           Map<String, DeviceSmvData> deviceSmvMap) {
+                                           Map<String, DeviceSmvData> deviceSmvMap,
+                                           Map<String, List<RuleDto>> rulesByTarget,
+                                           Map<RuleDto, Integer> ruleIndexes) {
         for (DeviceVerificationDto device : devices) {
             DeviceSmvData smv = deviceSmvMap.get(device.getVarName());
             if (smv == null || smv.getManifest() == null || smv.getManifest().getApis() == null) continue;
@@ -1581,22 +1505,26 @@ private String buildRuleStateCondition(RuleDto.Condition condition, DeviceSmvDat
                     throw SmvGenerationException.templateInvalid(varName,
                             "Signal API name is required");
                 }
-                
-                content.append("\n\tnext(").append(varName).append(".").append(signalName).append(") :=\n");
-                content.append("\tcase\n");
 
                 String eventCondition = buildStateEventCondition(
                         smv, varName, api.getStartState(), api.getEndState());
-                if (eventCondition != null) {
-                    content.append("\t\t").append(eventCondition).append(": TRUE;\n");
-                } else {
+                if (eventCondition == null) {
                     throw SmvGenerationException.templateInvalid(varName,
                             "Signal API '" + api.getName()
                                     + "' has no representable state change");
                 }
 
-                content.append("\t\tTRUE: FALSE;\n");
-                content.append("\tesac;");
+                // Disjoint commands can reproduce the same mode tuple without selecting this API.
+                // The next-state probes identify selected rules, including priority and delivery.
+                List<String> actionProbes = rulesByTarget.getOrDefault(varName, List.of()).stream()
+                        .filter(rule -> DeviceSmvDataFactory.findApi(smv.getManifest(),
+                                rule.getCommand().getAction()) == api)
+                        .map(rule -> "next(" + SmvConstants.RULE_EXECUTION_PROBE_PREFIX + ruleIndexes.get(rule) + ")")
+                        .toList();
+                String pulse = actionProbes.isEmpty() ? "FALSE"
+                        : "(" + String.join(" | ", actionProbes) + ") & (" + eventCondition + ")";
+                content.append("\n\tnext(").append(varName).append(".").append(signalName)
+                        .append(") := ").append(pulse).append(";");
             }
         }
     }
@@ -1680,7 +1608,8 @@ private String buildRuleStateCondition(RuleDto.Condition condition, DeviceSmvDat
                         && Boolean.TRUE.equals(var.getFalsifiableWhenCompromised())) {
                     content.append("\n\tnext(").append(propVar).append(") :=\n")
                             .append("\tcase\n")
-                            .append("\t\t").append(varName).append(".is_attack=TRUE: untrusted;\n")
+                            .append("\t\t").append(varName).append('.').append(SmvConstants.DEVICE_ATTACK_FLAG)
+                            .append("=TRUE: untrusted;\n")
                             .append("\t\tTRUE: ").append(propVar).append(";\n")
                             .append("\tesac;");
                 } else {
@@ -1767,10 +1696,8 @@ private String buildRuleStateCondition(RuleDto.Condition condition, DeviceSmvDat
                 }
             }
         } else if ("mode".equals(targetType)) {
-            if (condSmv.getModes() == null || !condSmv.getModes().contains(attr)) {
-                return null;
-            }
-            return buildCurrentStatePropertyPredicate(condSmv, condVarName, dim, attr);
+            String mode = DeviceSmvDataFactory.resolveModeIdentifier(condSmv, attr);
+            return mode == null ? null : buildCurrentStatePropertyPredicate(condSmv, condVarName, dim, mode);
         } else if ("state".equals(targetType)) {
             Set<String> referencedModes = resolveStateConditionModes(condition, condSmv);
             return referencedModes.isEmpty()
@@ -1803,7 +1730,8 @@ private String buildRuleStateCondition(RuleDto.Condition condition, DeviceSmvDat
             return Collections.emptySet();
         }
         String relation = normalizeRuleRelation(condition.getRelation());
-        List<String> candidates = splitStateRuleCandidates(condition.getValue(), relation, smv);
+        int modeCount = smv.getModes() == null ? 0 : smv.getModes().size();
+        List<String> candidates = SmvRelationUtils.stateConditionValues(condition.getValue(), relation, modeCount);
         Set<String> modes = new LinkedHashSet<>();
         for (String candidate : candidates) {
             Map<String, String> tuple = resolveStateTupleCandidate(smv, candidate);
@@ -1926,7 +1854,7 @@ private String buildRuleStateCondition(RuleDto.Condition condition, DeviceSmvDat
                 content.append("\tcase\n");
 
                 if (isAttack && Boolean.TRUE.equals(var.getFalsifiableWhenCompromised())) {
-                    content.append("\t\t").append(varName).append(".is_attack=TRUE: ");
+                    content.append("\t\t").append(varName).append('.').append(SmvConstants.DEVICE_ATTACK_FLAG).append("=TRUE: ");
                     if (var.getValues() != null && !var.getValues().isEmpty()) {
                         List<String> cleanVals = new ArrayList<>();
                         for (String v : var.getValues()) {
@@ -1972,9 +1900,9 @@ private String buildRuleStateCondition(RuleDto.Condition condition, DeviceSmvDat
 
                 boolean numericVariable = hasNumericBounds;
                 if (numericVariable) {
-                    String impactedRate = "";
+                    List<ImpactRate> impactedRates = List.of();
                     if (smv.getImpactedVariables() != null && smv.getImpactedVariables().contains(var.getName())) {
-                        impactedRate = varName + "." + var.getName() + "_rate";
+                        impactedRates = List.of(impactRate(smv, var.getName()));
                     }
 
                     NaturalChangeRateParser.RateRange localRate = parseNaturalChangeRate(
@@ -1983,19 +1911,11 @@ private String buildRuleStateCondition(RuleDto.Condition condition, DeviceSmvDat
                     String varRef = varName + "." + var.getName();
 
                     appendLocalNumericDynamicsBranches(content, smv, varName, var, varRef,
-                            localRate, hasNumericBounds, lowerBound, upperBound);
+                            localRate, lowerBound, upperBound);
 
-                    // Every integer in the declared interval is admissible, combined with the
-                    // device's own active effect. Clamping pins both boundaries, so saturation at
-                    // the domain edge needs no separate branch.
                     List<String> rateCandidates = new ArrayList<>();
                     for (int delta : localRate.admissibleDeltas()) {
-                        String expr = formatArithmeticExpr(varRef, delta);
-                        if (!impactedRate.isEmpty()) {
-                            expr = expr + " + " + impactedRate;
-                        }
-                        rateCandidates.add(
-                                hasNumericBounds ? clampExpr(expr, lowerBound, upperBound) : expr);
+                        rateCandidates.add(clampNumericOffset(varRef, lowerBound, upperBound, delta, impactedRates));
                     }
                     content.append("\t\tTRUE: {").append(String.join(", ", rateCandidates)).append("};\n");
                 } else {
@@ -2070,8 +1990,15 @@ private String buildRuleStateCondition(RuleDto.Condition condition, DeviceSmvDat
         // (IsInside=false, Reads=false) — and that is exactly what
         // `SmvModelValidator.buildLegalAttributeSet` refuses as a trigger attribute. An unassigned
         // identifier is legal SMV that NuSMV re-picks freely every step, which is why refusing it matters.
-        String triggerRef = varName + "." + trigger.getAttribute();
-        String triggerCondition = triggerRef + triggerRelation + trigger.getValue().replace(" ", "");
+        String mode = DeviceSmvDataFactory.resolveModeIdentifier(smv, trigger.getAttribute());
+        String attribute = mode == null ? trigger.getAttribute() : mode;
+        String value = mode == null ? trigger.getValue().replace(" ", "")
+                : smv.resolveAuthoredState(mode, trigger.getValue());
+        if (value == null) {
+            throw SmvGenerationException.templateInvalid(smv.getVarName(), "Transition '" + transition.getName()
+                    + "' compares mode '" + trigger.getAttribute() + "' with undeclared state '" + trigger.getValue() + "'");
+        }
+        String triggerCondition = varName + "." + attribute + triggerRelation + value;
         String startStateGuard = buildStartStateCondition(smv, varName, transition.getStartState());
         return startStateGuard.isEmpty()
                 ? triggerCondition
@@ -2093,7 +2020,7 @@ private String buildRuleStateCondition(RuleDto.Condition condition, DeviceSmvDat
             if (cleanStart != null && !cleanStart.isEmpty()) {
                 guards.add(varName + "." + mode + "=" + cleanStart);
             }
-            String cleanEnd = getStateForMode(endState, modeIndex);
+            String cleanEnd = getStateForMode(endState, modeIndex, false);
             if (cleanEnd != null && !cleanEnd.isEmpty()) {
                 guards.add("next(" + varName + "." + mode + ")=" + cleanEnd);
                 changedPredicates.add(varName + "." + mode + "!=" + cleanEnd);
@@ -2125,11 +2052,7 @@ private String buildRuleStateCondition(RuleDto.Condition condition, DeviceSmvDat
     }
 
     private String normalizeAssignmentLiteral(String value) {
-        String normalized = value.replace(" ", "");
-        if ("true".equalsIgnoreCase(normalized) || "false".equalsIgnoreCase(normalized)) {
-            return normalized.toUpperCase(Locale.ROOT);
-        }
-        return normalized;
+        return value.replace(" ", "");
     }
 
     private void appendLocalNumericDynamicsBranches(StringBuilder content,
@@ -2138,9 +2061,8 @@ private String buildRuleStateCondition(RuleDto.Condition condition, DeviceSmvDat
                                                     DeviceManifest.InternalVariable var,
                                                     String varRef,
                                                     NaturalChangeRateParser.RateRange rate,
-                                                    boolean hasNumericBounds,
-                                                    Integer lowerBound,
-                                                    Integer upperBound) {
+                                                    int lowerBound,
+                                                    int upperBound) {
         if (smv.getManifest() == null || smv.getManifest().getWorkingStates() == null) {
             return;
         }
@@ -2154,22 +2076,13 @@ private String buildRuleStateCondition(RuleDto.Condition condition, DeviceSmvDat
                 if (condition == null) {
                     continue;
                 }
-                final int dynamicRate;
-                try {
-                    dynamicRate = Integer.parseInt(dynamic.getChangeRate().trim());
-                } catch (NumberFormatException e) {
-                    throw SmvGenerationException.templateInvalid(deviceVarName,
-                            "WorkingState Dynamics for local variable '" + var.getName()
-                                    + "' has non-integer ChangeRate '" + dynamic.getChangeRate() + "'");
-                }
+                int dynamicRate = parseDynamicChangeRate(deviceVarName, var.getName(), dynamic.getChangeRate());
 
                 // The state's own ChangeRate is a definite effect; the declared interval is the
                 // drift that may accompany it, so every admissible delta combines with that effect.
                 List<String> candidates = new ArrayList<>();
                 for (int delta : rate.admissibleDeltas()) {
-                    candidates.add(clampIfBounded(
-                            formatArithmeticExpr(formatArithmeticExpr(varRef, delta), dynamicRate),
-                            hasNumericBounds, lowerBound, upperBound));
+                    candidates.add(clampConstantRates(varRef, lowerBound, upperBound, delta, dynamicRate));
                 }
 
                 content.append("\t\t").append(condition).append(": {")
@@ -2196,29 +2109,6 @@ private String buildRuleStateCondition(RuleDto.Condition condition, DeviceSmvDat
         return String.join(" & ", conditions);
     }
 
-    /**
-     * Extract the state segment at modeIndex from a semicolon-separated state tuple.
-     */
-    private String getStateForMode(String multiModeState, int modeIndex) {
-        return getStateForMode(multiModeState, modeIndex, false);
-    }
-
-    /**
-     * Extract state value for a specific mode from multi-mode state string.
-     * @param allowWildcard if true, treats "_" as wildcard (returns null); used for StartState
-     */
-    private String getStateForMode(String multiModeState, int modeIndex, boolean allowWildcard) {
-        if (multiModeState == null) return null;
-        String[] states = multiModeState.split(";");
-        if (modeIndex < states.length) {
-            String raw = states[modeIndex].trim();
-            if (raw.isEmpty()) return null;
-            if (allowWildcard && raw.equals("_")) return null;
-            return DeviceSmvDataFactory.cleanStateName(raw);
-        }
-        return null;
-    }
-
     private String formatArithmeticExpr(String varRef, int rate) {
         if (rate == 0) return varRef;
         if (rate > 0) return varRef + " + " + rate;
@@ -2229,15 +2119,73 @@ private String buildRuleStateCondition(RuleDto.Condition condition, DeviceSmvDat
         return "max(" + lower + ", min(" + upper + ", " + expr + "))";
     }
 
-    private String clampExpr(String expr, Integer lower, Integer upper) {
-        if (lower == null || upper == null) {
-            return expr;
+    private int parseDynamicChangeRate(String device, String variable, String rawRate) {
+        try {
+            return Integer.parseInt(rawRate.trim());
+        } catch (NumberFormatException e) {
+            throw SmvGenerationException.templateInvalid(device,
+                    "WorkingState Dynamics for variable '" + variable + "' has non-integer ChangeRate '" + rawRate + "'");
         }
-        return clampExpr(expr, lower.intValue(), upper.intValue());
     }
 
-    private String clampIfBounded(String expr, boolean hasNumericBounds, Integer lower, Integer upper) {
-        return hasNumericBounds ? clampExpr(expr, lower, upper) : expr;
+    private String clampConstantRates(String current, int lower, int upper, int drift, int effect) {
+        long offset = (long) drift + effect;
+        if (drift != Integer.MIN_VALUE && effect != Integer.MIN_VALUE
+                && fitsIntegerRange(lower, upper, drift) && fitsIntegerRange(lower, upper, offset)) {
+            return clampExpr(formatArithmeticExpr(formatArithmeticExpr(current, drift), effect), lower, upper);
+        }
+        long span = (long) upper - lower;
+        if (offset >= span) return String.valueOf(upper);
+        if (offset <= -span) return String.valueOf(lower);
+        if (offset == 0) return current;
+        // Only evaluate the addition for values that can move without crossing the bound.
+        String saturation = offset > 0
+                ? current + " >= " + (upper - offset) + " : " + upper
+                : current + " <= " + (lower - offset) + " : " + lower;
+        String shifted = formatArithmeticExpr(current, Math.toIntExact(offset));
+        return "(case " + saturation + "; TRUE : " + shifted + "; esac)";
+    }
+
+    private boolean fitsIntegerRange(int lower, int upper, long offset) {
+        return lower + offset >= Integer.MIN_VALUE && upper + offset <= Integer.MAX_VALUE;
+    }
+
+    private record ImpactRate(String expression, long maxMagnitude) {}
+
+    private static final int NUMERIC_CHUNK_BASE = 1 << 16;
+
+    private String clampNumericOffset(String current, int lower, int upper, int drift, List<ImpactRate> rates) {
+        if (rates.isEmpty()) {
+            return clampConstantRates(current, lower, upper, drift, 0);
+        }
+        long currentMagnitude = Math.max(Math.abs((long) lower), Math.abs((long) upper));
+        long totalMagnitude = currentMagnitude + Math.abs((long) drift)
+                + rates.stream().mapToLong(ImpactRate::maxMagnitude).sum();
+        if (totalMagnitude <= Integer.MAX_VALUE) {
+            String deviceRates = rates.stream().map(ImpactRate::expression).collect(Collectors.joining("+"));
+            return clampExpr(formatArithmeticExpr(current, drift) + " + " + deviceRates, lower, upper);
+        }
+
+        // Measure the sum relative to the lower bound, adding 16-bit chunks separately. The quotient
+        // can be clipped far enough out that no combination of remainders can bring it into the domain.
+        // Under the admitted device and domain-size limits both scaled chunks fit within an integer.
+        int span = Math.toIntExact((long) upper - lower);
+        // Allow one chunk each for the current value, drift and lower bound remainders, plus a guard chunk.
+        int quotientLimit = rates.size() + span / NUMERIC_CHUNK_BASE + 4;
+        String quotient = relativeChunkSum(current, rates, "/",
+                drift / NUMERIC_CHUNK_BASE - lower / NUMERIC_CHUNK_BASE);
+        String remainder = relativeChunkSum(current, rates, "mod",
+                drift % NUMERIC_CHUNK_BASE - lower % NUMERIC_CHUNK_BASE);
+        String relative = clampExpr(quotient, -quotientLimit, quotientLimit) + " * " + NUMERIC_CHUNK_BASE
+                + " + (" + remainder + ")";
+        return "(" + lower + " + " + clampExpr(relative, 0, span) + ")";
+    }
+
+    private String relativeChunkSum(String current, List<ImpactRate> rates, String operator, int shift) {
+        String separator = " " + operator + " " + NUMERIC_CHUNK_BASE;
+        String sum = current + separator + " + " + rates.stream()
+                .map(rate -> rate.expression() + separator).collect(Collectors.joining(" + "));
+        return formatArithmeticExpr(sum, shift);
     }
 
     /**
@@ -2351,10 +2299,6 @@ private String buildRuleStateCondition(RuleDto.Condition condition, DeviceSmvDat
 
     private static List<String> splitRuleValues(String value) {
         return SmvRelationUtils.splitRuleValues(value);
-    }
-
-    private static String cleanRuleValueByRelation(String normalizedRelation, String value) {
-        return SmvRelationUtils.cleanRuleValueByRelation(normalizedRelation, value);
     }
 
     private static DeviceManifest.InternalVariable findInternalVariableByName(DeviceSmvData smv, String attr) {

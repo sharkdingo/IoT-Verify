@@ -10,6 +10,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.function.ToIntFunction;
 import java.util.stream.Collectors;
 
 /** Canonical, order-insensitive signature for the behavior represented by a board rule. */
@@ -26,13 +27,17 @@ public final class RuleSemanticSignature {
     }
 
     public static Signature from(RuleDto rule) {
+        return from(rule, null);
+    }
+
+    public static Signature from(RuleDto rule, ToIntFunction<String> modeCountForDevice) {
         if (rule == null) {
             return new Signature("", Set.of(), Set.of());
         }
         return new Signature(
                 commandKey(rule.getCommand()),
-                canonicalConditionKeys(rule.getConditions(), false),
-                canonicalConditionKeys(rule.getConditions(), true));
+                canonicalConditionKeys(rule.getConditions(), false, modeCountForDevice),
+                canonicalConditionKeys(rule.getConditions(), true, modeCountForDevice));
     }
 
     /**
@@ -48,17 +53,21 @@ public final class RuleSemanticSignature {
      * overlap between different rules, where collapsing duplicates is correct.
      */
     public static boolean exactlyMatches(RuleDto left, RuleDto right) {
+        return exactlyMatches(left, right, null);
+    }
+
+    public static boolean exactlyMatches(RuleDto left, RuleDto right, ToIntFunction<String> modeCountForDevice) {
         return commandKey(left == null ? null : left.getCommand())
                 .equals(commandKey(right == null ? null : right.getCommand()))
-                && conditionMultiset(left).equals(conditionMultiset(right));
+                && conditionMultiset(left, modeCountForDevice).equals(conditionMultiset(right, modeCountForDevice));
     }
 
     /** Canonical condition keys with their occurrence counts, so cardinality survives comparison. */
-    private static Map<String, Long> conditionMultiset(RuleDto rule) {
+    private static Map<String, Long> conditionMultiset(RuleDto rule, ToIntFunction<String> modeCountForDevice) {
         if (rule == null) {
             return Map.of();
         }
-        return canonicalConditionKeyList(rule.getConditions(), false).stream()
+        return canonicalConditionKeyList(rule.getConditions(), false, modeCountForDevice).stream()
                 .collect(Collectors.groupingBy(key -> key, Collectors.counting()));
     }
 
@@ -73,8 +82,9 @@ public final class RuleSemanticSignature {
                 normalize(command.getContent()));
     }
 
-    private static Set<String> canonicalConditionKeys(List<RuleDto.Condition> conditions, boolean shapeOnly) {
-        return new TreeSet<>(canonicalConditionKeyList(conditions, shapeOnly));
+    private static Set<String> canonicalConditionKeys(List<RuleDto.Condition> conditions, boolean shapeOnly,
+                                                       ToIntFunction<String> modeCountForDevice) {
+        return new TreeSet<>(canonicalConditionKeyList(conditions, shapeOnly, modeCountForDevice));
     }
 
     /**
@@ -83,7 +93,8 @@ public final class RuleSemanticSignature {
      * <p>The set and multiset views are both derived from this list so a normalization change cannot
      * apply to only one of them.
      */
-    private static List<String> canonicalConditionKeyList(List<RuleDto.Condition> conditions, boolean shapeOnly) {
+    private static List<String> canonicalConditionKeyList(List<RuleDto.Condition> conditions, boolean shapeOnly,
+                                                          ToIntFunction<String> modeCountForDevice) {
         List<String> result = new ArrayList<>();
         if (conditions == null) {
             return result;
@@ -94,11 +105,12 @@ public final class RuleSemanticSignature {
             }
             String targetType = normalize(condition.getTargetType()).toLowerCase(Locale.ROOT);
             String relation = "api".equals(targetType) ? "" : normalizeRelation(condition.getRelation());
+            String device = normalize(condition.getDeviceName());
             String value = shapeOnly || "api".equals(targetType)
                     ? ""
-                    : normalizeConditionValue(condition.getValue(), relation, targetType);
+                    : normalizeConditionValue(condition.getValue(), relation, targetType, device, modeCountForDevice);
             result.add(String.join("|",
-                    normalize(condition.getDeviceName()),
+                    device,
                     targetType,
                     normalize(condition.getAttribute()),
                     relation,
@@ -107,7 +119,13 @@ public final class RuleSemanticSignature {
         return result;
     }
 
-    private static String normalizeConditionValue(String value, String relation, String targetType) {
+    private static String normalizeConditionValue(String value, String relation, String targetType, String device,
+                                                  ToIntFunction<String> modeCountForDevice) {
+        if (modeCountForDevice != null) {
+            String membership = SmvRelationUtils.canonicalStateMembershipValue(
+                    value, relation, targetType, modeCountForDevice.applyAsInt(device));
+            if (membership != null) return membership;
+        }
         String normalized = normalize(value);
         if (!"in".equals(relation) && !"not in".equals(relation)) {
             return normalized;

@@ -9,14 +9,14 @@ import type {DeviceManifest, DeviceTemplate, DeviceTrigger, InternalVariable} fr
 import type {DeviceNode} from '../types/node'
 import type {Specification} from '../types/spec'
 import { buildSpecFormulaPreview } from '@/utils/spec'
-import { describeSpecification } from '@/utils/modelPresentation'
+import { describeSpecification, formatRelationWords } from '@/utils/modelPresentation'
 import { verdictVariableSourceKeys } from '@/views/board/verdictVariableSource'
-import { resolveImpactEnvironmentDefinition } from '@/utils/device'
+import { indexDeviceTemplates, resolveImpactEnvironmentDefinition } from '@/utils/device'
+import { normalizeTemplateLookupName } from '@/utils/templateUsage'
 import { formatBuiltInModelToken } from '@/utils/modelTokenDisplay'
 import { resolveEffectiveNodeState } from '@/utils/canvas/nodeState'
 import { confirmDestructive } from '@/utils/feedback'
 import { deviceIconFor } from '@/utils/deviceIcon'
-import { normalizeModelRelation } from '@/utils/modelRequest'
 import FailureDetails from '@/components/FailureDetails.vue'
 import type { ApiErrorDetails } from '@/utils/userMessage'
 import { useAuth } from '@/stores/auth'
@@ -900,25 +900,10 @@ const transitions = computed(() => {
 // Trigger is an object { Attribute, Relation, Value }; render it as readable text.
 const formatTrigger = (trigger?: DeviceTrigger | null): string => {
   if (!trigger) return t('app.notAvailable')
-  // Normalize first: the schema also admits `EQ`/`NEQ`/`GT`/`GTE`/`LT`/`LTE`/`==`, which
-  // `SmvRelationUtils` folds to symbols server-side. Without this the map missed them and a template
-  // written with `GTE` printed the raw token instead of "at least" — the same three-renderings-of-one-
-  // operator problem the note in `SystemInspector.getRelationLabel` records.
-  const relation = (normalizeModelRelation(trigger.Relation) ?? String(trigger.Relation || '=')).trim().toLowerCase()
-  const relationLabels: Record<string, string> = {
-    '=': t('app.relationEquals'),
-    '!=': t('app.relationNotEquals'),
-    '>': t('app.relationGreater'),
-    '<': t('app.relationLess'),
-    '>=': t('app.relationGreaterEqual'),
-    '<=': t('app.relationLessEqual'),
-    in: t('app.relationIn'),
-    'not in': t('app.relationNotIn'),
-    not_in: t('app.relationNotIn')
-  }
-  const rel = relationLabels[relation] || String(trigger.Relation || '=')
+  const relation = trigger.Relation || '='
+  const relationLabel = formatRelationWords(relation, t) || relation
   const value = trigger.Value !== undefined && trigger.Value !== ''
-    ? ` ${rel} ${formatDeviceModelToken(trigger.Value)}`
+    ? ` ${relationLabel} ${formatDeviceModelToken(trigger.Value)}`
     : ''
   return trigger.Attribute
     ? `${formatDeviceModelToken(trigger.Attribute)}${value}`
@@ -937,8 +922,9 @@ const deviceSpecs = computed(() => {
   }
 
   const currentDeviceId = props.nodeId // 使用正确的设备ID
+  const templatesByName = indexDeviceTemplates(props.deviceTemplates || [])
   const nodeContexts = new Map((props.nodes || []).map(node => [node.id, {
-    node, template: props.deviceTemplates?.find(template => template.name === node.templateName)
+    node, template: templatesByName.get(normalizeTemplateLookupName(node.templateName))
   }]))
   const presentationContext = {
     t,
@@ -967,7 +953,7 @@ const deviceSpecs = computed(() => {
       return false
     })
     .map(spec => {
-      const preview = buildSpecFormulaPreview(spec, { nodes: props.nodes || [] })
+      const preview = buildSpecFormulaPreview(spec, { nodes: props.nodes, modeCount: presentationContext.modeCount })
 
       return {
         id: spec.id,

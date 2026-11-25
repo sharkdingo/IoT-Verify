@@ -5,7 +5,7 @@ import { defineComponent, h, ref } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import FixResultDialog from '../FixResultDialog.vue'
 import HintTooltip from '../common/HintTooltip.vue'
-import type { FaultLocalizationResult, FixResult, FixStrategyAttemptStatus } from '@/types/fix'
+import type { FaultLocalizationResult, FixApplyResult, FixResult, FixStrategyAttemptStatus } from '@/types/fix'
 import { useAuth } from '@/stores/auth'
 import { FIX_RESPONSE_INCOMPLETE_CODE } from '@/utils/fixResponse'
 import { openModalDepth, registerModalSurface } from '@/composables/useBodyScrollLock'
@@ -62,6 +62,7 @@ const provenanceI18n = createI18n({
     zh: {
       app: {
         fixParameterTargetLabel: '规则 {rule} · {device}：{attribute} {relation} {original}',
+        fixParameterAdjustmentTargetLabel: '规则 {rule} · {device}：{attribute} {relation}',
         relationEquals: '等于',
         relationNotEquals: '不等于',
         relationGreater: '大于',
@@ -286,7 +287,7 @@ const duplicateNameRemoveResult = (): FixResult => {
   }
 }
 
-const boundaryParameterResult = (relation: '>' | '>='): FixResult => {
+const boundaryParameterResult = (relation: '>' | '>=', upperBound = 100): FixResult => {
   const result = parameterResult()
   const adjustment = result.suggestions[0]!.parameterAdjustments[0]!
   return {
@@ -296,8 +297,8 @@ const boundaryParameterResult = (relation: '>' | '>='): FixResult => {
       parameterAdjustments: [{
         ...adjustment,
         relation,
-        newValue: '100',
-        upperBound: 100
+        newValue: String(upperBound),
+        upperBound
       }]
     }]
   }
@@ -346,10 +347,11 @@ const incompleteSourceModelResult = (): FixResult => ({
 })
 
 const mountedDialogs: VueWrapper[] = []
+const applyImmediately = (write: () => Promise<FixApplyResult | null>) => write()
 
 const mountDialog = (i18nPlugin: any = i18n) => {
   const wrapper = mount(FixResultDialog, {
-    props: { visible: true, traceId: 7, violatedSpecId: 'spec-1' },
+    props: { visible: true, traceId: 7, violatedSpecId: 'spec-1', applyOnBoard: applyImmediately },
     global: { plugins: [i18nPlugin] }
   })
   mountedDialogs.push(wrapper)
@@ -362,7 +364,8 @@ const mountPersistentDialogHost = () => {
     setup: () => ({
       dialogRef: ref<InstanceType<typeof FixResultDialog> | null>(null),
       traceId: ref(7),
-      visible: ref(true)
+      visible: ref(true),
+      applyImmediately
     }),
     template: `
       <FixResultDialog
@@ -370,6 +373,7 @@ const mountPersistentDialogHost = () => {
         :visible="visible"
         :trace-id="traceId"
         violated-spec-id="spec-1"
+        :apply-on-board="applyImmediately"
         @update:visible="visible = $event"
       />
     `
@@ -460,7 +464,7 @@ describe('FixResultDialog strategy workflow', () => {
     document.body.append(opener)
     opener.focus()
     const wrapper = mount(FixResultDialog, { attachTo: document.body,
-      props: { visible: true, traceId: 7 }, global: { plugins: [i18n] } })
+      props: { visible: true, traceId: 7, applyOnBoard: applyImmediately }, global: { plugins: [i18n] } })
     mountedDialogs.push(wrapper)
     try {
       await flush()
@@ -486,7 +490,7 @@ describe('FixResultDialog strategy workflow', () => {
     const opener = result.querySelector('button')!
     opener.focus()
     const wrapper = mount(FixResultDialog, { attachTo: document.body,
-      props: { visible: true, traceId: 7 }, global: { plugins: [i18n] } })
+      props: { visible: true, traceId: 7, applyOnBoard: applyImmediately }, global: { plugins: [i18n] } })
     mountedDialogs.push(wrapper)
     try {
       await flush()
@@ -652,7 +656,7 @@ describe('FixResultDialog strategy workflow', () => {
       .toEqual(['关闭', 'off', 'workingState'])
   })
 
-  it('localizes condition relations without translating custom model tokens', async () => {
+  it('localizes aliased condition relations without translating custom model tokens', async () => {
     const result = conditionResult()
     const base = result.suggestions[0]!.conditionAdjustments[0]!
     result.suggestions[0]!.conditionAdjustments = [
@@ -667,8 +671,17 @@ describe('FixResultDialog strategy workflow', () => {
         ...base,
         deviceLabel: 'Custom device',
         attribute: 'workingState',
-        relation: 'not in',
+        relation: 'EQ',
         value: 'off',
+        modelTokenSource: 'CUSTOM'
+      },
+      {
+        ...base,
+        deviceLabel: 'Custom device',
+        attribute: 'state',
+        targetType: 'state',
+        relation: 'IN',
+        value: 'Case;_ | ;_Case',
         modelTokenSource: 'CUSTOM'
       }
     ]
@@ -681,7 +694,8 @@ describe('FixResultDialog strategy workflow', () => {
     await wrapper.vm.$nextTick()
 
     expect(wrapper.text()).toContain('工作状态 不属于 关闭')
-    expect(wrapper.text()).toContain('workingState 不属于 off')
+    expect(wrapper.text()).toContain('workingState 等于 off')
+    expect(wrapper.text()).toContain('state 属于 Case;_ | ;_Case')
   })
 
   it('runs only the selected strategy and keeps apply hidden until a verified response arrives', async () => {
@@ -1449,14 +1463,20 @@ describe('FixResultDialog strategy workflow', () => {
     expect(alternativesChecked(wrapper)).toEqual([false, true])
   })
 
-  it('keeps the applied option selected while apply is running', async () => {
+  it('keeps the selected option stable while waiting for the Board to start and finish applying it', async () => {
     const result = parameterAlternativesResult()
+    const boardMutationSlot = deferred<void>()
     const pending = deferred<ReturnType<typeof parameterApplied>>()
     boardApi.applyFix.mockReturnValueOnce(pending.promise)
     const wrapper = await tryParameter(result)
+    await wrapper.setProps({ applyOnBoard: async (write: () => Promise<FixApplyResult | null>) => {
+      await boardMutationSlot.promise
+      return write()
+    } })
 
     await wrapper.get('[data-testid="fix-apply-current"]').trigger('click')
     await wrapper.vm.$nextTick()
+    expect(boardApi.applyFix).not.toHaveBeenCalled()
     const radios = wrapper.findAll('[data-testid="fix-alternative"] input[type="radio"]')
     expect(radios.every(radio => radio.attributes('disabled') !== undefined)).toBe(true)
     expect(wrapper.findAll('[data-testid^="fix-strategy-"]').filter(item => item.element.tagName === 'BUTTON')
@@ -1469,9 +1489,13 @@ describe('FixResultDialog strategy workflow', () => {
     await wrapper.findAll('[data-testid="fix-alternative"]')[1]!.trigger('click')
     expect(alternativesChecked(wrapper)).toEqual([true, false])
 
+    boardMutationSlot.resolve()
+    await flush()
+    expect(wrapper.emitted('applied')).toBeUndefined()
+    expect(boardApi.applyFix).toHaveBeenCalledWith(7, result.suggestions[0], undefined)
     pending.resolve(parameterApplied(result.suggestions[0]!))
     await flush()
-    expect(boardApi.applyFix).toHaveBeenCalledWith(7, result.suggestions[0], undefined)
+    expect(wrapper.emitted('applied')).toEqual([[7]])
   })
 
   it('starts a retried search from its smallest option again', async () => {
@@ -1512,6 +1536,27 @@ describe('FixResultDialog strategy workflow', () => {
     expect(wrapper.find('[data-testid="fix-alternatives-incomplete"]').exists()).toBe(expectedNote)
   })
 
+  it('shows the threshold change once and describes incomplete search without promising the option can be applied', async () => {
+    const translations = createI18n({ legacy: false, locale: 'en', messages: {
+      en: actualI18n.global.getLocaleMessage('en')
+    } })
+    const result = parameterResult()
+    result.strategyAttempts[0]!.alternativesComplete = false
+    result.templateSnapshotComparison = 'CHANGED'
+    boardApi.fixTrace.mockResolvedValueOnce(result)
+    const wrapper = mountDialog(translations)
+    await flush()
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+    const proposal = wrapper.get('[data-testid="fix-verified-proposals"]')
+
+    expect(wrapper.get('[data-testid="fix-apply-current"]').attributes('disabled')).toBeDefined()
+    expect.soft(proposal.get('[data-testid="fix-alternatives-incomplete"]').text())
+      .toContain('Some possible options have not been checked.')
+    expect.soft(proposal.text().match(/70/g) ?? []).toHaveLength(1)
+    expect(proposal.text()).not.toContain('Range: [71, 100]')
+  })
+
   it('lets each option state the specifications it leaves violated', async () => {
     // Forward verification computes this per candidate, so two options may differ.
     const result = parameterAlternativesResult()
@@ -1542,6 +1587,22 @@ describe('FixResultDialog strategy workflow', () => {
 
     expect(wrapper.find('[data-testid="fix-parameter-unreachable-warning"]').exists())
       .toBe(expectedWarning)
+  })
+
+  it('keeps a rule reachable at the boundary of a preferred range within the device range', async () => {
+    const wrapper = await tryParameter(parameterResult())
+    const upper = wrapper.get('[data-testid="fix-parameter-range-row"]').findAll('input[type="number"]')[1]!
+    await upper.setValue('90')
+    const result = boundaryParameterResult('>', 90)
+    result.suggestions[0]!.parameterAdjustments[0]!.lowerBound = 0
+    boardApi.fixTrace.mockResolvedValueOnce(result)
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+
+    expect(boardApi.fixTrace.mock.calls[1]![1].preferredRangeSelections)
+      .toEqual([{ targetId: result.parameterTargets[0]!.targetId, lower: 0, upper: 90 }])
+    expect(wrapper.get('[data-testid="fix-verified-proposals"]').text()).toContain('90')
+    expect(wrapper.find('[data-testid="fix-parameter-unreachable-warning"]').exists()).toBe(false)
   })
 
   it('keeps a verified parameter suggestion current until a search range is actually narrowed', async () => {
@@ -1931,10 +1992,7 @@ describe('FixResultDialog strategy workflow', () => {
       undefined
     )
     expect(elementPlus.success).not.toHaveBeenCalled()
-    expect(wrapper.emitted('applied')?.[0]?.[0]).toMatchObject({
-      strategy: 'condition',
-      currentRuleCount: 1
-    })
+    expect(wrapper.emitted('applied')).toHaveLength(1)
   })
 
   it('applies the exact verified parameter adjustment and authoritative rule snapshot', async () => {
@@ -1970,10 +2028,7 @@ describe('FixResultDialog strategy workflow', () => {
       undefined
     )
     expect(elementPlus.success).not.toHaveBeenCalled()
-    expect(wrapper.emitted('applied')?.[0]?.[0]).toMatchObject({
-      strategy: 'parameter',
-      currentRuleCount: 1
-    })
+    expect(wrapper.emitted('applied')).toHaveLength(1)
   })
 
   it.each([0, 1])('leaves apply feedback to its parent after closing with %i underlying modals', async (underlyingModals) => {
@@ -1996,7 +2051,7 @@ describe('FixResultDialog strategy workflow', () => {
       expect(elementPlus.success).not.toHaveBeenCalled()
       expect(openModalDepth.value).toBe(underlyingModals)
       expect(wrapper.find('[data-testid="fix-result-dialog"]').exists()).toBe(false)
-      expect(dialog.emitted('applied')?.[0]?.[0]).toEqual(applied)
+      expect(dialog.emitted('applied')).toHaveLength(1)
       expect(dialog.emitted('update:visible')).toEqual([[false]])
     } finally {
       releaseUnderlyingModal()
@@ -2081,12 +2136,7 @@ describe('FixResultDialog strategy workflow', () => {
     )
     expect(elementPlus.success).not.toHaveBeenCalled()
     expect(elementPlus.success).not.toHaveBeenCalledWith('Removed one rule.')
-    expect(wrapper.emitted('applied')?.[0]?.[0]).toMatchObject({
-      applied: true,
-      strategy: 'remove',
-      currentRuleCount: 0,
-      rules: []
-    })
+    expect(wrapper.emitted('applied')).toHaveLength(1)
   })
 
   it('keeps an internal device reference in technical details when fix apply is rejected', async () => {
@@ -2147,6 +2197,39 @@ describe('FixResultDialog strategy workflow', () => {
     expect(wrapper.emitted('update:visible')).toBeUndefined()
   })
 
+  it.each(['localization', 'search', 'apply'] as const)('retires the repair workflow if %s rejects the historical modeling version', async stage => {
+    const rejected = { response: { status: 409, data: {
+      message: 'Verify the current board again.', data: { reasonCode: 'MODEL_SEMANTICS_CHANGED' }
+    } } }
+    if (stage === 'localization') boardApi.getFaultRules.mockRejectedValueOnce(rejected)
+    else if (stage === 'search') boardApi.fixTrace.mockRejectedValueOnce(rejected)
+    else {
+      boardApi.fixTrace.mockResolvedValueOnce(parameterResult())
+      boardApi.applyFix.mockRejectedValueOnce(rejected)
+    }
+    const wrapper = mountDialog()
+    await flush()
+    if (stage !== 'localization') {
+      await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+      await flush()
+    }
+    if (stage === 'apply') {
+      await wrapper.get('[data-testid="fix-apply-current"]').trigger('click')
+      await flush()
+    }
+    expect(wrapper.find('[data-testid="fix-apply-current"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="fix-try-current"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="fix-search-needs-verification"]').text()).toContain('runBoardSemanticsChanged')
+    if (stage === 'localization') {
+      expect(wrapper.find('[data-testid="fix-fault-count"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="fix-fault-summary"]').exists()).toBe(false)
+    }
+    expect(wrapper.emitted('model-semantics-changed')).toEqual([[7]])
+    expect(wrapper.emitted('outcome-uncertain')).toBeUndefined()
+    await wrapper.get('[data-testid="fix-reverify-current-board"]').trigger('click')
+    expect(wrapper.emitted('reverify')).toHaveLength(1)
+  })
+
   it('keeps the proposal retryable when another formal operation temporarily blocks apply', async () => {
     boardApi.fixTrace.mockResolvedValueOnce(parameterResult())
     boardApi.applyFix.mockRejectedValueOnce({ response: { status: 429, data: {
@@ -2165,6 +2248,71 @@ describe('FixResultDialog strategy workflow', () => {
     expect(wrapper.emitted('applied')).toBeUndefined()
     expect(wrapper.emitted('outcome-uncertain')).toBeUndefined()
     expect(wrapper.get('[data-testid="fix-apply-current"]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('replaces a rejected strategy’s stale proposals using the same preferred ranges', async () => {
+    const stale = parameterAlternativesResult()
+    const refreshed = parameterAlternativesResult()
+    for (const [index, suggestion] of refreshed.suggestions.entries()) {
+      suggestion.suggestionToken = `signed-refreshed-option-${index + 1}`
+    }
+    boardApi.fixTrace.mockResolvedValueOnce(parameterResult()).mockResolvedValueOnce(stale)
+      .mockResolvedValueOnce(conditionResult()).mockResolvedValueOnce(refreshed)
+    boardApi.applyFix.mockRejectedValueOnce({ response: { status: 400, data: {
+      message: 'Run the fix again before applying it.', data: { reasonCode: 'FIX_SUGGESTION_STALE' }
+    } } }).mockResolvedValueOnce(parameterApplied(refreshed.suggestions[0]!))
+    const wrapper = mount(FixResultDialog, { attachTo: document.body,
+      props: { visible: true, traceId: 7, violatedSpecId: 'spec-1', applyOnBoard: applyImmediately }, global: { plugins: [i18n] } })
+    mountedDialogs.push(wrapper)
+    const search = () => wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    const select = (strategy: string) => wrapper.get(`[data-testid="fix-strategy-${strategy}"]`).trigger('click')
+
+    await flush()
+    await search()
+    await flush()
+    await wrapper.findAll('[data-testid="fix-parameter-range-row"] input[type="number"]')[0]!.setValue('60')
+    await search()
+    await flush()
+    await select('condition')
+    await search()
+    await flush()
+    await select('parameter')
+    await wrapper.findAll('[data-testid="fix-alternative"]')[1]!.trigger('click')
+    const expiredApply = wrapper.get('[data-testid="fix-apply-current"]')
+    ;(expiredApply.element as HTMLButtonElement).focus()
+    await expiredApply.trigger('click')
+    await flush()
+
+    const preferences = [{ targetId: 'param_abcdefghijklmnopqrstuvwx', lower: 60, upper: 100 }]
+    expect(boardApi.applyFix).toHaveBeenCalledExactlyOnceWith(7, stale.suggestions[1], preferences)
+    expect(boardApi.fixTrace).toHaveBeenCalledTimes(3)
+    expect(wrapper.find('[data-testid="fix-apply-current"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="fix-verified-proposals"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="fix-search-failure-summary"]').text()).toBe('fixSuggestionStale')
+    expect(wrapper.get('[data-testid="fix-search-failure"]').text()).toContain('fixSuggestionStaleNextStep')
+    expect(document.activeElement).toBe(wrapper.get('[data-testid="fix-try-current"]').element)
+    expect(elementPlus.failure).not.toHaveBeenCalled()
+    expect(wrapper.emitted('applied')).toBeUndefined()
+    expect(wrapper.emitted('outcome-uncertain')).toBeUndefined()
+    expect(wrapper.emitted('update:visible')).toBeUndefined()
+
+    await select('condition')
+    expect(wrapper.get('[data-testid="fix-apply-current"]').attributes('disabled')).toBeUndefined()
+    await select('parameter')
+    expect(wrapper.get('[data-testid="fix-try-current"]').attributes('aria-label')).toBe('retryFixStrategy')
+    await search()
+    await flush()
+    expect(boardApi.fixTrace).toHaveBeenNthCalledWith(4, 7, {
+      strategies: ['parameter'], preferredRangeSelections: preferences
+    }, expect.anything())
+    expect(boardApi.applyFix).toHaveBeenCalledTimes(1)
+    expect(alternativesChecked(wrapper)).toEqual([true, false])
+    expect(wrapper.find('[data-testid="fix-search-failure"]').exists()).toBe(false)
+
+    await wrapper.get('[data-testid="fix-apply-current"]').trigger('click')
+    await flush()
+    expect(boardApi.applyFix).toHaveBeenNthCalledWith(2, 7, refreshed.suggestions[0], preferences)
+    expect(wrapper.emitted('applied')).toHaveLength(1)
   })
 
   it('retries the same signed proposal after a preflight-only rejection', async () => {
@@ -2203,7 +2351,7 @@ describe('FixResultDialog strategy workflow', () => {
     await flush()
     expect(boardApi.fixTrace).toHaveBeenCalledOnce()
     expect(boardApi.applyFix.mock.calls[1]).toEqual(boardApi.applyFix.mock.calls[0])
-    expect(wrapper.emitted('applied')?.[0]?.[0]).toMatchObject({ applied: true, canUndo: true, canRedo: false })
+    expect(wrapper.emitted('applied')).toHaveLength(1)
     expect(elementPlus.success).not.toHaveBeenCalled()
   })
 
@@ -2255,13 +2403,14 @@ describe('FixResultDialog strategy workflow', () => {
     expect(elementPlus.error).not.toHaveBeenCalled()
   })
 
-  it('does not report a rule count while fault localization is loading', async () => {
+  it('reports one loading message and no rule count until fault localization finishes', async () => {
     const localization = deferred<FaultLocalizationResult>()
     boardApi.getFaultRules.mockReturnValueOnce(localization.promise)
     const wrapper = mountDialog()
     await flush()
 
     expect(wrapper.get('[data-testid="fix-fault-summary"]').text()).toContain('loadingFaultLocalization')
+    expect(wrapper.get('[data-testid="fix-fault-details"]').text().match(/loadingFaultLocalization/g)).toHaveLength(1)
     expect(wrapper.find('[data-testid="fix-fault-count"]').exists()).toBe(false)
 
     localization.resolve({ traceId: 7, violatedSpecId: 'spec-1', sourceModelComplete: true,
@@ -2287,7 +2436,7 @@ describe('FixResultDialog strategy workflow', () => {
     } } })
     const wrapper = mountDialog(chinese)
     await flush()
-    expect(wrapper.get('[data-testid="fix-fault-summary"]').text()).toBe('故障定位')
+    expect(wrapper.find('[data-testid="fix-fault-summary"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="fix-fault-count"]').exists()).toBe(false)
     const card = wrapper.get('[data-testid="fix-fault-failure"]')
     expect(card.attributes('role')).toBe('alert')
@@ -2318,7 +2467,7 @@ describe('FixResultDialog strategy workflow', () => {
     expect(wrapper.find('[data-testid="fix-fault-failure"]').exists()).toBe(false)
     expect(wrapper.get('[data-testid="fix-fault-summary"]').text()).toContain('faultRulesIdentified')
     expect(wrapper.find('[data-testid="fix-fault-count"]').exists()).toBe(true)
-    expect(wrapper.text()).toContain(empty ? 'noFaultRulesFound' : 'Recovered unsafe automation')
+    expect(wrapper.text()).toContain(empty ? 'faultLocalizationNoRuleCaveat' : 'Recovered unsafe automation')
     expect(wrapper.find('[data-testid="fix-apply-current"]').exists()).toBe(true)
     expect(elementPlus.error).not.toHaveBeenCalled()
   })
@@ -2479,6 +2628,31 @@ describe('FixResultDialog strategy workflow', () => {
     expect(wrapper.get(`#${describedBy}`).text()).toContain('fixTemplateSnapshotChangedLimitation')
   })
 
+  it('retries the same strategy after template comparison is temporarily unavailable', async () => {
+    const result = conditionResult()
+    boardApi.fixTrace.mockResolvedValueOnce({ ...result, templateSnapshotComparison: 'UNAVAILABLE' })
+      .mockResolvedValueOnce(result)
+    const wrapper = mountDialog()
+    await flush()
+    await wrapper.get('[data-testid="fix-strategy-condition"]').trigger('click')
+    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    await flush()
+
+    expect(wrapper.find('[data-testid="fix-verified-proposals"]').exists()).toBe(true)
+    const retry = wrapper.get('[data-testid="fix-try-current"]')
+    expect(retry.attributes('aria-label')).toBe('retryFixStrategy')
+    expect(retry.attributes('aria-describedby')).toBe('fix-apply-readiness')
+    expect(wrapper.get('#fix-apply-readiness').text()).toBe('fixTemplateSnapshotUnavailableLimitation')
+    expect(wrapper.find('[data-testid="fix-apply-current"]').exists()).toBe(false)
+    await retry.trigger('click')
+    await flush()
+
+    expect(boardApi.fixTrace.mock.calls.map(([, request]) => request.strategies)).toEqual([['condition'], ['condition']])
+    expect(wrapper.get('[data-testid="fix-apply-current"]').attributes('disabled')).toBeUndefined()
+    expect(wrapper.find('[data-testid="fix-apply-readiness"]').exists()).toBe(false)
+    expect(boardApi.applyFix).not.toHaveBeenCalled()
+  })
+
   it('does not attach a blocked explanation while apply is available', async () => {
     boardApi.fixTrace.mockResolvedValueOnce(parameterResult())
     const wrapper = mountDialog()
@@ -2622,7 +2796,7 @@ describe('FixResultDialog strategy workflow', () => {
     const pending = deferred<FixResult>()
     boardApi.fixTrace.mockReturnValueOnce(pending.promise)
     const wrapper = mount(FixResultDialog, {
-      props: { visible: true, traceId: 7, violatedSpecId: 'spec-1' },
+      props: { visible: true, traceId: 7, violatedSpecId: 'spec-1', applyOnBoard: applyImmediately },
       global: { plugins: [i18n] },
       attachTo: document.body
     })

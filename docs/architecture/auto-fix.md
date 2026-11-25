@@ -12,7 +12,7 @@ repaired rules back to the board (see [Applying a suggestion](#applying-a-sugges
 API contract (`fault-rules`, `fix`, `fix/apply`) → [../api/verification.md](../api/verification.md).
 Spec formulas → [spec-templates.md](spec-templates.md).
 
-Verified against code on 2026-10-22. Source: `component/nusmv/fixer/` — `RuleFixer`,
+Verified against code on 2026-11-25. Source: `component/nusmv/fixer/` — `RuleFixer`,
 `localize/{FaultLocalizer, RuleInfluenceScope}`, `strategy/{ParameterAdjustStrategy, ConditionAdjustStrategy,
 RemoveRulesFixStrategy, FixAlternatives, CommandEffects, FixStrategyUtils, FixStrategyApplier}`, `BoardSemanticFingerprint`,
 `parameterize/{ParameterExtractor, CounterexampleInitialStateConstraints}`;
@@ -40,7 +40,8 @@ RemoveRulesFixStrategy, FixAlternatives, CommandEffects, FixStrategyUtils, FixSt
    A plain shared-pool value condition seeds only its named environment domain; another reading
    on the same sensor is not a dependency. Template `7` additionally seeds the selected device,
    because it also observes that device's propagated trust label. A device brings every environment
-   domain it declares, and a domain brings every device that declares an impact on it; a rule
+   domain it can read, and a domain brings every device that declares an impact or an
+   [autonomous assignment to that shared value](shared-value-semantics.md#6-device-effects). A rule
    whose command targets a relevant device is relevant, and everything it reads (condition
    devices, content device) becomes relevant; repeat to a fixpoint. The cone deliberately
    over-approximates, because missing a relevant rule would make a strategy report "no repair"
@@ -249,12 +250,13 @@ any model that disables a rule or skips a specification.
   nothing to apply or retry, the footer offers the next strategy that has not been tried yet.
 - Bounded by the [shared search policy](#listing-alternatives-fixalternatives) (`¬ρ` solves in phases 1–2), `FIX_MAX_REFINE_ATTEMPTS`
   (refinement iterations per listed repair), and the overall `FIX_TIMEOUT_MS` deadline. Distance and
-  refinement-window arithmetic uses `long` intermediates so the full signed 32-bit manifest
-  domain cannot overflow.
+  refinement-window arithmetic uses `long` intermediates to cover the full admitted manifest
+  domain without overflow.
 - Emits structured parameter edits following the [fix response contract](../api/verification.md#5-auto-fix).
   Internal rule/condition indices remain application locators; the public snapshot order is display metadata.
   A strict `> upperBound` or `< lowerBound` result makes its rule unreachable and is labeled
-  explicitly in the Board. Non-strict `>= upperBound` and `<= lowerBound` results still match
+  explicitly in the Board. These are the target's declared device bounds, independent of any
+  preferred search range. Non-strict `>= upperBound` and `<= lowerBound` results still match
   one domain value and are not described as disabled.
 - A candidate must also satisfy the Board's exact-duplicate rule invariant before it can be
   certified. Forward verification uses the same `RuleSemanticSignature` as persistence and
@@ -276,22 +278,34 @@ ruleDescription, deviceLabel, relation, value }`. Internal rule/condition positi
 the model device reference needed for an add operation are retained inside the signed
 suggestion token and restored only after the server verifies that token during apply.
 
+The search constrains the final condition count of edited rules to the Board's authoring limits
+and checks the resulting rules before forward verification. An addition paired with a removal
+can still be offered at the limit when the resulting rule is valid.
+
 The lambda scope is the [repair scope](#pipeline-rulefixer). Candidate additions may be state,
 mode, variable, or positive API-event conditions taken from the specification. For mode
 and variable candidates with a declared enum or integer range, the policy supplies the
 clause shape while an additional `FROZENVAR` supplies Salus §5.2's free value `Y`; the
 selected concrete value is included in the signed suggestion and used by forward
-verification and apply. State-tuple and positive API-event candidates retain the concrete
-policy value because their persisted rule semantics are not a single scalar domain. Trust
-and privacy conditions remain specification-only because the persisted rule language has
-no corresponding trigger type.
+verification and apply. State-tuple candidates keep the policy's concrete value. An API
+comparison supplies an event guard only when it is true exactly while the signal is active.
+For example, `= TRUE`, `IN true`, and `NOT_IN false` all produce the same rule event guard
+with no comparison fields. Trust and privacy conditions remain specification-only because
+the persisted rule language has no corresponding trigger type.
 
 Candidate pruning distinguishes possible propagation from an unambiguous command outcome.
-The command-effect closure follows every potentially triggered link, but a guard is excluded as
-an outcome only when all recorded effects on its device establish it. If a feedback chain can
-both turn a device on and turn it off, either state may be a necessary precondition; neither
-is discarded merely because the chain can produce it later. Complete forward verification
-still decides whether the proposed conditions repair the target and preserve passing requirements.
+The command-effect closure considers state predicates that can hold after disjoint commands
+or autonomous transitions write different modes in the same step. Pruning requires a path
+supported by guaranteed outcomes and agreement from all recorded effects on the guard's
+device. A merely possible conflicting outcome keeps the guard available for forward verification.
+An affected trigger clause can start possible propagation. A downstream rule supplies
+pruning evidence only when a single preceding effect guarantees all its trigger clauses.
+This preserves useful preconditions when feedback can both turn a device on and turn it off.
+The edited rule's direct effect is evaluated when its command is selected. A downstream
+rule with a possible [earlier overlapping raw match](nusmv-model.md#rule-semantics)
+only supplies possible outcomes, including competing writes. A blocked command cannot
+update even its other modes. Selected commands take priority over autonomous transitions
+for every mode they write, leaving unwritten modes available to autonomous writers.
 
 Before the unrestricted lambda search, the strategy tries bounded deterministic
 configurations. Individual probes add one policy-derived guard to a localized rule while
@@ -343,10 +357,9 @@ Free-value candidates are deduplicated by clause shape (resolved device/domain, 
 type, attribute, and relation), not by the policy's placeholder literal. Search exclusions
 are semantic: when a candidate lambda is `FALSE`, its unused `Y` value is omitted from the
 excluded assignment, preventing the attempt budget from being spent on equivalent disabled
-candidates. Command `EndState` and incompatible concrete `StartState` values are removed
-from a free candidate's domain; one unsafe policy literal therefore does not discard other
-valid values for the same clause shape. Values that a rule the command triggers establishes are
-removed the same way.
+candidates. The command outcome and pre-state checks also filter the free candidate's
+domain. This keeps other usable values for the same clause shape when the policy value
+itself is unsuitable.
 
 A candidate that forward verification rejects excludes more than itself (`CounterexampleLemma`).
 Its forward-verification model carries [guard probes](nusmv-model.md#rule-semantics) reporting,
@@ -363,18 +376,23 @@ missing, non-boolean, contradict the reported guard, or report an operand that i
 literal. Only the exact assignment is excluded then. Learning changes how many candidates are
 checked, never which repairs are listed.
 
-The candidate filter rejects a condition that the rule itself brings about. That is a positive
-state or mode condition satisfied by the declared API `EndState`, or an API condition asserting
-the event, of the rule's own command, or of any rule that such an effect triggers, transitively.
-That would be a consequence masquerading as a trigger (directly, `camera.state = taking_photo ->
-camera.take_photo`; through a chain, `camera.state = taking_photo` on a rule that turns on the
-lamp whose `on` event makes the camera take a photo) and can make the useful automation
-unreachable while still making a safety property pass. The chain over-approximates: a rule counts
-as triggered when one of its conditions is established, whatever its other conditions and
-priority. Negative conditions and internal variables are never established. A
-candidate on the command target is also rejected when it is provably false under every concrete
-state allowed by the API `StartState`; wildcard start-state segments remain eligible instead of
-being treated as contradictions. A rule with no meaningful condition adjustment is reported as
+The candidate filter checks positive state and mode conditions and observable API events
+against the rule's own command and the rules it triggers transitively. A guard on the edited
+command's target remains a candidate when it permits a state change from an allowed start
+state, even if it matches every command outcome. This can happen when a membership set
+includes a start state as well as all outcomes of a partial command. A guard that only
+matches established outcomes can make useful automation unreachable, as in
+`camera.state = taking_photo -> camera.take_photo`. For a partial API result, a start-state
+component helps prove a new outcome only when no modeled command or autonomous transition
+can update that component. Priority excludes a blocker proven incompatible by API start states
+or fixed authored state guards. Guards eligible for repair edits cannot prove that a blocker
+is absent. A state or mode
+exclusion can carry possible feedback when the action could make it true. A candidate on
+the command target is also rejected when it is provably false under every concrete
+state allowed by the API `StartState`. Both checks consider the union of the authored set's
+members over the declared mode domains. A wildcard stays unconstrained, and a coverage proof
+that exceeds its search bound leaves the candidate for normal forward verification.
+A rule with no meaningful condition adjustment is reported as
 having no condition fix; the user should revise the property, adjust a genuine precondition, or
 choose rule removal.
 
@@ -524,9 +542,11 @@ model snapshot before persisting.
 HMAC token bound to the authenticated user, trace, strategy, complete user-visible proposal,
 preferred ranges, expiry, and all hidden operation locators (parameter and condition positions,
 the internal device reference for condition additions, and remove-rule positions). Apply submits that displayed proposal
-and token. Any edit, replay in another context, or expired token rejects with `400`; otherwise the
-same proposal is applied. This removes the second expensive strategy search and prevents apply
-from silently choosing a different valid suggestion than the one the user reviewed.
+and token. An unusable signature follows the [stale-suggestion apply contract](../api/verification.md#post-apiverifytracesidfixapply--apply-a-fix-suggestion).
+A current signature allows the exact reviewed proposal to proceed through the model drift checks
+without a second strategy search. The drift check uses the authored specification's canonical
+condition values, so an equivalent API Boolean comparison remains valid after editing the
+specification's display name or comparison formatting.
 
 The assistant's `apply_fix` tool uses the same boundary, resolving the selected signed proposal
 from its server-side conversation record rather than asking the model to reproduce it.
@@ -568,14 +588,19 @@ still describes the model being changed:
 - **Board-rule drift** — the server's internal rule/condition positions are relative to
   the snapshot; apply aligns snapshot and current rules by index + an **order-preserving**
   fingerprint and rejects if rules were added/removed/edited/reordered, so a stale index
-  never edits the wrong rule.
+  never edits the wrong rule. The fingerprint uses each condition's declared type. It retains
+  semicolons within whole-state tuples, treats state and mode membership as unordered sets,
+  and preserves the sign of numeric operands. Exact automation-link attack selections also
+  require the captured rule IDs at the original positions and a valid selection after the fix.
 - **Spec/device/environment drift** — a spec-, device-, or environment-pool-only edit
   touches neither rules nor templates. Apply compares a canonical
   **semantic fingerprint** (`BoardSemanticFingerprint`) of the trace snapshot against the
   current board — not raw-JSON equality: both sides run through the same normalization
-  (device names canonicalized via `DeviceNameNormalizer`, effective variable/trust/privacy
-  values derived from the same manifests NuSMV uses, values de-quoted) so an untouched board
-  matches its model-boundary normalized snapshot instead of misfiring. Environment
+  (device names canonicalized via `DeviceNameNormalizer`, effective variable values and
+  per-mode initial trust/privacy labels resolved as in NuSMV). Authored state and mode
+  names are kept intact, and numeric variable operands use numeric normalization. This
+  lets an untouched board match its model-boundary snapshot. Competing autonomous assignments
+  follow [canonical device priority](shared-value-semantics.md#6-device-effects). Environment
   variables, including variables that are only affected by devices, are compared as the
   board-level pool; missing required pool values use the same default merge as
   verification. Omitted internal enum/numeric variables use the
@@ -607,15 +632,10 @@ during the search, since an empty-condition rule is fail-closed in NuSMV (never 
 so could otherwise verify yet be un-appliable (`RuleDto.conditions` is `@NotEmpty`).
 Parameter and condition searches generate NuSMV-only FROZENVARs such as `param_r0_c0`
 and `lambda_r0_c0`, and condition adjustment's forward verification defines guard probes
-(`iot_verify_guard_probe_<n>`). These prefixes are
-[reserved device-id prefixes](data-authority-model.md#environment-pool): a device id may not start with one. Refused at board admission
-(`validateGeneratedMainNamespace`) and again per request
-(`NusmvRequestValidator.rejectFixGeneratedPrefix`), so the clash surfaces when the board is
-saved rather than when a fix is later requested. During
-parameterized model generation, `SmvMainModuleBuilder` checks them against the active
-`MODULE main` namespace (device instances, generated `a_<environmentName>` variables,
-the internal compromised-point counter, automation-link choices, and rule probes) and fails generation rather
-than emitting a colliding model.
+(`iot_verify_guard_probe_<n>`). Repair chooses temporary symbols that avoid the active
+device instance names and exact solver enum values. It uses those same symbols when
+reading the solver witness and excluding prior candidates. Main-module generation
+checks the resulting declarations in the [active namespace](data-authority-model.md#environment-pool).
 
 When applying a condition fix, model-boundary NuSMV `varName` references are translated back to
 the raw `DeviceNode.id` from the current board snapshot before persistence. If a reference cannot

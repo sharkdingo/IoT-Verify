@@ -11,6 +11,10 @@ import { errorDetails } from '@/utils/userMessage'
 import { validateDeviceRuntimeConfig } from '@/utils/deviceRuntime'
 import { materializeRuleRecommendation, materializeSpecificationRecommendationConditions, RecommendationCandidateError } from '@/utils/recommendationMaterialization'
 import { REQUEST_LIMITS } from '@/constants/requestLimits'
+import { normalizeModelRelation } from '@/utils/modelRequest'
+import { canonicalStateModeMembership } from '@/utils/stateConditionDomain'
+import type { RuleRecommendation } from '@/types/recommendation'
+import type { RuleForm } from '@/types/rule'
 
 const source = readFileSync(join(__dirname, '../Board.vue'), 'utf8')
 const extract = (start: string, end: string) => {
@@ -27,18 +31,25 @@ const handlers = extract('const createDeviceInstanceAt =', 'const openTemplateIn
   + extract('const keepAppliedRecommendationAdjustments =', 'const invalidateRecommendationsForSceneChange =')
   + resetSource + extract('const isDefinitiveMutationRejection =', 'type AsyncTaskStatus =')
   + extract('type RecommendationBatchState =', 'const keepAppliedRecommendationAdjustments =')
+const ruleDuplicateCheck = new Function('rules', 'normalizeModelRelation', 'deviceModeCount', 'canonicalStateModeMembership', transpileModule(
+  extract('const ruleRecommendationTargetTypes =', 'const formatRecommendedRuleDevice =')
+  + extract('const normalizeRuleDuplicateText =', 'const confirmRecommendedRuleSimilarity =')
+  + '\nreturn ruleExists',
+  { compilerOptions: { target: ScriptTarget.ES2022 } }).outputText)
 const rejection = { response: { status: 422, data: { message: 'Value outside domain', data: {
   errors: { 'conditions[0].value': 'Allowed integer range 0..100' }
 } } } }
-const rule = { name: 'Proposed rule', reason: 'Draft', conditions: [{ deviceId: 'lamp', attribute: 'on', targetType: 'api' }],
-  command: { deviceId: 'lamp', action: 'off' } }
+const rule: RuleRecommendation = { name: 'Proposed rule', reason: 'Draft',
+  conditions: [{ deviceId: 'lamp', deviceName: 'Lamp', attribute: 'on', targetType: 'api' }],
+  command: { deviceId: 'lamp', deviceName: 'Lamp', action: 'off' } }
 const spec = { name: 'Safety requirement', rationale: 'Draft', templateId: '1', aConditions: [{ deviceId: 'lamp', targetType: 'state', key: 'state', relation: '=', value: 'off' }],
   ifConditions: [], thenConditions: [] }
 const device = { templateName: 'Light', suggestedLabel: 'Proposed light', reason: 'Draft', intendedUse: 'Lighting' }
 type Kind = 'rule' | 'spec' | 'device'
-const setup = (error?: unknown, recovered = false) => {
+const setup = (error?: unknown, recovered = false, storedRules?: RuleForm[]) => {
   const owner = { token: 'session-A', active: true, persisted: false }
   const nodes = Vue.ref<any[]>([{ id: 'lamp', templateName: 'Light', label: 'Lamp' }])
+  const rules = Vue.ref(storedRules ?? [])
   const template = { name: 'Light', manifest: { Name: 'Light', Modes: [], APIs: [], InternalVariables: [] } }
   const mutation = { currentItems: [], currentNodes: nodes.value, affectedItem: { id: 'created-rule' },
     affectedDevices: [{ id: 'created-1', label: device.suggestedLabel }], environmentVariables: [], currentSpecifications: [], environmentChanges: [] }
@@ -53,13 +64,17 @@ const setup = (error?: unknown, recovered = false) => {
     ensureBoardItemCapacity: () => true, ensureNestedItemCapacity: () => true, assertRulesHaveTriggers: () => true,
     boardApi: { addRule: vi.fn(write), addSpec: vi.fn(write), addNodes: vi.fn(write) },
     enqueueBoardMutation: queue, commitSemanticScene: vi.fn(),
-    focusRuleOnCanvas: vi.fn(), focusCreatedDeviceNode: vi.fn(), nodes, rules: Vue.ref([]), specifications: Vue.ref<any[]>([]),
+    focusRuleOnCanvas: vi.fn(), focusCreatedDeviceNode: vi.fn(), nodes, rules, specifications: Vue.ref<any[]>([]),
     isBoardDataReady: Vue.ref(true), isSceneReplacementInProgress: Vue.ref(false),
     isAnyRecommendationRunning: () => false,
     appliedRuleRecommendations: Vue.ref(new Set()), appliedSpecRecommendations: Vue.ref(new Set()), appliedDeviceRecommendations: Vue.ref(new Set()),
     applyingRuleRecommendations: Vue.ref(new Set()), applyingSpecRecommendations: Vue.ref(new Set()), applyingDeviceRecommendations: Vue.ref(new Set()),
     confirmRecommendedRuleSimilarity: vi.fn().mockResolvedValue(true), confirmChoice: vi.fn().mockResolvedValue(true),
-    ruleExists: () => owner.persisted, specificationExists: () => false, isSameSpecification: () => owner.persisted,
+    ruleExists: storedRules
+      ? ruleDuplicateCheck(rules, normalizeModelRelation, () => 2, canonicalStateModeMembership)
+      : () => owner.persisted,
+    specificationExists: () => false, isSameSpecification: () => owner.persisted,
+    deviceModeCount: () => undefined,
     refreshRules: vi.fn(async () => { owner.persisted = recovered; return recovered }),
     refreshSpecifications: vi.fn(async () => { owner.persisted = recovered; dependencies.specifications.value = recovered ? [{}] : []; return recovered }),
     refreshDevices: vi.fn(async () => { if (recovered) nodes.value.push({ id: 'created-1', label: device.suggestedLabel }); return recovered }),
@@ -323,6 +338,26 @@ describe('one-click recommendation application', () => {
 })
 
 describe('candidate apply failure ownership in production Board paths', () => {
+  it('blocks an equivalent multi-mode rule recommendation before requesting similarity or writing', async () => {
+    const candidate = (value: string): RuleRecommendation => ({
+      ...rule,
+      conditions: [...rule.conditions, { deviceId: 'lamp', deviceName: 'Lamp',
+        attribute: 'state', targetType: 'state', relation: 'in', value }]
+    })
+    const state = setup(undefined, false, [materializeRuleRecommendation(candidate('idle;_, _;warm'), 'saved')])
+
+    await state.applyRecommendation(candidate(';warm | idle;'), 0)
+
+    expect(state.notifyBlocked).toHaveBeenCalledExactlyOnceWith('app.duplicateRuleExists')
+    expect(state.confirmRecommendedRuleSimilarity).not.toHaveBeenCalled()
+    expect(state.boardApi.addRule).not.toHaveBeenCalled()
+
+    await state.applyRecommendation(candidate(';warm | Idle;'), 0)
+
+    expect(state.boardApi.addRule).toHaveBeenCalledOnce()
+    expect(state.boardApi.addRule.mock.calls[0][0].sources[1].value).toBe(';warm | Idle;')
+  })
+
   for (const kind of ['rule', 'spec', 'device'] as const) {
     it(`${kind}: retains a rejected field beside only its candidate, without a second toast`, async () => {
       const state = setup(rejection)

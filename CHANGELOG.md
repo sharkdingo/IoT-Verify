@@ -15,6 +15,134 @@ history into a technical spec. The spec content itself now lives under
 
 ## [Unreleased]
 
+### 2026-11-25
+
+#### Fixed
+
+- Equivalent API event comparisons supply the same guard to automatic condition repair.
+- Fault localization and repair require the verified run's saved Environment Pool and reject
+  missing or incomplete evidence. Model generation and repair use the pool as the single source
+  of shared values and labels.
+- Modeling revision 7 gives state-derived local initial values the same meaning in
+  NuSMV, bounded exploration, and repair comparison. Default-template reset updates
+  the affected device values, shows their previous and proposed values before confirmation,
+  and returns the current devices with its receipt.
+- Modeling revision 6 uses the same authored state names for single-mode domains,
+  initial values, automation endpoints, and traces.
+- Default-template reset previews report conflicting Environment Pool domains and
+  reject resets that would exceed the Board's 200-variable limit.
+- Condition repair keeps candidates when only part of a downstream rule's trigger
+  follows from an earlier command or its clauses hold on different steps.
+- Board saves detect duplicate rules and specifications when equivalent single-mode
+  membership sets use different delimiters or operand order.
+- Scene replacement requires an explicit template snapshot list for every caller,
+  including an empty list when clearing the scene. Batch text fields require JSON strings.
+- Scene export identifies device states that would prevent re-import. The affected devices
+  can be corrected one at a time. At narrow widths, import keeps the undo consequences
+  visible beside the confirmation actions.
+- When moving from an exploration finding to verification, the panel updates the target's
+  availability and model comparison as the Board changes.
+- Undo and redo refuse to restore specifications that lack a valid variable source.
+- Applying a repair reconciles its receipt before a refresh from another tab can load
+  subsequent rule changes.
+- Late cancellation responses leave cancellation of a newer verification or
+  simulation task intact.
+- Modeling revision 5 resolves initial variable values from authored mode tuples and
+  validates API endpoints, autonomous endpoints, and mode triggers by their declared modes.
+- Signed repairs check effective per-mode labels, preserve authored state operands, and
+  validate exact automation-link rule identities before reusing verification evidence.
+- Equivalent state and mode membership edits preserve model fingerprints using the
+  referenced device's mode count.
+- Equivalent multi-mode membership tuples share duplicate checks and model identity
+  when they differ only in wildcard spelling or segment whitespace.
+- Exploration continues to deliver the task result when completion and cancellation overlap.
+- Condition repair retains feasible guards when an earlier matching rule can block a
+  downstream command on any shared mode. A selected command still wins its written modes
+  over autonomous transitions.
+- Condition repair keeps feasible feedback guards when a disjoint rule or an
+  autonomous transition can write the modes that a partial command leaves open.
+- Saving the same wildcard membership operands in a different order preserves
+  the captured Board identity and keeps the existing signed repair applicable.
+- Rule and specification editors keep valid saved wildcard values available
+  while editing membership conditions. Specification previews distinguish single-mode
+  lists from multi-mode tuples across the Board, portable scenes, and saved results.
+- Condition repair evaluates wildcard membership as a set across modes when checking
+  command preconditions and effects. It keeps guards that still allow the command to change
+  state, even when every outcome satisfies the guard. Reordering equivalent operands does not
+  stale a repair.
+- State conditions choose modes by authored spelling before solver escaping. Rule and
+  specification editors preserve valid composed tuples, and condition repair returns
+  authored state names. These changes use modeling revision 4.
+- Cross-device name validation allows separate devices to reuse mode names and checks privacy
+  and attack symbols only when generated. Shared-pool and rule playback names are checked
+  against the scene's enum values before they reach NuSMV.
+- New runs retain authored working-state names in playback and use their solver identifiers
+  when replaying initial states for repair.
+- Imported device IDs can use repair-variable prefixes. Parameter and condition repair
+  allocate solver symbols around those devices and authored enum values while retaining
+  the public repair target IDs.
+- New formal traces display the captured template's mode names, including labels on state trust
+  and privacy. Current repair reconstructs solver constraints using the corresponding identifiers.
+- Template and scene validation reject NuSMV symbol collisions and mode or variable identifiers
+  that the solver would hide from traces.
+- A repair rejected because its source used different modeling semantics stays retired in the
+  open result and Run History. The repair dialog shows a rule count only when it has
+  localization evidence.
+- Repair drift checks distinguish mode membership from whole-state tuples and retain the sign
+  of numeric rule conditions.
+- Verification, simulation, and exploration identify historical executions that used different
+  modeling semantics, even when the Board input still matches. Earlier counterexamples remain
+  replayable and require a fresh verification before automatic repair.
+- NuSMV resolves authored mode names consistently in rules, specifications, and autonomous
+  transitions. Exploration accepts specifications over device-local reported variables.
+- NuSMV evaluates and limits numeric updates without signed-integer overflow, including when
+  large shared effects cancel each other.
+- Competing autonomous writes use canonical device priority across verification, exploration,
+  and portable scene round trips. Saved runs remain available with their original results. Earlier
+  signed repair suggestions must be regenerated.
+- Template and Board admission reject transition integers, range bounds, and numeric conditions
+  that NuSMV cannot parse.
+- Condition repair respects the Board's final condition-count limit during candidate search;
+  applying a signed repair also accepts equivalent spellings of specification comparisons.
+- Assistant template guidance uses valid symbolic enum values for two-valued data.
+- Verification, simulation, and exploration prevent duplicate submissions while saving Board edits.
+  Closing a watched task leaves the result in Run History. Exploration notifications stay with
+  the account that owns the run.
+- Specification previews and assistant condition checks preserve the declared case of device enums.
+- A verified repair whose template comparison is temporarily unavailable offers a retry of the
+  selected strategy. Trace tools distinguish ordinary model evolution from observed changes.
+- Counterexample exploration respects declared shared-value read capability for specifications,
+  rules, and autonomous triggers while preserving modeled shared assignments.
+- Formal verification includes every declared shared value in the environment pool, including
+  values with an autonomous writer and no reader.
+- Repair proposals that expire or fail signature matching can be refreshed in the same dialog
+  using the selected strategy. A fresh proposal requires a separate apply action.
+
+### 2026-11-24
+
+#### Fixed
+
+- Formal verification and counterexample exploration keep autonomous assignments to device-local
+  variables out of same-named shared pool values. Declared shared assignments, such as the Clock
+  rollover, still apply and now count toward automatic repair's rule influence analysis.
+- Paper-compatible exploration accepts the same working-state names in its preview, sampled initial
+  state, and device events when a template's state names have leading or trailing whitespace.
+- Formal verification and exploration emit a one-step action event only for the selected command
+  that actually changes state. Exploration recognizes the same partial state wildcards and mode
+  literals as formal verification.
+- Verification accepts mixed-case Boolean values in API event conditions. Formal model writes and
+  exploration preserve the case of declared enum values such as `True` and `true`.
+- Automatic repair distinguishes device bounds from preferred search ranges when warning about
+  unreachable thresholds and rejects proposals whose competing shared writers have changed order.
+- Device transition details and repair suggestions use the same localized comparison words.
+- Environment evolution explains when autonomous assignments take priority over ordinary updates.
+
+#### Changed
+
+- Playback shows recorded environment changes in Changes and selected values in State details.
+- Repair results show each threshold adjustment once and report the remaining search scope and
+  rule-localization status without implying an option can already be applied.
+
 ### 2026-10-31 (remaining test redundancy)
 
 #### Removed

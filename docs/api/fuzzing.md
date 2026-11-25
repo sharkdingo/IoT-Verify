@@ -35,22 +35,10 @@ confirmed redistribution license.
 
 ## Submit and task lifecycle
 
-### `GET /api/fuzz/model-fingerprint`
-
-This read-only endpoint returns the current authenticated user's canonical bounded-search
-model fingerprint as a 64-character lowercase SHA-256 string in `Result<String>.data`.
-Its identity equals the verification/exploration value in the shared
-[current model fingerprint contract](board.md#current-model-fingerprints). That contract owns
-the included semantic inputs and excluded presentation fields.
-
-Completed runs store this fingerprint in `modelSnapshot.modelFingerprint`. The frontend
-uses exact fingerprint equality to decide whether a historical run still matches the
-current Board, including edits that leave all public item counts unchanged. The field is
-required on every stored task and run; missing or malformed fingerprints make the row
-unavailable instead of weakening the comparison to item counts. When full run detail is
-read, the backend decodes the strict versioned frozen-input envelope, recomputes this same
-canonical fingerprint, and requires exact equality with the stored public snapshot; a
-same-count content change is persisted-data corruption, not a compatible history shape.
+Use the [current Board comparison](board.md#current-model-fingerprints) for exploration tasks and
+runs. The input fingerprint is required on stored exploration records. Full run detail recomputes
+it from the frozen input to check integrity. This integrity check also applies to archived runs
+whose execution version differs from the current one.
 
 ### `POST /api/fuzz/workload/preview`
 
@@ -123,7 +111,7 @@ the paper seed instead of silently randomizing the rest of the candidate.
 A client must present this response as a legal-domain preview, then use persisted
 finding input events to explain the concrete choices after a candidate is found.
 
-The paper-domain identity adds the requested `pathLength` to the shared
+The paper-domain identity adds the requested `pathLength` and current execution version to the shared
 [canonical model input](board.md#current-model-fingerprints). It is distinct from the stored
 run's Board identity, which does not include search configuration.
 The submit endpoint recomputes this value from a fresh server snapshot before writing a
@@ -477,9 +465,9 @@ contract is owned by [SpecificationDto](verification.md#specificationdto).
 `TRUST_PRIVACY_UNSUPPORTED`, `REPORTED_READING_UNSUPPORTED`,
 `CONTENT_COMMAND_UNSUPPORTED`, `MODEL_INVALID`, or `INVALID_SPECIFICATION` —
 the exact set `FuzzEngine` emits (`MODEL_INVALID` plus the six eligibility reasons).
-`REPORTED_READING_UNSUPPORTED` covers a `variable` condition reading a *reported* value: the
-explorer keeps one value per shared reading and models no compromised device, so it cannot separate
-"what this device said" from "what the home held".
+`REPORTED_READING_UNSUPPORTED` covers a `variable` condition reading the device's reported
+value of a **shared** variable. The explorer tracks the environment value for shared variables.
+It tracks device-local variables directly and supports their `reported` conditions.
 `reason` is an English technical diagnostic and is not ordinary localized UI copy.
 The ordinary result dialog does not render this raw diagnostic; it uses the stable
 `reasonCode` for localized guidance. The raw `reason` remains available to authenticated

@@ -27,6 +27,9 @@ public class ModelRunSnapshotDto {
     /** Canonical SHA-256 of the captured board model; null means comparison evidence was not recorded. */
     private String modelFingerprint;
 
+    /** Revision of the engine semantics used for this run; zero denotes unversioned historical evidence. */
+    private int modelSemanticsVersion;
+
     /** True when model generation reused the captured manifests instead of reading mutable templates again. */
     private boolean templatesFrozen;
 
@@ -49,6 +52,7 @@ public class ModelRunSnapshotDto {
                 .specificationCount(Math.max(0, specificationCount))
                 .environmentVariableCount(Math.max(0, environmentVariableCount))
                 .deviceTemplateCount(Math.max(0, deviceTemplateCount))
+                .modelSemanticsVersion(ModelSemanticsVersion.CURRENT)
                 .templatesFrozen(true)
                 .build();
     }

@@ -5276,6 +5276,35 @@
     display: none;
 }
 
+/* The import details scroll independently so the irreversible consequence stays above the actions. */
+.scene-replacement-confirm:has(.scene-import-preview) :is(
+    .el-message-box__content, .el-message-box__container, .el-message-box__message
+),
+.scene-import-preview {
+    display: flex;
+    min-height: 0;
+    flex-direction: column;
+}
+
+.scene-replacement-confirm:has(.scene-import-preview) .el-message-box__content {
+    overflow: hidden;
+}
+
+.scene-replacement-confirm:has(.scene-import-preview) .el-message-box__container {
+    flex: 1;
+    align-items: stretch;
+}
+
+.scene-import-preview,
+.scene-import-preview__details {
+    min-height: 0;
+    flex: 1 1 auto;
+}
+
+.scene-import-preview > .iot-dialog__consequence {
+    flex: none;
+}
+
 .scene-replacement-confirm .el-message-box__status {
     width: 24px;
     height: 24px;

@@ -184,8 +184,11 @@ class FaultLocalizerTest {
         RuleDto cool = rule(1L, "Start cooling", "ac_1", "cool");
         RuleDto stop = rule(2L, "Stop the AC", "ac_1", "stop");
         DeviceSmvData ac = multiModeDevice("ac_1", "Living-room AC", List.of(
-                api("cool", "Cool", "on;idle"),
-                api("stop", "Stop", "off;idle")));
+                api("cool", "Cool", "Case;night standby"),
+                api("stop", "Stop", "ready;night standby")));
+        ac.setAuthoredStatesByMode(Map.of(
+                "Mode", Map.of("_Case", "Case", "ready", "ready"),
+                "Fan", Map.of("nightstandby", "night standby")));
 
         List<FaultRuleDto> faults = localizer.localize(
                 List.of(state(1), state(2,
@@ -196,16 +199,9 @@ class FaultLocalizerTest {
 
         assertEquals(2, faults.size());
         assertTrue(faults.get(0).isConflicting());
-        // A reader must never see the raw manifest tuple (`on;idle`, unspaced and uncleaned). The
-        // per-mode states are joined with "; " instead: for a bundled template the frontend's
-        // formatBuiltInModelToken splits on [;,|] and localizes each token, so the delimiter has to
-        // stay in that set — joining with " / " renders the whole string raw in a non-English UI.
-        for (FaultRuleDto fault : faults) {
-            assertFalse(fault.getTargetEndState().contains(";idle"), fault.getTargetEndState());
-            assertFalse(fault.getConflictingEndState().contains(";idle"), fault.getConflictingEndState());
-        }
-        assertEquals("on; idle", faults.get(0).getTargetEndState());
-        assertEquals("off; idle", faults.get(0).getConflictingEndState());
+        assertEquals("Case; night standby", faults.get(0).getTargetEndState());
+        assertEquals("ready; night standby", faults.get(0).getConflictingEndState());
+        assertTrue(faults.get(0).getReason().contains("Case; night standby"));
     }
 
     @Test

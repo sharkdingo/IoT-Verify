@@ -5,6 +5,7 @@ import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.exception.BadRequestException;
 import cn.edu.nju.Iot_Verify.exception.InternalServerException;
 import cn.edu.nju.Iot_Verify.util.NaturalChangeRateParser;
+import cn.edu.nju.Iot_Verify.util.SmvIntegerLiteral;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -243,8 +244,15 @@ public class DeviceTemplateSchemaValidator {
             String name = declaration.path("Name").asText("<unnamed>");
             JsonNode lower = declaration.get("LowerBound");
             JsonNode upper = declaration.get("UpperBound");
-            if (lower != null && upper != null && lower.isIntegralNumber() && upper.isIntegralNumber()
-                    && lower.asInt() > upper.asInt()) {
+            boolean numeric = lower != null && upper != null && lower.isIntegralNumber() && upper.isIntegralNumber();
+            if (numeric && (!lower.canConvertToInt() || !upper.canConvertToInt()
+                    || lower.asInt() < SmvIntegerLiteral.MIN_RANGE_BOUND
+                    || upper.asInt() < SmvIntegerLiteral.MIN_RANGE_BOUND)) {
+                throw new BadRequestException("Template '" + templateName + "': " + kind + " '"
+                        + name + "' must use integers from " + SmvIntegerLiteral.MIN_RANGE_BOUND + " to "
+                        + Integer.MAX_VALUE + " for LowerBound and UpperBound.");
+            }
+            if (numeric && lower.asInt() > upper.asInt()) {
                 throw new BadRequestException("Template '" + templateName + "': " + kind + " '"
                         + name + "' has LowerBound " + lower.asInt() + " greater than UpperBound "
                         + upper.asInt() + ".");
@@ -267,8 +275,6 @@ public class DeviceTemplateSchemaValidator {
                 }
             }
             String naturalRate = declaration.path("NaturalChangeRate").asText(null);
-            boolean numeric = lower != null && upper != null
-                    && lower.isIntegralNumber() && upper.isIntegralNumber();
             boolean sharedEnvironment = "EnvironmentDomain".equals(kind)
                     || ("InternalVariable".equals(kind)
                     && declaration.has("IsInside")
@@ -565,11 +571,11 @@ public class DeviceTemplateSchemaValidator {
         if (domain.numeric()) {
             final int value;
             try {
-                value = Integer.parseInt(rawValue.trim());
+                value = SmvIntegerLiteral.parse(rawValue);
             } catch (NumberFormatException exception) {
                 throw new BadRequestException("Template '" + templateName + "': Transition '"
                         + transitionName + "' compares numeric trigger '" + attribute
-                        + "' with non-integer value '" + rawValue + "'.");
+                        + "' with non-integer value '" + rawValue + "'. Use digits 0-9 with an optional sign.");
             }
             if (value < domain.lowerBound() || value > domain.upperBound()) {
                 throw new BadRequestException("Template '" + templateName + "': Transition '"
@@ -676,11 +682,11 @@ public class DeviceTemplateSchemaValidator {
         if (lower != null && upper != null && lower.isIntegralNumber() && upper.isIntegralNumber()) {
             final int numericValue;
             try {
-                numericValue = Integer.parseInt(value.trim());
+                numericValue = SmvIntegerLiteral.parse(value);
             } catch (NumberFormatException e) {
                 throw new BadRequestException("Template '" + templateName + "': Transition '"
                         + transitionName + "' assigns non-integer value '" + value
-                        + "' to numeric variable '" + attribute + "'.");
+                        + "' to numeric variable '" + attribute + "'. Use digits 0-9 with an optional sign.");
             }
             if (numericValue < lower.asInt() || numericValue > upper.asInt()) {
                 throw new BadRequestException("Template '" + templateName + "': Transition '"

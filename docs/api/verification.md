@@ -525,24 +525,26 @@ tasks, task summaries, and persisted trace detail/summary DTOs.
 | `deviceTemplateCount` | `int` | Distinct referenced template manifests captured for the run |
 | `templatesFrozen` | `boolean` | Always `true`; generation reused the captured manifests and did not reload mutable definitions |
 | `modelFingerprint` | `String` | Canonical lowercase SHA-256 of the captured Board input, stored from task acceptance onward and retained in synchronous results and history. Verification includes specifications; simulation excludes them. A missing/null value explicitly means the record has no comparison evidence; a present malformed value is rejected as corrupt persisted data. See [current model fingerprints](board.md#current-model-fingerprints) |
-| `environmentProvenance` | `EnvironmentValueProvenanceDto[]` | Per-shared-value evolution rules frozen for this run, so a stored trace stays explainable after the Board changes. Empty when the run had no shared values. See [`EnvironmentValueProvenanceDto`](#environmentvalueprovenancedto) |
+| `modelSemanticsVersion` | `int` | Execution semantics recorded when the run was accepted. `0` identifies archival runs from before the semantics version was recorded. New runs use the current positive revision |
+| `environmentProvenance` | `EnvironmentValueProvenanceDto[]` | Ordinary per-shared-value evolution rules frozen for this run. Empty when the run had no shared values. See [`EnvironmentValueProvenanceDto`](#environmentvalueprovenancedto) |
 
 `modelSnapshot` describes the accepted run, not the mutable current Board. Both validation
 and generation use the same captured template manifests; task creation stores its fingerprint
 before dispatching a worker. Later edits do not change that input or cancel the task.
-The frontend compares the frozen identity with the authoritative current Board identity,
-including for reopened history and after reload. It distinguishes `UNCHANGED`, `CHANGED`,
-`UNAVAILABLE` (current comparison could not be read), and `NOT_COMPARED` (the record has no
-fingerprint). Older records without recorded evidence remain usable as historical results,
-but the frontend cannot assert that their contents still match the current Board. Item counts
+The frontend compares the execution version before the frozen input fingerprint. An earlier or
+otherwise different version is `SEMANTICS_CHANGED` even when the input fingerprints are identical.
+With equal versions, it distinguishes `UNCHANGED`, `CHANGED`, `UNAVAILABLE` (the current comparison
+could not be read), and `NOT_COMPARED` (the record has no fingerprint). Earlier runs retain their
+recorded results and replay. Rerun verification under the current version for a current conclusion.
+Item counts
 are scope information only. A specification-only edit changes verification identity without
 making a simulation stale; undoing a semantic edit can restore a known match.
 
 ### `EnvironmentValueProvenanceDto`
 
-One entry per shared value in the run, recording which rule permitted that value to move.
-Without it, explaining a stored counterexample would require re-reading the current Board —
-which may have changed since the run, so the explanation could contradict the trace.
+One entry per shared value in the run, recording its ordinary evolution when no autonomous
+assignment applies. This is frozen model metadata. It does not record the cause of a particular
+change in the trace.
 
 | Field | Type | Meaning |
 | :--- | :--- | :--- |
@@ -551,24 +553,22 @@ which may have changed since the run, so the explanation could contradict the tr
 | `lowerBound` / `upperBound` | `Integer` | Declared numeric domain; both `null` for a discrete value |
 | `naturalChangeRate` | `String` | Declared per-step interval for a numeric value; `null` for a discrete value, which has no ordering to move along |
 | `values` | `String[]` | Declared discrete domain; `null` for a numeric value |
-| `authorship` | `EXOGENOUS` \| `DEVICE_CONTROLLED` \| `COMPOSED` | Who may change it: nobody in the scene, exactly one device, or several |
+| `authorship` | `EXOGENOUS` \| `DEVICE_CONTROLLED` \| `COMPOSED` | How many devices in `writers` contribute to ordinary evolution: zero, one, or several |
 | `writers` | `DeviceWriter[]` | Submitted devices declaring this name in `ImpactedVariables`, each with `deviceVarName`, `templateName`, and `templateSource` |
 | `readers` | `DeviceReader[]` | Submitted devices declaring `Reads: true` for it, each with `deviceVarName` |
 | `semantics` | `EXACT` \| `ABSTRACTION` | Whether the evolution rule means exactly what the user declared, or deliberately over-approximates it |
-| `evolutionSummary` | `String` | Prose statement of the same rule, for direct display next to a changed value |
+| `evolutionSummary` | `String` | Plain-text summary of the ordinary evolution rule |
 
 `authorship` is derived from `writers`, so the two cannot disagree: an empty list is
 `EXOGENOUS`, one writer is `DEVICE_CONTROLLED`, and more than one is `COMPOSED`.
 
-`semantics` is `ABSTRACTION` for exactly one case — an `EXOGENOUS` discrete value, which the
-model lets take any declared value each step because no device in the scene controls it and a
-discrete domain has no natural-evolution rule to fall back on. Every other combination is
-`EXACT`. The rules behind both tags live in
+`semantics` is `ABSTRACTION` when ordinary evolution lets an `EXOGENOUS` discrete value
+take any declared value. Every other combination is `EXACT`. The rules behind both tags live in
 [shared-value-semantics.md](../architecture/shared-value-semantics.md) §7, which this DTO
 reports rather than defines.
 
-Conflicting discrete writers never reach this DTO: board assembly rejects that scene before
-generation, so a `COMPOSED` discrete value is one whose writers agree.
+Board assembly rejects conflicting discrete `Dynamics` writers before generation, so the
+`writers` of a `COMPOSED` discrete value agree.
 
 ### Other verification endpoints
 
@@ -657,11 +657,10 @@ Before verification, simulation, or fix generation, the backend collects environ
 variables required by the submitted devices' templates, merges missing values from
 defaults (`Values[0]` for enums, `LowerBound` for bounded numeric variables), validates
 the pool, and passes that shared pool to NuSMV generation as the authoritative source for
-`init(a_<name>)`, where `<name>` is the literal template variable name. Devices whose templates declare an environment `InternalVariable`
-receive a read mirror such as
-`sensor_1.temperature := a_temperature`; devices that only list the name in
-`ImpactedVariables` can change `a_temperature` but cannot be used as the rule/spec
-source for that variable. Rules/specs still use a device prefix such as
+`init(a_<name>)`, where `<name>` is the literal template variable name. A shared declaration with
+`Reads: true` gets a mirror such as `sensor_1.temperature := a_temperature`. Write-only declarations
+can affect the pool through [device effects](../architecture/shared-value-semantics.md#6-device-effects).
+Rules and specifications still use a device prefix such as
 `sensor_1.temperature`; the prefix checks that the referenced device declares that shared value
 as readable model state and anchors the model identity. It is not account, Board, or API
 authorization; the actual value comes from this pool.
@@ -898,6 +897,9 @@ state.
 variables: TraceVariableDto[], trustPrivacy[], privacies[] }`. `deviceId` is the
 model-boundary identity; user-facing trace and simulation UIs should display
 `deviceLabel` when it is present and keep `deviceId` in technical/debug details.
+For current-version evidence, `mode` uses the name declared in the captured template. A complete
+multi-mode state lists the names in template order, separated by `;`. Historical runs retain the
+labels that were saved with them.
 `compromised` is the user-facing boolean translated from NuSMV's internal attack flag;
 the internal `is_attack` variable is not mixed into `variables[]`.
 `TraceVariableDto`: `{ name, value, trust, observed, modelTokenSource }`.
@@ -919,8 +921,8 @@ variable, environment variable, and global variable entry; a missing or null sou
 the persisted trace invalid rather than implicitly selecting `UNKNOWN`.
 `TraceTrustPrivacyDto`: `{ name, propertyScope ('state'|'variable'|'content'),
 mode?, trust? (Boolean), privacy? ('private'|'public') }`. For a state property, `name`
-is the literal state and `mode` is its literal mode. Generated `Mode_state`, `trust_*`,
-and `privacy_*` identifiers are parser-only details and are never serialized.
+is the state value and `mode` follows the same captured-template naming as the device's `mode`.
+Generated `Mode_state`, `trust_*`, and `privacy_*` identifiers remain in the solver model.
 Verification, simulation, and fuzz replay clients validate these nested objects before
 rendering them, including string/Boolean shapes, legal trust/privacy values, and the frozen
 token-source enum. Device identity and provenance must remain stable across states; every
@@ -1183,6 +1185,15 @@ Truncation lands on a character boundary, so the downloaded file always decodes.
 
 Fast, no NuSMV invocation. **Response**: `FaultLocalizationResultDto`
 
+Fault localization, repair search, and repair application require a trace whose source used the
+current [execution semantics](#modelrunsnapshotdto). A different version returns HTTP `409`
+with `data.reasonCode = MODEL_SEMANTICS_CHANGED`. The user can replay the historical trace and
+run verification again on the current Board to obtain repair evidence.
+
+Repair uses the complete Environment Pool saved with the verification, including its values, trust
+and privacy labels. Missing or invalid pool evidence blocks repair. Playback still uses the recorded
+trace.
+
 | Field | Type | Notes |
 | :--- | :--- | :--- |
 | `traceId` | `Long` | Trace being analyzed |
@@ -1434,9 +1445,9 @@ Its confirmation storage and security boundary are described in
 - **Exact-suggestion signature.** The client submits the displayed proposal, but cannot alter it:
   the HMAC-protected token binds the user, trace, strategy, complete visible suggestion,
   preferred ranges, expiry, and all hidden operation locators (parameter/condition positions,
-  the internal device reference for condition additions, and remove-rule positions). Tampering, expiry, or mixing a token
-  with another trace/range rejects with `400`. Apply therefore cannot silently substitute a
-  different newly searched proposal.
+  the internal device reference for condition additions, and remove-rule positions). Expired and
+  mismatched signed proposals use the same [stale-suggestion rejection](overview.md#error-and-status-codes).
+  Search the selected strategy again to obtain a fresh proposal, then review it before applying.
 - **Complete-source-model guard.** A trace produced while any rule/specification was
   omitted cannot be used for automatic fix generation or apply. Suggestion generation
   returns explicit skipped strategy attempts; apply rejects with `400` and requires the

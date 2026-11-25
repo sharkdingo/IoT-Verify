@@ -14,8 +14,11 @@ import cn.edu.nju.Iot_Verify.component.fuzz.paper.PaperPredecessorResolver;
 import cn.edu.nju.Iot_Verify.component.fuzz.paper.PaperSeed;
 import cn.edu.nju.Iot_Verify.component.fuzz.paper.PaperStructuredMonitorFactory;
 import cn.edu.nju.Iot_Verify.component.fuzz.paper.PaperTruthValue;
+import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvRelationUtils;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvDataFactory;
+import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvNamespace;
 import cn.edu.nju.Iot_Verify.component.template.DeviceManifestModes;
+import cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics;
 import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
@@ -34,6 +37,7 @@ import cn.edu.nju.Iot_Verify.util.mapper.BoardDataConverter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -44,6 +48,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.SplittableRandom;
 import java.util.function.BooleanSupplier;
+import java.util.function.Function;
 
 /** Parsed, executable subset of the current NuSMV model semantics. */
 final class FuzzModel {
@@ -95,10 +100,15 @@ final class FuzzModel {
 
         List<DeviceModel> deviceModels = new ArrayList<>();
         Map<String, DeviceModel> devicesById = new LinkedHashMap<>();
+        Map<String, DeviceManifest> activeManifests = new LinkedHashMap<>();
         Map<String, ValueDomain> environmentDomains = new LinkedHashMap<>();
         Map<String, ModelTokenSource> environmentTokenSources = new LinkedHashMap<>();
-        // NuSMV CASE branches use the captured Board order for first-match writes.
-        for (DeviceVerificationDto device : snapshot.devices()) {
+        // Canonical IDs determine shared assignment precedence and fix the order of seeded choices.
+        List<DeviceVerificationDto> devicesByModelId = snapshot.devices().stream()
+                .sorted(Comparator.comparing(device -> device.getVarName() == null
+                        ? "" : device.getVarName().trim()))
+                .toList();
+        for (DeviceVerificationDto device : devicesByModelId) {
             if (device == null || !hasText(device.getVarName())) {
                 throw error("Every model device must have a canonical ID.");
             }
@@ -113,8 +123,11 @@ final class FuzzModel {
             DeviceModel parsed = DeviceModel.from(device, manifest, environmentDomains);
             deviceModels.add(parsed);
             devicesById.put(id, parsed);
+            activeManifests.put(id, manifest);
             mergeEnvironmentTokenSources(environmentTokenSources, parsed);
         }
+        DeviceSmvNamespace.validateScene(activeManifests, snapshot.rules() == null ? 0 : snapshot.rules().size(),
+                (device, reason) -> error(device == null ? reason : "Device '" + device + "': " + reason));
 
         LinkedHashMap<String, String> initialEnvironment = new LinkedHashMap<>();
         Map<String, BoardEnvironmentVariableDto> submittedEnvironment = new LinkedHashMap<>();
@@ -163,6 +176,11 @@ final class FuzzModel {
 
     int geneCount(int pathLength) {
         return Math.max(1, Math.max(0, pathLength - 1) * choicesPerTransition);
+    }
+
+    boolean isSharedReading(SpecConditionDto condition) {
+        DeviceModel device = devicesById.get(condition.getDeviceId());
+        return device != null && device.readableEnvironment.contains(conditionKey(condition));
     }
 
     void validateSpecification(SpecificationDto specification) {
@@ -245,8 +263,7 @@ final class FuzzModel {
         List<PaperDeviceDomain> paperDevices = new ArrayList<>();
         for (DeviceModel device : devices) {
             List<String> workingStates = device.workingStates.stream()
-                    .map(DeviceManifest.WorkingState::getName)
-                    .map(String::trim)
+                    .map(FuzzModel::paperWorkingStateName)
                     .toList();
             if (!workingStates.isEmpty()) {
                 paperDevices.add(new PaperDeviceDomain(device.id, "state", workingStates));
@@ -539,6 +556,10 @@ final class FuzzModel {
                 source);
     }
 
+    private static String paperWorkingStateName(DeviceManifest.WorkingState state) {
+        return state.getName().trim();
+    }
+
     private void applyPaperEvent(ModelState state, PaperEvent event) {
         if (event.type() == PaperEvent.Type.DEVICE) {
             DeviceModel device = devicesById.get(event.name());
@@ -547,7 +568,7 @@ final class FuzzModel {
             }
             int workingStateIndex = -1;
             for (int index = 0; index < device.workingStates.size(); index++) {
-                if (event.value().equals(device.workingStates.get(index).getName())) {
+                if (event.value().equals(paperWorkingStateName(device.workingStates.get(index)))) {
                     workingStateIndex = index;
                     break;
                 }
@@ -677,7 +698,7 @@ final class FuzzModel {
             ValueDomain domain = entry.getValue();
             boolean mayBeWritten = devices.stream().anyMatch(device ->
                     device.numericImpactedEnvironment.contains(name)
-                            || transitionAssignment(device.transitions, name) != null);
+                            || device.sharedTransitionAssignment(device.transitions, name) != null);
             if (domain.isNumeric() && !mayBeWritten) {
                 environmentReachability.put(name, rateReachability(domain, initialState.environment.get(name)));
             }
@@ -728,7 +749,7 @@ final class FuzzModel {
                 : environmentReachability.get(key);
         String relation = normalizeRelation(condition.getRelation());
         Set<Integer> expected = new LinkedHashSet<>();
-        for (String value : splitCandidates(condition.getValue(), relation, false)) {
+        for (String value : splitCandidates(condition.getValue(), relation)) {
             expected.add(parseInteger(value, "for numeric specification condition"));
         }
         ValueDomain numericDomain = domain;
@@ -737,7 +758,7 @@ final class FuzzModel {
             if (step == 0) {
                 return specificationConditionMatches(condition, state) == truth ? 0.0 : Double.POSITIVE_INFINITY;
             }
-            String actual = resolveConditionValue(device, state.devices.get(device.id), state, condition, "variable");
+            String actual = resolveVariableValue(state.devices.get(device.id), state.environment, key);
             int value = parseInteger(actual, "for numeric specification state");
             // The nearest target and its feasibility use the same support, including set alternatives.
             // Unknown writers keep the full declared domain; only a proof may narrow it.
@@ -846,18 +867,15 @@ final class FuzzModel {
         if ("state".equals(type)) {
             return compareState(device, deviceState, atom.relation(), atom.value());
         }
-        String actual;
         if ("mode".equals(type)) {
-            actual = deviceState.modes[device.modeIndex(atom.key())];
-        } else if ("api".equals(type)) {
-            actual = deviceState.apiSignals.contains(atom.key()) ? "TRUE" : "FALSE";
-        } else {
-            actual = deviceState.locals.get(atom.key());
-            if (actual == null) {
-                actual = state.environment.get(atom.key());
-            }
+            return compare(deviceState.modes[device.modeIndex(atom.key())],
+                    atom.relation(), atom.value(), FuzzModel::cleanState);
         }
-        return compare(actual, atom.relation(), atom.value());
+        if ("api".equals(type)) {
+            return compareApiSignal(deviceState.apiSignals.contains(atom.key()), atom.relation(), atom.value());
+        }
+        String actual = resolveVariableValue(deviceState, state.environment, atom.key());
+        return variableDomain(device, atom.key()).matches(actual, atom.relation(), atom.value());
     }
 
     private PaperCondition previousPaperConditions(
@@ -968,7 +986,7 @@ final class FuzzModel {
         String type = normalized(target.targetType());
         if ("api".equals(type)) {
             boolean emitted = target.key().equals(api.getName()) && Boolean.TRUE.equals(api.getSignal());
-            return emitted && compare("TRUE", target.relation(), target.value()) == expectedTruth;
+            return emitted && compareApiSignal(true, target.relation(), target.value()) == expectedTruth;
         }
         if ("variable".equals(type)) {
             return false;
@@ -978,7 +996,8 @@ final class FuzzModel {
         if ("mode".equals(type)) {
             String actual = stateSegment(
                     api.getEndState(), device.modeIndex(target.key()), false);
-            result = hasText(actual) ? compare(actual, target.relation(), target.value()) : null;
+            result = hasText(actual)
+                    ? compare(actual, target.relation(), target.value(), FuzzModel::cleanState) : null;
         } else if ("state".equals(type)) {
             String[] knownResult = new String[device.modes.size()];
             for (int modeIndex = 0; modeIndex < knownResult.length; modeIndex++) {
@@ -1117,6 +1136,7 @@ final class FuzzModel {
             DeviceState before = transitionSource.devices.get(device.id);
             DeviceState copiedTarget = targetBase.devices.get(device.id);
             String[] nextModes = copiedTarget.modes.clone();
+            Set<String> nextSignals = new LinkedHashSet<>();
             Set<Integer> ruleControlledModes = new LinkedHashSet<>();
             List<RuleGuard> earlierRuleGuards = new ArrayList<>();
             for (RuleDto rule : rulesByTarget.getOrDefault(device.id, List.of())) {
@@ -1135,9 +1155,14 @@ final class FuzzModel {
                 boolean blocked = rawGuard && earlierRuleGuards.stream().anyMatch(earlier ->
                         earlier.rawGuard() && !Collections.disjoint(earlier.affectedModes(), affectedModes));
                 if (rawGuard && !blocked && !affectedModes.isEmpty()) {
+                    boolean changed = false;
                     for (int modeIndex : affectedModes) {
                         nextModes[modeIndex] = stateSegment(api.getEndState(), modeIndex, false);
+                        changed |= !before.modes[modeIndex].equals(nextModes[modeIndex]);
                         ruleControlledModes.add(modeIndex);
+                    }
+                    if (changed && Boolean.TRUE.equals(api.getSignal())) {
+                        nextSignals.add(api.getName());
                     }
                     triggeredRules.add(rule);
                 }
@@ -1170,7 +1195,7 @@ final class FuzzModel {
             nextDevices.put(device.id, new DeviceState(
                     nextModes,
                     new LinkedHashMap<>(copiedTarget.locals),
-                    new LinkedHashSet<>(),
+                    nextSignals,
                     copiedTarget.impactRates));
         }
 
@@ -1218,7 +1243,7 @@ final class FuzzModel {
             boolean hasDeclaredWriter = false;
             for (DeviceModel device : devices) {
                 if (forced == null) {
-                    forced = transitionAssignment(selectedTransitions.get(device.id), name);
+                    forced = device.sharedTransitionAssignment(selectedTransitions.get(device.id), name);
                 }
                 DeviceState deviceState = transitionSource.devices.get(device.id);
                 if (entry.getValue().isNumeric() && device.numericImpactedEnvironment.contains(name)) {
@@ -1306,17 +1331,6 @@ final class FuzzModel {
             }
         }
 
-        for (DeviceModel device : devices) {
-            ensureNotCancelled(cancelled);
-            DeviceState before = transitionSource.devices.get(device.id);
-            DeviceState after = nextDevices.get(device.id);
-            for (DeviceManifest.API api : device.apis.values()) {
-                if (Boolean.TRUE.equals(api.getSignal()) && stateEventMatches(before.modes, after.modes, api)) {
-                    after.apiSignals.add(api.getName());
-                }
-            }
-        }
-
         List<RuleDto> triggeredInBoardOrder = new ArrayList<>();
         for (RuleDto rule : rules) {
             ensureNotCancelled(cancelled);
@@ -1343,19 +1357,16 @@ final class FuzzModel {
         if ("api".equals(targetType)) {
             return deviceState.apiSignals.contains(condition.getAttribute());
         }
-        String actual;
         if ("state".equals(targetType)) {
             return compareState(device, deviceState, condition.getRelation(), condition.getValue());
-        } else if ("mode".equals(targetType)) {
-            int modeIndex = device.modeIndex(condition.getAttribute());
-            actual = deviceState.modes[modeIndex];
-        } else {
-            actual = deviceState.locals.get(condition.getAttribute());
-            if (actual == null) {
-                actual = state.environment.get(condition.getAttribute());
-            }
         }
-        return compare(actual, condition.getRelation(), condition.getValue());
+        String key = condition.getAttribute();
+        if ("mode".equals(targetType)) {
+            return compare(deviceState.modes[device.modeIndex(key)],
+                    condition.getRelation(), condition.getValue(), FuzzModel::cleanState);
+        }
+        String actual = resolveVariableValue(deviceState, state.environment, key);
+        return variableDomain(device, key).matches(actual, condition.getRelation(), condition.getValue());
     }
 
     private boolean triggerMatches(
@@ -1367,14 +1378,17 @@ final class FuzzModel {
                 || !hasText(trigger.getRelation()) || !hasText(trigger.getValue())) {
             return false;
         }
-        String actual = state.locals.get(trigger.getAttribute());
-        int modeIndex = device.findModeIndex(trigger.getAttribute());
+        String key = trigger.getAttribute();
+        int modeIndex = device.findModeIndex(key);
         if (modeIndex >= 0) {
-            actual = state.modes[modeIndex];
-        } else if (actual == null) {
-            actual = environment.get(trigger.getAttribute());
+            return compare(state.modes[modeIndex], trigger.getRelation(), trigger.getValue(), FuzzModel::cleanState);
         }
-        return compare(actual, trigger.getRelation(), trigger.getValue());
+        String actual = resolveVariableValue(state, environment, key);
+        return variableDomain(device, key).matches(actual, trigger.getRelation(), trigger.getValue());
+    }
+
+    private ValueDomain variableDomain(DeviceModel device, String key) {
+        return device.localDomains.getOrDefault(key, environmentDomains.get(key));
     }
 
     private void validateSpecificationCondition(SpecConditionDto condition) {
@@ -1403,9 +1417,9 @@ final class FuzzModel {
         }
         if ("mode".equals(type)) {
             requireEnumRelation(relation, "mode");
-            int modeIndex = device.modeIndex(key);
-            for (String value : splitCandidates(condition.getValue(), relation, false)) {
-                if (!device.legalModeValues.get(modeIndex).contains(cleanState(value))) {
+            device.modeIndex(key);
+            for (String value : splitCandidates(condition.getValue(), relation)) {
+                if (device.resolveAuthoredState(key, value) == null) {
                     throw error("Illegal value '" + value + "' for mode '" + key + "'.");
                 }
             }
@@ -1417,8 +1431,9 @@ final class FuzzModel {
             if (api == null || !Boolean.TRUE.equals(api.getSignal())) {
                 throw error("API '" + key + "' is not an observable signal.");
             }
-            for (String value : splitCandidates(condition.getValue(), relation, false)) {
-                if (!isBoolean(value)) {
+            for (String value : splitCandidates(condition.getValue(), relation)) {
+                if (!ManifestConditionSemantics.matchesLiteral(
+                        value, ManifestConditionSemantics.API_SIGNAL_LITERALS)) {
                     throw error("API conditions require TRUE/FALSE values.");
                 }
             }
@@ -1476,8 +1491,16 @@ final class FuzzModel {
         if ("state".equals(type)) {
             return compareState(device, deviceState, condition.getRelation(), condition.getValue());
         }
-        String actual = resolveConditionValue(device, deviceState, state, condition, type);
-        return compare(actual, condition.getRelation(), condition.getValue());
+        String key = conditionKey(condition);
+        if ("mode".equals(type)) {
+            return compare(deviceState.modes[device.modeIndex(key)],
+                    condition.getRelation(), condition.getValue(), FuzzModel::cleanState);
+        }
+        if ("api".equals(type)) {
+            return compareApiSignal(deviceState.apiSignals.contains(key), condition.getRelation(), condition.getValue());
+        }
+        return variableDomain(device, key).matches(resolveVariableValue(deviceState, state.environment, key),
+                condition.getRelation(), condition.getValue());
     }
 
     /**
@@ -1492,20 +1515,8 @@ final class FuzzModel {
         return key == null ? null : key.trim();
     }
 
-    private String resolveConditionValue(
-            DeviceModel device,
-            DeviceState deviceState,
-            ModelState state,
-            SpecConditionDto condition,
-            String type) {
-        if ("mode".equals(type)) {
-            return deviceState.modes[device.modeIndex(conditionKey(condition))];
-        }
-        if ("api".equals(type)) {
-            return deviceState.apiSignals.contains(conditionKey(condition)) ? "TRUE" : "FALSE";
-        }
-        String value = deviceState.locals.get(conditionKey(condition));
-        return value != null ? value : state.environment.get(conditionKey(condition));
+    private static String resolveVariableValue(DeviceState device, Map<String, String> environment, String key) {
+        return device.locals.getOrDefault(key, environment.get(key));
     }
 
     private boolean compareState(DeviceModel device, DeviceState state, String rawRelation, String rawValue) {
@@ -1528,7 +1539,12 @@ final class FuzzModel {
             traceDevice.setDeviceLabel(device.label);
             traceDevice.setTemplateName(device.templateName);
             traceDevice.setModelTokenSource(device.modelTokenSource);
-            traceDevice.setState(String.join(";", deviceState.modes));
+            List<String> authoredStates = new ArrayList<>(device.modes.size());
+            for (int modeIndex = 0; modeIndex < device.modes.size(); modeIndex++) {
+                authoredStates.add(device.authoredStatesByMode.getOrDefault(device.modes.get(modeIndex), Map.of())
+                        .getOrDefault(deviceState.modes[modeIndex], deviceState.modes[modeIndex]));
+            }
+            traceDevice.setState(String.join(";", authoredStates));
             traceDevice.setMode(String.join(";", device.modes));
             traceDevice.setCompromised(false);
             List<TraceVariableDto> variables = new ArrayList<>();
@@ -1585,9 +1601,7 @@ final class FuzzModel {
     private static void mergeEnvironmentTokenSources(
             Map<String, ModelTokenSource> environmentTokenSources,
             DeviceModel device) {
-        Set<String> declarations = new LinkedHashSet<>(device.readableEnvironment);
-        declarations.addAll(device.impactedEnvironment);
-        for (String name : declarations) {
+        for (String name : device.sharedDeclarations) {
             ModelTokenSource current = environmentTokenSources.get(name);
             ModelTokenSource source = device.modelTokenSource;
             environmentTokenSources.put(name, current == null || current == source
@@ -1631,18 +1645,18 @@ final class FuzzModel {
                         throw error("Rule API condition '" + condition.getAttribute() + "' is not an observable signal.");
                     }
                 } else if ("state".equals(type)) {
-                    if (!"state".equals(condition.getAttribute())) {
+                    if (!hasText(condition.getAttribute()) || !"state".equalsIgnoreCase(condition.getAttribute().trim())) {
                         throw error("Rule state conditions must use attribute 'state'.");
                     }
                     String relation = normalizeRelation(condition.getRelation());
                     requireEnumRelation(relation, "Rule state");
                     stateCandidates(source, condition.getValue(), relation);
                 } else if ("mode".equals(type)) {
-                    int modeIndex = source.modeIndex(condition.getAttribute());
+                    source.modeIndex(condition.getAttribute());
                     String relation = normalizeRelation(condition.getRelation());
                     requireEnumRelation(relation, "Rule mode");
-                    for (String value : splitCandidates(condition.getValue(), relation, false)) {
-                        if (!source.legalModeValues.get(modeIndex).contains(cleanState(value))) {
+                    for (String value : splitCandidates(condition.getValue(), relation)) {
+                        if (source.resolveAuthoredState(condition.getAttribute().trim(), value) == null) {
                             throw error("Illegal rule value '" + value + "' for mode '"
                                     + condition.getAttribute() + "'.");
                         }
@@ -1653,7 +1667,8 @@ final class FuzzModel {
                         domain = environmentDomains.get(condition.getAttribute());
                     }
                     if (domain == null) {
-                        throw error("Rule variable '" + condition.getAttribute() + "' is not declared.");
+                        throw error("Rule variable '" + condition.getAttribute()
+                                + "' is not readable by device '" + source.id + "'.");
                     }
                     String relation = normalizeRelation(condition.getRelation());
                     if (relation == null) {
@@ -1718,25 +1733,6 @@ final class FuzzModel {
         return DynamicEffect.NONE;
     }
 
-    private static boolean stateEventMatches(String[] before, String[] after, DeviceManifest.API api) {
-        if (!matchesPartialState(before, api.getStartState(), true)) {
-            return false;
-        }
-        boolean changed = false;
-        String[] end = splitState(api.getEndState());
-        for (int i = 0; i < before.length && i < end.length; i++) {
-            String desired = cleanState(end[i]);
-            if (desired.isEmpty()) {
-                continue;
-            }
-            if (!desired.equals(after[i])) {
-                return false;
-            }
-            changed |= !before[i].equals(desired);
-        }
-        return changed;
-    }
-
     private static boolean matchesPartialState(String[] current, String rawState, boolean wildcardUnderscore) {
         if (!hasText(rawState)) {
             return true;
@@ -1786,62 +1782,29 @@ final class FuzzModel {
 
     private static List<Map<Integer, String>> stateCandidates(DeviceModel device, String rawValue, String relation) {
         List<Map<Integer, String>> resolved = new ArrayList<>();
-        for (String candidate : splitCandidates(rawValue, relation, device.modes.size() > 1)) {
+        if (!hasText(rawValue)) {
+            throw error("Condition value is required.");
+        }
+        List<String> candidates = SmvRelationUtils.stateConditionValues(rawValue, relation, device.modes.size());
+        if (candidates.isEmpty()) {
+            throw error("Condition candidate list cannot be empty.");
+        }
+        for (String candidate : candidates) {
+            Map<String, String> named = ManifestConditionSemantics.resolveStatePattern(
+                    candidate, device.modes, device::resolveAuthoredState, reason -> { throw error(reason + "."); });
             Map<Integer, String> tuple = new LinkedHashMap<>();
-            if (candidate.contains(";")) {
-                String[] segments = candidate.split(";", -1);
-                if (segments.length != device.modes.size()) {
-                    throw error("State tuple '" + candidate + "' does not match the device mode count.");
-                }
-                for (int i = 0; i < segments.length; i++) {
-                    if (!segments[i].isBlank()) {
-                        String value = cleanState(segments[i]);
-                        if (!device.legalModeValues.get(i).contains(value)) {
-                            throw error("Illegal state value '" + value + "'.");
-                        }
-                        tuple.put(i, value);
-                    }
-                }
-            } else if (device.modes.size() == 1) {
-                String value = cleanState(candidate);
-                if (!device.legalModeValues.get(0).contains(value)) {
-                    throw error("Illegal state value '" + value + "'.");
-                }
-                tuple.put(0, value);
-            } else {
-                String value = cleanState(candidate);
-                int match = -1;
-                for (int i = 0; i < device.legalModeValues.size(); i++) {
-                    if (device.legalModeValues.get(i).contains(value)) {
-                        if (match >= 0) {
-                            throw error("State value '" + value + "' is ambiguous across device modes.");
-                        }
-                        match = i;
-                    }
-                }
-                if (match < 0) {
-                    throw error("State value '" + value + "' is not legal for the device.");
-                }
-                tuple.put(match, value);
-            }
-            if (tuple.isEmpty()) {
-                throw error("State conditions require at least one concrete mode value.");
-            }
+            named.forEach((mode, state) -> tuple.put(device.modeIndex(mode), state));
             resolved.add(tuple);
         }
         return resolved;
     }
 
-    private static List<String> splitCandidates(String value, String relation, boolean preserveSemicolon) {
+    private static List<String> splitCandidates(String value, String relation) {
         if (!hasText(value)) {
             throw error("Condition value is required.");
         }
         if ("in".equals(relation) || "not in".equals(relation)) {
-            String regex = preserveSemicolon ? "[,|]" : "[,;|]";
-            List<String> candidates = Arrays.stream(value.split(regex))
-                    .map(String::trim)
-                    .filter(FuzzModel::hasText)
-                    .toList();
+            List<String> candidates = SmvRelationUtils.splitRuleValues(value);
             if (candidates.isEmpty()) {
                 throw error("Condition candidate list cannot be empty.");
             }
@@ -1859,7 +1822,12 @@ final class FuzzModel {
         return true;
     }
 
-    private static boolean compare(String actual, String rawRelation, String rawExpected) {
+    private static boolean compareApiSignal(boolean active, String relation, String value) {
+        return compare(Boolean.toString(active), relation, value, ManifestConditionSemantics::canonicalApiSignalValue);
+    }
+
+    private static <T extends Comparable<T>> boolean compare(
+            String actual, String rawRelation, String rawExpected, Function<String, T> normalizeValue) {
         if (actual == null || rawExpected == null) {
             return false;
         }
@@ -1867,64 +1835,28 @@ final class FuzzModel {
         if (relation == null) {
             return false;
         }
-        List<String> expected = splitCandidates(rawExpected, relation, false).stream()
-                .map(FuzzModel::cleanLiteral)
+        T observed = normalizeValue.apply(actual);
+        List<T> expected = splitCandidates(rawExpected, relation).stream()
+                .map(normalizeValue)
                 .toList();
-        if ("in".equals(relation)) {
-            return expected.stream().anyMatch(value -> literalEquals(actual, value));
-        }
-        if ("not in".equals(relation)) {
-            return expected.stream().noneMatch(value -> literalEquals(actual, value));
-        }
-        String right = expected.get(0);
-        Double leftNumber = number(actual);
-        Double rightNumber = number(right);
-        int comparison = leftNumber != null && rightNumber != null
-                ? Double.compare(leftNumber, rightNumber)
-                : cleanLiteral(actual).compareTo(right);
         return switch (relation) {
-            case "=" -> literalEquals(actual, right);
-            case "!=" -> !literalEquals(actual, right);
-            case ">" -> comparison > 0;
-            case ">=" -> comparison >= 0;
-            case "<" -> comparison < 0;
-            case "<=" -> comparison <= 0;
+            case "=", "in" -> expected.contains(observed);
+            case "!=", "not in" -> !expected.contains(observed);
+            case ">" -> observed.compareTo(expected.get(0)) > 0;
+            case ">=" -> observed.compareTo(expected.get(0)) >= 0;
+            case "<" -> observed.compareTo(expected.get(0)) < 0;
+            case "<=" -> observed.compareTo(expected.get(0)) <= 0;
             default -> false;
         };
     }
 
-    private static boolean literalEquals(String left, String right) {
-        if (isBoolean(left) && isBoolean(right)) {
-            return left.trim().equalsIgnoreCase(right.trim());
-        }
-        Double leftNumber = number(left);
-        Double rightNumber = number(right);
-        if (leftNumber != null && rightNumber != null) {
-            return Double.compare(leftNumber, rightNumber) == 0;
-        }
-        return cleanLiteral(left).equals(cleanLiteral(right));
-    }
-
     private static String normalizeRelation(String relation) {
-        if (relation == null) {
-            return null;
-        }
-        return switch (relation.trim().toLowerCase(Locale.ROOT)) {
-            case "=", "==", "eq" -> "=";
-            case "!=", "neq" -> "!=";
-            case ">", "gt" -> ">";
-            case ">=", "gte" -> ">=";
-            case "<", "lt" -> "<";
-            case "<=", "lte" -> "<=";
-            case "in" -> "in";
-            case "not_in", "not in" -> "not in";
-            default -> null;
-        };
+        String normalized = SmvRelationUtils.normalizeRelation(relation);
+        return SmvRelationUtils.isSupportedRelation(normalized) ? normalized : null;
     }
 
     private static void requireEnumRelation(String relation, String label) {
-        if (!"=".equals(relation) && !"!=".equals(relation)
-                && !"in".equals(relation) && !"not in".equals(relation)) {
+        if (!SmvRelationUtils.isEnumRelation(relation)) {
             throw error(label + " conditions support only =, !=, IN, and NOT_IN.");
         }
     }
@@ -1958,31 +1890,7 @@ final class FuzzModel {
     }
 
     private static String cleanLiteral(String value) {
-        if (value == null) {
-            return null;
-        }
-        String cleaned = value.replace(" ", "").trim();
-        if (isBoolean(cleaned)) {
-            return cleaned.toUpperCase(Locale.ROOT);
-        }
-        return cleaned;
-    }
-
-    private static boolean isBoolean(String value) {
-        return value != null && ("true".equalsIgnoreCase(value.trim()) || "false".equalsIgnoreCase(value.trim()));
-    }
-
-    private static Double number(String value) {
-        if (value == null) {
-            return null;
-        }
-        try {
-            double numeric = Double.parseDouble(value.trim());
-            // Integer literals accept -0; comparisons must agree with integer distances and NuSMV.
-            return numeric == 0.0 ? 0.0 : numeric;
-        } catch (NumberFormatException ignored) {
-            return null;
-        }
+        return value == null ? null : ManifestConditionSemantics.cleanEnumLiteral(value);
     }
 
     private static int parseInteger(String value, String context) {
@@ -2041,12 +1949,14 @@ final class FuzzModel {
         private final String templateName;
         private final ModelTokenSource modelTokenSource;
         private final List<String> modes;
+        private final Map<String, Map<String, String>> authoredStatesByMode;
         private final List<List<String>> legalModeValues;
         private final List<DeviceManifest.WorkingState> workingStates;
         private final List<String[]> workingStateTuples;
         private final Map<String, DeviceManifest.API> apis;
         private final List<DeviceManifest.Transition> transitions;
         private final Map<String, ValueDomain> localDomains;
+        private final Set<String> sharedDeclarations;
         private final Set<String> readableEnvironment;
         private final Set<String> impactedEnvironment;
         private final Set<String> numericImpactedEnvironment;
@@ -2058,12 +1968,14 @@ final class FuzzModel {
                 String templateName,
                 ModelTokenSource modelTokenSource,
                 List<String> modes,
+                Map<String, Map<String, String>> authoredStatesByMode,
                 List<List<String>> legalModeValues,
                 List<DeviceManifest.WorkingState> workingStates,
                 List<String[]> workingStateTuples,
                 Map<String, DeviceManifest.API> apis,
                 List<DeviceManifest.Transition> transitions,
                 Map<String, ValueDomain> localDomains,
+                Set<String> sharedDeclarations,
                 Set<String> readableEnvironment,
                 Set<String> impactedEnvironment,
                 Set<String> numericImpactedEnvironment,
@@ -2073,12 +1985,14 @@ final class FuzzModel {
             this.templateName = templateName;
             this.modelTokenSource = modelTokenSource;
             this.modes = modes;
+            this.authoredStatesByMode = authoredStatesByMode;
             this.legalModeValues = legalModeValues;
             this.workingStates = workingStates;
             this.workingStateTuples = workingStateTuples;
             this.apis = apis;
             this.transitions = transitions;
             this.localDomains = localDomains;
+            this.sharedDeclarations = sharedDeclarations;
             this.readableEnvironment = readableEnvironment;
             this.impactedEnvironment = impactedEnvironment;
             this.numericImpactedEnvironment = numericImpactedEnvironment;
@@ -2119,6 +2033,7 @@ final class FuzzModel {
             }
             workingStates = List.copyOf(workingStates);
             List<List<String>> legalValues = legal.stream().map(values -> List.copyOf(values)).toList();
+            Map<String, List<String>> authoredModeStates = DeviceManifestModes.authoredModeStates(manifest);
 
             Map<String, DeviceManifest.API> apis = new LinkedHashMap<>();
             Map<String, String> signalRoutes = new LinkedHashMap<>();
@@ -2130,8 +2045,8 @@ final class FuzzModel {
                 if (apis.putIfAbsent(api.getName(), api) != null) {
                     throw error("Manifest for device '" + id + "' contains duplicate API '" + api.getName() + "'.");
                 }
-                validatePartialState(api.getStartState(), modes.size(), legalValues, true, "API start state", id);
-                validatePartialState(api.getEndState(), modes.size(), legalValues, false, "API end state", id);
+                validatePartialState(api.getStartState(), modes, authoredModeStates, true, "API start state", id);
+                validatePartialState(api.getEndState(), modes, authoredModeStates, false, "API end state", id);
                 if (!hasPossibleApiStateChange(api, legalValues)) {
                     throw error("API '" + api.getName() + "' on device '" + id
                             + "' has no representable state change.");
@@ -2152,8 +2067,8 @@ final class FuzzModel {
                 if (transition == null || transition.getTrigger() == null) {
                     throw error("Manifest for device '" + id + "' contains an invalid transition.");
                 }
-                validatePartialState(transition.getStartState(), modes.size(), legalValues, true, "transition start state", id);
-                validatePartialState(transition.getEndState(), modes.size(), legalValues, false, "transition end state", id);
+                validatePartialState(transition.getStartState(), modes, authoredModeStates, true, "transition start state", id);
+                validatePartialState(transition.getEndState(), modes, authoredModeStates, false, "transition end state", id);
                 DeviceManifest.Trigger trigger = transition.getTrigger();
                 String triggerRelation = normalizeRelation(trigger.getRelation());
                 if (!hasText(trigger.getAttribute()) || triggerRelation == null
@@ -2191,8 +2106,10 @@ final class FuzzModel {
                     }
                 } else {
                     mergeEnvironmentDomain(environmentDomains, variable.getName(), domain);
-                    readableEnvironment.add(variable.getName());
                     putOwnEnvironmentDomain(ownEnvironmentDomains, variable.getName(), domain, id);
+                    if (!Boolean.FALSE.equals(variable.getReads())) {
+                        readableEnvironment.add(variable.getName());
+                    }
                 }
             }
 
@@ -2219,9 +2136,13 @@ final class FuzzModel {
 
             String initialRaw = hasText(device.getState()) ? device.getState() : manifest.getInitState();
             String[] initialModes = parseFullState(initialRaw, modes.size(), "initial state", id);
+            Map<String, Map<String, String>> authoredStates = DeviceManifestModes.authoredStatesByMode(manifest,
+                    reason -> error("Device '" + id + "': " + reason));
+            String[] initialNames = initialModes.length == 0 ? new String[0] : initialRaw.split(";", -1);
             for (int i = 0; i < initialModes.length; i++) {
-                if (!legalValues.get(i).contains(initialModes[i])) {
-                    throw error("Initial state '" + initialModes[i] + "' is illegal for mode '" + modes.get(i) + "'.");
+                String initialName = initialNames[i].trim();
+                if (!initialName.equals(authoredStates.getOrDefault(modes.get(i), Map.of()).get(initialModes[i]))) {
+                    throw error("Initial state '" + initialName + "' is illegal for mode '" + modes.get(i) + "'.");
                 }
             }
             Map<String, VariableStateDto> submittedVariables = new LinkedHashMap<>();
@@ -2245,10 +2166,9 @@ final class FuzzModel {
                 }
                 String name = variable.getName();
                 VariableStateDto submitted = submittedVariables.get(name);
-                String initialValue = submitted == null
-                        ? DeviceManifestModes.localInitialValue(manifest, variable, initialRaw)
-                        : submitted.getValue();
-                if (!hasText(initialValue)) {
+                String initialValue = DeviceManifestModes.localInitialValue(
+                        manifest, variable, initialRaw, submitted == null ? null : submitted.getValue());
+                if ((submitted != null && submitted.getValue() == null) || !hasText(initialValue)) {
                     throw error("Local variable '" + name + "' on device '" + id
                             + "' has an invalid initial value.");
                 }
@@ -2259,9 +2179,8 @@ final class FuzzModel {
 
             validateDynamics(id, workingStates, locals, ownEnvironmentDomains, impactedEnvironment);
             validateTransitionTriggers(
-                    id, transitions, modes, legalValues, locals, readableEnvironment, environmentDomains);
-            validateTransitionAssignments(
-                    id, transitions, locals, ownEnvironmentDomains, impactedEnvironment, readableEnvironment);
+                    id, transitions, modes, authoredModeStates, locals, readableEnvironment, environmentDomains);
+            validateTransitionAssignments(id, transitions, locals, ownEnvironmentDomains);
             LinkedHashMap<String, Integer> initialImpactRates = new LinkedHashMap<>();
             numericImpactedEnvironment.forEach(name -> initialImpactRates.put(name, 0));
             return new DeviceModel(
@@ -2271,16 +2190,27 @@ final class FuzzModel {
                     device.getModelTokenSource() != null
                             ? device.getModelTokenSource() : ModelTokenSource.UNKNOWN,
                     List.copyOf(modes),
+                    authoredStates,
                     legalValues,
                     workingStates,
                     List.copyOf(tuples),
                     Collections.unmodifiableMap(apis),
                     transitions,
                     Collections.unmodifiableMap(locals),
+                    Set.copyOf(ownEnvironmentDomains.keySet()),
                     Collections.unmodifiableSet(readableEnvironment),
                     Collections.unmodifiableSet(impactedEnvironment),
                     Collections.unmodifiableSet(numericImpactedEnvironment),
                     new DeviceState(initialModes, initialLocals, new LinkedHashSet<>(), initialImpactRates));
+        }
+
+        private String sharedTransitionAssignment(Iterable<DeviceManifest.Transition> candidates, String name) {
+            // A transition resolves assignments in its own manifest, even when a different device
+            // declares a shared value with the same name.
+            if (localDomains.containsKey(name) || !sharedDeclarations.contains(name)) {
+                return null;
+            }
+            return transitionAssignment(candidates, name);
         }
 
         private int modeIndex(String key) {
@@ -2292,17 +2222,12 @@ final class FuzzModel {
         }
 
         private int findModeIndex(String key) {
-            if (!hasText(key)) {
-                return -1;
-            }
-            String cleanKey = cleanState(key);
-            for (int i = 0; i < modes.size(); i++) {
-                if (modes.get(i).equals(key.trim()) || modes.get(i).equalsIgnoreCase(key.trim())
-                        || modes.get(i).equals(cleanKey)) {
-                    return i;
-                }
-            }
-            return -1;
+            return FuzzModel.findModeIndex(modes, key);
+        }
+
+        private String resolveAuthoredState(String mode, String name) {
+            String atom = cleanState(name);
+            return name.equals(authoredStatesByMode.getOrDefault(mode, Map.of()).get(atom)) ? atom : null;
         }
 
         private DeviceManifest.WorkingState activeWorkingState(String[] current) {
@@ -2364,17 +2289,14 @@ final class FuzzModel {
             String deviceId,
             List<DeviceManifest.Transition> transitions,
             Map<String, ValueDomain> locals,
-            Map<String, ValueDomain> ownEnvironment,
-            Set<String> impactedEnvironment,
-            Set<String> readableEnvironment) {
+            Map<String, ValueDomain> ownEnvironment) {
         for (DeviceManifest.Transition transition : transitions) {
             for (DeviceManifest.Assignment assignment : safe(transition.getAssignments())) {
                 if (assignment == null || !hasText(assignment.getAttribute()) || !hasText(assignment.getValue())) {
                     throw error("Transition assignment on device '" + deviceId + "' is invalid.");
                 }
                 ValueDomain domain = locals.get(assignment.getAttribute());
-                if (domain == null && (impactedEnvironment.contains(assignment.getAttribute())
-                        || readableEnvironment.contains(assignment.getAttribute()))) {
+                if (domain == null) {
                     domain = ownEnvironment.get(assignment.getAttribute());
                 }
                 if (domain == null) {
@@ -2389,7 +2311,7 @@ final class FuzzModel {
             String deviceId,
             List<DeviceManifest.Transition> transitions,
             List<String> modes,
-            List<List<String>> legalModeValues,
+            Map<String, List<String>> authoredModeStates,
             Map<String, ValueDomain> locals,
             Set<String> readableEnvironment,
             Map<String, ValueDomain> environment) {
@@ -2399,8 +2321,8 @@ final class FuzzModel {
             String relation = normalizeRelation(transition.getTrigger().getRelation());
             if (modeIndex >= 0) {
                 requireEnumRelation(relation, "Transition mode trigger");
-                String value = cleanState(transition.getTrigger().getValue());
-                if (!legalModeValues.get(modeIndex).contains(value)) {
+                String value = transition.getTrigger().getValue().trim();
+                if (!authoredModeStates.getOrDefault(modes.get(modeIndex), List.of()).contains(value)) {
                     throw error("Transition trigger value '" + transition.getTrigger().getValue()
                             + "' is not legal for mode '" + attribute + "'.");
                 }
@@ -2420,17 +2342,7 @@ final class FuzzModel {
     }
 
     private static int findModeIndex(List<String> modes, String key) {
-        if (!hasText(key)) {
-            return -1;
-        }
-        String cleanKey = cleanState(key);
-        for (int modeIndex = 0; modeIndex < modes.size(); modeIndex++) {
-            String mode = modes.get(modeIndex);
-            if (mode.equals(key.trim()) || mode.equalsIgnoreCase(key.trim()) || mode.equals(cleanKey)) {
-                return modeIndex;
-            }
-        }
-        return -1;
+        return hasText(key) ? modes.indexOf(key.trim()) : -1;
     }
 
     private static void mergeEnvironmentDomain(
@@ -2482,27 +2394,14 @@ final class FuzzModel {
 
     private static void validatePartialState(
             String raw,
-            int modeCount,
-            List<List<String>> legalValues,
+            List<String> modes,
+            Map<String, List<String>> authoredModeStates,
             boolean allowWildcard,
             String context,
             String deviceId) {
-        if (!hasText(raw)) {
-            return;
-        }
-        String[] segments = raw.split(";", -1);
-        if (segments.length > modeCount) {
-            throw error("Device '" + deviceId + "' " + context + " has too many mode segments.");
-        }
-        for (int i = 0; i < segments.length; i++) {
-            String rawSegment = segments[i].trim();
-            if (rawSegment.isEmpty() || allowWildcard && "_".equals(rawSegment)) {
-                continue;
-            }
-            String value = cleanState(rawSegment);
-            if (i >= legalValues.size() || !legalValues.get(i).contains(value)) {
-                throw error("Device '" + deviceId + "' " + context + " contains illegal value '" + value + "'.");
-            }
+        String issue = DeviceManifestModes.endpointIssue(raw, modes, authoredModeStates, allowWildcard);
+        if (issue != null) {
+            throw error("Device '" + deviceId + "' " + context + ": " + issue + ".");
         }
     }
 
@@ -2695,12 +2594,19 @@ final class FuzzModel {
             return lower != null;
         }
 
+        private boolean matches(String actual, String relation, String expected) {
+            if (isNumeric()) {
+                return compare(actual, relation, expected, value -> parseInteger(value, "comparison value"));
+            }
+            return compare(actual, relation, expected, FuzzModel::cleanLiteral);
+        }
+
         private void requireValue(String value, String context) {
             if (!hasText(value)) {
                 throw error(context + " requires a value.");
             }
             if (!isNumeric()) {
-                if (values.stream().noneMatch(candidate -> literalEquals(candidate, value))) {
+                if (!values.contains(cleanLiteral(value))) {
                     throw error(context + " value '" + value + "' is outside its declared domain.");
                 }
                 return;
@@ -2712,7 +2618,7 @@ final class FuzzModel {
         }
 
         private void validateConditionValue(String relation, String rawValue, String context) {
-            List<String> candidates = splitCandidates(rawValue, relation, false);
+            List<String> candidates = splitCandidates(rawValue, relation);
             if (!isNumeric()) {
                 requireEnumRelation(relation, context);
                 for (String candidate : candidates) {

@@ -17,7 +17,9 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -47,6 +49,27 @@ class NusmvRequestValidatorSemanticTest {
                 errors);
 
         assertTrue(errors.isEmpty(), () -> "Expected unsaved rule ids to validate, got: " + errors);
+    }
+
+    @Test
+    void numericRuleAndSpecificationConditionsRequireAsciiDigitsAtAdmission() {
+        String nonAsciiDigit = "\u0661";
+        var model = Map.of("sensor_1", smv());
+        var rule = RuleDto.builder()
+                .conditions(List.of(RuleDto.Condition.builder().deviceName("sensor_1").targetType("variable")
+                        .attribute("level").relation("=").value(nonAsciiDigit).build()))
+                .command(RuleDto.Command.builder().deviceName("sensor_1").action("turnOn").build()).build();
+        var spec = new SpecificationDto();
+        spec.setTemplateId("1");
+        spec.setAConditions(List.of(condition("variable", "level", "=", nonAsciiDigit, "reported")));
+        var errors = NusmvRequestValidator.newErrors();
+
+        NusmvRequestValidator.validateRuleSemantics(List.of(rule), model, errors);
+        NusmvRequestValidator.validateSpecificationSemantics(List.of(spec), model, errors);
+
+        assertAll(
+                () -> assertTrue(errors.containsKey("rules[0].conditions[0].value"), errors::toString),
+                () -> assertTrue(errors.containsKey("specs[0].aConditions[0].value"), errors::toString));
     }
 
     @Test
@@ -127,6 +150,32 @@ class NusmvRequestValidatorSemanticTest {
                 errors.get("specs[0].aConditions[1].value"));
         assertTrue(errors.get("specs[0].aConditions[2].value")
                 .contains("Illegal mode value 'missing'"));
+    }
+
+    @Test
+    void validationAcceptsAuthoredStatesAndRejectsTheirGeneratedAliases() {
+        DeviceSmvData device = smv();
+        device.setModeStates(Map.of("Mode", List.of("_Case", "nightstandby")));
+        device.setAuthoredStatesByMode(Map.of("Mode", Map.of("_Case", "Case", "nightstandby", "night standby")));
+        SpecificationDto spec = new SpecificationDto();
+        spec.setAConditions(List.of(
+                condition("state", "state", "=", "Case"),
+                condition("mode", "Mode", "=", "night standby"),
+                condition("state", "state", "=", "_Case"),
+                condition("mode", "Mode", "=", "nightstandby")));
+        RuleDto rule = RuleDto.builder().conditions(List.of(
+                RuleDto.Condition.builder().deviceName("sensor_1").targetType("mode").attribute("Mode")
+                        .relation("=").value("night standby").build(),
+                RuleDto.Condition.builder().deviceName("sensor_1").targetType("mode").attribute("Mode")
+                        .relation("=").value("nightstandby").build()))
+                .build();
+        Map<String, String> errors = NusmvRequestValidator.newErrors();
+
+        NusmvRequestValidator.validateSpecificationSemantics(List.of(spec), Map.of("sensor_1", device), errors);
+        NusmvRequestValidator.validateRuleSemantics(List.of(rule), Map.of("sensor_1", device), errors);
+
+        assertEquals(Set.of("specs[0].aConditions[2].value", "specs[0].aConditions[3].value",
+                "rules[0].conditions[1].value"), errors.keySet());
     }
 
     @Test
@@ -287,6 +336,29 @@ class NusmvRequestValidatorSemanticTest {
                 errors.get("devices[0].privacies[0].name"));
         assertEquals("Duplicate privacy override: temperature",
                 errors.get("devices[0].privacies[2].name"));
+    }
+
+    @Test
+    void validateDeviceSemanticsRequiresOneAuthoredInitialValuePerMode() {
+        DeviceSmvData model = smv();
+        model.setModes(List.of("Mode", "FanMode"));
+        model.setModeStates(Map.of("Mode", List.of("_Case", "ready"), "FanMode", List.of("fanidle", "on")));
+        model.setAuthoredStatesByMode(Map.of("Mode", Map.of("_Case", "Case", "ready", "ready"),
+                "FanMode", Map.of("fanidle", "fan idle", "on", "on")));
+        List<DeviceVerificationDto> devices = new ArrayList<>();
+        Map<String, DeviceSmvData> models = new LinkedHashMap<>();
+        for (String state : List.of("Case;fan idle", "Case", "Case;_")) {
+            DeviceVerificationDto device = new DeviceVerificationDto();
+            device.setVarName("sensor_" + devices.size());
+            device.setState(state);
+            devices.add(device);
+            models.put(device.getVarName(), model);
+        }
+        Map<String, String> errors = NusmvRequestValidator.newErrors();
+
+        NusmvRequestValidator.validateDeviceSemantics(devices, models, errors);
+
+        assertEquals(Set.of("devices[1].state", "devices[2].state"), errors.keySet());
     }
 
     @Test
@@ -453,47 +525,19 @@ class NusmvRequestValidatorSemanticTest {
         assertTrue(linkErrors.isEmpty());
     }
 
-    /*
-     * The fix-generated prefixes are reserved at request time, not only at generation.
-     *
-     * Every other generated identifier is namespaced (`iot_verify_…`) so user input cannot reach it. The fix
-     * strategies' `param_`/`lambda_`/`condition_value_` are not — and `param_` cannot be renamed, because it is
-     * the wire format for `PreferredRangeSelection.targetId`, validated by a `@Pattern` on the DTO and by
-     * `^param_[A-Za-z0-9_-]{24}$` in the frontend. Verified against the running API: `/api/board/nodes` accepts
-     * a device with canonical id `condition_value_r0_c1`, so the board saved and verified fine and
-     * `SmvMainModuleBuilder` only threw when the user asked for a fix — correct, but blaming a surface they were
-     * not editing, long after the name was chosen.
-     */
     @Test
-    void validateMainNamespace_rejectsDeviceNameReservedByTheFixGenerator() {
-        for (String reserved : List.of("param_abc", "lambda_r0_c1", "condition_value_r0_c1",
+    void validateMainNamespace_acceptsDeviceIdsMatchingRepairTemporaryNames() {
+        for (String id : List.of("param_r0_c0", "lambda_r0_c0", "condition_value_r0_c1",
                 SmvConstants.GUARD_PROBE_PREFIX + "0")) {
             Map<String, String> errors = NusmvRequestValidator.newErrors();
             DeviceSmvData smv = smv();
-            smv.setVarName(reserved);
+            smv.setVarName(id);
 
             NusmvRequestValidator.validateMainNamespace(
-                    List.of(device(reserved, "Sensor")), List.of(), Map.of(reserved, smv), false, errors);
+                    List.of(device(id, "Sensor")), List.of(), Map.of(id, smv), false, errors);
 
-            assertTrue(errors.containsKey("devices[0].varName"),
-                    "expected '" + reserved + "' to be rejected");
-            assertTrue(errors.get("devices[0].varName").contains("automatic-fix"),
-                    "the message should say who reserves the name: " + errors.get("devices[0].varName"));
+            assertTrue(errors.isEmpty(), () -> "unexpected rejection of '" + id + "': " + errors);
         }
-    }
-
-    @Test
-    void validateMainNamespace_allowsDeviceNameMerelyContainingAReservedWord() {
-        // The boundary: only a *prefix* is reserved. `my_param_sensor` is a legitimate device name.
-        Map<String, String> errors = NusmvRequestValidator.newErrors();
-        DeviceSmvData smv = smv();
-        smv.setVarName("my_param_sensor");
-
-        NusmvRequestValidator.validateMainNamespace(
-                List.of(device("my_param_sensor", "Sensor")), List.of(),
-                Map.of("my_param_sensor", smv), false, errors);
-
-        assertTrue(errors.isEmpty(), "unexpected rejection: " + errors);
     }
 
     @Test
@@ -902,6 +946,7 @@ class NusmvRequestValidatorSemanticTest {
         smv.setModes(List.of());
         smv.setVariables(manifest.getInternalVariables());
         smv.setEnvVariables(Map.of("temperature", temperature));
+        smv.setSharedDeclarations(Map.of("temperature", temperature));
         return smv;
     }
 
@@ -927,6 +972,7 @@ class NusmvRequestValidatorSemanticTest {
         smv.setModes(List.of());
         smv.setVariables(manifest.getInternalVariables());
         smv.setEnvVariables(Map.of("a_temperature", temperature));
+        smv.setSharedDeclarations(Map.of("a_temperature", temperature));
         return smv;
     }
 

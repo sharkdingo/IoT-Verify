@@ -171,6 +171,7 @@ const validateModelSnapshot = (result: Record<string, any>, context: string) => 
   requireInteger(snapshot, 'ruleCount', context)
   requireInteger(snapshot, 'specificationCount', context)
   requireInteger(snapshot, 'environmentVariableCount', context)
+  requireInteger(snapshot, 'modelSemanticsVersion', context)
   if (templateCount > deviceCount) {
     throw new RunResponseContractError(context, 'modelSnapshot deviceTemplateCount cannot exceed deviceCount')
   }

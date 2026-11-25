@@ -13,6 +13,9 @@ import java.util.function.Consumer;
 
 public interface FixService {
 
+    /** Verify that an owned trace can be used as current evidence before asking for confirmation. */
+    void requireCurrentVerificationSource(Long userId, Long traceId);
+
     /**
      * Localize fault rules from a counterexample trace (fast, pure in-memory).
      */

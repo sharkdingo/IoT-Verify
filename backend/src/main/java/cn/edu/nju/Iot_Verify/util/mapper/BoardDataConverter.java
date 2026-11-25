@@ -1,5 +1,7 @@
 package cn.edu.nju.Iot_Verify.util.mapper;
 
+import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvRelationUtils;
+import cn.edu.nju.Iot_Verify.component.template.DeviceManifestModes;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
@@ -18,6 +20,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -50,12 +53,17 @@ public class BoardDataConverter {
         Map<String, ModelTokenSource> tokenSourcesByTemplate = tokenSourcesByTemplate(templates);
         List<DeviceVerificationDto> devices = devicesForVerification(
                 nodes, manifestsByTemplate, tokenSourcesByTemplate);
+        Map<String, Integer> modeCounts = new HashMap<>();
+        for (DeviceVerificationDto device : devices) {
+            DeviceManifest manifest = manifestForTemplate(device.getTemplateName(), manifestsByTemplate);
+            modeCounts.put(device.getVarName(), DeviceManifestModes.modeNames(manifest).size());
+        }
         return new ModelInputSnapshot(
                 nodes,
                 devices,
                 snapshot != null ? snapshot.environmentVariables() : List.of(),
-                normalizeRules(snapshot != null ? snapshot.rules() : List.of()),
-                normalizeSpecs(snapshot != null ? snapshot.specifications() : List.of()),
+                normalizeRules(snapshot != null ? snapshot.rules() : List.of(), modeCounts),
+                normalizeSpecs(snapshot != null ? snapshot.specifications() : List.of(), modeCounts),
                 referencedTemplateManifests(devices, manifestsByTemplate));
     }
 
@@ -90,30 +98,31 @@ public class BoardDataConverter {
                     return dv;
                 })
                 .filter(dv -> dv != null)
+                .sorted(Comparator.comparing(DeviceVerificationDto::getVarName))
                 .toList();
     }
 
-    private List<RuleDto> normalizeRules(List<RuleDto> rules) {
+    private List<RuleDto> normalizeRules(List<RuleDto> rules, Map<String, Integer> modeCounts) {
         if (rules == null) {
             return Collections.emptyList();
         }
         return rules.stream()
                 .filter(r -> r != null)
-                .map(this::normalizeRuleForModel)
+                .map(rule -> normalizeRuleForModel(rule, modeCounts))
                 .toList();
     }
 
-    private List<SpecificationDto> normalizeSpecs(List<SpecificationDto> specs) {
+    private List<SpecificationDto> normalizeSpecs(List<SpecificationDto> specs, Map<String, Integer> modeCounts) {
         if (specs == null) {
             return Collections.emptyList();
         }
         return specs.stream()
                 .filter(s -> s != null)
-                .map(this::normalizeSpecForModel)
+                .map(spec -> normalizeSpecForModel(spec, modeCounts))
                 .toList();
     }
 
-    private RuleDto normalizeRuleForModel(RuleDto source) {
+    private RuleDto normalizeRuleForModel(RuleDto source, Map<String, Integer> modeCounts) {
         RuleDto target = new RuleDto();
         target.setId(source.getId());
         target.setUserId(source.getUserId());
@@ -123,13 +132,17 @@ public class BoardDataConverter {
         if (source.getConditions() != null) {
             target.setConditions(source.getConditions().stream()
                     .filter(c -> c != null)
-                    .map(c -> RuleDto.Condition.builder()
-                            .deviceName(normalizeRef(c.getDeviceName()))
-                            .attribute(c.getAttribute())
-                            .targetType(c.getTargetType())
-                            .relation(c.getRelation())
-                            .value(c.getValue())
-                            .build())
+                    .map(c -> {
+                        String device = normalizeRef(c.getDeviceName());
+                        return RuleDto.Condition.builder()
+                                .deviceName(device)
+                                .attribute(c.getAttribute())
+                                .targetType(c.getTargetType())
+                                .relation(c.getRelation())
+                                .value(normalizeStateMembership(c.getValue(), c.getRelation(), c.getTargetType(),
+                                        modeCounts.getOrDefault(device, 0)))
+                                .build();
+                    })
                     .toList());
         } else {
             target.setConditions(Collections.emptyList());
@@ -147,15 +160,15 @@ public class BoardDataConverter {
         return target;
     }
 
-    private SpecificationDto normalizeSpecForModel(SpecificationDto source) {
+    private SpecificationDto normalizeSpecForModel(SpecificationDto source, Map<String, Integer> modeCounts) {
         SpecificationDto target = new SpecificationDto();
         target.setId(source.getId());
         target.setName(source.getName());
         target.setTemplateId(source.getTemplateId());
         target.setTemplateLabel(source.getTemplateLabel());
-        target.setAConditions(normalizeConditions(source.getAConditions()));
-        target.setIfConditions(normalizeConditions(source.getIfConditions()));
-        target.setThenConditions(normalizeConditions(source.getThenConditions()));
+        target.setAConditions(normalizeConditions(source.getAConditions(), modeCounts));
+        target.setIfConditions(normalizeConditions(source.getIfConditions(), modeCounts));
+        target.setThenConditions(normalizeConditions(source.getThenConditions(), modeCounts));
         target.setFormula(source.getFormula());
         if (source.getDevices() != null) {
             target.setDevices(source.getDevices().stream()
@@ -173,7 +186,8 @@ public class BoardDataConverter {
         return target;
     }
 
-    private List<SpecConditionDto> normalizeConditions(List<SpecConditionDto> conditions) {
+    private List<SpecConditionDto> normalizeConditions(List<SpecConditionDto> conditions,
+                                                       Map<String, Integer> modeCounts) {
         if (conditions == null) {
             return Collections.emptyList();
         }
@@ -190,10 +204,18 @@ public class BoardDataConverter {
                     copy.setPropertyScope(c.getPropertyScope());
                     copy.setVariableSource(c.getVariableSource());
                     copy.setRelation(c.getRelation());
-                    copy.setValue(c.getValue());
+                    copy.setValue(normalizeStateMembership(c.getValue(), c.getRelation(), c.getTargetType(),
+                            modeCounts.getOrDefault(copy.getDeviceId(), 0)));
                     return copy;
                 })
                 .toList();
+    }
+
+    private String normalizeStateMembership(String value, String relation, String targetType, int modeCount) {
+        if (value == null || targetType == null) return value;
+        String membership = SmvRelationUtils.canonicalStateMembershipValue(
+                value, SmvRelationUtils.normalizeRelation(relation), targetType.trim().toLowerCase(Locale.ROOT), modeCount);
+        return membership != null ? membership : value;
     }
 
     private String trimToNull(String value) {

@@ -6,9 +6,9 @@ import HintTooltip from '@/components/common/HintTooltip.vue'
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { TraceState } from '../types/verify'
-import type { ModelRunSnapshot, ModelSemantics, RunBoardComparison } from '../types/modelSemantics'
-import type { EnvironmentValueProvenance } from '../types/model'
+import type { ModelSemantics, RunBoardComparison } from '../types/modelSemantics'
 import { isModelSemanticsConsistent } from '../utils/modelSemantics'
+import { hasRunBoardDifference } from '../utils/modelComparison'
 
 const props = defineProps<{
   states: TraceState[]
@@ -40,7 +40,6 @@ const props = defineProps<{
    * degrading to it beats describing attack and privacy semantics no run declared.
    */
   modelSemantics: ModelSemantics
-  modelSnapshot?: ModelRunSnapshot
   boardComparison?: RunBoardComparison
   currentRuleIds?: string[]
   currentDeviceIds?: string[]
@@ -62,11 +61,6 @@ const selectedStateIndex = ref(0)
 // 当前状态
 const currentState = computed(() => {
   return props.states[selectedStateIndex.value] || null
-})
-
-const previousState = computed(() => {
-  if (selectedStateIndex.value <= 0) return null
-  return props.states[selectedStateIndex.value - 1] || null
 })
 
 // 所有状态数量
@@ -93,48 +87,6 @@ const modelSemanticsConsistent = computed(() => isModelSemanticsConsistent(
   props.modelSemantics,
   { isAttack: props.isAttack, attackBudget: props.attackBudget, enablePrivacy: props.enablePrivacy }
 ))
-
-const getPreviousEnvValue = (name: string) =>
-  previousState.value?.envVariables?.find(variable => variable.name === name)?.value
-
-const getProvenanceForVariable = (name: string) =>
-  props.modelSnapshot?.environmentProvenance?.find((p: EnvironmentValueProvenance) => p.name === name) || null
-
-const environmentVariableTitle = (name: string, value: string) => {
-  const previous = getPreviousEnvValue(name)
-  const displayName = formatEnvironmentModelToken(name, name)
-  const displayValue = formatEnvironmentModelToken(name, value)
-
-  let title = previous === undefined || previous === value
-    ? `${displayName}: ${displayValue}`
-    : `${displayName}: ${formatEnvironmentModelToken(name, previous)} -> ${displayValue}`
-
-  // Add concise cause explanation when value changed
-  if (previous !== undefined && previous !== value) {
-    const provenance = getProvenanceForVariable(name)
-    if (provenance) {
-      if (provenance.authorship === 'EXOGENOUS') {
-        // A value no submitted device writes moved on its own. Which rule permitted that depends on
-        // its type: a numeric value has a declared per-step interval, so the change is exactly what
-        // the user wrote; a discrete one has no such rule, so the model lets it take any declared
-        // value -- an abstraction the user needs named before they act on the trace.
-        title += provenance.semantics === 'ABSTRACTION'
-          ? ` (${t('app.traceVisualization.provenance.externalInput')})`
-          : ` (${t('app.traceVisualization.provenance.naturalEvolution', {
-              rate: provenance.naturalChangeRate ?? ''
-            })})`
-      } else if (provenance.authorship === 'DEVICE_CONTROLLED' && provenance.writers.length > 0) {
-        const writer = provenance.writers[0]
-        const writerLabel = formatDeviceModelToken?.({ varName: writer.deviceVarName } as any, writer.deviceVarName) || writer.deviceVarName
-        title += ` (${t('app.traceVisualization.provenance.affectedBy', { device: writerLabel })})`
-      } else if (provenance.authorship === 'COMPOSED') {
-        title += ` (${t('app.traceVisualization.provenance.affectedByMultiple', { count: provenance.writers.length })})`
-      }
-    }
-  }
-
-  return title
-}
 
 // Runtime compromised-point count from NuSMV globals, not the configured attack budget.
 const runtimeCompromisedPointCount = computed(() => {
@@ -295,7 +247,7 @@ watch(selectedStateIndex, () => {
         </button>
       </HintTooltip>
     </template>
-    <template v-if="modelComplete === false || (actualSteps !== undefined && requestedSteps !== undefined && actualSteps < requestedSteps) || !modelSemanticsConsistent || boardComparison === 'CHANGED'" #context>
+    <template v-if="modelComplete === false || (actualSteps !== undefined && requestedSteps !== undefined && actualSteps < requestedSteps) || !modelSemanticsConsistent || hasRunBoardDifference(boardComparison)" #context>
       <div
         v-if="modelComplete === false"
         class="mb-2 rounded-lg board-surface-warning px-3 py-2 text-[length:var(--iot-font-caption)] font-medium leading-4 board-text-warning"
@@ -320,11 +272,11 @@ watch(selectedStateIndex, () => {
       </div>
 
       <div
-        v-if="boardComparison === 'CHANGED'"
+        v-if="hasRunBoardDifference(boardComparison)"
         class="mb-2 rounded-lg board-surface-warning px-3 py-2 text-[length:var(--iot-font-caption)] font-medium leading-4 board-text-warning"
         data-testid="simulation-board-drift-warning"
       >
-        {{ t('app.playbackBoardInputChanged') }}
+        {{ t(boardComparison === 'SEMANTICS_CHANGED' ? 'app.runBoardSemanticsChanged' : 'app.playbackBoardInputChanged') }}
       </div>
     </template>
     <template #details>
@@ -336,7 +288,6 @@ watch(selectedStateIndex, () => {
         :current-rule-ids="currentRuleIds || []"
         :format-device-token="formatDeviceModelToken"
         :format-environment-token="formatEnvironmentModelToken"
-        :environment-title="environmentVariableTitle"
       />
     </template>
     <template #changes><slot name="changes" /></template>

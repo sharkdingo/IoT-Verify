@@ -184,8 +184,11 @@ for (const locale of ['en']) {
   }
 }
 
-for (const kind of ['verification', 'simulation'] as const) {
-  test(`watching an existing ${kind} task opens its progress and real result`, async ({ page, request }, testInfo) => {
+for (const [kind, closeBeforeCompletion] of [
+  ['verification', false], ['simulation', false], ['verification', true]
+] as const) {
+  const expectation = closeBeforeCompletion ? 'keeps its real result in history after closing progress' : 'opens its progress and real result'
+  test(`watching an existing ${kind} task ${expectation}`, async ({ page, request }, testInfo) => {
     const auth = await createAuthenticatedUser(request)
     await seedBoard(request, auth)
     const domain = kind === 'verification' ? 'verify' : 'simulate'
@@ -224,6 +227,23 @@ for (const kind of ['verification', 'simulation'] as const) {
     await expect(progress.getByTestId(`${kind}-frozen-task-summary`)).toContainText(`任务 #${task.id}`)
     await expect(progress).toContainText('31%')
     await page.screenshot({ path: testInfo.outputPath('watched-task-progress.png') })
+    if (closeBeforeCompletion) {
+      const urlBeforeClose = page.url()
+      await page.getByTestId(`close-${kind}-panel`).click()
+      await expect(progress).toBeHidden()
+      const background = page.getByTestId('mini-task-indicator')
+      await expect(background).toBeVisible()
+      release = true
+      await expect(background).toBeHidden()
+      await expect(page.getByTestId('verification-result-dialog')).toHaveCount(0)
+      expect(page.url()).toBe(urlBeforeClose)
+
+      await openTool(page, 'history')
+      await page.getByTestId('history-layer-results').click()
+      await page.getByTestId(`open-verification-run-${task.id}`).click()
+      await expect(page.getByTestId('verification-result-dialog')).toBeVisible()
+      return
+    }
     release = true
     if (kind === 'verification') await expect(page.getByTestId('verification-result-dialog')).toBeVisible()
     else await expect(page.getByTestId('simulation-timeline-host')).toBeVisible()

@@ -1,5 +1,6 @@
 package cn.edu.nju.Iot_Verify.component.aitool.verification;
 
+import cn.edu.nju.Iot_Verify.dto.model.ModelSemanticsVersion;
 import cn.edu.nju.Iot_Verify.component.ai.model.LlmToolSpec;
 import cn.edu.nju.Iot_Verify.component.aitool.AbstractAiTool;
 import cn.edu.nju.Iot_Verify.dto.verification.VerificationRunSummaryDto;
@@ -25,7 +26,8 @@ public class ListVerificationRunsTool extends AbstractAiTool {
 
     private static final String INTERPRETATION = "These summaries report formula outcomes only and omit response-trigger reachability. "
             + "SATISFIED does not establish preserved functionality. Use get_verification_run to inspect "
-            + "per-specification outcomes and antecedentReachability.";
+            + "per-specification outcomes and antecedentReachability. "
+            + VerificationToolPresenter.MODEL_COMPARISON_GUIDANCE;
 
     private final VerificationService verificationService;
 
@@ -69,6 +71,7 @@ public class ListVerificationRunsTool extends AbstractAiTool {
                     summary.put("unavailableReasonCode", run.getUnavailableReasonCode());
                 } else {
                     summary.put("outcome", run.getOutcome());
+                    summary.put("modelSemanticsCurrent", ModelSemanticsVersion.isCurrent(run.getModelSnapshot()));
                     summary.put("modelComplete", run.getModelComplete());
                     summary.put("violatedSpecCount", run.getViolatedSpecCount());
                     summary.put("counterexampleCount", run.getCounterexampleCount());

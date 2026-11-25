@@ -99,6 +99,50 @@ class BoardSemanticValidatorTest {
     }
 
     @Test
+    void acceptsAnEnumMemberExcludedOnlyUnderDifferentCase() {
+        var issue = BoardSemanticValidator.validateSpecConditionGroup(booleanLikeEnumContext(), List.of(
+                specCondition("variable", "flag", "in", "True"),
+                specCondition("variable", "flag", "!=", "true")
+        ), "a");
+
+        assertNull(issue);
+    }
+
+    @Test
+    void rejectsConflictingEnumMembersWithDifferentCase() {
+        var issue = BoardSemanticValidator.validateSpecConditionGroup(booleanLikeEnumContext(), List.of(
+                specCondition("variable", "flag", "=", "True"),
+                specCondition("variable", "flag", "=", "true")
+        ), "a");
+
+        assertNotNull(issue);
+        assertEquals("CONTRADICTORY_CONDITION_GROUP", issue.reasonCode());
+    }
+
+    @Test
+    void differentEnumCaseDoesNotMakeAFixedValueReachable() {
+        var issue = BoardSemanticValidator.validateRuleConditionGroup(booleanLikeEnumContext(), List.of(
+                ruleCondition("variable", "flag", "=", "true")
+        ), null);
+
+        assertNotNull(issue);
+        assertEquals("UNREACHABLE_CONDITION_GROUP", issue.reasonCode());
+    }
+
+    @Test
+    void apiSignalConjunctionComparesBooleanLiteralsIgnoringCase() {
+        var context = context();
+        context.templatesByName().get("heater").getManifest().getApis().get(0).setSignal(true);
+
+        var issue = BoardSemanticValidator.validateSpecConditionGroup(context, List.of(
+                specCondition("api", "start", "in", "fAlSe, TrUe"),
+                specCondition("api", "start", "=", "FALSE")
+        ), "a");
+
+        assertNull(issue);
+    }
+
+    @Test
     void rejectsCommandWhoseRequiredStartStateCannotMeetConditions() {
         RuleDto.Command command = RuleDto.Command.builder()
                 .deviceName("device-1")
@@ -272,6 +316,16 @@ class BoardSemanticValidatorTest {
 
         return BoardSemanticValidator.recommendationContext(
                 List.of(node), List.of(template), List.of(environment));
+    }
+
+    private static BoardSemanticValidator.BoardContext booleanLikeEnumContext() {
+        var context = context();
+        var flag = DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
+                .name("flag").isInside(true).falsifiableWhenCompromised(false)
+                .trust("trusted").privacy("public").values(List.of("True", "true")).build();
+        context.templatesByName().get("heater").getManifest().setInternalVariables(List.of(flag));
+        context.nodesById().get("device-1").setVariables(List.of(new VariableStateDto("flag", "True", "trusted")));
+        return context;
     }
 
     private static BoardSemanticValidator.BoardContext context() {

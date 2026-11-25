@@ -2,6 +2,8 @@ package cn.edu.nju.Iot_Verify.service.impl;
 
 import cn.edu.nju.Iot_Verify.component.nusmv.fixer.RuleFixer;
 import cn.edu.nju.Iot_Verify.component.nusmv.fixer.strategy.FixStrategyApplier;
+import cn.edu.nju.Iot_Verify.component.nusmv.generator.AttackScenarioSurfaceValidator;
+import cn.edu.nju.Iot_Verify.component.nusmv.generator.AttackSurface;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvGenerator;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceReferenceResolver;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvData;
@@ -24,6 +26,7 @@ import cn.edu.nju.Iot_Verify.dto.fix.PreferredRange;
 import cn.edu.nju.Iot_Verify.dto.fix.PreferredRangeSelection;
 import cn.edu.nju.Iot_Verify.dto.fix.TemplateSnapshotComparison;
 import cn.edu.nju.Iot_Verify.dto.model.ModelGenerationIssueDto;
+import cn.edu.nju.Iot_Verify.dto.model.ModelSemanticsVersion;
 import cn.edu.nju.Iot_Verify.dto.model.ModelTokenSource;
 import cn.edu.nju.Iot_Verify.dto.model.TemplateSnapshotBundleDto;
 import cn.edu.nju.Iot_Verify.dto.model.InteractiveOperationStage;
@@ -33,6 +36,7 @@ import cn.edu.nju.Iot_Verify.dto.trace.TraceDto;
 import cn.edu.nju.Iot_Verify.dto.verification.VerificationRequestDto;
 import cn.edu.nju.Iot_Verify.exception.BadRequestException;
 import cn.edu.nju.Iot_Verify.exception.FixApplyPreflightUnavailableException;
+import cn.edu.nju.Iot_Verify.exception.ModelSemanticsChangedException;
 import cn.edu.nju.Iot_Verify.exception.PersistedDataIntegrityException;
 import cn.edu.nju.Iot_Verify.exception.ResourceNotFoundException;
 import cn.edu.nju.Iot_Verify.exception.SmvGenerationException;
@@ -89,14 +93,18 @@ public class FixServiceImpl implements FixService {
 
     @Override
     @Transactional(readOnly = true)
+    public void requireCurrentVerificationSource(Long userId, Long traceId) {
+        loadContext(userId, traceId);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
     public FaultLocalizationResultDto localizeFault(Long userId, Long traceId) {
         VerificationContext ctx = loadContext(userId, traceId);
-        ModelBoundaryInput modelInput = modelBoundaryInput(
-                ctx.request, ctx.templateManifests, ctx.modelTokenSourcesByDeviceId);
         List<FaultRuleDto> faultRules = ruleFixer.localizeFaults(
                 ctx.trace.getStates(), ctx.request.getRules(), ctx.trace.getViolatedSpecId(),
-                ctx.request.getSpecs(), modelInput.deviceSmvMap());
-        attachModelTokenSources(faultRules, modelInput.deviceSmvMap());
+                ctx.request.getSpecs(), ctx.deviceSmvMap());
+        attachModelTokenSources(faultRules, ctx.deviceSmvMap());
         boolean modelComplete = sourceModelComplete(ctx.trace);
         String summary = faultRules.isEmpty()
                 ? "No automation rule that fired in the counterexample can influence the violated property. "
@@ -144,9 +152,7 @@ public class FixServiceImpl implements FixService {
         VerificationContext ctx = loadContext(userId, traceId);
         VerificationRequestDto req = ctx.request;
         progress.accept(InteractiveOperationStage.PREPARING_MODEL);
-        ModelBoundaryInput modelInput = modelBoundaryInput(
-                req, ctx.templateManifests, ctx.modelTokenSourcesByDeviceId);
-        Map<String, DeviceSmvData> deviceSmvMap = modelInput.deviceSmvMap();
+        Map<String, DeviceSmvData> deviceSmvMap = ctx.deviceSmvMap();
 
         if (!sourceModelComplete(ctx.trace)) {
             progress.accept(InteractiveOperationStage.FINALIZING);
@@ -160,8 +166,8 @@ public class FixServiceImpl implements FixService {
                 ctx.trace.getViolatedSpecId(),
                 ctx.trace.getStates(),
                 req.getRules(),
-                modelInput.devices(),
-                modelInput.environmentVariables(),
+                req.getDevices(),
+                req.getEnvironmentVariables(),
                 req.getSpecs(),
                 deviceSmvMap,
                 userId,
@@ -219,9 +225,7 @@ public class FixServiceImpl implements FixService {
             throw new BadRequestException("Verification context has no rules; cannot apply fix.");
         }
 
-        ModelBoundaryInput modelInput = modelBoundaryInput(
-                ctx.request, ctx.templateManifests, ctx.modelTokenSourcesByDeviceId);
-        Map<String, DeviceSmvData> deviceSmvMap = modelInput.deviceSmvMap();
+        Map<String, DeviceSmvData> deviceSmvMap = ctx.deviceSmvMap();
 
         FixSuggestionDto suggestionToApply = trusted;
 
@@ -247,7 +251,8 @@ public class FixServiceImpl implements FixService {
                     // Guard against board drift: the snapshot the fix was computed against must still line up
                     // with the current board rules by ordered fingerprint. Internal fix coordinates must never
                     // be allowed to target a different rule or condition after the board changes.
-                    assertBoardAlignedWithSnapshot(boardRules, snapshotRules, deviceSmvMap);
+                    AttackScenarioDto scenario = ctx.request.getAttackScenario();
+                    assertBoardAlignedWithSnapshot(boardRules, snapshotRules, deviceSmvMap, scenario);
                     // Apply the exact signed suggestion shown to the user. Snapshot checks above ensure its
                     // existing NuSMV evidence still describes the model being changed.
                     Map<String, String> persistenceDeviceRefs = buildPersistenceDeviceRefAliases(
@@ -255,9 +260,24 @@ public class FixServiceImpl implements FixService {
                     Map<String, String> displayDeviceNames = "remove".equals(validatedStrategy)
                             ? Map.of()
                             : buildDisplayDeviceNames(currentSnapshot.nodes());
-                    return FixStrategyApplier.apply(
+                    List<RuleDto> proposedRules = FixStrategyApplier.apply(
                             validatedStrategy, suggestionToApply, boardRules, deviceSmvMap,
                             persistenceDeviceRefs, displayDeviceNames);
+                    if (scenario != null && scenario.getMode() == AttackScenarioDto.Mode.EXACT_POINTS) {
+                        // Candidate commands still carry Board IDs; the validator reports model IDs.
+                        Map<String, DeviceSmvData> deviceRefs = new LinkedHashMap<>(currentBoard.currentDeviceSmvMap());
+                        for (DeviceSmvData device : currentBoard.currentDeviceSmvMap().values()) {
+                            String boardRef = persistenceDeviceRefs.get(device.getVarName());
+                            if (boardRef != null) deviceRefs.putIfAbsent(boardRef, device);
+                        }
+                        AttackScenarioSurfaceValidator.firstExactSelectionViolation(
+                                scenario, AttackSurface.analyze(proposedRules, deviceRefs),
+                                proposedRules).ifPresent(violation -> {
+                            throw new BadRequestException("The proposed repair changes an exact selection. "
+                                    + violation.message());
+                        });
+                    }
+                    return proposedRules;
                 });
         List<RuleDto> saved = mutation.getCurrentItems();
         log.info("Applied '{}' fix for trace {} (user {}): {} rule(s) -> {} rule(s)",
@@ -284,17 +304,27 @@ public class FixServiceImpl implements FixService {
      * stale, so we reject rather than risk editing the wrong rule.
      */
     private void assertBoardAlignedWithSnapshot(List<RuleDto> boardRules, List<RuleDto> snapshotRules,
-                                                Map<String, DeviceSmvData> deviceSmvMap) {
+                                                Map<String, DeviceSmvData> deviceSmvMap,
+                                                AttackScenarioDto scenario) {
         if (boardRules.size() != snapshotRules.size()) {
             throw new BadRequestException("Board rules changed since verification ("
                     + snapshotRules.size() + " rules verified, " + boardRules.size()
                     + " now). Please re-run verification before applying a fix.");
         }
+        Set<Long> selectedRuleIds = scenario != null && scenario.getMode() == AttackScenarioDto.Mode.EXACT_POINTS
+                ? scenario.selectedAutomationLinkRuleIds() : Set.of();
         for (int i = 0; i < boardRules.size(); i++) {
-            String boardFp = ruleFingerprint(boardRules.get(i), deviceSmvMap);
-            String snapFp = ruleFingerprint(snapshotRules.get(i), deviceSmvMap);
+            RuleDto boardRule = boardRules.get(i);
+            RuleDto snapshotRule = snapshotRules.get(i);
+            if (snapshotRule.getId() != null && selectedRuleIds.contains(snapshotRule.getId())
+                    && !Objects.equals(boardRule.getId(), snapshotRule.getId())) {
+                throw new BadRequestException("A selected automation link changed since verification. "
+                        + "Please re-run verification before applying a fix.");
+            }
+            String boardFp = ruleFingerprint(boardRule, deviceSmvMap);
+            String snapFp = ruleFingerprint(snapshotRule, deviceSmvMap);
             if (!Objects.equals(boardFp, snapFp)) {
-                throw new BadRequestException(ruleDriftLabel(boardRules.get(i), i)
+                throw new BadRequestException(ruleDriftLabel(boardRule, i)
                         + " changed since verification. "
                         + "Please re-run verification before applying a fix.");
             }
@@ -327,7 +357,7 @@ public class FixServiceImpl implements FixService {
      * <p>Compares a canonical SEMANTIC fingerprint of the trace's snapshot against the current board.
      * Both sides are canonicalized identically ({@link BoardSemanticFingerprint}) — device names
      * normalized, effective variable/trust/privacy values derived from the same manifests NuSMV uses,
-     * values de-quoted — so an untouched board matches its model-boundary normalized snapshot instead of
+     * numeric variable values normalized — so an untouched board matches its model-boundary normalized snapshot instead of
      * misfiring (the failure mode of the earlier byte-equality attempt). {@code snapshotDeviceSmvMap}
      * was built from the snapshot devices; the current board gets its own map so omitted instance
      * overrides resolve against the same manifests.</p>
@@ -965,6 +995,9 @@ public class FixServiceImpl implements FixService {
                 .stream().findFirst().orElse(null);
         TraceMapper.PersistedContext persisted = traceMapper.readContext(po, run);
         TraceDto trace = persisted.trace();
+        if (!ModelSemanticsVersion.isCurrent(trace.getModelSnapshot())) {
+            throw new ModelSemanticsChangedException();
+        }
         VerificationRequestDto request = persisted.request();
         if (request == null || request.getDevices() == null || request.getDevices().isEmpty()) {
             throw invalidTraceContext(po, "requestJson", "verification request has no devices");
@@ -976,15 +1009,29 @@ public class FixServiceImpl implements FixService {
             throw invalidTraceContext(po, "requestJson", e.getMessage());
         }
 
-        FrozenTemplateSnapshots templateSnapshots = readFrozenTemplateSnapshots(po, persisted.templateSnapshotsJson(), request.getDevices());
+        FrozenTemplateSnapshots templateSnapshots = readFrozenTemplateSnapshots(
+                po, persisted.templateSnapshotsJson(), request.getDevices());
+        List<BoardEnvironmentVariableDto> environment = request.getEnvironmentVariables();
+        if (environment == null || environment.size() != trace.getModelSnapshot().getEnvironmentVariableCount()
+                || environment.stream().anyMatch(value -> value == null
+                || !isCanonicalNonBlank(value.getName()) || !isCanonicalNonBlank(value.getValue())
+                || !isCanonicalNonBlank(value.getTrust()) || !isCanonicalNonBlank(value.getPrivacy()))) {
+            throw invalidTraceContext(po, "requestJson", "the frozen environment pool is missing or incomplete");
+        }
+        Map<String, DeviceManifest> manifests = templateSnapshots.manifests();
+        List<DeviceVerificationDto> devices = request.getDevices();
+        applyFrozenModelTokenSources(devices, templateSnapshots.modelTokenSourcesByDeviceId());
+        Map<String, DeviceSmvData> deviceSmvMap =
+                smvGenerator.buildDeviceSmvMapFromTemplateSnapshots(devices, manifests);
+        Map<String, String> errors = NusmvRequestValidator.newErrors();
+        NusmvRequestValidator.validateEnvironmentVariables(environment, deviceSmvMap, errors);
+        if (!errors.isEmpty()) {
+            throw invalidTraceContext(po, "requestJson", String.join("; ", errors.values()));
+        }
 
         log.debug("Loaded verification context for trace {}", traceId);
 
-        return new VerificationContext(
-                trace,
-                request,
-                Map.copyOf(templateSnapshots.manifests()),
-                Map.copyOf(templateSnapshots.modelTokenSourcesByDeviceId()));
+        return new VerificationContext(trace, request, manifests, deviceSmvMap);
     }
 
     private boolean isCanonicalNonBlank(String value) {
@@ -1000,35 +1047,14 @@ public class FixServiceImpl implements FixService {
         return new PersistedDataIntegrityException("verification trace", trace.getId(), field, detail);
     }
 
-    private ModelBoundaryInput modelBoundaryInput(VerificationRequestDto request,
-                                                   Map<String, DeviceManifest> templateManifests,
-                                                   Map<String, ModelTokenSource> modelTokenSourcesByDeviceId) {
-        List<DeviceVerificationDto> devices = request.getDevices() == null ? List.of() : request.getDevices();
-        applyFrozenModelTokenSources(devices, modelTokenSourcesByDeviceId);
-        Map<String, DeviceSmvData> rawDeviceSmvMap =
-                smvGenerator.buildDeviceSmvMapFromTemplateSnapshots(devices, templateManifests);
-        List<BoardEnvironmentVariableDto> environmentVariables = NusmvEnvironmentPool.mergeWithDefaults(
-                request.getEnvironmentVariables(), rawDeviceSmvMap);
-        request.setEnvironmentVariables(environmentVariables);
-        List<DeviceVerificationDto> expandedDevices = NusmvEnvironmentPool.expandDevices(
-                devices, environmentVariables, rawDeviceSmvMap);
-        Map<String, DeviceSmvData> expandedDeviceSmvMap =
-                smvGenerator.buildDeviceSmvMapFromTemplateSnapshots(expandedDevices, templateManifests);
-        return new ModelBoundaryInput(expandedDevices, environmentVariables, expandedDeviceSmvMap);
-    }
-
     private record VerificationContext(TraceDto trace,
                                        VerificationRequestDto request,
                                        Map<String, DeviceManifest> templateManifests,
-                                       Map<String, ModelTokenSource> modelTokenSourcesByDeviceId) {}
+                                       Map<String, DeviceSmvData> deviceSmvMap) {}
 
     private record FrozenTemplateSnapshots(
             Map<String, DeviceManifest> manifests,
             Map<String, ModelTokenSource> modelTokenSourcesByDeviceId) {}
-
-    private record ModelBoundaryInput(List<DeviceVerificationDto> devices,
-                                      List<BoardEnvironmentVariableDto> environmentVariables,
-                                      Map<String, DeviceSmvData> deviceSmvMap) {}
 
     private record CurrentBoardSemanticContext(List<DeviceVerificationDto> currentDevices,
                                                Map<String, DeviceSmvData> currentDeviceSmvMap) {}

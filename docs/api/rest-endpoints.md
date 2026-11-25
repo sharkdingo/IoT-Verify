@@ -127,7 +127,6 @@ Verified against code on 2026-10-26.
 
 | Method | Path | Note | Detail |
 | :--- | :--- | :--- | :--- |
-| GET | `/api/fuzz/model-fingerprint` | Read the current Board's canonical bounded-search model fingerprint without creating a task | [fuzzing.md](fuzzing.md) |
 | POST | `/api/fuzz/workload/preview` | Calculate the current Board's authoritative bounded-search workload without creating a task | [fuzzing.md](fuzzing.md) |
 | POST | `/api/fuzz/paper-domain/preview` | Read the current Board's authoritative paper-mode initial-state and Event domains without creating a task | [fuzzing.md](fuzzing.md) |
 | POST | `/api/fuzz/async` | Capture the current Board and submit a bounded background search | [fuzzing.md](fuzzing.md) |

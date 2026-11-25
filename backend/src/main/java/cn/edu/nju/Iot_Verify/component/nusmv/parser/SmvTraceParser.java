@@ -72,7 +72,7 @@ public class SmvTraceParser {
         TraceStateDto currentState = null;
         Map<String, TraceDeviceDto> currentDevicesById = new HashMap<>();
         String pendingStateName = null;
-        Map<String, Map<String, String>> previousModeValuesByDevice = new HashMap<>();
+        Map<String, Map<String, String>> modeValuesByDevice = new HashMap<>();
         Map<Integer, Boolean> ruleExecutionValues = new HashMap<>();
         Map<Integer, Boolean> automationLinkAttackValues = new HashMap<>();
         TraceStateDto previousCompleteState = null;
@@ -95,7 +95,7 @@ public class SmvTraceParser {
             if (stateMatcher != null && stateMatcher.find()) {
                 int stateIdx = Integer.parseInt(stateMatcher.group(1));
                 if (currentState != null) {
-                    finalizeModeStates(currentState, deviceSmvMap, previousModeValuesByDevice);
+                    finalizeModeStates(currentState, deviceSmvMap, modeValuesByDevice);
                     materializeCompleteState(currentState, previousCompleteState);
                     finalizeTriggeredRules(currentState, ruleExecutionValues, rules);
                     finalizeCompromisedAutomationLinks(currentState, automationLinkAttackValues, rules);
@@ -122,19 +122,19 @@ public class SmvTraceParser {
                     pendingStateName = null;
                 }
 
-                parseLineVariables(currentState, currentDevicesById, line, deviceSmvMap, pendingStateName,
+                parseLineVariables(currentState, currentDevicesById, line, deviceSmvMap, pendingStateName, modeValuesByDevice,
                         ruleExecutionValues, automationLinkAttackValues);
                 continue;
             }
 
             if (currentState != null) {
-                parseLineVariables(currentState, currentDevicesById, line, deviceSmvMap, pendingStateName,
+                parseLineVariables(currentState, currentDevicesById, line, deviceSmvMap, pendingStateName, modeValuesByDevice,
                         ruleExecutionValues, automationLinkAttackValues);
             }
         }
 
         if (currentState != null) {
-            finalizeModeStates(currentState, deviceSmvMap, previousModeValuesByDevice);
+            finalizeModeStates(currentState, deviceSmvMap, modeValuesByDevice);
             materializeCompleteState(currentState, previousCompleteState);
             finalizeTriggeredRules(currentState, ruleExecutionValues, rules);
             finalizeCompromisedAutomationLinks(currentState, automationLinkAttackValues, rules);
@@ -177,6 +177,7 @@ public class SmvTraceParser {
                                     String line,
                                     Map<String, DeviceSmvData> deviceSmvMap,
                                     String pendingStateName,
+                                    Map<String, Map<String, String>> modeValuesByDevice,
                                     Map<Integer, Boolean> ruleExecutionValues,
                                     Map<Integer, Boolean> automationLinkAttackValues) {
         int assignmentIndex = line.indexOf('=');
@@ -192,7 +193,8 @@ public class SmvTraceParser {
                         varMatcher.group(2),
                         varMatcher.group(3),
                         deviceSmvMap,
-                        pendingStateName);
+                        pendingStateName,
+                        modeValuesByDevice);
             }
         }
 
@@ -213,7 +215,8 @@ public class SmvTraceParser {
                                  String attr,
                                  String value,
                                  Map<String, DeviceSmvData> deviceSmvMap,
-                                 String stateName) {
+                                 String stateName,
+                                 Map<String, Map<String, String>> modeValuesByDevice) {
         if (deviceId == null || attr == null || value == null) {
             return;
         }
@@ -240,21 +243,21 @@ public class SmvTraceParser {
         }
         if (devTrace.getState() == null && stateName != null) {
             String matchedState = matchState(smv, stateName);
-            devTrace.setState(matchedState != null ? matchedState : stateName);
-            if (devTrace.getMode() == null && smv.getModes() != null && smv.getModes().size() == 1) {
-                devTrace.setMode(smv.getModes().get(0));
+            String stateValue = matchedState != null ? matchedState : stateName;
+            if (smv.getModes() != null && smv.getModes().size() == 1) {
+                String mode = smv.getModes().get(0);
+                stateValue = smv.authoredStateName(mode, stateValue);
+                if (devTrace.getMode() == null) {
+                    devTrace.setMode(smv.authoredModeName(mode));
+                }
             }
+            devTrace.setState(stateValue);
         }
 
-        // NuSMV state variable name is mode name (e.g. HvacMode / SwitchState).
+        // Track the latest mode assignments separately from authored trace variables.
+        // NuSMV prints only changes after the initial state.
         if (smv.getModes() != null && smv.getModes().contains(attr)) {
-            TraceVariableDto modeVar = findOrCreateVariable(devTrace, "__mode__" + attr);
-            modeVar.setValue(cleanValue);
-            return;
-        }
-
-        if ("is_attack".equals(attr)) {
-            devTrace.setCompromised("TRUE".equalsIgnoreCase(cleanValue));
+            modeValuesByDevice.computeIfAbsent(deviceId, key -> new HashMap<>()).put(attr, cleanValue);
             return;
         }
 
@@ -270,6 +273,11 @@ public class SmvTraceParser {
                 return;
             }
             varTrace.setValue(cleanValue);
+            return;
+        }
+
+        if (SmvConstants.DEVICE_ATTACK_FLAG.equals(attr)) {
+            devTrace.setCompromised("TRUE".equalsIgnoreCase(cleanValue));
             return;
         }
 
@@ -578,11 +586,7 @@ public class SmvTraceParser {
     }
 
     private boolean declaresEnvironmentVariable(DeviceSmvData smv, String name) {
-        if (smv == null || name == null) return false;
-        return (smv.getEnvVariables() != null && smv.getEnvVariables().containsKey(name))
-                || (smv.getImpactedEnvironmentVariables() != null
-                    && smv.getImpactedEnvironmentVariables().containsKey(name))
-                || (smv.getImpactedVariables() != null && smv.getImpactedVariables().contains(name));
+        return smv != null && name != null && smv.getSharedDeclarations().containsKey(name);
     }
 
     private String toPublicEnvironmentVariableName(String smvName, Map<String, DeviceSmvData> deviceSmvMap) {
@@ -590,14 +594,14 @@ public class SmvTraceParser {
             return smvName;
         }
 
-        return smvName.substring("a_".length());
+        return smvName.substring(SmvConstants.ENVIRONMENT_POOL_PREFIX.length());
     }
 
     private boolean isGeneratedEnvironmentVariableName(String smvName, Map<String, DeviceSmvData> deviceSmvMap) {
-        if (smvName == null || !smvName.startsWith("a_")) {
+        if (smvName == null || !smvName.startsWith(SmvConstants.ENVIRONMENT_POOL_PREFIX)) {
             return false;
         }
-        String candidate = smvName.substring("a_".length());
+        String candidate = smvName.substring(SmvConstants.ENVIRONMENT_POOL_PREFIX.length());
         return isKnownEnvironmentVariable(candidate, deviceSmvMap);
     }
 
@@ -606,22 +610,7 @@ public class SmvTraceParser {
             return false;
         }
 
-        for (DeviceSmvData smv : deviceSmvMap.values()) {
-            if (smv == null) {
-                continue;
-            }
-            if (smv.getEnvVariables() != null && smv.getEnvVariables().containsKey(name)) {
-                return true;
-            }
-            if (smv.getImpactedEnvironmentVariables() != null
-                    && smv.getImpactedEnvironmentVariables().containsKey(name)) {
-                return true;
-            }
-            if (smv.getImpactedVariables() != null && smv.getImpactedVariables().contains(name)) {
-                return true;
-            }
-        }
-        return false;
+        return deviceSmvMap.values().stream().anyMatch(smv -> declaresEnvironmentVariable(smv, name));
     }
 
     private boolean isKnownDeviceVariable(DeviceSmvData smv, String name) {
@@ -725,7 +714,7 @@ public class SmvTraceParser {
             String stateName = generatedName.substring((mode + "_").length());
             List<String> modeStates = smv.getModeStates() != null ? smv.getModeStates().get(mode) : null;
             if (modeStates != null && modeStates.contains(stateName)) {
-                return new StateProperty(mode, stateName);
+                return new StateProperty(smv.authoredModeName(mode), smv.authoredStateName(mode, stateName));
             }
         }
         return null;
@@ -768,18 +757,6 @@ public class SmvTraceParser {
                 ? device.getModelTokenSource() : ModelTokenSource.UNKNOWN;
     }
 
-    private TraceVariableDto findVariable(TraceDeviceDto devTrace, String name) {
-        if (devTrace.getVariables() == null) {
-            return null;
-        }
-        for (TraceVariableDto var : devTrace.getVariables()) {
-            if (name.equals(var.getName())) {
-                return var;
-            }
-        }
-        return null;
-    }
-
     private TraceTrustPrivacyDto findOrCreateTrustPrivacy(TraceDeviceDto devTrace,
                                                           boolean trustList,
                                                           String propertyScope,
@@ -813,7 +790,7 @@ public class SmvTraceParser {
 
     private void finalizeModeStates(TraceStateDto state,
                                     Map<String, DeviceSmvData> deviceSmvMap,
-                                    Map<String, Map<String, String>> previousModeValuesByDevice) {
+                                    Map<String, Map<String, String>> modeValuesByDevice) {
         if (state == null || state.getDevices() == null) {
             return;
         }
@@ -824,26 +801,17 @@ public class SmvTraceParser {
                 continue;
             }
 
-            Map<String, String> previousModeValues =
-                    previousModeValuesByDevice.computeIfAbsent(dev.getDeviceId(), k -> new HashMap<>());
+            Map<String, String> deviceModeValues = modeValuesByDevice.getOrDefault(dev.getDeviceId(), Map.of());
             List<String> modeValues = new ArrayList<>();
             List<String> modeNames = new ArrayList<>();
             boolean hasAnyModeValue = false;
             boolean hasAllModeValues = true;
             for (String mode : smv.getModes()) {
-                TraceVariableDto modeVar = findVariable(dev, "__mode__" + mode);
-                String modeValue = null;
-                if (modeVar != null && modeVar.getValue() != null && !modeVar.getValue().isBlank()) {
-                    modeValue = modeVar.getValue();
-                    previousModeValues.put(mode, modeValue);
-                } else {
-                    modeValue = previousModeValues.get(mode);
-                }
-
+                String modeValue = deviceModeValues.get(mode);
                 if (modeValue != null && !modeValue.isBlank()) {
                     hasAnyModeValue = true;
-                    modeValues.add(modeValue);
-                    modeNames.add(mode);
+                    modeValues.add(smv.authoredStateName(mode, modeValue));
+                    modeNames.add(smv.authoredModeName(mode));
                 } else {
                     hasAllModeValues = false;
                 }
@@ -852,7 +820,7 @@ public class SmvTraceParser {
             if (hasAnyModeValue) {
                 if (smv.getModes().size() > 1 && hasAllModeValues) {
                     dev.setState(String.join(";", modeValues));
-                    dev.setMode(String.join(";", smv.getModes()));
+                    dev.setMode(String.join(";", modeNames));
                 } else if (smv.getModes().size() == 1) {
                     dev.setState(modeValues.get(0));
                     dev.setMode(modeNames.get(0));
@@ -866,15 +834,12 @@ public class SmvTraceParser {
             // state 已由早期路径设置但 mode 仍为空时，尝试回填
             if (dev.getMode() == null && smv.getModes() != null) {
                 if (smv.getModes().size() == 1) {
-                    dev.setMode(smv.getModes().get(0));
+                    dev.setMode(smv.authoredModeName(smv.getModes().get(0)));
                 } else if (!modeNames.isEmpty()) {
                     dev.setMode(modeNames.get(0));
                 }
             }
 
-            if (dev.getVariables() != null) {
-                dev.getVariables().removeIf(v -> v.getName() != null && v.getName().startsWith("__mode__"));
-            }
         }
     }
 

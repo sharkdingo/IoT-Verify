@@ -866,13 +866,22 @@ class SimulationServiceImplTest {
         RuleDto rule = makeRule();
         List<RuleDto> rules = new ArrayList<>(List.of(rule));
         SimulationRequestDto request = simRequest(devices, rules, 10, false, 0, false);
-        Map<String, DeviceSmvData> resolvedSubmissionModel = new java.util.LinkedHashMap<>();
-        resolvedSubmissionModel.put("testdevice", new DeviceSmvData());
+        var manifest = DeviceManifest.builder().name("light").modes(List.of("Power")).initState("on")
+                .workingStates(List.of(DeviceManifest.WorkingState.builder().name("on").build()))
+                .apis(List.of(DeviceManifest.API.builder().name("turnOn").endState("on").signal(false).build()))
+                .build();
+        var resolvedDevice = new DeviceSmvData();
+        resolvedDevice.setVarName("testdevice");
+        resolvedDevice.setManifest(manifest);
+        resolvedDevice.getModes().add("Power");
+        resolvedDevice.getModeStates().put("Power", List.of("on"));
+        var capturedModel = new SmvGenerator.CapturedDeviceModel(
+                Map.of("light", manifest), Map.of("testdevice", resolvedDevice));
 
-        when(smvGenerator.buildDeviceSmvMapFromTemplateSnapshots(anyList(), anyMap()))
-                .thenReturn(resolvedSubmissionModel);
-        when(smvGenerator.generateWithEnvironment(any(), any(), anyList(), any(), any(), any(), anyBoolean(), any(), any()))
-                .thenReturn(genResult);
+        when(smvGenerator.captureDeviceModelFromTemplateSnapshots(anyList(), anyMap()))
+                .thenReturn(capturedModel);
+        doReturn(genResult).when(smvGenerator).generateWithResolvedDeviceModel(
+                anyLong(), anyList(), anyList(), anyList(), anyList(), any(), anyBoolean(), any(), any(), anyMap());
         when(nusmvExecutor.executeInteractiveSimulation(any(), anyInt()))
                 .thenReturn(SimulationOutput.success("trace", "raw"));
         when(smvTraceParser.parseCounterexampleStates(any(), any(), anyList()))
@@ -897,19 +906,15 @@ class SimulationServiceImplTest {
 
         capturingExecutor.capturedTask().run();
 
-        verify(smvGenerator).generateWithResolvedDeviceModel(eq(1L), anyList(), anyList(), anyList(), eq(List.of()),
-                eq(AttackScenarioDto.none()), eq(false), eq(SmvGenerator.GeneratePurpose.SIMULATION),
-                argThat(ctx -> "task".equals(ctx.scope()) && Objects.equals(15L, ctx.id())),
-                same(resolvedSubmissionModel));
-
-        verify(smvGenerator).generateWithEnvironment(eq(1L),
+        verify(smvGenerator).generateWithResolvedDeviceModel(eq(1L),
                 argThat(sentDevices -> sentDevices.size() == 1
                         && "testdevice".equals(sentDevices.get(0).getVarName())),
                 eq(List.of()),
                 argThat(sentRules -> sentRules.size() == 1
                         && "testdevice".equals(sentRules.get(0).getConditions().get(0).getDeviceName())),
                 eq(List.of()), eq(AttackScenarioDto.none()), eq(false), eq(SmvGenerator.GeneratePurpose.SIMULATION),
-                argThat(ctx -> "task".equals(ctx.scope()) && Objects.equals(15L, ctx.id())));
+                argThat(ctx -> "task".equals(ctx.scope()) && Objects.equals(15L, ctx.id())),
+                same(capturedModel.deviceSmvMap()));
         JsonNode requestJson = readRequestJson(fakeFile);
         assertEquals(10, requestJson.path("steps").asInt());
         assertEquals(0, requestJson.path("attackBudget").asInt());

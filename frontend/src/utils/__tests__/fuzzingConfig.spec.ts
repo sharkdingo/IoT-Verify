@@ -53,13 +53,14 @@ describe('fuzzing configuration limits', () => {
       ifConditions: [],
       thenConditions: []
     }
-    expect(getKnownFuzzingSpecificationIssue(specification))
+    const noSharedVariables = () => false
+    expect(getKnownFuzzingSpecificationIssue(specification, noSharedVariables))
       .toBe('TRUST_PRIVACY_UNSUPPORTED')
-    expect(isKnownFuzzingSpecificationSupported(specification)).toBe(false)
+    expect(isKnownFuzzingSpecificationSupported(specification, noSharedVariables)).toBe(false)
     expect(isKnownFuzzingSpecificationSupported({
       ...specification,
       aConditions: [{ ...specification.aConditions[0], targetType: 'state' }]
-    })).toBe(true)
+    }, noSharedVariables)).toBe(true)
   })
 
   it('rejects invalid integer fields instead of relying on silent normalization', () => {
@@ -207,14 +208,7 @@ describe('fuzzing bounds mirror the backend', () => {
       expect(diverged).toEqual([])
     })
 
-  it('flags a reported-reading specification as unexplorable, mirroring the backend', () => {
-    /*
-     * The explorer keeps one value per shared reading and models no compromised device, so it cannot tell
-     * "what this device said" from "what the home held" — it would answer the `environment` question and
-     * label the answer as this specification's. The backend refuses these with
-     * `REPORTED_READING_UNSUPPORTED`; this rule exists so the panel does not offer a run that will be
-     * refused, and must stay in step with it.
-     */
+  it('blocks shared reported readings while allowing a device-local report', () => {
     const spec = (variableSource?: string) => ({ name: 'Safety requirement',
       templateId: '1',
       aConditions: [{
@@ -229,10 +223,9 @@ describe('fuzzing bounds mirror the backend', () => {
       thenConditions: []
     }) as any
 
-    expect(getKnownFuzzingSpecificationIssue(spec('reported'))).toBe('REPORTED_READING_UNSUPPORTED')
-    // `environment` IS answerable: it is the one question the explorer's single value represents.
-    expect(getKnownFuzzingSpecificationIssue(spec('environment'))).toBeNull()
-    // A legacy condition that never chose is blocked earlier, at the run gate, not misreported here.
-    expect(getKnownFuzzingSpecificationIssue(spec(undefined))).toBeNull()
+    const sharedTemperature = (deviceId: string, key: string) => deviceId === 'd1' && key === 'temperature'
+    expect(getKnownFuzzingSpecificationIssue(spec('reported'), sharedTemperature)).toBe('REPORTED_READING_UNSUPPORTED')
+    expect(getKnownFuzzingSpecificationIssue(spec('reported'), () => false)).toBeNull()
+    expect(getKnownFuzzingSpecificationIssue(spec('environment'), sharedTemperature)).toBeNull()
   })
 })

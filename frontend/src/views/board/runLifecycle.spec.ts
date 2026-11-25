@@ -1,9 +1,11 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import ts from 'typescript'
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, reactive, ref } from 'vue'
 import { flushPromises } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
+import type { BoardModelFingerprints, ModelRunSnapshot } from '@/types/modelSemantics'
+import { compareModelSnapshot } from '@/utils/modelComparison'
 import { errorDetails, technicalErrorLines } from '@/utils/userMessage'
 import { countResponseTriggerWarnings, getVerificationOutcome } from './verificationResult'
 
@@ -22,6 +24,15 @@ const bind = (name: string, ports: Record<string, unknown>) => {
   }).outputText
   // Keep mutable component-scope counters live across awaits and deferred result actions.
   return new Function('ports', `with (ports) { ${javascript}; return ${name} }`)(ports)
+}
+
+const bindRun = (name: string, ports: Record<string, any>) => {
+  ports.boardAuthScopeEpoch ??= 0
+  ports.currentAuthUserId ??= ref(1)
+  ports.isCurrentBoardAuthScope ??= (epoch: number) => epoch === ports.boardAuthScopeEpoch && !ports.boardLifecycleDisposed
+  ports.captureBoardRunOwner = bind('captureBoardRunOwner', ports)
+  ports.deliverCompletedFuzzingRun = bind('deliverCompletedFuzzingRun', ports)
+  return bind(name, ports)
 }
 
 const deferred = () => {
@@ -50,6 +61,119 @@ describe('side-panel opening focus', () => {
 })
 
 describe('tracking an existing background task', () => {
+  it.each([
+    { closePanel: true, playback: false }, { closePanel: false, playback: true }
+  ])('keeps a watched exploration in the inbox after close=$closePanel or replay=$playback', async ({ closePanel, playback }) => {
+    const pending = deferred()
+    const ports = {
+      isFuzzing: ref(false), fuzzingTasks: ref([]), fuzzingWatchedTask: ref(null), fuzzingSettingsNotice: ref(null),
+      asyncFuzzingActive: ref(false), fuzzingCancelRequested: ref(false), cancellingFuzzingTask: ref(false),
+      fuzzingError: ref(null), paperDomainStaleRecoveryActive: ref(false), asyncFuzzingTask: ref(null),
+      normalizeTaskProgress: () => 0, taskProgressStatusKey: () => 'app.taskInitializing',
+      trackFuzzTask: vi.fn(), untrackFuzzTask: vi.fn(), closeHistoryPanel: vi.fn(),
+      showFuzzingPanel: ref(false), pollAsyncFuzzing: () => pending.promise, isModelPlaybackActive: ref(playback),
+      refreshCurrentBoardModelFingerprints: vi.fn(), presentFuzzingRun: vi.fn(), boardLifecycleDisposed: false,
+      loadTaskInbox: vi.fn(), markFuzzNotificationUnread: vi.fn(() => true), fuzzingCompletionMessage: () => 'finished',
+      notifyInfo: vi.fn(), notifyBlocked: vi.fn(), t: (key: string) => key
+    }
+    const watching = bindRun('watchFuzzingTask', ports)(17)
+    if (closePanel) ports.showFuzzingPanel.value = false
+    pending.resolve({ id: 17, initiator: 'USER', outcome: 'BUDGET_EXHAUSTED' })
+    await watching
+    expect(ports.presentFuzzingRun).not.toHaveBeenCalled()
+    expect(ports.markFuzzNotificationUnread).toHaveBeenCalledWith(expect.objectContaining({ runId: 17, kind: 'COMPLETED' }))
+    expect(ports.notifyInfo.mock.calls).toEqual(playback ? [['finished'], ['app.fuzzResultDeferredForPlayback']] : [['finished']])
+  })
+
+  it('drops completed exploration detail after its board is disposed', async () => {
+    const pending = deferred()
+    class PollingAbortedError extends Error {}
+    const ports: Record<string, any> = {
+      boardLifecycleDisposed: false, pollingEpoch: 0, ASYNC_TASK_MAX_POLLS: 1, PollingAbortedError,
+      fuzzingApi: { getTask: vi.fn().mockResolvedValue({ id: 17, status: 'COMPLETED', runId: 17 }) },
+      asyncFuzzingTask: ref({ taskId: 17, progress: 0 }), normalizeTaskProgress: () => 100,
+      taskProgressStatusKey: () => 'app.taskStatusCompleted', upsertFuzzingTaskSummary: vi.fn(),
+      loadFuzzRunSingleFlight: () => pending.promise, clearFuzzRunRecoveryState: vi.fn(),
+      summarizeFuzzingRun: (run: unknown) => run, upsertFuzzingRunSummary: vi.fn()
+    }
+    ports.throwIfPollingAborted = bind('throwIfPollingAborted', ports)
+    ports.isPollingAbortedError = bind('isPollingAbortedError', ports)
+    const polling = bind('pollAsyncFuzzing', ports)(17)
+    await flushPromises()
+    ports.boardLifecycleDisposed = true
+    pending.resolve({ id: 17 })
+    await expect(polling).rejects.toBeInstanceOf(PollingAbortedError)
+    expect(ports.upsertFuzzingRunSummary).not.toHaveBeenCalled()
+  })
+
+  it('continues polling when an exploration finishes before cancellation takes effect', async () => {
+    const status = deferred()
+    const cancellation = deferred()
+    const nextPoll = deferred()
+    const result = { id: 17, outcome: 'BUDGET_EXHAUSTED' }
+    class AsyncTaskCancelledError extends Error {}
+    const ports = {
+      boardLifecycleDisposed: false, pollingEpoch: 0, ASYNC_TASK_MAX_POLLS: 2, AsyncTaskCancelledError,
+      throwIfPollingAborted: vi.fn(), waitForNextPoll: vi.fn(() => nextPoll.promise),
+      fuzzingApi: {
+        getTask: vi.fn().mockReturnValueOnce(status.promise)
+          .mockResolvedValueOnce({ id: 17, status: 'COMPLETED', runId: 17 }),
+        cancelTask: vi.fn(() => cancellation.promise)
+      },
+      asyncFuzzingTask: ref({ taskId: 17 }), fuzzingCancelRequested: ref(false), cancellingFuzzingTask: ref(false),
+      normalizeTaskProgress: () => 0, taskProgressStatusKey: vi.fn(), upsertFuzzingTaskSummary: vi.fn(),
+      loadFuzzRunSingleFlight: vi.fn().mockResolvedValue(result), clearFuzzRunRecoveryState: vi.fn(),
+      summarizeFuzzingRun: (run: unknown) => run, upsertFuzzingRunSummary: vi.fn(), notifyTaskCancellationResult: vi.fn()
+    }
+    const polling = bind('pollAsyncFuzzing', ports)(17).catch((error: unknown) => error)
+    const cancelling = bind('cancelAsyncFuzzing', ports)()
+    status.resolve({ id: 17, status: 'RUNNING' })
+    await flushPromises()
+    expect(ports.waitForNextPoll).toHaveBeenCalledOnce()
+
+    cancellation.resolve({ cancellationAccepted: false, cancellationOutcome: 'ALREADY_COMPLETED', taskStatus: 'COMPLETED' })
+    await cancelling
+    nextPoll.resolve()
+    expect(await polling).toBe(result)
+    expect(ports.upsertFuzzingRunSummary).toHaveBeenCalledWith(result)
+  })
+
+  it.each([
+    ['verification', 'Verification', 'boardApi'],
+    ['simulation', 'Simulation', 'simulationApi'],
+    ['fuzzing', 'Fuzzing', 'fuzzingApi']
+  ])('keeps a new %s cancellation pending when the previous response arrives', async (kind, taskType, apiName) => {
+    const previous = deferred()
+    const current = deferred()
+    const task = ref({ taskId: 17 })
+    const requested = ref(false)
+    const cancelling = ref(false)
+    const ports = {
+      boardLifecycleDisposed: false, [`async${taskType}Task`]: task,
+      [`${kind}CancelRequested`]: requested, [`cancelling${taskType}Task`]: cancelling,
+      [apiName]: { cancelTask: vi.fn().mockReturnValueOnce(previous.promise).mockReturnValueOnce(current.promise) },
+      notifyTaskCancellationResult: vi.fn(), taskProgressStatusKey: vi.fn()
+    }
+    const cancel = bind(`cancelAsync${taskType}`, ports)
+    const oldRequest = cancel()
+    // The first task finished and released its slot before the acknowledgement reached the browser.
+    task.value = { taskId: 18 }
+    cancelling.value = false
+    requested.value = false
+    const currentRequest = cancel()
+    previous.resolve({ taskId: 17, cancellationAccepted: false, cancellationOutcome: 'ALREADY_COMPLETED', taskStatus: 'COMPLETED' })
+    await oldRequest
+    expect(cancelling.value).toBe(true)
+    expect(requested.value).toBe(true)
+    expect(ports.notifyTaskCancellationResult).not.toHaveBeenCalled()
+
+    const accepted = { taskId: 18, cancellationAccepted: true, cancellationOutcome: 'ACCEPTED', taskStatus: 'CANCELLED' }
+    current.resolve(accepted)
+    await currentRequest
+    expect(ports.notifyTaskCancellationResult).toHaveBeenCalledExactlyOnceWith(kind, accepted)
+    expect(cancelling.value).toBe(false)
+  })
+
   it.each([
     ['simulation', 'current', 'success'], ['simulation', 'disposed', 'success'], ['simulation', 'invalidated', 'success'],
     ['simulation', 'current', 'failure'], ['simulation', 'disposed', 'failure'], ['simulation', 'invalidated', 'failure'],
@@ -126,7 +250,7 @@ describe('tracking an existing background task', () => {
       ports[`${taskKind}CancelRequested`] = ref(false)
     }
     ports.notifyTaskCancellationResult = bind('notifyTaskCancellationResult', ports)
-    const watching = bind(`watch${suffix}Task`, ports)(7)
+    const watching = bindRun(`watch${suffix}Task`, ports)(7)
     try {
       expect(ports[`show${suffix}Panel`].value).toBe(true)
       ports[`show${suffix}Panel`].value = false
@@ -238,6 +362,67 @@ describe('reopening verification settings from a stale result', () => {
   })
 })
 
+describe('exploration finding handoff', () => {
+  it('keeps the historical target while the current Board comparison and target presence change', () => {
+    const original = 'a'.repeat(64)
+    const modelSnapshot: ModelRunSnapshot = {
+      capturedAt: '2026-11-25T12:00:00', deviceCount: 1, ruleCount: 1, specificationCount: 1,
+      environmentVariableCount: 0, deviceTemplateCount: 1, templatesFrozen: true,
+      modelFingerprint: original, modelSemanticsVersion: 7
+    }
+    const sourceRun = { id: 24, modelSnapshot }
+    const fuzzingResult = ref<typeof sourceRun | null>(sourceRun)
+    const currentBoardModelFingerprints = ref<BoardModelFingerprints | null>({
+      verification: original, simulation: original, modelSemanticsVersion: 7
+    })
+    const boardDataLoadState = reactive({ specs: 'ready' })
+    const ports: Record<string, any> = {
+      computed, ref, compareModelSnapshot, currentBoardModelFingerprints,
+      fuzzingResult, fuzzingRuns: ref([]), fuzzVerificationHandoffSource: ref(null),
+      specifications: ref([{ id: 'spec-a', name: 'Current name' }]),
+      boardDataLoadState, allBoardDataKeys: ['specs'],
+      isBoardDataReady: computed(() => boardDataLoadState.specs === 'ready'),
+      loadingCurrentBoardModelFingerprints: ref(false),
+      closeHistoryPanel: vi.fn(), dismissFuzzingResult: () => { fuzzingResult.value = null },
+      showSimulationPanel: ref(false), showFuzzingPanel: ref(true), showVerificationPanel: ref(false)
+    }
+    for (const name of ['fuzzVerificationHandoff', 'fuzzVerificationHandoffNoticeKey',
+      'availableFuzzRunForFinding', 'showVerificationPanelForHandoff']) {
+      ports[name] = bind(name, ports)
+    }
+
+    bind('openFormalVerificationForFuzzFinding', ports)({
+      fuzzTaskId: 24, violatedSpecId: 'spec-a', specificationLabel: 'Captured target'
+    })
+    expect(fuzzingResult.value).toBeNull()
+    expect(ports.showVerificationPanel.value).toBe(true)
+    expect(ports.fuzzVerificationHandoff.value).toMatchObject({
+      runId: 24, specificationLabel: 'Captured target', targetPresent: true, boardComparison: 'UNCHANGED'
+    })
+
+    // A Board reload leaves the old collections in place while admission is still unknown.
+    boardDataLoadState.specs = 'loading'
+    expect(ports.fuzzVerificationHandoff.value).toMatchObject({
+      targetPresent: null, boardComparison: 'UNAVAILABLE'
+    })
+    expect(ports.fuzzVerificationHandoffNoticeKey.value).toBe('app.fuzzVerificationHandoffChecking')
+
+    boardDataLoadState.specs = 'ready'
+    currentBoardModelFingerprints.value = {
+      verification: 'b'.repeat(64), simulation: original, modelSemanticsVersion: 7
+    }
+    expect(ports.fuzzVerificationHandoffNoticeKey.value).toBe('app.fuzzVerificationHandoffScopeChanged')
+
+    ports.specifications.value = [{ id: 'spec-b', name: 'Replacement target' }]
+    expect(ports.fuzzVerificationHandoff.value).toMatchObject({
+      runId: 24, specificationLabel: 'Captured target', targetPresent: false, boardComparison: 'CHANGED'
+    })
+    expect(ports.fuzzVerificationHandoffNoticeKey.value).toBe('app.fuzzVerificationHandoffTargetMissing')
+    boardDataLoadState.specs = 'error'
+    expect(ports.fuzzVerificationHandoffNoticeKey.value).toBe('app.fuzzVerificationHandoffTargetUnavailable')
+  })
+})
+
 describe('run failures during playback', () => {
   const context = (playback: boolean) => {
     const owner = { current: true }
@@ -340,8 +525,11 @@ describe('run failures during playback', () => {
     expect(ports.runFailureDiagnostics.value).toEqual({ verification: null, simulation: null })
   })
 
-  it.each(['verification', 'simulation'] as const)('keeps a rejected watched %s task from interrupting replay', async kind => {
-    const failure = context(true).ports
+  it.each([
+    ['verification', true], ['simulation', true], ['verification', false]
+  ] as const)('defers a watched %s failure when replay is active=%s and presentation is unavailable', async (kind, playback) => {
+    const failure = context(playback).ports
+    const pending = deferred()
     const flag = () => ({ value: false })
     const ports = {
       isVerifying: flag(), isSimulating: flag(),
@@ -352,14 +540,17 @@ describe('run failures during playback', () => {
       verificationCancelRequested: flag(), simulationCancelRequested: flag(),
       cancellingVerificationTask: flag(), cancellingSimulationTask: flag(),
       normalizeTaskProgress: () => 0, taskProgressStatusKey: () => 'app.taskInitializing', closeHistoryPanel: vi.fn(),
-      pollAsyncVerification: vi.fn().mockRejectedValue(new Error('run failed')),
-      pollAsyncSimulation: vi.fn().mockRejectedValue(new Error('run failed')),
+      pollAsyncVerification: vi.fn(() => pending.promise),
+      pollAsyncSimulation: vi.fn(() => pending.promise),
       isPollingAbortedError: () => false, isCompletedTaskResultUnavailableError: () => false,
       extractApiErrorMessage: (error: Error) => error.message, isAsyncTaskCancelledError: () => false,
       ...failure, presentRunFailure: bind('presentRunFailure', failure),
       semanticSceneChangeCount: 0, boardLifecycleDisposed: false, loadTaskInbox: vi.fn().mockResolvedValue(true)
     }
-    await bind(kind === 'verification' ? 'watchVerificationTask' : 'watchSimulationTask', ports)(7)
+    const watching = bindRun(kind === 'verification' ? 'watchVerificationTask' : 'watchSimulationTask', ports)(7)
+    if (!playback) ports.showVerificationPanel.value = false
+    pending.resolve(Promise.reject(new Error('run failed')))
+    await watching
     expect(failure.verificationError.value).toBeNull()
     expect(failure.simulationError.value).toBeNull()
     expect(failure.notifyError).not.toHaveBeenCalled()
@@ -421,10 +612,12 @@ describe('run failures during playback', () => {
   })
 })
 
-describe('stale fuzz domain feedback', () => {
+describe('exploration launch', () => {
   const context = (visible: boolean, refreshed: boolean, validPath = true) => {
     const ports: Record<string, any> = {
       isFuzzing: ref(false), isSceneReplacementInProgress: ref(false),
+      boardAuthScopeEpoch: 3, currentAuthUserId: ref<number | null>(1),
+      isCurrentBoardAuthScope: (epoch: number) => epoch === 3 && !ports.boardLifecycleDisposed,
       waitForPendingFixRefresh: vi.fn(), waitForPendingBoardMutations: vi.fn(),
       ensureBoardDataReady: () => true, nodes: ref([{}]), specifications: ref([{ id: 'spec-1' }]),
       rules: ref([]), assertRulesHaveTriggers: () => true,
@@ -456,8 +649,49 @@ describe('stale fuzz domain feedback', () => {
     ports.fuzzingFailureDetails = bind('fuzzingFailureDetails', ports)
     ports.fuzzingErrorMessage = bind('fuzzingErrorMessage', ports)
     ports.hasApiValidationError = bind('hasApiValidationError', ports)
-    return { ports, run: bind('runFuzzing', ports) }
+    return { ports, run: bindRun('runFuzzing', ports) }
   }
+
+  it('keeps only one submitter while waiting for a pending board edit', async () => {
+    const { ports, run } = context(true, false)
+    const boardEdit = deferred()
+    ports.waitForPendingBoardMutations.mockReturnValue(boardEdit.promise)
+    const first = run()
+    const duplicate = run()
+    await flushPromises()
+    expect(ports.fuzzingApi.startAsync).not.toHaveBeenCalled()
+    boardEdit.resolve()
+    await Promise.all([first, duplicate])
+    expect(ports.fuzzingApi.startAsync).toHaveBeenCalledOnce()
+  })
+
+  it('leaves the new account untouched when an old exploration launch is accepted', async () => {
+    const { ports, run } = context(true, false)
+    const accepted = deferred()
+    const closed = new Error('Board disposed')
+    ports.fuzzingApi.startAsync.mockReturnValue(accepted.promise)
+    Object.assign(ports, {
+      trackFuzzTask: vi.fn(), upsertFuzzingTaskSummary: vi.fn(), normalizeTaskProgress: () => 0,
+      taskProgressStatusKey: () => 'app.taskInitializing',
+      pollAsyncFuzzing: vi.fn().mockRejectedValue(closed), isPollingAbortedError: (error: unknown) => error === closed
+    })
+    const completion = run()
+    await vi.waitFor(() => expect(ports.fuzzingApi.startAsync).toHaveBeenCalledOnce())
+    ports.currentAuthUserId.value = 2
+    ports.boardLifecycleDisposed = true
+    accepted.resolve({ id: 17, initiator: 'USER' })
+    expect(await completion).toBe(false)
+    expect(ports.trackFuzzTask).not.toHaveBeenCalled()
+    expect(ports.upsertFuzzingTaskSummary).not.toHaveBeenCalled()
+    expect(ports.pollAsyncFuzzing).not.toHaveBeenCalled()
+  })
+
+  it('keeps the exploration notification storage key tied to the mounted board owner', () => {
+    const storageKey = bind('fuzzNotificationStorageKey', {
+      boardOwnerUserId: 1, currentUser: ref({ userId: 2 }), fuzzNotificationStorageKeyForUser: (id: number) => `fuzz-${id}`
+    })
+    expect(storageKey()).toBe('fuzz-1')
+  })
 
   it.each([{ refreshed: false, validPath: true }, { refreshed: true, validPath: false }])(
     'keeps visible stale-domain feedback inline after refresh=$refreshed and validPath=$validPath', async options => {
@@ -523,7 +757,7 @@ describe('simulation run ownership', () => {
         savedSimulationStates: ref([{ stateIndex: 0 }]), simulationAnimationState: ref({ visible: false }),
         playbackPanelOpen: ref(false), highlightedTrace: ref(null), staleDeepLink: ref(true),
         activatePlaybackScene: vi.fn(), focusCanvasForReplay: vi.fn(),
-        navigateToRunTarget: vi.fn(), clearRunDeepLink: vi.fn()
+        navigateToRunTarget: vi.fn(), clearRunDeepLink: vi.fn(), refreshCurrentBoardModelFingerprints: vi.fn()
       }
       bind('openSimulationAnimationFromSavedStates', ports)()
       expect(ports.simulationAnimationState.value.visible).toBe(true)
@@ -602,7 +836,7 @@ describe('simulation completion during another replay', () => {
     ports.notifyAvailableResult.mockImplementation((options: { onClose: () => void }) => vi.fn(() => options.onClose()))
     ports.notifyAutomaticPlaybackDeferredForReplay.mockImplementation(
       bind('notifyAutomaticPlaybackDeferredForReplay', ports))
-    const run = bind('handleSimulate', ports)
+    const run = bindRun('handleSimulate', ports)
     const start = () => run({ steps: 1, isAsync, saveToHistory: status !== 'NOT_REQUESTED' })
     return { previous, result, ports, owner, pending, start,
       savedStates: bind('savedSimulationStates', { computed, lastSimulationResult }) }
@@ -616,6 +850,36 @@ describe('simulation completion during another replay', () => {
     expect(await completion).toBe(true)
     expect(state.ports.openSimulationAnimationFromSavedStates).toHaveBeenCalledOnce()
     expect(state.ports.notifySimulationOutcome).not.toHaveBeenCalled()
+  })
+
+  it('submits a single async simulation after the board mutation queue settles', async () => {
+    const state = context('SAVED', true)
+    const boardEdit = deferred()
+    state.ports.waitForPendingBoardMutations.mockReturnValue(boardEdit.promise)
+    const first = state.start()
+    const duplicate = state.start()
+    await flushPromises()
+    expect(state.ports.simulationApi.simulateAsync).not.toHaveBeenCalled()
+    boardEdit.resolve()
+    await flushPromises()
+    state.pending.resolve(state.result)
+    await Promise.all([first, duplicate])
+    expect(state.ports.simulationApi.simulateAsync).toHaveBeenCalledOnce()
+  })
+
+  it('keeps a watched simulation in history after its progress panel is closed', async () => {
+    const state = context('SAVED', true)
+    const ports = Object.assign(state.ports, {
+      simulationTasks: ref([]), closeHistoryPanel: vi.fn(), loadTaskInbox: vi.fn(), boardLifecycleDisposed: false,
+      summarizeSimulationResult: () => ({ id: 17 })
+    })
+    const watching = bindRun('watchSimulationTask', ports)(17)
+    bind('closeSimulationPanel', ports)()
+    state.pending.resolve(state.result)
+    await watching
+    expect(ports.simulationRuns.value).toEqual([{ id: 17 }])
+    expect(ports.openSimulationAnimationFromSavedStates).not.toHaveBeenCalled()
+    expect(ports.notifySimulationOutcome).toHaveBeenCalledWith(state.result, true)
   })
 
   it.each(['SAVED', 'NOT_REQUESTED', 'OUTCOME_UNKNOWN'])(
@@ -728,6 +992,7 @@ describe('verification completion', () => {
   ] as const)(
     'announces a background formula pass according to its %s trigger evidence', (antecedentReachability, warning) => {
       const ports = {
+        compareRunToCurrentBoard: () => 'UNCHANGED',
         getGenerationWarningCounts: () => ({ total: 0 }),
         getVerificationOutcome, countResponseTriggerWarnings,
         isVerificationModelComplete: (result: { modelComplete: boolean }) => result.modelComplete,
@@ -747,6 +1012,18 @@ describe('verification completion', () => {
       expect(result.outcome).toBe('SATISFIED')
     }
   )
+
+  it('announces an earlier modeling version instead of success for a background verdict', () => {
+    const ports = {
+      compareRunToCurrentBoard: () => 'SEMANTICS_CHANGED',
+      getGenerationWarningCounts: () => ({ total: 0 }), getVerificationOutcome,
+      countResponseTriggerWarnings, isVerificationModelComplete: () => true,
+      notifyBlocked: vi.fn(), notifySuccess: vi.fn(), t: (key: string) => key
+    }
+    bind('notifyVerificationOutcome', ports)({ outcome: 'SATISFIED', modelComplete: true, specResults: [] })
+    expect(ports.notifyBlocked).toHaveBeenCalledExactlyOnceWith('app.runBoardSemanticsChanged')
+    expect(ports.notifySuccess).not.toHaveBeenCalled()
+  })
 
   const context = (status = 'FAILED', isAsync = false) => {
     const flag = () => ({ value: false })
@@ -775,7 +1052,7 @@ describe('verification completion', () => {
       buildVerificationResultFromTask: () => result, showVerificationPanel: ref(true),
       historyDetailRequests: { invalidate: vi.fn() }, deepLinkLoadRequests: { invalidate: vi.fn() },
       staleDeepLink: ref(true), navigateToRunTarget: vi.fn().mockResolvedValue(undefined), clearRunDeepLink: vi.fn(),
-      adoptVerificationRunResult: vi.fn(),
+      adoptVerificationRunResult: vi.fn(), refreshCurrentBoardModelFingerprints: vi.fn(),
       isModelPlaybackActive: flag(), notifyVerificationOutcome: vi.fn(),
       unsavedRunNotifications: new Set<() => void>(), notifyAvailableResult: vi.fn(),
       ensureHistoricalPlaybackUiAdmission: vi.fn(() => !ports.isModelPlaybackActive.value),
@@ -790,8 +1067,8 @@ describe('verification completion', () => {
     ports.adoptVerificationRunResult.mockImplementation(bind('adoptVerificationRunResult', ports))
     ports.notifyAvailableResult.mockImplementation((options: { onClose: () => void }) => vi.fn(() => options.onClose()))
     return { ports, pending, owner, result, start: isAsync
-      ? () => bind('pollAsyncVerification', ports)(17, { presentResult: true })
-      : bind('handleVerify', ports) }
+      ? () => bind('pollAsyncVerification', ports)(17)
+      : bindRun('handleVerify', ports) }
   }
 
   it.each([false, true])('makes a saved completion addressable without refetching it (async=%s)', async isAsync => {
@@ -803,6 +1080,7 @@ describe('verification completion', () => {
     await completion
     expect(state.ports.verificationResult.value).toBe(state.result)
     expect(state.ports.verificationResultStale.value).toBe(true)
+    expect(state.ports.refreshCurrentBoardModelFingerprints).toHaveBeenCalledOnce()
     expect(state.ports.navigateToRunTarget).toHaveBeenCalledExactlyOnceWith({ kind: 'verification', runId: 17 }, 'push')
     expect(state.ports.historyDetailRequests.invalidate).toHaveBeenCalledOnce()
     expect(state.ports.deepLinkLoadRequests.invalidate).toHaveBeenCalledOnce()
@@ -814,12 +1092,52 @@ describe('verification completion', () => {
   it('keeps a background asynchronous completion from changing the selected run', async () => {
     const state = context('SAVED', true)
     state.ports.showVerificationPanel.value = false
+    state.ports.isModelPlaybackActive.value = true
     const completion = bind('pollAsyncVerification', state.ports)(17)
     state.pending.resolve(state.result)
     await completion
     expect(state.ports.adoptVerificationRunResult).not.toHaveBeenCalled()
     expect(state.ports.navigateToRunTarget).not.toHaveBeenCalled()
     expect(state.ports.notifyVerificationOutcome).toHaveBeenCalledWith(state.result)
+    expect(state.ports.notifyInfo).not.toHaveBeenCalled()
+  })
+
+  it('submits one async verification and keeps its owner through a pending board edit', async () => {
+    const state = context('SAVED')
+    const boardEdit = deferred()
+    const verifyAsync = vi.fn().mockResolvedValue({ id: 17, progress: 0 })
+    const pollAsyncVerification = vi.fn(() => state.pending.promise)
+    Object.assign(state.ports, { pollAsyncVerification })
+    Object.assign(state.ports.boardApi, { verifyAsync })
+    state.ports.verificationForm.isAsync = true
+    state.ports.waitForPendingBoardMutations.mockReturnValue(boardEdit.promise)
+    const first = state.start()
+    const duplicate = state.start()
+    await flushPromises()
+    expect(verifyAsync).not.toHaveBeenCalled()
+    boardEdit.resolve()
+    await flushPromises()
+    state.pending.resolve()
+    await Promise.all([first, duplicate])
+    expect(verifyAsync).toHaveBeenCalledOnce()
+    expect(pollAsyncVerification).toHaveBeenCalledExactlyOnceWith(17)
+  })
+
+  it('keeps a watched verification out of the foreground after closing progress', async () => {
+    const state = context('SAVED', true)
+    const ports = Object.assign(state.ports, {
+      verificationTasks: ref([]), closeHistoryPanel: vi.fn(), loadTaskInbox: vi.fn(),
+      fuzzVerificationHandoffSource: ref(null), boardLifecycleDisposed: false,
+      pollAsyncVerification: bind('pollAsyncVerification', state.ports)
+    })
+    const watching = bindRun('watchVerificationTask', ports)(17)
+    bind('closeVerificationPanel', ports)()
+    state.pending.resolve(state.result)
+    await watching
+    expect(ports.adoptVerificationRunResult).not.toHaveBeenCalled()
+    expect(ports.navigateToRunTarget).not.toHaveBeenCalled()
+    expect(ports.notifyVerificationOutcome).toHaveBeenCalledWith(state.result)
+    expect(ports.loadVerificationRuns).toHaveBeenCalledOnce()
   })
 
   it('preserves the active replay URL when an asynchronous verdict arrives', async () => {

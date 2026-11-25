@@ -2,6 +2,7 @@ package cn.edu.nju.Iot_Verify.util;
 
 import cn.edu.nju.Iot_Verify.util.mapper.BoardDataConverter.ModelInputSnapshot;
 import cn.edu.nju.Iot_Verify.dto.board.BoardModelFingerprintsDto;
+import cn.edu.nju.Iot_Verify.dto.model.ModelSemanticsVersion;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.MapperFeature;
@@ -54,7 +55,7 @@ public final class ModelFingerprint {
         ObjectNode canonical = canonicalModel(snapshot, true, null);
         String verification = hash(canonical);
         canonical.set("specifications", mapper.createArrayNode());
-        return new BoardModelFingerprintsDto(verification, hash(canonical));
+        return new BoardModelFingerprintsDto(verification, hash(canonical), ModelSemanticsVersion.CURRENT);
     }
 
     public String paperDomainFingerprint(ModelInputSnapshot snapshot, int pathLength) {
@@ -78,7 +79,11 @@ public final class ModelFingerprint {
         semanticModel.put("specifications", includeSpecifications ? snapshot.specifications().stream()
                 .map(spec -> new SpecificationModel(spec.getId(), SpecificationSemanticSignature.from(spec))).toList() : List.of());
         semanticModel.put("templateManifests", snapshot.templateManifests());
-        if (pathLength != null) semanticModel.put("pathLength", pathLength);
+        if (pathLength != null) {
+            // A paper-mode preview authorizes the search domain under the current engine semantics.
+            semanticModel.put("pathLength", pathLength);
+            semanticModel.put("modelSemanticsVersion", ModelSemanticsVersion.CURRENT);
+        }
         ObjectNode canonicalModel = mapper.valueToTree(semanticModel);
         canonicalModel.fields().forEachRemaining(field -> {
             if ("templateManifests".equals(field.getKey())) {

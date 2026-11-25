@@ -1,6 +1,7 @@
 package cn.edu.nju.Iot_Verify.controller;
 
 import cn.edu.nju.Iot_Verify.component.model.ModelRequestParser;
+import cn.edu.nju.Iot_Verify.configure.JwtConfig;
 import cn.edu.nju.Iot_Verify.dto.fix.FixRequestDto;
 import cn.edu.nju.Iot_Verify.dto.fix.FixApplyRequestDto;
 import cn.edu.nju.Iot_Verify.dto.fix.FixApplyResultDto;
@@ -9,9 +10,14 @@ import cn.edu.nju.Iot_Verify.dto.fix.FixSuggestionDto;
 import cn.edu.nju.Iot_Verify.dto.fix.PreferredRange;
 import cn.edu.nju.Iot_Verify.dto.fix.PreferredRangeSelection;
 import cn.edu.nju.Iot_Verify.exception.BadRequestException;
+import cn.edu.nju.Iot_Verify.exception.GlobalExceptionHandler;
+import cn.edu.nju.Iot_Verify.exception.ModelSemanticsChangedException;
+import cn.edu.nju.Iot_Verify.security.CurrentUserArgumentResolver;
 import cn.edu.nju.Iot_Verify.service.FixService;
+import cn.edu.nju.Iot_Verify.service.FixSuggestionTokenService;
 import cn.edu.nju.Iot_Verify.service.InteractiveFixExecutionService;
 import cn.edu.nju.Iot_Verify.service.VerificationService;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.validation.Validation;
 import jakarta.validation.Validator;
 import org.junit.jupiter.api.BeforeEach;
@@ -20,7 +26,16 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.http.MediaType;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
@@ -28,6 +43,9 @@ import java.util.concurrent.Callable;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @ExtendWith(MockitoExtension.class)
 class VerificationControllerFixTest {
@@ -161,5 +179,63 @@ class VerificationControllerFixTest {
                 eq("signed-suggestion"), ranges.capture());
         assertEquals(10, ranges.getValue().get(targetId).getLower());
         assertEquals(20, ranges.getValue().get(targetId).getUpper());
+    }
+
+    @Test
+    void applyFix_expiredSuggestionKeepsBadRequestStatusWithStaleReason() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        JwtConfig jwtConfig = new JwtConfig();
+        jwtConfig.setSecret("test-secret-that-is-long-enough-for-hmac-signatures");
+        FixSuggestionTokenService tokens = new FixSuggestionTokenService(mapper, jwtConfig);
+        FixSuggestionDto suggestion = FixSuggestionDto.builder()
+                .strategy("remove").description("Remove conflicting automation")
+                .removedRuleIndices(List.of(0)).removedRuleDescriptions(List.of("Conflicting light rule"))
+                .build();
+        ReflectionTestUtils.setField(tokens, "clock", Clock.fixed(Instant.EPOCH, ZoneOffset.UTC));
+        String token = tokens.issue(1L, 2L, suggestion, Map.of());
+        ReflectionTestUtils.setField(tokens, "clock", Clock.fixed(Instant.EPOCH.plusSeconds(960), ZoneOffset.UTC));
+        when(fixService.applyFix(eq(1L), eq(2L), eq("remove"), any(), eq(token), isNull()))
+                .thenAnswer(call -> {
+                    tokens.verify(1L, 2L, "remove", call.getArgument(3), token, null);
+                    return FixApplyResultDto.builder().applied(true).build();
+                });
+        var mvc = fixMockMvc();
+        FixApplyRequestDto request = FixApplyRequestDto.builder()
+                .strategy("remove").suggestion(suggestion).suggestionToken(token).build();
+
+        SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(1L, null));
+        try {
+            mvc.perform(post("/api/verify/traces/2/fix/apply").contentType(MediaType.APPLICATION_JSON)
+                            .content(mapper.writeValueAsBytes(request)))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.code").value(400))
+                    .andExpect(jsonPath("$.data.reasonCode").value("FIX_SUGGESTION_STALE"));
+        } finally {
+            SecurityContextHolder.clearContext();
+        }
+    }
+
+    @Test
+    void fixSearch_historicalModelReturnsConflictWithReverificationReason() throws Exception {
+        when(fixService.fix(eq(1L), eq(2L), any(), any(), any()))
+                .thenThrow(new ModelSemanticsChangedException());
+        SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(1L, null));
+        try {
+            fixMockMvc().perform(post("/api/verify/traces/2/fix").param("requestId", "source-stale-1")
+                            .contentType(MediaType.APPLICATION_JSON).content("""
+                                    {"strategies":["condition"]}
+                                    """))
+                    .andExpect(status().isConflict())
+                    .andExpect(jsonPath("$.code").value(409))
+                    .andExpect(jsonPath("$.data.reasonCode").value("MODEL_SEMANTICS_CHANGED"));
+        } finally {
+            SecurityContextHolder.clearContext();
+        }
+    }
+
+    private MockMvc fixMockMvc() {
+        return MockMvcBuilders.standaloneSetup(controller)
+                .setCustomArgumentResolvers(new CurrentUserArgumentResolver())
+                .setControllerAdvice(new GlobalExceptionHandler()).build();
     }
 }

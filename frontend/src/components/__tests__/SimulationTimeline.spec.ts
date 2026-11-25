@@ -104,12 +104,6 @@ const i18n = createI18n({
           stateDetails: 'State details',
           transitionNumber: 'State after transition {index}',
           environmentVariables: 'Environment variables',
-          provenance: {
-            externalInput: 'external input',
-            affectedBy: 'affected by {device}',
-            affectedByMultiple: 'affected by {count} devices',
-            naturalEvolution: 'natural evolution {rate}'
-          },
           changed: 'Changed',
           deviceBecameCompromised: 'Device became compromised',
           deviceNoLongerCompromised: 'Device is no longer compromised'
@@ -233,6 +227,9 @@ describe('SimulationTimeline', () => {
         expect(warning.text()).toMatch(locale === 'en' ? /replay uses the scene saved for this run/i : /回放.*本次运行保存的场景/)
         expect(warning.text()).not.toMatch(/rerun|重新运行/i)
       }
+      await wrapper.setProps({ boardComparison: 'SEMANTICS_CHANGED' })
+      expect(wrapper.get('[data-testid="simulation-board-drift-warning"]').text())
+        .toMatch(locale === 'en' ? /modeling version/ : /建模版本/)
       await wrapper.setProps({ boardComparison: 'UNCHANGED' })
       expect(wrapper.find('[data-testid="simulation-board-drift-warning"]').exists()).toBe(false)
     } finally { wrapper.unmount(); appI18n.global.locale.value = previousLocale }
@@ -504,15 +501,6 @@ describe('SimulationTimeline', () => {
         states: states('history'),
         modelComplete: false,
         disabledRuleCount: 2,
-        modelSnapshot: {
-          capturedAt: '2026-07-12T09:30:00',
-          deviceCount: 3,
-          ruleCount: 2,
-          specificationCount: 0,
-          environmentVariableCount: 1,
-          deviceTemplateCount: 1,
-          templatesFrozen: true
-        },
         boardComparison: 'CHANGED',
         currentRuleIds: []
       },
@@ -700,122 +688,31 @@ describe('SimulationTimeline', () => {
     expect(links.text()).not.toContain('iot_verify_automation_link_compromised_0')
   })
 
-  describe('a changed shared value names the rule that permitted the change', () => {
-    // A value that moved with no stated cause is the case a user cannot act on: they cannot tell
-    // whether their own rule did it or the model allowed it. So every combination the backend can
-    // report must produce a cause, not just the ones that were easy to render first.
-    const provenanceStates = (name: string, from: string, to: string): TraceState[] => [
-      {
-        stateIndex: 1,
-        triggeredRules: [],
-        compromisedAutomationLinks: [],
-        devices: [],
-        envVariables: [{ name, value: from, modelTokenSource: 'BUNDLED' }]
+  it('shows the selected environment value without repeating the change in state details', async () => {
+    const wrapper = mount(SimulationTimeline, {
+      props: {
+        visible: true,
+        modelSemantics: consistentSemantics,
+        states: ['23', '0'].map((value, index): TraceState => ({
+          stateIndex: index + 1,
+          triggeredRules: [],
+          compromisedAutomationLinks: [],
+          devices: [],
+          envVariables: [{ name: 'time', value, modelTokenSource: 'BUNDLED' }]
+        }))
       },
-      {
-        stateIndex: 2,
-        triggeredRules: [],
-        compromisedAutomationLinks: [],
-        devices: [],
-        envVariables: [{ name, value: to, modelTokenSource: 'BUNDLED' }]
-      }
-    ]
-
-    const titleForChangedValue = async (
-      name: string,
-      from: string,
-      to: string,
-      provenance: Record<string, unknown>
-    ) => {
-      const wrapper = mount(SimulationTimeline, {
-        props: {
-          visible: true,
-          modelSemantics: consistentSemantics,
-          states: provenanceStates(name, from, to),
-          modelSnapshot: {
-            capturedAt: '2026-08-01T10:00:00',
-            deviceCount: 1,
-            ruleCount: 0,
-            specificationCount: 0,
-            environmentVariableCount: 1,
-            deviceTemplateCount: 1,
-            templatesFrozen: true,
-            environmentProvenance: [provenance]
-          } as never
-        },
-        global: { plugins: [i18n], stubs: { Teleport: true } }
-      })
-      // Index 1 is the second state -- the one that changed. Index 0 has no predecessor, so it
-      // deliberately carries no cause annotation.
-      await wrapper.get('[data-testid="simulation-timeline-state-1"]').trigger('click')
-      return wrapper.get('[data-testid="playback-state-environment"]').html()
-    }
-
-    it('reports a device when exactly one device declares it writes the value', async () => {
-      const html = await titleForChangedValue('illuminance', 'dim', 'bright', {
-        name: 'illuminance',
-        type: 'DISCRETE_ENUM',
-        values: ['dim', 'bright'],
-        authorship: 'DEVICE_CONTROLLED',
-        semantics: 'EXACT',
-        writers: [{ deviceVarName: 'light_1', templateName: 'Light', templateSource: 'BUNDLED' }],
-        readers: [],
-        evolutionSummary: 'Controlled by device light_1 (Light).'
-      })
-      expect(html).toContain('affected by light_1')
+      global: { plugins: [i18n], stubs: { Teleport: true } }
     })
 
-    it('names the abstraction when nobody writes a discrete value', async () => {
-      const html = await titleForChangedValue('weather', 'sunny', 'rainy', {
-        name: 'weather',
-        type: 'DISCRETE_ENUM',
-        values: ['sunny', 'rainy'],
-        authorship: 'EXOGENOUS',
-        semantics: 'ABSTRACTION',
-        writers: [],
-        readers: [{ deviceVarName: 'weather_1' }],
-        evolutionSummary: 'External input.'
-      })
-      // The user must be able to tell this apart from a change their scene caused.
-      expect(html).toContain('external input')
-    })
+    await wrapper.get('[data-testid="simulation-timeline-state-1"]').trigger('click')
+    await wrapper.get('[data-testid="simulation-timeline-details-tab"]').trigger('click')
 
-    it('cites the declared interval when nobody writes a numeric value', async () => {
-      // This is the most common shared value in the product -- every bundled sensor declares one --
-      // and it fell through every branch, so the trace showed a bare "20 -> 21" with no cause.
-      const html = await titleForChangedValue('temperature', '20', '21', {
-        name: 'temperature',
-        type: 'NUMERIC',
-        lowerBound: 0,
-        upperBound: 100,
-        naturalChangeRate: '[-1, 1]',
-        authorship: 'EXOGENOUS',
-        semantics: 'EXACT',
-        writers: [],
-        readers: [{ deviceVarName: 'temp_1' }],
-        evolutionSummary: 'External input; natural evolution [-1, 1].'
-      })
-      expect(html).toContain('natural evolution [-1, 1]')
-      // Exact semantics must not be presented as the disclosed over-approximation.
-      expect(html).not.toContain('external input')
-    })
-
-    it('reports the writer count when several devices write the value', async () => {
-      const html = await titleForChangedValue('airQuality', 'poor', 'good', {
-        name: 'airQuality',
-        type: 'DISCRETE_ENUM',
-        values: ['poor', 'good'],
-        authorship: 'COMPOSED',
-        semantics: 'EXACT',
-        writers: [
-          { deviceVarName: 'purifier_1', templateName: 'Air Purifier', templateSource: 'BUNDLED' },
-          { deviceVarName: 'fan_1', templateName: 'Range Hood', templateSource: 'BUNDLED' }
-        ],
-        readers: [],
-        evolutionSummary: 'Affected by 2 devices: purifier_1, fan_1.'
-      })
-      expect(html).toContain('affected by 2 devices')
-    })
+    const environment = wrapper.get('[data-testid="playback-state-environment"]')
+    expect(environment.isVisible()).toBe(true)
+    expect(environment.get('dt').text()).toBe('time')
+    expect(environment.get('dd').text()).toBe('0')
+    expect(environment.find('[title]').exists()).toBe(false)
+    wrapper.unmount()
   })
 
   it('keeps navigation separate from execution records and full state values', async () => {

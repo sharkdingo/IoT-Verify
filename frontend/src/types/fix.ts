@@ -169,15 +169,15 @@ export interface FixApplyRequest {
 
 // Applied-fix result after boardApi maps the authoritative backend RuleDto snapshot.
 export interface FixApplyResult {
-  applied: boolean
+  applied: true
   strategy: FixStrategyName
   /** Apply reuses the run's verification evidence after drift checks; it never re-runs the search. */
-  verificationEvidenceReused: boolean
+  verificationEvidenceReused: true
   appliedSuggestion: FixSuggestion
   previousRuleCount: number
   currentRuleCount: number
   message: string
   rules: RuleForm[]
-  canUndo: boolean
-  canRedo: boolean
+  canUndo: true
+  canRedo: false
 }

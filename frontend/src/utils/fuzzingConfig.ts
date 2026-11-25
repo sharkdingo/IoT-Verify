@@ -18,8 +18,11 @@ export type KnownFuzzingSpecificationIssue =
   | 'TRUST_PRIVACY_UNSUPPORTED'
   | 'REPORTED_READING_UNSUPPORTED'
 
+export type IsSharedFuzzingVariable = (deviceId: string, key: string) => boolean
+
 export const getKnownFuzzingSpecificationIssue = (
-  specification: Pick<Specification, 'templateId' | 'aConditions' | 'ifConditions' | 'thenConditions'>
+  specification: Pick<Specification, 'templateId' | 'aConditions' | 'ifConditions' | 'thenConditions'>,
+  isSharedVariable: IsSharedFuzzingVariable
 ): KnownFuzzingSpecificationIssue | null => {
   if (!isKnownFuzzingTemplateSupported(specification.templateId)) return 'UNSUPPORTED_TEMPLATE'
   const conditions = [
@@ -33,21 +36,20 @@ export const getKnownFuzzingSpecificationIssue = (
     targetType === 'trust' || targetType === 'privacy')) {
     return 'TRUST_PRIVACY_UNSUPPORTED'
   }
-  // Mirrors the backend's own exclusion. The explorer keeps one value per shared reading and models no
-  // compromised device, so it cannot tell "what this device said" from "what the home held" — it would
-  // answer the `environment` question and label the answer as this specification's. Pre-warning here keeps
-  // the panel from offering a run the backend will refuse.
+  // The explorer tracks local values directly, but keeps only the environment value for shared readings.
   if (normalizedTargetTypes.some(({ condition, targetType }) =>
     targetType === 'variable'
-    && String(condition?.variableSource ?? '').trim().toLowerCase() === 'reported')) {
+    && String(condition?.variableSource ?? '').trim().toLowerCase() === 'reported'
+    && isSharedVariable(condition.deviceId.trim(), condition.key.trim()))) {
     return 'REPORTED_READING_UNSUPPORTED'
   }
   return null
 }
 
 export const isKnownFuzzingSpecificationSupported = (
-  specification: Pick<Specification, 'templateId' | 'aConditions' | 'ifConditions' | 'thenConditions'>
-): boolean => getKnownFuzzingSpecificationIssue(specification) === null
+  specification: Pick<Specification, 'templateId' | 'aConditions' | 'ifConditions' | 'thenConditions'>,
+  isSharedVariable: IsSharedFuzzingVariable
+): boolean => getKnownFuzzingSpecificationIssue(specification, isSharedVariable) === null
 
 export interface FuzzingWorkloadConfig {
   maxIterations: number

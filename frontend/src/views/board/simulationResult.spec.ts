@@ -17,7 +17,8 @@ const trace = (): SimulationTrace => ({
   modelSnapshot: {
     capturedAt: '2026-10-07T00:00:00', deviceCount: 0, ruleCount: 0,
     specificationCount: 0, environmentVariableCount: 0, deviceTemplateCount: 0,
-    templatesFrozen: true
+    templatesFrozen: true,
+    modelSemanticsVersion: 1
   },
   modelSemantics: {
     attackPointUnit: 'BEHAVIOR_CHANGING_DEVICE_INSTANCE_OR_AUTOMATION_LINK',

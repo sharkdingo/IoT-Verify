@@ -12,6 +12,7 @@ import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvGenerator;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceReferenceResolver;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvData;
 import cn.edu.nju.Iot_Verify.configure.FixConfig;
+import cn.edu.nju.Iot_Verify.dto.RequestLimits;
 import cn.edu.nju.Iot_Verify.dto.fix.ConditionAdjustment;
 import cn.edu.nju.Iot_Verify.dto.fix.FaultRuleDto;
 import cn.edu.nju.Iot_Verify.dto.fix.FixSuggestionDto;
@@ -68,8 +69,9 @@ public class ConditionAdjustStrategy implements FixStrategy {
         // §5.2: candidate conditions on every rule that can influence the violated property
         SpecificationDto violatedSpec = ctx.getSpecs().get(violatedSpecIndex);
         Map<String, DeviceSmvData> deviceSmvMap = ctx.getDeviceSmvMap();
+        Set<String> occupiedSymbols = FixStrategyUtils.occupiedRepairSymbols(ctx);
 
-        PreparedData prep = prepareAugmentedRules(allRules, repairIndices, violatedSpec, deviceSmvMap);
+        PreparedData prep = prepareAugmentedRules(allRules, repairIndices, violatedSpec, deviceSmvMap, occupiedSymbols);
         if (prep == null) return StrategyOutcome.none();
 
         List<Long> domainSizes = new ArrayList<>(Collections.nCopies(prep.conditionLambdas.size(), 2L));
@@ -78,14 +80,14 @@ public class ConditionAdjustStrategy implements FixStrategy {
         ctx.initializeStrategySearch(NAME, maxAttempts, domainSizes);
         log.info("ConditionAdjustStrategy: created {} lambda variable(s)", prep.conditionLambdas.size());
         CounterexampleLemma lemma = CounterexampleLemma.plan(
-                prep.augmentedRules, prep.conditionLambdas, prep.candidateConditionValues);
+                prep.augmentedRules, prep.conditionLambdas, prep.candidateConditionValues, occupiedSymbols);
 
         // Solve loop. A checked assignment is excluded exactly; a rejected one also excludes every
         // assignment its violating path cannot tell apart from it (see CounterexampleLemma), and a
         // listed repair excludes every assignment that flips at least the same conditions (see
         // supersetExclusion).
         FixAlternatives alternatives = new FixAlternatives(ctx);
-        List<String> exclusionInvars = new ArrayList<>();
+        List<String> exclusionInvars = new ArrayList<>(conditionLimitConstraints(prep));
         int prioritizedBudget = maxAttempts > 1 ? Math.max(1, maxAttempts / 2) : 0;
         List<Set<String>> prioritizedConfigurations = maxAttempts > 1
                 ? prioritizedConfigurations(prep, deviceSmvMap, faultRules, violatedSpec, prioritizedBudget)
@@ -209,14 +211,11 @@ public class ConditionAdjustStrategy implements FixStrategy {
                 // Apply changes to a fresh copy of allRules
                 List<RuleDto> modifiedRules = applyChanges(allRules, ir.conditionsToRemove, ir.conditionsToAdd);
 
-                // Reject solutions that strip a rule down to zero trigger conditions. NuSMV treats an
-                // empty-condition rule as fail-closed (never fires), so such a solution can verify — but
-                // RuleDto forbids empty conditions and the apply layer rejects it, so returning it would
-                // hand the user a "verified" suggestion that can never be applied. Exclude and keep searching.
-                if (emptiesAnyRule(modifiedRules, ir.conditionsToRemove.keySet())) {
-                    log.info("ConditionAdjust attempt {}: solution empties a rule's conditions; excluding", attempt + 1);
-                    // It avoids the counterexample but is not a persistable rule, the same ground on
-                    // which forward verification rejects a candidate.
+                // Judge the resulting count after both removals and additions. A rule at its
+                // condition limit can still accept a replacement.
+                if (hasInvalidConditionCount(modifiedRules, ir)) {
+                    log.info("ConditionAdjust attempt {}: resulting trigger condition count is outside 1..{}; excluding",
+                            attempt + 1, RequestLimits.MAX_RULE_CONDITIONS);
                     alternatives.notAccepted(ir.changes, FixStrategyUtils.Verification.rejected());
                     addExclusion(exclusionInvars, prep, extractedValues);
                     continue;
@@ -283,9 +282,9 @@ public class ConditionAdjustStrategy implements FixStrategy {
                 ctx.clearStrategySolverFailure(NAME);
                 if (alternatives.anyRejected()) {
                     ctx.recordStrategyNoResult(NAME, "ALL_CANDIDATES_REJECTED",
-                            "Condition changes that prevent this counterexample exist, but each one either leaves a"
-                                    + " rule without a trigger condition or was rejected by forward verification on"
-                                    + " the complete model.");
+                            "Condition changes that prevent this counterexample exist, but each would leave an"
+                                    + " edited rule outside the allowed trigger condition count or was rejected by"
+                                    + " forward verification on the complete model.");
                 } else {
                     ctx.recordStrategyNoResult(NAME, "NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE",
                             "No combination of removing existing trigger conditions and adding candidate ones"
@@ -309,18 +308,20 @@ public class ConditionAdjustStrategy implements FixStrategy {
             List<RuleDto> allRules,
             Set<Integer> expandedIndices,
             SpecificationDto violatedSpec,
-            Map<String, DeviceSmvData> deviceSmvMap) {
+            Map<String, DeviceSmvData> deviceSmvMap,
+            Set<String> occupiedSymbols) {
 
         List<RuleDto> augmentedRules = FixStrategyUtils.deepCopyRules(allRules);
         Map<Integer, Integer> originalCondCounts = new HashMap<>();
 
+        CommandEffects.Scene commandEffects = new CommandEffects.Scene(allRules, deviceSmvMap, expandedIndices);
         Map<Integer, CommandEffects> effectsByRule = new HashMap<>();
         for (int ruleIdx : expandedIndices) {
             RuleDto augRule = augmentedRules.get(ruleIdx);
             originalCondCounts.put(ruleIdx, augRule.getConditions() != null
                     ? augRule.getConditions().size() : 0);
 
-            CommandEffects effects = CommandEffects.of(allRules.get(ruleIdx), allRules, deviceSmvMap);
+            CommandEffects effects = commandEffects.forRule(ruleIdx);
             effectsByRule.put(ruleIdx, effects);
             List<RuleDto.Condition> candidates = FixStrategyUtils.extractCandidateConditions(
                     violatedSpec, allRules.get(ruleIdx), effects, deviceSmvMap, fixConfig.getMaxCandidatesPerRule());
@@ -344,13 +345,13 @@ public class ConditionAdjustStrategy implements FixStrategy {
             for (int condIdx = 0; condIdx < augRule.getConditions().size(); condIdx++) {
                 if (augRule.getConditions().get(condIdx) == null) continue;
                 String key = "r" + ruleIdx + "_c" + condIdx;
-                String lambdaName = "lambda_" + key;
+                String lambdaName = FixStrategyUtils.freshSolverName("lambda_" + key, occupiedSymbols);
                 conditionLambdas.put(key, lambdaName);
                 frozenVarNames.add(lambdaName);
 
                 int originalCount = originalCondCounts.getOrDefault(ruleIdx, 0);
                 if (condIdx >= originalCount) {
-                    String valueName = "condition_value_" + key;
+                    String valueName = FixStrategyUtils.freshSolverName("condition_value_" + key, occupiedSymbols);
                     ParameterizationConfig.ConditionValueInfo valueInfo =
                             FixStrategyUtils.candidateConditionValueInfo(
                                     augRule.getConditions().get(condIdx), allRules.get(ruleIdx),
@@ -404,7 +405,8 @@ public class ConditionAdjustStrategy implements FixStrategy {
             if (valueInfo != null) {
                 String selectedValue = extractedValues.get(valueInfo.getFrozenVarName());
                 if (selectedValue != null) {
-                    cond = copyConditionWithValue(cond, selectedValue);
+                    cond = copyConditionWithValue(cond,
+                            FixStrategyUtils.authoredCandidateValue(cond, selectedValue, deviceSmvMap));
                 }
             }
             String ruleDescription = describeRule(allRules, ruleIdx);
@@ -493,15 +495,12 @@ public class ConditionAdjustStrategy implements FixStrategy {
         return modifiedRules;
     }
 
-    /**
-     * True if applying the changes leaves any affected rule with zero trigger conditions. Only rules
-     * that had conditions removed can be emptied (adds never reduce the count), so we check those.
-     */
-    private static boolean emptiesAnyRule(List<RuleDto> modifiedRules, Set<Integer> touchedRuleIndices) {
-        for (int ruleIdx : touchedRuleIndices) {
-            if (ruleIdx < 0 || ruleIdx >= modifiedRules.size()) continue;
-            List<RuleDto.Condition> conds = modifiedRules.get(ruleIdx).getConditions();
-            if (conds == null || conds.isEmpty()) {
+    private static boolean hasInvalidConditionCount(List<RuleDto> modifiedRules, InterpretedResult changes) {
+        Set<Integer> changedRuleIndices = new LinkedHashSet<>(changes.conditionsToRemove.keySet());
+        changedRuleIndices.addAll(changes.conditionsToAdd.keySet());
+        for (int ruleIndex : changedRuleIndices) {
+            List<RuleDto.Condition> conditions = modifiedRules.get(ruleIndex).getConditions();
+            if (conditions == null || conditions.isEmpty() || conditions.size() > RequestLimits.MAX_RULE_CONDITIONS) {
                 return true;
             }
         }
@@ -576,6 +575,17 @@ public class ConditionAdjustStrategy implements FixStrategy {
     }
 
     // -------- Helpers --------
+
+    private static List<String> conditionLimitConstraints(PreparedData prep) {
+        Map<Integer, List<String>> lambdasByRule = new LinkedHashMap<>();
+        prep.conditionLambdas.forEach((key, lambda) -> lambdasByRule
+                .computeIfAbsent(ruleIndexForKey(key), ignored -> new ArrayList<>()).add(lambda));
+        // Otherwise different assignments to the same over-limit guard can exhaust the search.
+        return lambdasByRule.values().stream()
+                .filter(lambdas -> lambdas.size() > RequestLimits.MAX_RULE_CONDITIONS)
+                .map(lambdas -> "count(" + String.join(", ", lambdas) + ") <= " + RequestLimits.MAX_RULE_CONDITIONS)
+                .toList();
+    }
 
     private static void addExclusion(
             List<String> exclusionInvars,

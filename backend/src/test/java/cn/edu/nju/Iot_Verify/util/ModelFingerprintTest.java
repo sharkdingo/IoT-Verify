@@ -3,6 +3,7 @@ package cn.edu.nju.Iot_Verify.util;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
+import cn.edu.nju.Iot_Verify.dto.model.ModelSemanticsVersion;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import cn.edu.nju.Iot_Verify.util.mapper.BoardDataConverter.ModelInputSnapshot;
@@ -32,7 +33,10 @@ class ModelFingerprintTest {
         var pair = fingerprint.boardFingerprints(board);
         assertEquals("c889a292b6784a8377274f7774ef88b7b77d0bcb967e3469e76819c28b18010a", pair.verification());
         assertEquals("db23109e9940c050afd0e0ba51c845473e2eab78f497528f13cb9cc3d91da019", pair.simulation());
-        assertEquals("fe6a502aeaa5ee1d70c9c548a5b5266424c4bc20cb492ad9a20142fdba364cc5",
+        assertEquals(ModelSemanticsVersion.CURRENT, JsonUtils.fromJson(JsonUtils.toJson(pair),
+                com.fasterxml.jackson.databind.JsonNode.class).path("modelSemanticsVersion").asInt());
+        // An earlier domain approval must be requested again even for identical modeled input.
+        assertNotEquals("fe6a502aeaa5ee1d70c9c548a5b5266424c4bc20cb492ad9a20142fdba364cc5",
                 fingerprint.paperDomainFingerprint(board, 5));
     }
 

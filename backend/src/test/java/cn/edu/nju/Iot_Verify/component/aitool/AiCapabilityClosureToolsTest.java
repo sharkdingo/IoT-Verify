@@ -10,6 +10,7 @@ import cn.edu.nju.Iot_Verify.dto.board.BoardEditHistoryClearPreviewDto;
 import cn.edu.nju.Iot_Verify.dto.board.BoardReplacementPreviewDto;
 import cn.edu.nju.Iot_Verify.dto.board.BoardUndoResultDto;
 import cn.edu.nju.Iot_Verify.dto.fuzz.FuzzTaskSummaryDto;
+import cn.edu.nju.Iot_Verify.dto.model.ModelRunSnapshotDto;
 import cn.edu.nju.Iot_Verify.dto.model.RunInitiator;
 import cn.edu.nju.Iot_Verify.dto.simulation.SimulationTaskSummaryDto;
 import cn.edu.nju.Iot_Verify.dto.verification.VerificationRunDto;
@@ -116,11 +117,12 @@ class AiCapabilityClosureToolsTest {
 
     @Test
     void verificationRunTools_includeSatisfiedRunsAndPerSpecDetailsWithoutRawOutput() throws Exception {
+        var historical = ModelRunSnapshotDto.builder().modelFingerprint("a".repeat(64)).build();
         VerificationRunSummaryDto summary = VerificationRunSummaryDto.builder()
                 .id(21L).initiator(RunInitiator.USER).outcome(
                         cn.edu.nju.Iot_Verify.dto.verification.VerificationOutcome.SATISFIED)
                 .modelComplete(true).violatedSpecCount(0).counterexampleCount(0)
-                .dataAvailable(true).build();
+                .modelSnapshot(historical).dataAvailable(true).build();
         when(verificationService.getRuns(7L)).thenReturn(List.of(summary));
         VerificationRunDto detail = VerificationRunDto.builder()
                 .id(21L).initiator(RunInitiator.USER).outcome(
@@ -130,7 +132,7 @@ class AiCapabilityClosureToolsTest {
                         .templateId("internal-template-id")
                         .specificationLabel("Door remains closed")
                         .build())).checkLogs(List.of("checked"))
-                .nusmvOutput("large internal output").build();
+                .modelSnapshot(historical).nusmvOutput("large internal output").build();
         when(verificationService.getRun(7L, 21L)).thenReturn(detail);
 
         JsonNode listed = objectMapper.readTree(
@@ -140,6 +142,8 @@ class AiCapabilityClosureToolsTest {
                         .execute("{\"runId\":21}"));
 
         assertEquals("SATISFIED", listed.path("runs").get(0).path("outcome").asText());
+        assertEquals(Boolean.FALSE, objectMapper.convertValue(
+                listed.path("runs").get(0).get("modelSemanticsCurrent"), Boolean.class));
         assertEquals(0, listed.path("runs").get(0).path("counterexampleCount").asInt());
         String interpretation = listed.path("interpretation").asText();
         assertTrue(interpretation.contains("formula outcomes only"));
@@ -149,6 +153,7 @@ class AiCapabilityClosureToolsTest {
         assertTrue(new ListVerificationRunsTool(verificationService, objectMapper)
                 .getDefinition().description().contains("omit response-trigger reachability"));
         assertEquals(1, loaded.path("checkLogCount").asInt());
+        assertEquals(Boolean.FALSE, objectMapper.convertValue(loaded.get("modelSemanticsCurrent"), Boolean.class));
         assertTrue(loaded.path("specResults").isArray());
         assertFalse(loaded.path("specResults").get(0).has("specId"));
         assertFalse(loaded.path("specResults").get(0).has("templateId"));

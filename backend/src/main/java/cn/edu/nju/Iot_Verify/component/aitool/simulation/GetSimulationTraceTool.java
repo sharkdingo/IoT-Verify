@@ -53,7 +53,8 @@ public class GetSimulationTraceTool extends AbstractAiTool {
                 "Get a saved simulation trace by simulationId with a bounded state window. "
                         + "Page with stateOffset and stateLimit; use stateCount and nextStateOffset to inspect another window. "
                         + "Simulation does not check specifications; modelSnapshot.specificationCount is the run's scope, "
-                        + "not the saved Board's specification count.",
+                        + "not the saved Board's specification count. "
+                        + ModelTraceToolPresenter.ENVIRONMENT_PROVENANCE_GUIDANCE,
                 schema);
     }
 

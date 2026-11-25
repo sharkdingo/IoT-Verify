@@ -14,6 +14,7 @@ import cn.edu.nju.Iot_Verify.component.nusmv.parser.SmvTraceParser;
 import cn.edu.nju.Iot_Verify.component.template.DeviceTemplateSchemaValidator;
 import cn.edu.nju.Iot_Verify.configure.NusmvConfig;
 import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
+import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
@@ -41,12 +42,17 @@ class HouseholdEntrySceneNusmvTest {
     void aTriggerReachableFromOnlyOneInitialStateIsStillReachable() throws Exception {
         var device = new DeviceSmvData();
         device.setVarName("sensor_1");
-        device.setModes(List.of("SensorState"));
-        device.setModeStates(Map.of("SensorState", List.of("active", "idle")));
+        String mode = "SensorState";
+        List<String> states = List.of("active", "idle");
+        device.setManifest(DeviceManifest.builder().modes(List.of(mode))
+                .workingStates(states.stream().map(name -> DeviceManifest.WorkingState.builder().name(name).build()).toList())
+                .build());
+        device.setModes(List.of(mode));
+        device.setModeStates(Map.of(mode, states));
         var condition = new SpecConditionDto();
         condition.setDeviceId("sensor_1");
         condition.setTargetType("mode");
-        condition.setKey("SensorState");
+        condition.setKey(mode);
         condition.setRelation("=");
         condition.setValue("active");
         var spec = new SpecificationDto();

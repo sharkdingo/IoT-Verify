@@ -134,7 +134,10 @@ class BoardStorageServiceImplBatchTest {
     void saveBoardBatch_savesAllThreeCollections() {
         UserPo owner = UserPo.builder().id(1L).build();
         when(userRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(owner));
-        DeviceNodeDto node = boardNode("node-1", null, "Device");
+        DeviceNodeDto node = boardNode("node-1", "Switch", "Device");
+        DeviceTemplatePo template = DeviceTemplatePo.builder()
+                .name("Switch").manifestJson("{\"Name\":\"Switch\"}").build();
+        when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(template));
         RuleDto rule = RuleDto.builder().conditions(List.of()).build();
         SpecificationDto spec = new SpecificationDto();
         spec.setName("Door remains closed");
@@ -151,7 +154,8 @@ class BoardStorageServiceImplBatchTest {
         when(specRepo.saveAll(any())).thenReturn(List.of());
 
         BoardBatchDto result = service.saveBoardBatch(1L,
-                confirmedBatch(service, new BoardBatchDto(List.of(node), List.of(rule), List.of(spec))));
+                confirmedBatch(service, withTemplateSnapshots(
+                        new BoardBatchDto(List.of(node), List.of(), List.of(rule), List.of(spec)), template)));
 
         assertTrue(result != null);
         // All three collections reconcile identities within the single transaction.
@@ -169,12 +173,24 @@ class BoardStorageServiceImplBatchTest {
     @Test
     void saveBoardBatch_missingCollectionsRejectInsteadOfImplicitlyPreservingThem() {
         ValidationException error = assertThrows(ValidationException.class,
-                () -> service.saveBoardBatch(1L, new BoardBatchDto(null, List.of(), null)));
+                () -> service.saveBoardBatch(1L, new BoardBatchDto(null, List.of(), List.of(), null)));
 
         assertTrue(error.getErrors().containsKey("nodes"));
         assertTrue(error.getErrors().containsKey("specs"));
         verify(nodeRepo, never()).deleteAll(any());
         verify(specRepo, never()).deleteAll(any());
+    }
+
+    @Test
+    void saveBoardBatch_requiresExplicitTemplateSnapshotsEvenForAnEmptyReplacement() {
+        BoardBatchDto replacement = confirmedBatch(service,
+                new BoardBatchDto(List.of(), List.of(), List.of(), List.of()));
+
+        ValidationException error = assertThrows(ValidationException.class,
+                () -> service.saveBoardBatch(1L, replacement));
+
+        assertTrue(error.getErrors().containsKey("templateSnapshots"));
+        verify(editJournal, never()).clear(anyLong());
     }
 
     @Test
@@ -409,6 +425,7 @@ class BoardStorageServiceImplBatchTest {
         assertTrue(preview.getImpactToken() != null && !preview.getImpactToken().isBlank());
 
         BoardBatchDto replacement = new BoardBatchDto(List.of(), List.of(), List.of(), List.of());
+        replacement.setTemplateSnapshots(List.of());
         replacement.setImpactToken(preview.getImpactToken());
         BoardReplacementStaleException error = assertThrows(
                 BoardReplacementStaleException.class,
@@ -448,6 +465,7 @@ class BoardStorageServiceImplBatchTest {
         when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(
                 DeviceTemplatePo.builder().name("New Sensor").manifestJson("{\"Name\":\"New Sensor\"}").build()));
         BoardBatchDto replacement = new BoardBatchDto(List.of(), List.of(), List.of(), List.of());
+        replacement.setTemplateSnapshots(List.of());
         replacement.setImpactToken(preview.getImpactToken());
 
         assertThrows(BoardReplacementStaleException.class, () -> service.saveBoardBatch(1L, replacement));
@@ -462,6 +480,7 @@ class BoardStorageServiceImplBatchTest {
 
         var preview = service.previewBoardReplacement(1L);
         BoardBatchDto replacement = new BoardBatchDto(List.of(), List.of(), List.of(), List.of());
+        replacement.setTemplateSnapshots(List.of());
         replacement.setImpactToken(preview.getImpactToken());
 
         BoardReplacementStaleException error = assertThrows(
@@ -516,8 +535,9 @@ class BoardStorageServiceImplBatchTest {
     }
 
     @Test
-    void saveBoardBatch_canonicalizesRuleAndSpecRelationsAndTargetTypesBeforePersistence() {
-        DeviceNodeDto node = boardNode("sensor1", "Temperature Sensor", "Living Sensor");
+    void saveBoardBatch_acceptsRepairNamesAndCanonicalizesRuleAndSpecConditions() {
+        String nodeId = "param_r0_c0";
+        DeviceNodeDto node = boardNode(nodeId, "Temperature Sensor", "Living Sensor");
 
         DeviceTemplatePo template = DeviceTemplatePo.builder()
                 .userId(1L)
@@ -542,14 +562,14 @@ class BoardStorageServiceImplBatchTest {
 
         RuleDto rule = RuleDto.builder()
                 .conditions(List.of(RuleDto.Condition.builder()
-                        .deviceName("sensor1")
+                        .deviceName(nodeId)
                         .attribute("temperature")
                         .targetType("Variable")
                         .relation(" GTE ")
                         .value("28")
                         .build()))
                 .command(RuleDto.Command.builder()
-                        .deviceName("sensor1")
+                        .deviceName(nodeId)
                         .action("cool")
                         .build())
                 .build();
@@ -557,7 +577,7 @@ class BoardStorageServiceImplBatchTest {
         SpecConditionDto condition = new SpecConditionDto();
         condition.setId("c1");
         condition.setSide("a");
-        condition.setDeviceId("sensor1");
+        condition.setDeviceId(nodeId);
         condition.setDeviceLabel("Stale internal label");
         condition.setTargetType("PRIVACY");
         condition.setKey("temperature");
@@ -584,8 +604,9 @@ class BoardStorageServiceImplBatchTest {
         when(specificationMapper.toEntity(any(), anyLong())).thenReturn(new SpecificationPo());
         when(specRepo.saveAll(any())).thenReturn(List.of());
 
-        service.saveBoardBatch(1L,
-                confirmedBatch(service, new BoardBatchDto(List.of(node), List.of(rule), List.of(spec))));
+        service.saveBoardBatch(1L, confirmedBatch(service, withTemplateSnapshots(new BoardBatchDto(
+                List.of(node), List.of(new BoardEnvironmentVariableDto("temperature", "20", "untrusted", "public")),
+                List.of(rule), List.of(spec)), template)));
 
         verify(ruleMapper).toEntity(argThat(savedRule ->
                 ">=".equals(savedRule.getConditions().get(0).getRelation())
@@ -599,7 +620,7 @@ class BoardStorageServiceImplBatchTest {
                         && "Never".equals(savedSpec.getTemplateLabel())
                         && savedSpec.getFormula().contains("not in {public, private}")
                         && savedSpec.getDevices().size() == 1
-                        && "sensor1".equals(savedSpec.getDevices().get(0).getDeviceId())
+                        && nodeId.equals(savedSpec.getDevices().get(0).getDeviceId())
                         && savedSpec.getDevices().get(0).getSelectedApis().isEmpty()), anyLong());
     }
 
@@ -719,29 +740,12 @@ class BoardStorageServiceImplBatchTest {
         when(specificationMapper.toEntity(any(), anyLong())).thenReturn(new SpecificationPo());
         when(specRepo.saveAll(any())).thenReturn(List.of());
 
-        service.saveBoardBatch(1L,
-                confirmedBatch(service, new BoardBatchDto(List.of(node), List.of(), List.of(spec))));
+        service.saveBoardBatch(1L, confirmedBatch(service, withTemplateSnapshots(new BoardBatchDto(
+                List.of(node), List.of(new BoardEnvironmentVariableDto("temperature", "20", "untrusted", "public")),
+                List.of(), List.of(spec)), template)));
 
         verify(specificationMapper).toEntity(argThat(savedSpec ->
                 "environment".equals(savedSpec.getAConditions().get(0).getVariableSource())), anyLong());
-    }
-
-    @Test
-    void apiEventConditionWithoutRelationIsNotTreatedAsAnAdjustableParameter() {
-        RuleDto.Condition apiEvent = RuleDto.Condition.builder()
-                .deviceName("camera_1")
-                .attribute("take photo")
-                .targetType("api")
-                .build();
-
-        Boolean parameterizable = ReflectionTestUtils.invokeMethod(
-                service,
-                "isParameterizableBoardCondition",
-                apiEvent,
-                java.util.Map.of(),
-                java.util.Map.of());
-
-        assertEquals(Boolean.FALSE, parameterizable);
     }
 
     @Test
@@ -794,7 +798,8 @@ class BoardStorageServiceImplBatchTest {
 
         BoardBatchDto result = serviceWithEnvironment.saveBoardBatch(1L,
                 confirmedBatch(serviceWithEnvironment,
-                        new BoardBatchDto(List.of(node), List.of(importedEnvironment), List.of(), List.of())));
+                        withTemplateSnapshots(new BoardBatchDto(
+                                List.of(node), List.of(importedEnvironment), List.of(), List.of()), template)));
 
         assertEquals(1, result.getEnvironmentVariables().size());
         BoardEnvironmentVariableDto savedEnvironment = result.getEnvironmentVariables().get(0);
@@ -849,10 +854,10 @@ class BoardStorageServiceImplBatchTest {
         when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(firstTemplate, secondTemplate));
 
         ValidationException exception = assertThrows(ValidationException.class, () ->
-                serviceWithTemplates.saveBoardBatch(1L, confirmedBatch(serviceWithTemplates, new BoardBatchDto(
+                serviceWithTemplates.saveBoardBatch(1L, confirmedBatch(serviceWithTemplates, withTemplateSnapshots(new BoardBatchDto(
                         List.of(indoor, outdoor),
                         List.of(new BoardEnvironmentVariableDto("temperature", "20", "untrusted", "public")),
-                        List.of(), List.of()))));
+                        List.of(), List.of()), firstTemplate, secondTemplate))));
 
         String message = String.join(" ", exception.getErrors().values());
         assertTrue(message.contains("natural-change-rate mismatch"), message);
@@ -1002,16 +1007,83 @@ class BoardStorageServiceImplBatchTest {
         when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(template));
 
         ValidationException error = assertThrows(ValidationException.class, () ->
-                serviceWithTemplates.saveBoardBatch(1L, confirmedBatch(serviceWithTemplates, new BoardBatchDto(
+                serviceWithTemplates.saveBoardBatch(1L, confirmedBatch(serviceWithTemplates, withTemplateSnapshots(new BoardBatchDto(
                         List.of(node),
                         List.of(new BoardEnvironmentVariableDto("temperature", "20", "trusted", "public")),
-                        List.of(), List.of()))));
+                        List.of(), List.of()), template))));
 
         String reason = error.getErrors().get("nodes[0].id");
         assertTrue(reason.contains("Living-room sensor"), reason);
         assertTrue(reason.contains("shared environment value 'temperature'"), reason);
         assertTrue(reason.contains("display name may stay unchanged"), reason);
         verify(nodeRepo, never()).deleteAll(any());
+    }
+
+    @Test
+    void saveBoardBatch_rejectsEnumLiteralThatCollidesWithAnotherDevicesSharedPoolName() {
+        BoardStorageServiceImpl serviceWithTemplates = new BoardStorageServiceImpl(
+                nodeRepo, environmentRepo, specRepo, ruleRepo, null, deviceTemplateRepo, null,
+                transactionTemplate, null, specificationMapper, ruleMapper, new DeviceNodeMapper(),
+                null, new DeviceTemplateMapper(), null, userRepository, editJournal);
+        var lamp = DeviceTemplateDto.DeviceManifest.builder().name("Lamp")
+                .modes(List.of("Power")).initState("off")
+                .workingStates(List.of(workingState("off"), workingState("a_temperature"))).build();
+        var sensor = DeviceTemplateDto.DeviceManifest.builder().name("Sensor")
+                .internalVariables(List.of(DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
+                        .name("temperature").isInside(false).reads(true).lowerBound(0).upperBound(50)
+                        .trust("trusted").privacy("public").build())).build();
+        DeviceTemplatePo lampTemplate = DeviceTemplatePo.builder().userId(1L).name("Lamp")
+                .manifestJson(JsonUtils.toJson(lamp)).build();
+        DeviceTemplatePo sensorTemplate = DeviceTemplatePo.builder().userId(1L).name("Sensor")
+                .manifestJson(JsonUtils.toJson(sensor)).build();
+        when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(lampTemplate, sensorTemplate));
+        DeviceNodeDto lampNode = boardNode("lamp1", "Lamp", "Lamp");
+        lampNode.setState("off");
+        DeviceNodeDto sensorNode = boardNode("sensor1", "Sensor", "Sensor");
+        lenient().when(nodeRepo.saveAll(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        BoardBatchDto batch = withTemplateSnapshots(new BoardBatchDto(List.of(lampNode, sensorNode),
+                List.of(new BoardEnvironmentVariableDto("temperature", "20", "trusted", "public")),
+                List.of(), List.of()), lampTemplate, sensorTemplate);
+
+        ValidationException error = assertThrows(ValidationException.class, () ->
+                serviceWithTemplates.saveBoardBatch(1L, confirmedBatch(serviceWithTemplates, batch)));
+
+        String reason = error.getErrors().get("nodes");
+        assertNotNull(reason, error.getErrors().toString());
+        assertTrue(reason.contains("a_temperature"), reason);
+        assertTrue(reason.contains("working-state value of mode 'Power' on device 'lamp1'"), reason);
+        verify(nodeRepo, never()).saveAll(any());
+    }
+
+    @Test
+    void saveBoardBatch_rejectsEnumLiteralThatCollidesWithAnEmittedRuleProbe() {
+        var lamp = DeviceTemplateDto.DeviceManifest.builder().name("Lamp")
+                .modes(List.of("Power")).initState("off")
+                .workingStates(List.of(workingState("off"), workingState("iot_verify_rule_fired_0")))
+                .apis(List.of(DeviceTemplateDto.DeviceManifest.API.builder().name("turnOn").signal(false).build()))
+                .build();
+        DeviceTemplatePo template = DeviceTemplatePo.builder().userId(1L).name("Lamp")
+                .manifestJson(JsonUtils.toJson(lamp)).build();
+        when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(template));
+        DeviceNodeDto node = boardNode("lamp1", "Lamp", "Lamp");
+        node.setState("off");
+        RuleDto rule = RuleDto.builder().ruleString("Turn on the lamp when off")
+                .conditions(List.of(RuleDto.Condition.builder().deviceName("lamp1").attribute("state")
+                        .targetType("state").relation("=").value("off").build()))
+                .command(RuleDto.Command.builder().deviceName("lamp1").action("turnOn").build())
+                .build();
+        lenient().when(ruleMapper.toEntity(any(), anyLong())).thenReturn(new RulePo());
+        BoardBatchDto batch = withTemplateSnapshots(
+                new BoardBatchDto(List.of(node), List.of(), List.of(rule), List.of()), template);
+
+        ValidationException error = assertThrows(ValidationException.class, () ->
+                service.saveBoardBatch(1L, confirmedBatch(service, batch)));
+
+        String reason = error.getErrors().get("nodes");
+        assertNotNull(reason, error.getErrors().toString());
+        assertTrue(reason.contains("iot_verify_rule_fired_0"), reason);
+        assertTrue(reason.contains("rule playback"), reason);
+        verify(nodeRepo, never()).saveAll(any());
     }
 
     @Test
@@ -1043,8 +1115,8 @@ class BoardStorageServiceImplBatchTest {
         when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(template));
 
         ValidationException error = assertThrows(ValidationException.class, () ->
-                serviceWithTemplates.saveBoardBatch(1L, confirmedBatch(serviceWithTemplates, new BoardBatchDto(
-                        List.of(node), List.of(), List.of(rule), List.of()))));
+                serviceWithTemplates.saveBoardBatch(1L, confirmedBatch(serviceWithTemplates, withTemplateSnapshots(
+                        new BoardBatchDto(List.of(node), List.of(), List.of(rule), List.of()), template))));
 
         String reason = error.getErrors().get("nodes[0].id");
         assertTrue(reason.contains("rule playback tracking"), reason);
@@ -1067,6 +1139,12 @@ class BoardStorageServiceImplBatchTest {
 
     private static BoardBatchDto confirmedBatch(BoardStorageServiceImpl target, BoardBatchDto batch) {
         batch.setImpactToken(target.previewBoardReplacement(1L).getImpactToken());
+        return batch;
+    }
+
+    private static BoardBatchDto withTemplateSnapshots(BoardBatchDto batch, DeviceTemplatePo... templates) {
+        DeviceTemplateMapper mapper = new DeviceTemplateMapper();
+        batch.setTemplateSnapshots(java.util.Arrays.stream(templates).map(mapper::toDto).toList());
         return batch;
     }
 
@@ -1659,7 +1737,8 @@ class BoardStorageServiceImplBatchTest {
 
         ValidationException error = assertThrows(ValidationException.class, () ->
                 service.saveBoardBatch(1L,
-                        confirmedBatch(service, new BoardBatchDto(List.of(node), List.of(), List.of()))));
+                        confirmedBatch(service, withTemplateSnapshots(
+                                new BoardBatchDto(List.of(node), List.of(), List.of(), List.of())))));
 
         assertEquals("Width must be within 80..2000", error.getErrors().get("nodes[0].width"));
         verify(nodeRepo, never()).deleteAll(any());
@@ -1735,6 +1814,50 @@ class BoardStorageServiceImplBatchTest {
         assertThrows(DeviceRuntimeConflictException.class, () ->
                 serviceWithRealMapper.updateNodeRuntime(
                         1L, "switch_1", new DeviceRuntimeUpdateDto(expected, desired)));
+    }
+
+    @Test
+    void updateNodeRuntime_correctsTwoUnsupportedSavedStartingStatesIndependently() throws Exception {
+        DeviceNodeMapper realMapper = new DeviceNodeMapper();
+        var realService = new BoardStorageServiceImpl(
+                nodeRepo, null, specRepo, ruleRepo, null, deviceTemplateRepo, null,
+                transactionTemplate, null, specificationMapper, ruleMapper, realMapper,
+                null, new DeviceTemplateMapper(), null, userRepository, editJournal);
+        String oldState = "auto;emergencyheat";
+        String authoredState = "auto;emergency heat";
+        DeviceNodeDto hall = boardNode("hall_thermostat", "Thermostat", "Hall thermostat");
+        hall.setState(oldState);
+        DeviceNodeDto upstairs = boardNode("upstairs_thermostat", "Thermostat", "Upstairs thermostat");
+        upstairs.setState(oldState);
+        DeviceNodePo storedHall = realMapper.toEntity(hall, 1L);
+        DeviceNodePo storedUpstairs = realMapper.toEntity(upstairs, 1L);
+        String manifest;
+        try (var input = getClass().getResourceAsStream("/deviceTemplate/Thermostat.json")) {
+            manifest = new String(input.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        }
+        var template = DeviceTemplatePo.builder().userId(1L).name("Thermostat").manifestJson(manifest).build();
+        when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(template));
+        when(nodeRepo.findByUserId(1L)).thenReturn(List.of(storedHall, storedUpstairs));
+
+        var expected = new DeviceRuntimeConfigDto();
+        expected.setState(oldState);
+        var invalid = assertThrows(ValidationException.class, () -> realService.updateNodeRuntime(
+                1L, hall.getId(), new DeviceRuntimeUpdateDto(expected, expected)));
+        assertTrue(invalid.getErrors().containsKey("nodes[0].state"));
+        verify(nodeRepo, never()).save(any());
+
+        when(nodeRepo.findById(new DeviceNodeId(hall.getId(), 1L))).thenReturn(Optional.of(storedHall));
+        when(nodeRepo.findById(new DeviceNodeId(upstairs.getId(), 1L))).thenReturn(Optional.of(storedUpstairs));
+        when(nodeRepo.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        var desired = new DeviceRuntimeConfigDto();
+        desired.setState(authoredState);
+        var first = realService.updateNodeRuntime(1L, hall.getId(), new DeviceRuntimeUpdateDto(expected, desired));
+        assertEquals(List.of(authoredState, oldState), first.getCurrentNodes().stream()
+                .map(DeviceNodeDto::getState).toList());
+
+        var second = realService.updateNodeRuntime(1L, upstairs.getId(), new DeviceRuntimeUpdateDto(expected, desired));
+        assertEquals(List.of(authoredState, authoredState), second.getCurrentNodes().stream()
+                .map(DeviceNodeDto::getState).toList());
     }
 
     @Test
@@ -2084,7 +2207,7 @@ class BoardStorageServiceImplBatchTest {
         node.setTemplateName("Sensor");
 
         when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(existing));
-        BoardBatchDto batch = new BoardBatchDto(List.of(node), List.of(), List.of());
+        BoardBatchDto batch = new BoardBatchDto(List.of(node), List.of(), List.of(), List.of());
         batch.setEnvironmentVariables(List.of());
         batch.setTemplateSnapshots(List.of(importedSnapshot));
 
@@ -2142,7 +2265,7 @@ class BoardStorageServiceImplBatchTest {
         node.setId("sensor_1");
         node.setTemplateName("Renamed Sensor");
 
-        BoardBatchDto batch = new BoardBatchDto(List.of(node), List.of(), List.of());
+        BoardBatchDto batch = new BoardBatchDto(List.of(node), List.of(), List.of(), List.of());
         batch.setEnvironmentVariables(List.of());
         batch.setTemplateSnapshots(List.of(snapshot));
 
@@ -2254,7 +2377,7 @@ class BoardStorageServiceImplBatchTest {
         node.setTemplateName("Sensor");
 
         when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(existing));
-        BoardBatchDto batch = new BoardBatchDto(List.of(node), List.of(), List.of());
+        BoardBatchDto batch = new BoardBatchDto(List.of(node), List.of(), List.of(), List.of());
         batch.setEnvironmentVariables(List.of());
         batch.setTemplateSnapshots(List.of());
 
@@ -2285,7 +2408,7 @@ class BoardStorageServiceImplBatchTest {
         snapshot.setManifest(manifest);
 
         when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of());
-        BoardBatchDto batch = new BoardBatchDto(List.of(), List.of(), List.of());
+        BoardBatchDto batch = new BoardBatchDto(List.of(), List.of(), List.of(), List.of());
         batch.setEnvironmentVariables(List.of());
         batch.setTemplateSnapshots(List.of(snapshot));
 
@@ -2411,8 +2534,8 @@ class BoardStorageServiceImplBatchTest {
                 .build();
 
         ValidationException error = assertThrows(ValidationException.class,
-                () -> service.saveBoardBatch(1L, confirmedBatch(service,
-                        new BoardBatchDto(List.of(), List.of(rule), List.of()))));
+                () -> service.saveBoardBatch(1L, confirmedBatch(service, withTemplateSnapshots(
+                        new BoardBatchDto(List.of(), List.of(), List.of(rule), List.of())))));
         assertTrue(error.getErrors().containsKey("ruleString"),
                 () -> "the preview bound should name ruleString, got " + error.getErrors());
         verify(ruleRepo, never()).deleteByUserId(anyLong());

@@ -12,6 +12,10 @@ import java.util.Map;
 /** Shared user-semantic projections for verification tools. */
 final class VerificationToolPresenter {
 
+    static final String MODEL_COMPARISON_GUIDANCE = "Outcomes describe the saved run. When "
+            + "modelSemanticsCurrent is false, run verification again before using the conclusion. "
+            + "A true value only confirms the engine version; the Board input may still have changed.";
+
     private VerificationToolPresenter() {
     }
 

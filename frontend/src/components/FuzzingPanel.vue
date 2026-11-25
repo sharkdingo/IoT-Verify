@@ -18,6 +18,7 @@ import {
   FUZZ_POPULATION_MIN,
   FUZZ_TARGET_SPEC_MAX,
   getKnownFuzzingSpecificationIssue,
+  type IsSharedFuzzingVariable,
   type KnownFuzzingSpecificationIssue,
   isKnownFuzzingSpecificationSupported
 } from '@/utils/fuzzingConfig'
@@ -42,6 +43,7 @@ export type FuzzingPanelForm = {
 const props = withDefaults(defineProps<{
   form: FuzzingPanelForm
   specifications: Specification[]
+  isSharedVariable?: IsSharedFuzzingVariable
   running: boolean
   progress: number
   status: string
@@ -67,6 +69,7 @@ const props = withDefaults(defineProps<{
   preflightMessage?: string | null
   frozenTask?: FuzzingTaskSummary | null
 }>(), {
+  isSharedVariable: () => false,
   workloadReady: true,
   bundledDeviceIds: () => [],
   bundledEnvironmentNames: () => []
@@ -132,7 +135,7 @@ onBeforeUnmount(() => {
 })
 
 const eligibleSpecifications = computed(() =>
-  props.specifications.filter(isKnownFuzzingSpecificationSupported))
+  props.specifications.filter(spec => isKnownFuzzingSpecificationSupported(spec, props.isSharedVariable)))
 const eligibleIds = computed(() => new Set(eligibleSpecifications.value.map(spec => spec.id)))
 const normalizedSelectedIds = computed(() =>
   props.form.targetSpecIds.filter(id => eligibleIds.value.has(id)))
@@ -242,7 +245,7 @@ const SPEC_INELIGIBILITY_MESSAGE_KEYS: Record<KnownFuzzingSpecificationIssue, st
 }
 
 const specIneligibilityMessageKey = (spec: Specification) => {
-  const issue = getKnownFuzzingSpecificationIssue(spec)
+  const issue = getKnownFuzzingSpecificationIssue(spec, props.isSharedVariable)
   return issue ? SPEC_INELIGIBILITY_MESSAGE_KEYS[issue] : 'app.fuzzEligibilityUnsupportedTemplate'
 }
 

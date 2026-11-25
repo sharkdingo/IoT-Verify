@@ -11,6 +11,7 @@ import cn.edu.nju.Iot_Verify.dto.fix.PreferredRangeSelection;
 import cn.edu.nju.Iot_Verify.exception.BadRequestException;
 import cn.edu.nju.Iot_Verify.exception.BaseException;
 import cn.edu.nju.Iot_Verify.exception.FixApplyPreflightUnavailableException;
+import cn.edu.nju.Iot_Verify.exception.ModelSemanticsChangedException;
 import cn.edu.nju.Iot_Verify.exception.ResourceNotFoundException;
 import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
 import cn.edu.nju.Iot_Verify.security.UserContextHolder;
@@ -81,7 +82,7 @@ public class ApplyFixTool extends AbstractAiTool {
 
         return LlmToolSpec.of(
                 getName(),
-                "Preview or, after explicit two-turn confirmation, apply one exact signed formal-fix suggestion returned by fix_violation. The confirmed call uses the server-stored proposal and rechecks signature expiry plus all current Board, template, specification, device, environment, and write-fence guards before changing rules. Fuzz findings are not accepted.",
+                "Preview or, after explicit two-turn confirmation, apply one exact signed formal-fix suggestion returned by fix_violation for a verification run under the current model semantics. The confirmed call uses the server-stored proposal and rechecks signature expiry plus all current Board, template, specification, device, environment, and write-fence guards before changing rules. Fuzz findings are not accepted.",
                 new FunctionParameterSchema("object", properties, List.of("traceId", "confirmed")));
     }
 
@@ -108,6 +109,8 @@ public class ApplyFixTool extends AbstractAiTool {
             return e.getErrorResponse();
         } catch (ResourceNotFoundException e) {
             return errorJson(e.getMessage(), "NOT_FOUND", 404);
+        } catch (ModelSemanticsChangedException e) {
+            return errorJson(e.getMessage(), e.getReasonCode(), e.getCode());
         } catch (BadRequestException e) {
             return errorJson(e.getMessage(), "BAD_REQUEST", 400);
         } catch (ServiceUnavailableException e) {
@@ -150,6 +153,7 @@ public class ApplyFixTool extends AbstractAiTool {
         // suggestions that forward verification accepted.
         suggestionTokenService.verify(
                 userId, traceId, strategy, suggestion, suggestionToken, preferredRanges.byTargetId());
+        fixService.requireCurrentVerificationSource(userId, traceId);
 
         ApplyCommand command = new ApplyCommand(
                 traceId, suggestionId, strategy, suggestion, suggestionToken, preferredRanges.selections());

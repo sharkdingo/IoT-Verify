@@ -89,12 +89,7 @@ public final class PersistedModelContextIntegrity {
         ModelSemanticsDto semantics = JsonUtils.readPersistedJsonRequired(
                 recordType, recordId, "modelSemanticsJson", modelSemanticsJson,
                 () -> JsonUtils.fromJson(modelSemanticsJson, ModelSemanticsDto.class));
-        JsonNode snapshotJson = readJsonObject(
-                recordType, recordId, "modelSnapshotJson", modelSnapshotJson);
-        requireSnapshotJsonShape(recordType, recordId, snapshotJson);
-        ModelRunSnapshotDto snapshot = JsonUtils.readPersistedJsonRequired(
-                recordType, recordId, "modelSnapshotJson", modelSnapshotJson,
-                () -> JsonUtils.fromJson(modelSnapshotJson, ModelRunSnapshotDto.class));
+        ModelRunSnapshotDto snapshot = readSnapshot(recordType, recordId, modelSnapshotJson);
 
         requireSemantics(recordType, recordId, isAttack, attackBudget, enablePrivacy,
                 modeledDeviceAttackPointCount, modeledFalsifiableReadingDeviceCount,
@@ -106,6 +101,13 @@ public final class PersistedModelContextIntegrity {
                     "modeled attack-point counts do not match the model snapshot");
         }
         return new ValidatedContext(isAttack, attackBudget, enablePrivacy, semantics, snapshot);
+    }
+
+    public static ModelRunSnapshotDto readSnapshot(String recordType, Object recordId, String modelSnapshotJson) {
+        JsonNode snapshotJson = readJsonObject(recordType, recordId, "modelSnapshotJson", modelSnapshotJson);
+        requireSnapshotJsonShape(recordType, recordId, snapshotJson);
+        return JsonUtils.readPersistedJsonRequired(recordType, recordId, "modelSnapshotJson", modelSnapshotJson,
+                () -> JsonUtils.fromJson(modelSnapshotJson, ModelRunSnapshotDto.class));
     }
 
     private static JsonNode readJsonObject(
@@ -176,6 +178,12 @@ public final class PersistedModelContextIntegrity {
         JsonNode fingerprint = snapshot.get("modelFingerprint");
         if (fingerprint != null && !fingerprint.isNull() && !fingerprint.isTextual()) {
             throw invalid(recordType, recordId, "modelSnapshotJson", "modelFingerprint must be a string or null");
+        }
+        if (snapshot.has("modelSemanticsVersion")) {
+            requireJsonInteger(recordType, recordId, "modelSnapshotJson", snapshot, "modelSemanticsVersion");
+            if (snapshot.get("modelSemanticsVersion").intValue() < 0) {
+                throw invalid(recordType, recordId, "modelSnapshotJson", "modelSemanticsVersion must be non-negative");
+            }
         }
     }
 

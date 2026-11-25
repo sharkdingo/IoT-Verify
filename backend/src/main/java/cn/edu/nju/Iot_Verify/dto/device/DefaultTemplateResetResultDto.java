@@ -31,5 +31,7 @@ public class DefaultTemplateResetResultDto {
     @Builder.Default
     private List<DeviceTemplateDto> currentTemplates = List.of();
     @Builder.Default
+    private List<DeviceNodeDto> currentNodes = List.of();
+    @Builder.Default
     private List<BoardEnvironmentVariableDto> environmentVariables = List.of();
 }

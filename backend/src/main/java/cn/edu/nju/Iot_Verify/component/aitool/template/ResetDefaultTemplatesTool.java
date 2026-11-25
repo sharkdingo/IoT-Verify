@@ -58,7 +58,7 @@ public class ResetDefaultTemplatesTool extends AbstractAiTool {
                 "description", "Opaque token returned by the latest preview. Required when confirmed=true."));
         return LlmToolSpec.of(
                 getName(),
-                "Preview or, after explicit confirmation, atomically refresh the user's bundled default device templates and reconcile the Environment Pool. Custom templates with other names are preserved. This also clears the board edit history (undo/redo), because a refreshed manifest can change the semantics earlier device snapshots were taken against.",
+                "Preview or, after explicit confirmation, atomically refresh the user's bundled default device templates and reconcile affected device runtime values and the Environment Pool. Custom templates with other names are preserved. This also clears the board edit history (undo/redo), because a refreshed manifest can change the semantics earlier device snapshots were taken against.",
                 new FunctionParameterSchema("object", properties, List.of("confirmed")));
     }
 
@@ -168,6 +168,7 @@ public class ResetDefaultTemplatesTool extends AbstractAiTool {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("deviceLabel", device.getDeviceLabel());
         result.put("templateName", device.getTemplateName());
+        result.put("runtimeChanges", device.getRuntimeChanges());
         return result;
     }
 

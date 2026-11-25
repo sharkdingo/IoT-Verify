@@ -35,9 +35,24 @@ describe('specification condition domains', () => {
   it('keeps full-state tuples intact while offering individual mode values', () => {
     expect(validateSpecConditionDomain(condition({}), manifest, '1', t)).toBeNull()
     expect(validateSpecConditionDomain(condition({ value: 'on;heat|off;heat' }), manifest, '1', t))
+      .toBeNull()
+    expect(validateSpecConditionDomain(condition({ value: 'heat;off' }), manifest, '1', t))
       .toBe('app.specConditionValueUnavailable')
     expect(getSpecConditionValues(condition({ targetType: 'mode', key: 'Mode' }), manifest, '1')).toEqual(['heat', 'idle'])
     expect(isSpecConditionRelationSupported(condition({ targetType: 'mode' }), manifest, '1', '>')).toBe(false)
+  })
+
+  it('keeps authored state spellings scoped to the selected mode and retains only valid existing compositions', () => {
+    const model = { ...manifest, WorkingStates: ['Case;ready', 'slow heat;_Case'].map(Name => ({ Name,
+      Trust: 'trusted', Privacy: 'public' })) }
+    const draft = condition({ value: 'Case ; _Case|slow heat;_' })
+    expect(getSpecConditionValues(draft, model, '1')).toEqual(['Case;ready', 'slow heat;_Case', 'Case ; _Case', 'slow heat;_'])
+    expect(validateSpecConditionDomain(draft, model, '1', t)).toBeNull()
+    expect(validateSpecConditionDomain(condition({ relation: '=', value: '_Case' }), model, '1', t)).toBeNull()
+    for (const value of ['_Case;Case', 'slowheat;_', '_;_', 'ready;Case']) {
+      expect(validateSpecConditionDomain(condition({ relation: '=', value }), model, '1', t))
+        .toBe('app.specConditionValueUnavailable')
+    }
   })
 
   it.each([

@@ -42,11 +42,6 @@ public class FuzzController {
 
     private final FuzzService fuzzService;
 
-    @GetMapping("/model-fingerprint")
-    public Result<String> getCurrentModelFingerprint(@CurrentUser Long userId) {
-        return Result.success(fuzzService.getCurrentModelFingerprint(userId));
-    }
-
     @PostMapping("/paper-domain/preview")
     public Result<FuzzPaperDomainPreviewDto> previewPaperDomain(
             @CurrentUser Long userId,

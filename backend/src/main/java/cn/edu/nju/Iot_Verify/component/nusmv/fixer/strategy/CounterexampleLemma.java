@@ -6,6 +6,7 @@ import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvRelationUtils;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
+import cn.edu.nju.Iot_Verify.util.SmvConstants;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.ArrayList;
@@ -72,22 +73,26 @@ final class CounterexampleLemma {
 
     private final List<ScopedRule> scopedRules;
     private final List<GuardProbe> atomProbes;
+    private final Set<String> occupiedSymbols;
 
-    private CounterexampleLemma(List<ScopedRule> scopedRules, List<GuardProbe> atomProbes) {
+    private CounterexampleLemma(List<ScopedRule> scopedRules, List<GuardProbe> atomProbes, Set<String> occupiedSymbols) {
         this.scopedRules = scopedRules;
         this.atomProbes = atomProbes;
+        this.occupiedSymbols = occupiedSymbols;
     }
 
     /**
      * @param augmentedRules          the rules with candidate conditions appended, as the search model has them
      * @param conditionLambdas        the search's {@code r<rule>_c<condition>} keys and their variables
      * @param candidateConditionValues the candidates whose value the search chooses
+     * @param occupiedSymbols          device instance names and enum constants from the frozen model
      * @return {@code null} when some scoped condition cannot be described, in which case nothing is learned
      */
     static CounterexampleLemma plan(
             List<RuleDto> augmentedRules,
             Map<String, String> conditionLambdas,
-            Map<String, ParameterizationConfig.ConditionValueInfo> candidateConditionValues) {
+            Map<String, ParameterizationConfig.ConditionValueInfo> candidateConditionValues,
+            Set<String> occupiedSymbols) {
         Set<Integer> ruleIndices = new LinkedHashSet<>();
         for (String key : conditionLambdas.keySet()) {
             int ruleIndex = ruleIndexOf(key);
@@ -107,21 +112,22 @@ final class CounterexampleLemma {
                 if (condition == null || lambda == null) return null;
                 ParameterizationConfig.ConditionValueInfo valueInfo = candidateConditionValues.get(key);
                 Atom atom;
+                int probeId = nextProbeId(atomProbes, occupiedSymbols);
                 if (valueInfo != null) {
                     String relation = SmvRelationUtils.normalizeRelation(condition.getRelation());
                     if (relation == null || !SmvRelationUtils.isSupportedRelation(relation)) return null;
                     atom = new Atom(lambda, valueInfo.getFrozenVarName(), relation,
-                            GuardProbe.ofCondition(atomProbes.size(), GuardProbe.Kind.OPERAND, condition));
+                            GuardProbe.ofCondition(probeId, GuardProbe.Kind.OPERAND, condition));
                 } else {
                     atom = new Atom(lambda, null, null,
-                            GuardProbe.ofCondition(atomProbes.size(), GuardProbe.Kind.CONDITION, condition));
+                            GuardProbe.ofCondition(probeId, GuardProbe.Kind.CONDITION, condition));
                 }
                 atomProbes.add(atom.probe());
                 atoms.add(atom);
             }
             scopedRules.add(new ScopedRule(ruleIndex, List.copyOf(atoms)));
         }
-        return new CounterexampleLemma(List.copyOf(scopedRules), List.copyOf(atomProbes));
+        return new CounterexampleLemma(List.copyOf(scopedRules), List.copyOf(atomProbes), Set.copyOf(occupiedSymbols));
     }
 
     /** The probes to add to the forward-verification model of one candidate. */
@@ -131,14 +137,22 @@ final class CounterexampleLemma {
         Map<Integer, GuardProbe> conditionProbes = new HashMap<>();
         for (ScopedRule rule : scopedRules) {
             RuleDto candidateRule = candidateRules.get(rule.ruleIndex());
-            GuardProbe base = GuardProbe.ofRule(probes.size(), GuardProbe.Kind.RULE_BASE, candidateRule);
+            GuardProbe base = GuardProbe.ofRule(
+                    nextProbeId(probes, occupiedSymbols), GuardProbe.Kind.RULE_BASE, candidateRule);
             probes.add(base);
-            GuardProbe conditions = GuardProbe.ofRule(probes.size(), GuardProbe.Kind.RULE_CONDITIONS, candidateRule);
+            GuardProbe conditions = GuardProbe.ofRule(
+                    nextProbeId(probes, occupiedSymbols), GuardProbe.Kind.RULE_CONDITIONS, candidateRule);
             probes.add(conditions);
             baseProbes.put(rule.ruleIndex(), base);
             conditionProbes.put(rule.ruleIndex(), conditions);
         }
         return new Attempt(List.copyOf(probes), baseProbes, conditionProbes);
+    }
+
+    private static int nextProbeId(List<GuardProbe> probes, Set<String> occupiedSymbols) {
+        int id = probes.isEmpty() ? 0 : probes.get(probes.size() - 1).id() + 1;
+        while (occupiedSymbols.contains(SmvConstants.GUARD_PROBE_PREFIX + id)) id++;
+        return id;
     }
 
     final class Attempt {

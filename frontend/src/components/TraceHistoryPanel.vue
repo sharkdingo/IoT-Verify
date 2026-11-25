@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { compareModelSnapshot } from '@/utils/modelComparison'
+import { compareModelSnapshot, hasRunBoardDifference } from '@/utils/modelComparison'
 import { activeTaskProgressStage } from '@/utils/runResponse'
 import type { BoardModelFingerprints, ModelRunSnapshot, ModelSemantics, RunBoardComparison } from '@/types/modelSemantics'
 import { formatRunTimestamp } from '@/utils/runTimestamp'
@@ -69,6 +69,7 @@ const props = defineProps<{
   actionLocked: boolean
   currentModelFingerprints?: BoardModelFingerprints | null
   modelComparisonLoading?: boolean
+  rejectedVerificationRepairTraceIds?: ReadonlySet<number>
 }>()
 
 const emit = defineEmits<{
@@ -321,6 +322,7 @@ const comparisonLabel = (comparison: RunBoardComparison) => comparison === 'UNAV
   ? t('app.historyModelComparing') : t({
   UNCHANGED: 'app.historyModelUnchanged',
   CHANGED: 'app.historyModelChanged',
+  SEMANTICS_CHANGED: 'app.historyModelSemanticsChanged',
   UNAVAILABLE: 'app.historyModelUnavailable',
   NOT_COMPARED: 'app.historyModelNotRecorded'
 }[comparison])
@@ -328,6 +330,7 @@ const comparisonLabel = (comparison: RunBoardComparison) => comparison === 'UNAV
 const comparisonDetail = (comparison: RunBoardComparison, activeTask = false) => t({
   UNCHANGED: 'app.runBoardInputUnchanged',
   CHANGED: activeTask ? 'app.taskModelChangedDetail' : 'app.runBoardInputChanged',
+  SEMANTICS_CHANGED: activeTask ? 'app.taskModelSemanticsChangedDetail' : 'app.runBoardSemanticsChanged',
   UNAVAILABLE: props.modelComparisonLoading ? 'app.runBoardComparisonLoading' : 'app.runBoardComparisonUnavailable',
   NOT_COMPARED: 'app.historyModelNotRecordedDetail'
 }[comparison])
@@ -556,17 +559,17 @@ const resultDate = (item: ResultItem) => formatDate(resultTimestamp(item))
                     :test-id="`fuzzing-task-mode-help-${task.id}`" />
                 </span>
               </div>
-              <p class="history-model-relation" :class="comparisonFor(task.modelSnapshot, task.kind) === 'CHANGED' ? 'board-text-warning' : 'board-text-muted'"
+              <p class="history-model-relation" :class="hasRunBoardDifference(comparisonFor(task.modelSnapshot, task.kind)) ? 'board-text-warning' : 'board-text-muted'"
                 :data-testid="`task-model-comparison-${task.kind}-${task.id}`" :data-state="comparisonFor(task.modelSnapshot, task.kind)">
-                <span class="material-symbols-outlined text-base" aria-hidden="true">{{ comparisonFor(task.modelSnapshot, task.kind) === 'CHANGED' ? 'edit_note' : 'layers' }}</span>
+                <span class="material-symbols-outlined text-base" aria-hidden="true">{{ hasRunBoardDifference(comparisonFor(task.modelSnapshot, task.kind)) ? 'edit_note' : 'layers' }}</span>
                 <span>{{ comparisonLabel(comparisonFor(task.modelSnapshot, task.kind)) }}</span>
-                <InfoTooltip v-if="comparisonFor(task.modelSnapshot, task.kind) !== 'CHANGED' || !isActiveStatus(task.status)"
+                <InfoTooltip v-if="!hasRunBoardDifference(comparisonFor(task.modelSnapshot, task.kind)) || !isActiveStatus(task.status)"
                   :text="comparisonDetail(comparisonFor(task.modelSnapshot, task.kind), isActiveStatus(task.status))"
                   :label="t('app.showHelpFor', { topic: comparisonLabel(comparisonFor(task.modelSnapshot, task.kind)) })"
                   :test-id="`${task.kind}-task-model-help-${task.id}`" />
               </p>
-              <p v-if="comparisonFor(task.modelSnapshot, task.kind) === 'CHANGED' && isActiveStatus(task.status)" class="history-card__copy board-text-warning">
-                {{ t('app.taskModelChangedDetail') }}
+              <p v-if="hasRunBoardDifference(comparisonFor(task.modelSnapshot, task.kind)) && isActiveStatus(task.status)" class="history-card__copy board-text-warning">
+                {{ comparisonDetail(comparisonFor(task.modelSnapshot, task.kind), true) }}
               </p>
               <template v-if="isActiveStatus(task.status)">
                 <div class="history-progress-label board-text-muted"><span>{{ taskStageLabel(task) }}</span><span>{{ taskProgress(task) }}%</span></div>
@@ -676,9 +679,9 @@ const resultDate = (item: ResultItem) => formatDate(resultTimestamp(item))
 
             <p v-if="item.run.dataAvailable === false" class="history-card__copy board-text-muted">{{ t('app.historyItemUnavailableDetail') }}</p>
             <template v-else>
-              <p class="history-model-relation" :class="comparisonFor(item.run.modelSnapshot, item.kind) === 'CHANGED' ? 'board-text-warning' : 'board-text-muted'"
+              <p class="history-model-relation" :class="hasRunBoardDifference(comparisonFor(item.run.modelSnapshot, item.kind)) ? 'board-text-warning' : 'board-text-muted'"
                 :data-testid="`${item.kind}-history-model-comparison-${item.run.id}`" :data-state="comparisonFor(item.run.modelSnapshot, item.kind)">
-                <span class="material-symbols-outlined text-base" aria-hidden="true">{{ comparisonFor(item.run.modelSnapshot, item.kind) === 'CHANGED' ? 'edit_note' : 'layers' }}</span>
+                <span class="material-symbols-outlined text-base" aria-hidden="true">{{ hasRunBoardDifference(comparisonFor(item.run.modelSnapshot, item.kind)) ? 'edit_note' : 'layers' }}</span>
                 <span>{{ comparisonLabel(comparisonFor(item.run.modelSnapshot, item.kind)) }}</span>
                 <InfoTooltip :text="comparisonDetail(comparisonFor(item.run.modelSnapshot, item.kind))"
                   :label="t('app.showHelpFor', { topic: comparisonLabel(comparisonFor(item.run.modelSnapshot, item.kind)) })"
@@ -728,12 +731,16 @@ const resultDate = (item: ResultItem) => formatDate(resultTimestamp(item))
                     <p class="font-semibold board-text-strong" :title="traceSpecTitle(trace)">{{ traceSpecTitle(trace) }}</p>
                     <p :class="trace.dataAvailable ? 'board-text-muted' : 'board-text-warning'">{{ trace.dataAvailable
                       ? t('app.statesCount', { count: trace.stateCount || 0 }) : t('app.historyTraceUnavailableDetail') }}</p>
+                    <p v-if="rejectedVerificationRepairTraceIds?.has(trace.id)" :id="`rejected-verification-repair-${trace.id}`"
+                      class="board-text-warning">{{ comparisonDetail('SEMANTICS_CHANGED') }}</p>
                     <div class="history-evidence-actions">
                       <button type="button" :data-testid="`view-verification-trace-${trace.id}`" class="board-action-secondary"
                         :disabled="actionLocked || !trace.dataAvailable" @click="emit('view-verification-trace', trace.id)">{{ t('app.replay') }}</button>
                       <button type="button" :data-testid="`fix-verification-trace-${trace.id}`" class="history-text-action board-text-muted hover:board-text-strong"
-                        :disabled="actionLocked || !trace.dataAvailable || comparisonFor(item.run.modelSnapshot, 'verification') !== 'UNCHANGED'"
-                        :aria-describedby="trace.dataAvailable ? `historical-fix-caveat-${item.run.id}` : undefined"
+                        :disabled="actionLocked || !trace.dataAvailable || rejectedVerificationRepairTraceIds?.has(trace.id)
+                          || comparisonFor(item.run.modelSnapshot, 'verification') !== 'UNCHANGED'"
+                        :aria-describedby="rejectedVerificationRepairTraceIds?.has(trace.id) ? `rejected-verification-repair-${trace.id}`
+                          : trace.dataAvailable ? `historical-fix-caveat-${item.run.id}` : undefined"
                         @click="emit('fix-verification-trace', trace)">{{ t('app.fixRules') }}</button>
                     </div>
                   </div>

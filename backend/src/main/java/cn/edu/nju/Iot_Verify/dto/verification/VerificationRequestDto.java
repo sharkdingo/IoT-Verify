@@ -37,7 +37,7 @@ public class VerificationRequestDto {
     private List<DeviceNodeDto> playbackNodes;
 
     /** Board-level environment pool, captured with the same board read as the devices. */
-    private List<BoardEnvironmentVariableDto> environmentVariables = new ArrayList<>();
+    private List<BoardEnvironmentVariableDto> environmentVariables;
 
     private List<RuleDto> rules = new ArrayList<>();
 

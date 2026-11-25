@@ -486,17 +486,14 @@ const environmentVariables = computed(() => {
         rangeLabel: variable.conflicts.length > 0
           ? t('app.conflictingDefinitions')
           : ranges[0] || t('app.modelControlled'),
-        naturalChangeRateLabel: hasNumericDomain(variable.definition)
+        evolutionLabel: hasNumericDomain(variable.definition)
           ? (variable.definition.NaturalChangeRate
               ? t('app.environmentNumericEvolution', {
                   rate: variable.definition.NaturalChangeRate,
                   candidates: naturalChangeCandidateValues(variable.definition.NaturalChangeRate)
                 })
               : t('app.environmentNaturalRateMissing'))
-          // Branch on authorship exactly as the generator does: a value some device declares it
-          // writes holds when no effect applies, while one nobody writes is an exogenous input the
-          // verifier may move freely. Describing both as "nondeterministic" told the user the
-          // opposite of what gets verified for every device-written value.
+          // The discrete branch describes ordinary evolution, after autonomous assignments.
           : (variable.sources.some(source => source.role === 'impact')
               ? t('app.environmentDiscreteWrittenEvolution')
               : t('app.environmentDiscreteExogenousEvolution')),
@@ -677,20 +674,21 @@ const displayRules = computed(() => {
 
 // Convert real specifications to display format
 const displaySpecs = computed(() => {
+  const presentationContext = modelPresentationContext()
   return props.specifications.map(spec => {
     const template = specTemplateDetails.find(candidate => candidate.id === spec.templateId)
     const specType = template?.labelKey
       ? t(template.labelKey)
       : spec.templateLabel || template?.label || t('app.unknown')
 
-    const preview = buildSpecFormulaPreview(spec, { nodes: props.devices })
+    const preview = buildSpecFormulaPreview(spec, { nodes: props.devices, modeCount: presentationContext.modeCount })
 
     return {
       id: spec.id,
       type: spec.name,
       formula: preview.expression,
       formulaKind: preview.kind,
-      description: describeSpecification(spec, modelPresentationContext()),
+      description: describeSpecification(spec, presentationContext),
       // The formula alone renders the two readings as one differing token in a monospace string, and an
       // unrecorded one as a literal `<unresolved>`. This is the surface where a user scans their whole
       // specification set, so it names the reading in the same words the editor and verdict rows use.
@@ -1052,14 +1050,12 @@ const syncFullTextTitle = (event: PointerEvent | FocusEvent) => {
                 <details class="board-inventory-disclosure" :data-testid="`environment-evolution-${variable.name}`">
                   <summary class="board-caption board-text-muted">{{ t('app.modelEvolution') }}</summary>
                   <div class="board-caption board-text-muted board-inventory-disclosure__body">
-                    <p><span v-if="variable.lowerBound != null && variable.upperBound != null">{{ t('app.naturalChangeRate') }}: </span>{{ variable.naturalChangeRateLabel }}</p>
+                    <p>{{ variable.evolutionLabel }}</p>
                     <ul v-if="variable.evolutionEffects.length" class="space-y-1">
                       <li v-for="effect in variable.evolutionEffects" :key="`${effect.deviceId}:${effect.state}:${effect.value}`">
                         {{ effect.deviceLabel }} · {{ effect.stateLabel }}: {{ effect.value }}
                       </li>
                     </ul>
-                    <p v-else>{{ t('app.environmentNoDeviceEffects') }}</p>
-                    <p>{{ t('app.environmentEvolutionHint') }}</p>
                   </div>
                 </details>
                 <details class="board-inventory-disclosure">

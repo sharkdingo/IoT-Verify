@@ -123,7 +123,7 @@ exceptions and their statuses:
 
 | HTTP | Exception | Meaning |
 | :--- | :--- | :--- |
-| 400 | `BadRequestException`, `AccountChangeException` | Malformed request / invalid argument; account changes may return a typed field rejection |
+| 400 | `BadRequestException`, `AccountChangeException`, `FixSuggestionStaleException` | Malformed request / invalid argument. Account changes may return a typed field rejection. An unusable signed repair returns `data.reasonCode=FIX_SUGGESTION_STALE` before any board rules are changed. |
 | 401 | `UnauthorizedException` | Missing/invalid/expired token |
 | 403 | `ForbiddenException` | Authenticated but not allowed (e.g. another user's resource) |
 | 404 | `ResourceNotFoundException` | Resource does not exist |

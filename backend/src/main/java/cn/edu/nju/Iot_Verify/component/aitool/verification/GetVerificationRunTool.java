@@ -1,5 +1,6 @@
 package cn.edu.nju.Iot_Verify.component.aitool.verification;
 
+import cn.edu.nju.Iot_Verify.dto.model.ModelSemanticsVersion;
 import cn.edu.nju.Iot_Verify.component.ai.model.LlmToolSpec;
 import cn.edu.nju.Iot_Verify.component.aitool.AbstractAiTool;
 import cn.edu.nju.Iot_Verify.dto.verification.VerificationRunDto;
@@ -37,7 +38,8 @@ public class GetVerificationRunTool extends AbstractAiTool {
     @Override
     public LlmToolSpec getDefinition() {
         return LlmToolSpec.of(getName(),
-                "Read one completed formal-verification run with its per-spec conclusions, completeness, model snapshot, generation issues, and exact counterexample references. Use an available counterexamples[].traceId with get_trace or fix_violation; runId is not traceId. Raw NuSMV stdout is intentionally omitted.",
+                "Read one completed formal-verification run with its per-spec conclusions, completeness, model snapshot, generation issues, and exact counterexample references. Use an available counterexamples[].traceId with get_trace or fix_violation; runId is not traceId. Raw NuSMV stdout is intentionally omitted. "
+                        + VerificationToolPresenter.MODEL_COMPARISON_GUIDANCE,
                 new FunctionParameterSchema("object", Map.of(
                         "runId", Map.of("type", "integer", "description", "Run ID from list_verification_runs.")),
                         List.of("runId")));
@@ -67,6 +69,7 @@ public class GetVerificationRunTool extends AbstractAiTool {
             response.put("skippedSpecCount", run.getSkippedSpecCount());
             response.put("modelSemantics", run.getModelSemantics());
             response.put("modelSnapshot", run.getModelSnapshot());
+            response.put("modelSemanticsCurrent", ModelSemanticsVersion.isCurrent(run.getModelSnapshot()));
             response.put("generationIssues", safeList(run.getGenerationIssues()));
             response.put("specResults", VerificationToolPresenter.specResults(run.getSpecResults()));
             response.put("checkLogCount", safeList(run.getCheckLogs()).size());

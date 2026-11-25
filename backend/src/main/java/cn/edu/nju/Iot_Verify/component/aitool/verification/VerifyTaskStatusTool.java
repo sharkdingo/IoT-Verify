@@ -1,5 +1,6 @@
 package cn.edu.nju.Iot_Verify.component.aitool.verification;
 
+import cn.edu.nju.Iot_Verify.dto.model.ModelSemanticsVersion;
 import cn.edu.nju.Iot_Verify.component.ai.model.LlmToolSpec;
 import cn.edu.nju.Iot_Verify.component.aitool.AbstractAiTool;
 import cn.edu.nju.Iot_Verify.component.aitool.AiTaskStatusWaiter;
@@ -45,7 +46,8 @@ public class VerifyTaskStatusTool extends AbstractAiTool {
         );
 
         return LlmToolSpec.of(getName(),
-                "Query async verification task status and progress by taskId, waiting briefly for active work rather than repeatedly polling through the model. PENDING or RUNNING means keep waiting, not a verification conclusion. A completed task exposes its runId for get_verification_run. Raw NuSMV output and execution logs are intentionally omitted.",
+                "Query async verification task status and progress by taskId, waiting briefly for active work rather than repeatedly polling through the model. PENDING or RUNNING means keep waiting, not a verification conclusion. A completed task exposes its runId for get_verification_run. Raw NuSMV output and execution logs are intentionally omitted. "
+                        + VerificationToolPresenter.MODEL_COMPARISON_GUIDANCE,
                 schema);
     }
 
@@ -112,6 +114,7 @@ public class VerifyTaskStatusTool extends AbstractAiTool {
         projected.put("enablePrivacy", task.getEnablePrivacy());
         projected.put("modelSemantics", task.getModelSemantics());
         projected.put("modelSnapshot", task.getModelSnapshot());
+        projected.put("modelSemanticsCurrent", ModelSemanticsVersion.isCurrent(task.getModelSnapshot()));
         projected.put("outcome", task.getOutcome());
         projected.put("modelComplete", task.getModelComplete());
         projected.put("violatedSpecCount", task.getViolatedSpecCount());

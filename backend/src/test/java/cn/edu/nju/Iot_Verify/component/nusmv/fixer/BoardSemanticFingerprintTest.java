@@ -1,6 +1,9 @@
 package cn.edu.nju.Iot_Verify.component.nusmv.fixer;
 
+import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvModelValidator;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvData;
+import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvDataFactory;
+import cn.edu.nju.Iot_Verify.component.template.DeviceTemplateSchemaValidator;
 import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
@@ -8,6 +11,7 @@ import cn.edu.nju.Iot_Verify.dto.device.PrivacyStateDto;
 import cn.edu.nju.Iot_Verify.dto.device.VariableStateDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -66,6 +70,15 @@ class BoardSemanticFingerprintTest {
         return Map.of(key, smv);
     }
 
+    private String fingerprintWithDeviceModel(DeviceVerificationDto device, DeviceManifest manifest) {
+        ObjectMapper mapper = new ObjectMapper();
+        DeviceSmvDataFactory factory = new DeviceSmvDataFactory(
+                mapper, null, new SmvModelValidator(), new DeviceTemplateSchemaValidator(mapper));
+        var devices = List.of(device);
+        return BoardSemanticFingerprint.of(devices, List.of(), factory.buildDeviceSmvMapFromTemplateSnapshots(
+                devices, Map.of(device.getTemplateName(), manifest)));
+    }
+
     @Test
     void identicalBoards_produceEqualFingerprint() {
         Map<String, DeviceSmvData> map = Map.of();
@@ -108,6 +121,56 @@ class BoardSemanticFingerprintTest {
         assertEquals(
                 BoardSemanticFingerprint.of(a, List.of(), Map.of()),
                 BoardSemanticFingerprint.of(b, List.of(), Map.of()));
+    }
+
+    @Test
+    void competingSharedAssignmentsIgnoreCapturedDeviceOrder() {
+        DeviceManifest.InternalVariable time = DeviceManifest.InternalVariable.builder()
+                .name("time").isInside(false).reads(true).lowerBound(0).upperBound(23)
+                .naturalChangeRate("1").build();
+        DeviceVerificationDto first = device("first_timer", "Early Timer");
+        DeviceVerificationDto second = device("second_timer", "Late Timer");
+        DeviceVerificationDto lamp = device("lamp", "Light");
+        Map<String, DeviceSmvData> map = Map.of(
+                "first_timer", timerSmv(first, time, "0"),
+                "second_timer", timerSmv(second, time, "6"),
+                "lamp", deviceMap("lamp").get("lamp"));
+        List<BoardEnvironmentVariableDto> pool = List.of(
+                new BoardEnvironmentVariableDto("time", "23", "trusted", "public"));
+
+        String fingerprint = BoardSemanticFingerprint.of(List.of(first, second, lamp), List.of(), pool, map);
+        assertEquals(fingerprint,
+                BoardSemanticFingerprint.of(List.of(second, first, lamp), List.of(), pool, map));
+        assertEquals(fingerprint,
+                BoardSemanticFingerprint.of(List.of(lamp, first, second), List.of(), pool, map));
+    }
+
+    @Test
+    void standaloneSharedDefaultMatchesTheExplicitPoolValue() {
+        var writer = device("writer_1", "Light Control");
+        var models = deviceMap("writer_1");
+        var domain = DeviceManifest.InternalVariable.builder().name("roomLight").isInside(false).reads(false)
+                .values(List.of("dark", "bright")).trust("trusted").privacy("public").build();
+        models.get("writer_1").getSharedDeclarations().put("roomLight", domain);
+
+        String implicit = BoardSemanticFingerprint.of(List.of(writer), List.of(), List.of(), models);
+        assertEquals(implicit, BoardSemanticFingerprint.of(List.of(writer), List.of(), List.of(
+                new BoardEnvironmentVariableDto("roomLight", "dark", "trusted", "public")), models));
+        assertNotEquals(implicit, BoardSemanticFingerprint.of(List.of(writer), List.of(), List.of(
+                new BoardEnvironmentVariableDto("roomLight", "bright", "trusted", "public")), models));
+    }
+
+    private DeviceSmvData timerSmv(DeviceVerificationDto timer, DeviceManifest.InternalVariable time, String resetValue) {
+        DeviceManifest.Transition reset = DeviceManifest.Transition.builder().name("reset")
+                .trigger(DeviceManifest.Trigger.builder().attribute("time").relation("=").value("23").build())
+                .assignments(List.of(DeviceManifest.Assignment.builder().attribute("time").value(resetValue).build()))
+                .build();
+        DeviceSmvData smv = deviceMap(timer.getVarName()).get(timer.getVarName());
+        smv.setManifest(DeviceManifest.builder().name(timer.getTemplateName())
+                .internalVariables(List.of(time)).transitions(List.of(reset)).build());
+        smv.getSharedDeclarations().put("time", time);
+        smv.getEnvVariables().put("time", time);
+        return smv;
     }
 
     @Test
@@ -251,17 +314,21 @@ class BoardSemanticFingerprintTest {
     void trustCaseAndDefault_normalized() {
         // Explicit "TRUSTED" must equal the default (no trust set → trusted), so casing/defaulting
         // differences between snapshot and board don't misfire.
+        DeviceManifest manifest = DeviceManifest.builder().name("t1").modes(List.of("Setting"))
+                .initState("auto").workingStates(List.of(DeviceManifest.WorkingState.builder()
+                        .name("auto").build())).build();
         DeviceVerificationDto explicit = device("sensor", "t1");
+        explicit.setState("auto");
         explicit.setCurrentStateTrust("TRUSTED");
         DeviceVerificationDto defaulted = device("sensor", "t1");
-        assertEquals(
-                BoardSemanticFingerprint.of(List.of(explicit), List.of(), Map.of()),
-                BoardSemanticFingerprint.of(List.of(defaulted), List.of(), Map.of()));
+        defaulted.setState("auto");
+        assertEquals(fingerprintWithDeviceModel(explicit, manifest), fingerprintWithDeviceModel(defaulted, manifest));
     }
 
     @Test
     void omittedStateTrust_matchesTemplateWorkingStateTrust() {
         DeviceManifest manifest = DeviceManifest.builder()
+                .name("Air Conditioner").initState("auto")
                 .modes(List.of("SwitchState"))
                 .workingStates(List.of(
                         DeviceManifest.WorkingState.builder()
@@ -280,15 +347,15 @@ class BoardSemanticFingerprintTest {
         explicit.setState("cool");
         explicit.setCurrentStateTrust("untrusted");
 
-        Map<String, DeviceSmvData> map = deviceMapWithManifest("ac", "ac", manifest);
         assertEquals(
-                BoardSemanticFingerprint.of(List.of(implicit), List.of(), map),
-                BoardSemanticFingerprint.of(List.of(explicit), List.of(), map));
+                fingerprintWithDeviceModel(implicit, manifest),
+                fingerprintWithDeviceModel(explicit, manifest));
     }
 
     @Test
     void explicitStateTrustOverride_changesTemplateWorkingStateTrust() {
         DeviceManifest manifest = DeviceManifest.builder()
+                .name("Air Conditioner").initState("cool")
                 .modes(List.of("SwitchState"))
                 .workingStates(List.of(
                         DeviceManifest.WorkingState.builder()
@@ -303,23 +370,21 @@ class BoardSemanticFingerprintTest {
         override.setState("cool");
         override.setCurrentStateTrust("trusted");
 
-        Map<String, DeviceSmvData> map = deviceMapWithManifest("ac", "ac", manifest);
         assertNotEquals(
-                BoardSemanticFingerprint.of(List.of(implicit), List.of(), map),
-                BoardSemanticFingerprint.of(List.of(override), List.of(), map));
+                fingerprintWithDeviceModel(implicit, manifest),
+                fingerprintWithDeviceModel(override, manifest));
     }
 
     @Test
     void currentStatePrivacyOverride_changesFingerprint() {
         DeviceManifest manifest = DeviceManifest.builder()
+                .name("Light").initState("on")
                 .modes(List.of("SwitchState"))
                 .workingStates(List.of(DeviceManifest.WorkingState.builder()
                         .name("on")
                         .privacy("public")
                         .build()))
                 .build();
-        Map<String, DeviceSmvData> map = deviceMapWithManifest("light", "light", manifest);
-
         DeviceVerificationDto publicState = device("light", "Light");
         publicState.setState("on");
         DeviceVerificationDto privateState = device("light", "Light");
@@ -327,8 +392,8 @@ class BoardSemanticFingerprintTest {
         privateState.setCurrentStatePrivacy("private");
 
         assertNotEquals(
-                BoardSemanticFingerprint.of(List.of(publicState), List.of(), map),
-                BoardSemanticFingerprint.of(List.of(privateState), List.of(), map));
+                fingerprintWithDeviceModel(publicState, manifest),
+                fingerprintWithDeviceModel(privateState, manifest));
     }
 
     @Test

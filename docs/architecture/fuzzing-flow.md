@@ -91,7 +91,8 @@ Canvas coordinates and dimensions do not invalidate a semantic preview.
 6. `PAPER_COMPATIBLE` creates seeds from a nonce that materializes random legal initial
    device-state, device-local-variable, and environment values, sparse per-target initial
    overrides, and ordinary one-based `(Type, Name, Value, Position)` Events. Device Events
-   are legal only at position `1`; environment Events span the bounded trace. New offspring
+   are legal only at position `1`; environment Events span the bounded trace. Preview, sampled
+   initial states, and device Events use the same trimmed working-state names. New offspring
    use a `95%` mutation / `5%` fresh-random split. Mutation clones the selected parent's
    nonce and overrides, then changes a selected mandatory initial target or ordinary Event;
    the fresh-random branch receives a new nonce, no inherited overrides, and a new Event
@@ -120,11 +121,16 @@ Canvas coordinates and dimensions do not invalidate a semantic preview.
    in `s(i)` and prevents a position-`i` Event from triggering a rule one step early.
    A numeric environment rate is effective at that position:
    it replaces the unconstrained natural-rate choice and combines once with the current
-   device impact before clamping. A forced formal transition assignment overrides it.
+   device impact before clamping. An active
+   [shared transition assignment](shared-value-semantics.md#6-device-effects) overrides it.
    A paper-mode discrete environment otherwise remains stable instead of making an
    undocumented free enum choice.
 8. `FuzzModel` advances device modes, ordered automation actions, autonomous transitions,
-   variables, environment values, API pulses, and triggered-rule snapshots. Cancellation
+   variables, environment values, [API pulses](nusmv-model.md#rule-semantics), and triggered-rule snapshots.
+   Partial multi-mode conditions and mode literals use the formal model's wildcard and token rules.
+   Variable enum comparisons retain the declared literal case. Specifications, rule conditions, and
+   autonomous triggers follow the [shared-value read capability](shared-value-semantics.md#4-capabilities-read-and-affect),
+   including when an unreadable declaration supplies an assignment. Cancellation
    is checked while forming a state. Paper monitor FSMs advance online as each state is
    produced. A single-target candidate stops at its first violation, matching the paper;
    for the product's multi-target extension, one candidate continues only until every
@@ -239,10 +245,13 @@ requires equality, so content corruption cannot pass merely because collection c
 unchanged.
 
 The frontend keeps the proof handoff explicit: a finding can focus the user's attention
-on one historical target, but the verification request still contains the complete
-specification set from the current Board. It does not silently import the finding's
-historical snapshot, random initial state, or Event sequence. Search settings can be
-restored for review, using the effective seed, but restoration never starts a task and
+on one historical target. While verification settings are open, the handoff keeps that
+target's captured label and updates its presence and model comparison as the Board
+refreshes. The handoff distinguishes unavailable comparison data from a confirmed model
+change or missing target. Verification uses the current Board's complete specification set
+and starting state. Historical snapshots, sampled initial states, and Event sequences remain
+evidence for replay. Search settings can be restored for review, using the effective seed,
+but restoration never starts a task and
 never silently broadens a target set when historical targets are unavailable.
 
 ## Relationship to the HAFuzz paper

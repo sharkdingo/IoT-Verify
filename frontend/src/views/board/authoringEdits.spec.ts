@@ -13,6 +13,7 @@ const setup = (enqueue?: (work: () => Promise<unknown>) => Promise<unknown>) => 
   const ownership = { active: true, token: 'owner' }
   const dependencies = {
     isSameSpecification,
+    deviceModeCount: (id: string) => id === 'light' ? 1 : undefined,
     getToken: () => ownership.token, boardAuthScopeEpoch: 0,
     isCurrentSessionToken: (token: string) => token === ownership.token,
     isCurrentBoardAuthScope: () => ownership.active,
@@ -48,6 +49,21 @@ describe('Board edit ownership and reconciliation', () => {
     expect(state.dependencies.commitSemanticScene).toHaveBeenCalledWith({ [kind === 'rule' ? 'rules' : 'specs']: state.mutation.currentItems, availability: state.mutation, semanticChanged: true })
     expect(state.dependencies.handleAddRule).not.toHaveBeenCalled()
     expect(state.dependencies.handleAddSpec).not.toHaveBeenCalled()
+  })
+
+  it('keeps repair evidence current when a specification uses equivalent state-set operands', async () => {
+    const { handlers, dependencies, mutation } = setup()
+    const condition = { deviceId: 'light', targetType: 'state', key: 'state', relation: 'in', value: 'off;on' }
+    const expected = { id: '7', name: 'Safety', templateId: '1', aConditions: [condition],
+      ifConditions: [], thenConditions: [] }
+    dependencies.boardApi.updateSpec.mockResolvedValue({ ...mutation, currentItems: [expected] })
+
+    await handlers.handleSaveSpecification({ ...expected, expected, complete: vi.fn(),
+      aConditions: [{ ...condition, value: 'on,off,off' }] })
+
+    expect(dependencies.commitSemanticScene).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      specs: [expected], semanticChanged: false
+    }))
   })
 
   it('sends the opened baseline, adopts the authoritative collection and undo availability', async () => {

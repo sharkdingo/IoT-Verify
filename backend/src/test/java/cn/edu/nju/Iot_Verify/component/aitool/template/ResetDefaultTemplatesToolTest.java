@@ -6,6 +6,7 @@ import cn.edu.nju.Iot_Verify.dto.board.EnvironmentVariableChangeDto;
 import cn.edu.nju.Iot_Verify.dto.device.DefaultTemplateAffectedDeviceDto;
 import cn.edu.nju.Iot_Verify.dto.device.DefaultTemplateResetChangeDto;
 import cn.edu.nju.Iot_Verify.dto.device.DefaultTemplateResetResultDto;
+import cn.edu.nju.Iot_Verify.dto.device.DefaultTemplateRuntimeChangeDto;
 import cn.edu.nju.Iot_Verify.security.UserContextHolder;
 import cn.edu.nju.Iot_Verify.service.BoardStorageService;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -60,6 +61,11 @@ class ResetDefaultTemplatesToolTest {
 
         assertTrue(first.path("requiresUserConfirmation").asBoolean());
         assertEquals(3, first.path("preview").path("editHistoryEntryCount").asInt());
+        JsonNode runtimeChange = first.path("preview").path("affectedDevices").get(0).path("runtimeChanges").get(0);
+        assertEquals("VARIABLE_VALUE", runtimeChange.path("field").asText());
+        assertEquals("operatingState", runtimeChange.path("itemName").asText());
+        assertEquals("idle", runtimeChange.path("previousValue").asText());
+        assertEquals("cooling", runtimeChange.path("currentValue").asText());
         JsonNode environmentChange = first.path("preview").path("environmentChanges").get(0);
         assertEquals("temperature", environmentChange.path("name").asText());
         assertEquals("UPDATED", environmentChange.path("changeType").asText());
@@ -106,6 +112,8 @@ class ResetDefaultTemplatesToolTest {
                         .deviceId("device-1")
                         .deviceLabel("Living room AC")
                         .templateName("Air Conditioner")
+                        .runtimeChanges(List.of(new DefaultTemplateRuntimeChangeDto(
+                                DefaultTemplateRuntimeChangeDto.Field.VARIABLE_VALUE, "operatingState", "idle", "cooling")))
                         .build()))
                 .blockers(canApply ? List.of() : List.of(
                         cn.edu.nju.Iot_Verify.dto.device.DefaultTemplateResetBlockerDto.builder()

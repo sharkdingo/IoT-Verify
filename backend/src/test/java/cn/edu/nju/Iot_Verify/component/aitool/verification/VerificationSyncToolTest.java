@@ -128,7 +128,7 @@ class VerificationSyncToolTest {
         assertEquals(1, json.path("emittedSpecCount").asInt());
         verify(verificationService).verify(anyLong(), argThat(request ->
                 request.getDevices() == null && request.getSpecs() == null && request.getPlaybackNodes() == null
-                        && request.getRules().isEmpty() && request.getEnvironmentVariables().isEmpty()
+                        && request.getRules().isEmpty() && request.getEnvironmentVariables() == null
                         && request.getAttackScenario() != null));
         assertEquals(1, json.path("violationCount").asInt());
         assertEquals(1, json.path("traceCount").asInt());

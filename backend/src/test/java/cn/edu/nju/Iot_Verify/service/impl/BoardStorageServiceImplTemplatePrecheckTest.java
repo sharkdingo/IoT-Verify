@@ -3,6 +3,7 @@ package cn.edu.nju.Iot_Verify.service.impl;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvGenerator;
 import cn.edu.nju.Iot_Verify.component.template.DeviceTemplateSchemaValidator;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
+import cn.edu.nju.Iot_Verify.dto.device.DefaultTemplateAffectedDeviceDto;
 import cn.edu.nju.Iot_Verify.dto.device.DefaultTemplateResetChangeDto;
 import cn.edu.nju.Iot_Verify.dto.device.DefaultTemplateResetResultDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
@@ -18,9 +19,12 @@ import cn.edu.nju.Iot_Verify.exception.SmvGenerationException;
 import cn.edu.nju.Iot_Verify.dto.RequestLimits;
 import cn.edu.nju.Iot_Verify.exception.ValidationException;
 import cn.edu.nju.Iot_Verify.exception.TemplateDeletionConflictException;
+import cn.edu.nju.Iot_Verify.po.BoardEnvironmentVariablePo;
 import cn.edu.nju.Iot_Verify.po.DeviceNodePo;
 import cn.edu.nju.Iot_Verify.po.DeviceTemplatePo;
+import cn.edu.nju.Iot_Verify.po.RulePo;
 import cn.edu.nju.Iot_Verify.po.UserPo;
+import cn.edu.nju.Iot_Verify.repository.BoardEnvironmentVariableRepository;
 import cn.edu.nju.Iot_Verify.repository.BoardLayoutRepository;
 import cn.edu.nju.Iot_Verify.repository.DeviceNodeRepository;
 import cn.edu.nju.Iot_Verify.repository.DeviceTemplateRepository;
@@ -32,15 +36,20 @@ import cn.edu.nju.Iot_Verify.service.DeviceTemplateService;
 import cn.edu.nju.Iot_Verify.service.board.BoardEditHistoryState;
 import cn.edu.nju.Iot_Verify.service.board.BoardEditJournal;
 import cn.edu.nju.Iot_Verify.service.board.BoardUndoAvailability;
+import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.util.mapper.BoardLayoutMapper;
 import cn.edu.nju.Iot_Verify.util.mapper.DeviceNodeMapper;
 import cn.edu.nju.Iot_Verify.util.mapper.DeviceTemplateMapper;
 import cn.edu.nju.Iot_Verify.util.mapper.RuleMapper;
 import cn.edu.nju.Iot_Verify.util.mapper.SpecificationMapper;
 import cn.edu.nju.Iot_Verify.util.JsonUtils;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.lang.NonNull;
@@ -48,10 +57,16 @@ import org.springframework.transaction.support.TransactionCallback;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.File;
+import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -73,6 +88,8 @@ class BoardStorageServiceImplTemplatePrecheckTest {
 
     @Mock
     private DeviceNodeRepository nodeRepo;
+    @Mock
+    private BoardEnvironmentVariableRepository environmentRepo;
     @Mock
     private SpecificationRepository specRepo;
     @Mock
@@ -117,7 +134,7 @@ class BoardStorageServiceImplTemplatePrecheckTest {
                 new DeviceTemplateNuSmvValidator(smvGenerator);
         service = new BoardStorageServiceImpl(
                 nodeRepo,
-                null,
+                environmentRepo,
                 specRepo,
                 ruleRepo,
                 layoutRepo,
@@ -244,6 +261,126 @@ class BoardStorageServiceImplTemplatePrecheckTest {
     }
 
     @Test
+    void resetDefaultTemplates_updatesStoredValuesDerivedFromTheReplacementManifest() throws Exception {
+        var mapper = new ObjectMapper();
+        ObjectNode original;
+        try (var resource = Objects.requireNonNull(getClass().getResourceAsStream("/deviceTemplate/Car.json"))) {
+            original = (ObjectNode) mapper.readTree(resource);
+        }
+        var custom = original.deepCopy();
+        for (var state : custom.path("WorkingStates")) {
+            if ("away".equals(state.path("Name").asText())) {
+                ((ObjectNode) state.path("Dynamics").get(0)).put("Value", "garage");
+            }
+        }
+        DeviceTemplatePo bundled = templatePo("Car", mapper.writeValueAsString(original));
+        bundled.setId(null);
+        bundled.setDefaultTemplate(true);
+        DeviceTemplatePo current = templatePo("Car", mapper.writeValueAsString(custom));
+        DeviceNodeDto car = buildNode("car_1", "Car");
+        car.setState("away");
+        car.setVariables(List.of(new VariableStateDto("location", "garage", "trusted")));
+        var stored = new AtomicReference<>(List.of(deviceNodeMapper.toEntity(car, 1L)));
+        when(deviceTemplateService.getDefaultTemplateDefinitions(1L)).thenReturn(List.of(bundled));
+        when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(current), List.of(current), List.of(bundled));
+        when(nodeRepo.findByUserId(1L)).thenAnswer(invocation -> stored.get());
+        when(specRepo.findByUserId(1L)).thenReturn(List.of());
+        when(ruleRepo.findByUserIdOrderByExecutionOrderAscIdAsc(1L)).thenReturn(List.of());
+        when(deviceTemplateRepo.deleteDefaultsForReset(anyLong(), anyList())).thenReturn(1);
+        when(deviceTemplateRepo.saveAllAndFlush(anyList())).thenAnswer(invocation -> invocation.getArgument(0));
+        lenient().when(nodeRepo.saveAll(anyList())).thenAnswer(invocation -> {
+            List<DeviceNodePo> saved = invocation.getArgument(0);
+            stored.set(saved);
+            return saved;
+        });
+
+        var preview = service.previewDefaultTemplateReset(1L);
+        assertEquals(true, preview.isCanApply());
+        assertEquals("garage", preview.getCurrentNodes().get(0).getVariables().get(0).getValue());
+        assertEquals("garage", service.getNodes(1L).get(0).getVariables().get(0).getValue());
+        var result = service.resetDefaultTemplates(1L, preview.getImpactToken());
+
+        assertEquals("reset", result.getOperation());
+        DeviceNodeDto saved = service.getNodes(1L).get(0);
+        assertEquals("away", saved.getState());
+        assertEquals(List.of(new VariableStateDto("location", "away", "trusted")), saved.getVariables());
+        assertEquals(saved.getVariables(), result.getCurrentNodes().get(0).getVariables());
+    }
+
+    @Test
+    void resetDefaultTemplates_disclosesRuntimeWritesEvenWhenTheManifestMatches() throws Exception {
+        String manifestJson;
+        try (var resource = Objects.requireNonNull(getClass().getResourceAsStream("/deviceTemplate/Thermostat.json"))) {
+            manifestJson = new String(resource.readAllBytes(), StandardCharsets.UTF_8);
+        }
+        DeviceTemplatePo bundled = templatePo("Thermostat", manifestJson);
+        bundled.setId(null);
+        bundled.setDefaultTemplate(true);
+        DeviceTemplatePo current = templatePo("Thermostat", manifestJson);
+        current.setDefaultTemplate(true);
+
+        DeviceNodeDto changed = buildNode("thermostat_1", "Thermostat");
+        // Earlier admission accepted whitespace between mode values, but the value lookup matched the whole state.
+        changed.setState("auto; cool");
+        changed.setCurrentStateTrust("Trusted");
+        changed.setCurrentStatePrivacy(" ");
+        changed.setVariables(List.of(new VariableStateDto(" thermostatOperatingState ", "idle", "Untrusted")));
+        changed.setPrivacies(List.of(new PrivacyStateDto(" thermostatOperatingState ", " PUBLIC ")));
+        DeviceNodeDto unchanged = buildNode("thermostat_2", "Thermostat");
+        unchanged.setState("auto;cool");
+        unchanged.setVariables(List.of(new VariableStateDto("thermostatOperatingState", "cooling", "untrusted")));
+        Map<String, DeviceNodePo> stored = new LinkedHashMap<>();
+        DeviceNodePo previous = deviceNodeMapper.toEntity(changed, 1L);
+        previous.setState(" auto; cool ");
+        stored.put(changed.getId(), previous);
+        stored.put(unchanged.getId(), deviceNodeMapper.toEntity(unchanged, 1L));
+
+        when(deviceTemplateService.getDefaultTemplateDefinitions(1L)).thenReturn(List.of(bundled));
+        when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(current), List.of(current), List.of(bundled));
+        when(nodeRepo.findByUserId(1L)).thenAnswer(invocation -> List.copyOf(stored.values()));
+        when(specRepo.findByUserId(1L)).thenReturn(List.of());
+        when(ruleRepo.findByUserIdOrderByExecutionOrderAscIdAsc(1L)).thenReturn(List.of());
+        when(environmentRepo.findByUserIdOrderByNameAsc(1L))
+                .thenReturn(List.of(BoardEnvironmentVariablePo.builder().userId(1L).name("temperature")
+                        .value("20").trust("untrusted").privacy("public").build()));
+        when(deviceTemplateRepo.deleteDefaultsForReset(anyLong(), anyList())).thenReturn(1);
+        when(deviceTemplateRepo.saveAllAndFlush(anyList())).thenAnswer(invocation -> invocation.getArgument(0));
+        lenient().when(nodeRepo.saveAll(anyList())).thenAnswer(invocation -> {
+            List<DeviceNodePo> saved = invocation.getArgument(0);
+            saved.forEach(node -> stored.put(node.getId(), node));
+            return saved;
+        });
+
+        var preview = service.previewDefaultTemplateReset(1L);
+        verify(nodeRepo, never()).saveAll(anyList());
+        var result = service.resetDefaultTemplates(1L, preview.getImpactToken());
+
+        assertFalse(preview.getTemplateChanges().get(0).isSemanticsChanged());
+        assertThat(preview.getEnvironmentChanges()).isEmpty();
+        assertThat(preview.getAffectedDevices()).extracting(DefaultTemplateAffectedDeviceDto::getDeviceId)
+                .containsExactly("thermostat_1");
+        var mapper = new ObjectMapper().setSerializationInclusion(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL);
+        var runtimeChanges = mapper.valueToTree(preview.getAffectedDevices().get(0)).path("runtimeChanges");
+        assertEquals(mapper.readTree("""
+                [
+                  {"field":"STATE","previousValue":" auto; cool ","currentValue":"auto; cool"},
+                  {"field":"STATE_TRUST","previousValue":"Trusted","currentValue":"trusted"},
+                  {"field":"STATE_PRIVACY","previousValue":" ","currentValue":null},
+                  {"field":"VARIABLE_NAME","previousValue":" thermostatOperatingState ","currentValue":"thermostatOperatingState"},
+                  {"field":"VARIABLE_VALUE","itemName":"thermostatOperatingState","previousValue":"idle","currentValue":"cooling"},
+                  {"field":"VARIABLE_TRUST","itemName":"thermostatOperatingState","previousValue":"Untrusted","currentValue":"untrusted"},
+                  {"field":"PRIVACY_NAME","previousValue":" thermostatOperatingState ","currentValue":"thermostatOperatingState"},
+                  {"field":"PRIVACY_LABEL","itemName":"thermostatOperatingState","previousValue":" PUBLIC ","currentValue":"public"}
+                ]
+                """), runtimeChanges);
+        assertThat(result.getAffectedDevices()).isEqualTo(preview.getAffectedDevices());
+        assertThat(preview.getCurrentNodes().get(0).getVariables()).isEqualTo(changed.getVariables());
+        assertThat(result.getCurrentNodes().get(0).getVariables())
+                .containsExactly(new VariableStateDto("thermostatOperatingState", "cooling", "untrusted"));
+        assertThat(result.getCurrentNodes().get(1).getVariables()).isEqualTo(unchanged.getVariables());
+    }
+
+    @Test
     void previewDefaultTemplateReset_marksBundledEnvironmentAdditionsForSafeLocalization() {
         String manifestJson = """
                 {"Name":"Weather Sensor","Modes":[],"InitState":"","WorkingStates":[],
@@ -273,6 +410,130 @@ class BoardStorageServiceImplTemplatePrecheckTest {
                 preview.getEnvironmentChanges().get(0).getPreviousModelTokenSource());
         assertEquals(ModelTokenSource.BUNDLED,
                 preview.getEnvironmentChanges().get(0).getCurrentModelTokenSource());
+    }
+
+    @Test
+    void defaultTemplateReset_reportsEnvironmentConflictAndOtherBlockersWithoutWriting() throws Exception {
+        var bundledLight = bundledLightManifest();
+        var currentLight = lightWithoutEnvironmentVariables(bundledLight);
+        var currentOnlyApi = (ObjectNode) currentLight.path("APIs").get(0).deepCopy();
+        currentOnlyApi.put("Name", "dim");
+        currentLight.withArray("APIs").add(currentOnlyApi);
+        var sensorVariable = sharedNumber("illuminance", 50);
+        var sensor = sensorTemplate("Room Sensor", List.of(sensorVariable));
+        when(deviceTemplateService.getDefaultTemplateDefinitions(1L)).thenReturn(List.of(bundledLight(bundledLight)));
+        when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(
+                templatePo("Light", JsonUtils.toJson(currentLight)), sensor));
+        var lamp = buildNode("lamp_1", "Light");
+        var roomSensor = buildNode("sensor_1", "Room Sensor");
+        roomSensor.setState("Working");
+        when(nodeRepo.findByUserId(1L)).thenReturn(List.of(
+                deviceNodeMapper.toEntity(lamp, 1L), deviceNodeMapper.toEntity(roomSensor, 1L)));
+        when(environmentRepo.findByUserIdOrderByNameAsc(1L)).thenReturn(List.of(environmentValue(sensorVariable)));
+        RulePo automation = new RulePo();
+        when(ruleRepo.findByUserIdOrderByExecutionOrderAscIdAsc(1L)).thenReturn(List.of(automation));
+        when(ruleMapper.toDto(automation)).thenReturn(RuleDto.builder().ruleString("Dim the hallway light")
+                .conditions(List.of(RuleDto.Condition.builder().deviceName("lamp_1").attribute("state")
+                        .targetType("state").relation("=").value("off").build()))
+                .command(RuleDto.Command.builder().deviceName("lamp_1").action("dim").build()).build());
+
+        var preview = service.previewDefaultTemplateReset(1L);
+
+        assertFalse(preview.isCanApply());
+        assertThat(preview.getBlockers()).anySatisfy(blocker -> {
+            assertEquals("DEVICE_INSTANCE_INCOMPATIBLE", blocker.getReasonCode());
+            assertThat(blocker.getReason()).contains("illuminance", "lamp_1", "sensor_1");
+        }).anySatisfy(blocker -> {
+            assertEquals("AUTOMATION_RULE_INCOMPATIBLE", blocker.getReasonCode());
+            assertThat(blocker.getReason()).contains("dim");
+        });
+        assertThat(preview.getEnvironmentChanges()).isEmpty();
+        var error = assertThrows(ValidationException.class,
+                () -> service.resetDefaultTemplates(1L, preview.getImpactToken()));
+        assertThat(error.getErrors()).containsKeys("nodes[1].templateName", "rules[0].command.action");
+        assertResetMadeNoWrites();
+    }
+
+    @Test
+    void defaultTemplateReset_blocksAnEnvironmentPoolBeyondBoardCapacity() throws Exception {
+        var bundledLight = bundledLightManifest();
+        var currentLight = templatePo("Light", JsonUtils.toJson(lightWithoutEnvironmentVariables(bundledLight)));
+        var firstVariables = IntStream.range(0, RequestLimits.MAX_ENVIRONMENT_VARIABLES / 2)
+                .mapToObj(index -> sharedNumber("room_a_" + index, 100)).toList();
+        var secondVariables = IntStream.range(0, RequestLimits.MAX_ENVIRONMENT_VARIABLES / 2)
+                .mapToObj(index -> sharedNumber("room_b_" + index, 100)).toList();
+        var firstSensor = sensorTemplate("Room Sensor A", firstVariables);
+        var secondSensor = sensorTemplate("Room Sensor B", secondVariables);
+        when(deviceTemplateService.getDefaultTemplateDefinitions(1L)).thenReturn(List.of(bundledLight(bundledLight)));
+        when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(currentLight, firstSensor, secondSensor));
+        var roomA = buildNode("sensor_a", "Room Sensor A");
+        roomA.setState("Working");
+        var roomB = buildNode("sensor_b", "Room Sensor B");
+        roomB.setState("Working");
+        when(nodeRepo.findByUserId(1L)).thenReturn(List.of(
+                deviceNodeMapper.toEntity(buildNode("lamp_1", "Light"), 1L),
+                deviceNodeMapper.toEntity(roomA, 1L), deviceNodeMapper.toEntity(roomB, 1L)));
+        when(environmentRepo.findByUserIdOrderByNameAsc(1L)).thenReturn(Stream.concat(
+                firstVariables.stream(), secondVariables.stream()).map(this::environmentValue).toList());
+
+        var preview = service.previewDefaultTemplateReset(1L);
+
+        assertFalse(preview.isCanApply());
+        assertThat(preview.getEnvironmentVariables()).hasSize(RequestLimits.MAX_ENVIRONMENT_VARIABLES);
+        assertThat(preview.getBlockers()).singleElement().satisfies(blocker -> {
+            assertEquals("ENVIRONMENT_POOL_INCOMPATIBLE", blocker.getReasonCode());
+            assertThat(blocker.getReason()).contains(Integer.toString(RequestLimits.MAX_ENVIRONMENT_VARIABLES));
+        });
+        var error = assertThrows(ValidationException.class,
+                () -> service.resetDefaultTemplates(1L, preview.getImpactToken()));
+        assertThat(error.getErrors()).containsOnlyKeys("environmentVariables");
+        assertResetMadeNoWrites();
+    }
+
+    private ObjectNode bundledLightManifest() throws Exception {
+        try (var resource = Objects.requireNonNull(getClass().getResourceAsStream("/deviceTemplate/Light.json"))) {
+            return (ObjectNode) new ObjectMapper().readTree(resource);
+        }
+    }
+
+    private DeviceTemplatePo bundledLight(ObjectNode manifest) {
+        DeviceTemplatePo bundled = templatePo("Light", JsonUtils.toJson(manifest));
+        bundled.setId(null);
+        bundled.setDefaultTemplate(true);
+        return bundled;
+    }
+
+    private ObjectNode lightWithoutEnvironmentVariables(ObjectNode bundledLight) {
+        var current = bundledLight.deepCopy();
+        current.putArray("InternalVariables");
+        current.putArray("ImpactedVariables");
+        current.withArray("WorkingStates").forEach(state -> ((ObjectNode) state).putArray("Dynamics"));
+        return current;
+    }
+
+    private DeviceTemplatePo sensorTemplate(String name, List<DeviceManifest.InternalVariable> variables) {
+        return templatePo(name, JsonUtils.toJson(DeviceManifest.builder()
+                .name(name).internalVariables(variables).build()));
+    }
+
+    private DeviceManifest.InternalVariable sharedNumber(String name, int upperBound) {
+        return DeviceManifest.InternalVariable.builder().name(name).isInside(false).reads(true)
+                .falsifiableWhenCompromised(false).lowerBound(0).upperBound(upperBound)
+                .trust("untrusted").privacy("public").build();
+    }
+
+    private BoardEnvironmentVariablePo environmentValue(DeviceManifest.InternalVariable variable) {
+        return BoardEnvironmentVariablePo.builder().userId(1L).name(variable.getName())
+                .value("0").trust("untrusted").privacy("public").build();
+    }
+
+    private void assertResetMadeNoWrites() {
+        verify(deviceTemplateRepo, never()).deleteDefaultsForReset(anyLong(), anyList());
+        verify(deviceTemplateRepo, never()).saveAllAndFlush(anyList());
+        verify(nodeRepo, never()).saveAll(anyList());
+        verify(environmentRepo, never()).saveAll(anyList());
+        verify(environmentRepo, never()).deleteAll(anyList());
+        verify(editJournal, never()).clear(anyLong());
     }
 
     @Test
@@ -402,7 +663,7 @@ class BoardStorageServiceImplTemplatePrecheckTest {
                 service.saveNodes(1L, List.of(node)));
 
         org.assertj.core.api.Assertions.assertThat(ex.getErrors())
-                .containsEntry("nodes[0].state", "Illegal state value for device template: broken");
+                .containsEntry("nodes[0].state", "Device state must specify one declared state for each mode: broken");
         verify(nodeRepo, never()).deleteAll(any());
     }
 
@@ -878,25 +1139,8 @@ class BoardStorageServiceImplTemplatePrecheckTest {
         assertDoesNotThrow(() -> service.saveNodes(1L, List.of(atLimit)));
     }
 
-    /**
-     * A device name reserved by the fix generator must be refused when the board is saved.
-     *
-     * <p>`SmvConstants.FIX_GENERATED_NAME_PREFIXES` had one consumer:
-     * `NusmvRequestValidator.rejectFixGeneratedPrefix`, which rejects by *prefix* on every verify and
-     * simulate request. Board admission's namespace pass registered only *concrete* generated names —
-     * `lambda_r{i}_c{j}` and `param_r{i}_c{j}` for the rules and conditions present at the time — and
-     * never considered `condition_value_` at all.
-     *
-     * <p>So the device persisted and then every verification returned a `400` naming a prefix the user
-     * had no reason to know about, until they renamed the device. Milder than an HTTP 500, but the same
-     * shape: accepted, stored, unusable.
-     *
-     * <p>All three prefixes are asserted, because the gap was not uniform — `param_`/`lambda_` were
-     * caught only when the index happened to match a current rule/condition, and `condition_value_`
-     * never was.
-     */
     @Test
-    void saveNodes_whenDeviceNameUsesAFixGeneratorPrefix_shouldRejectBeforePersisting() {
+    void saveNodes_acceptsDeviceIdsMatchingRepairTemporaryNames() {
         DeviceTemplatePo template = templatePo("Light",
                 "{\"Name\":\"Light\",\"Modes\":[\"SwitchState\"],\"InitState\":\"off\","
                         + "\"WorkingStates\":[{\"Name\":\"off\",\"Trust\":\"trusted\",\"Privacy\":\"public\"},"
@@ -904,33 +1148,11 @@ class BoardStorageServiceImplTemplatePrecheckTest {
                         + "\"InternalVariables\":[]}");
         when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(template));
 
-        for (String prefix : cn.edu.nju.Iot_Verify.util.SmvConstants.FIX_GENERATED_NAME_PREFIXES) {
-            String reserved = prefix + "r0_c1";
-            ValidationException ex = assertThrows(ValidationException.class,
-                    () -> service.saveNodes(1L, List.of(buildNode(reserved, "Light"))),
-                    () -> "reserved prefix must be refused at the board boundary: " + reserved);
-            org.assertj.core.api.Assertions.assertThat(ex.getErrors().toString())
-                    .contains(prefix)
-                    // The remedy must be something the user can do: a device id is immutable
-                    // (`renameNode` changes only the label), so "rename the device" sent them into a
-                    // loop — the rename re-runs this check and fails on the id again.
-                    .contains("cannot be changed after creation")
-                    .doesNotContain("Rename the device");
-        }
-    }
-
-    /** A name that merely *contains* a reserved prefix is legitimate and must stay accepted. */
-    @Test
-    void saveNodes_whenDeviceNameOnlyContainsAReservedPrefix_shouldBeAccepted() {
-        DeviceTemplatePo template = templatePo("Light",
-                "{\"Name\":\"Light\",\"Modes\":[\"SwitchState\"],\"InitState\":\"off\","
-                        + "\"WorkingStates\":[{\"Name\":\"off\",\"Trust\":\"trusted\",\"Privacy\":\"public\"},"
-                        + "{\"Name\":\"on\",\"Trust\":\"trusted\",\"Privacy\":\"public\"}],"
-                        + "\"InternalVariables\":[]}");
-        when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(template));
-
-        // The guard is `startsWith`, matching the request-time check it mirrors — not `contains`.
-        assertDoesNotThrow(() -> service.saveNodes(1L, List.of(buildNode("myParam_light", "Light"))));
+        List<DeviceNodeDto> nodes = List.of("param_r0_c0", "lambda_r0_c0", "condition_value_r0_c1",
+                        "iot_verify_guard_probe_0").stream()
+                .map(id -> buildNode(id, "Light"))
+                .toList();
+        assertDoesNotThrow(() -> service.saveNodes(1L, nodes));
     }
 
     private static String discreteWriterManifest(String name, String value) {
@@ -944,6 +1166,30 @@ class BoardStorageServiceImplTemplatePrecheckTest {
                 + "\"ImpactedVariables\":[\"airQuality\"],"
                 + "\"APIs\":[{\"Name\":\"turnOn\",\"StartState\":\"off\",\"EndState\":\"on\","
                 + "\"Signal\":true}]}";
+    }
+
+    @Test
+    void saveNodes_rejectsAGlobalEnumThatCollidesWithAnotherDevicesMode() {
+        DeviceTemplatePo light = templatePo("Light", """
+                {"Name":"Light","Modes":["Next"],"InitState":"off","WorkingStates":[
+                  {"Name":"off","Trust":"trusted","Privacy":"public"},
+                  {"Name":"on","Trust":"trusted","Privacy":"public"}]}
+                """);
+        DeviceTemplatePo sensor = templatePo("Sensor", """
+                {"Name":"Sensor","InternalVariables":[{"Name":"preset","IsInside":true,
+                    "FalsifiableWhenCompromised":false,"Values":["_Next","warm"],
+                    "Trust":"trusted","Privacy":"public"}], "Transitions":[{"Name":"restorePreset",
+                    "Trigger":{"Attribute":"preset","Relation":"=","Value":"warm"},
+                    "Assignments":[{"Attribute":"preset","Value":"_Next"}]}]}
+                """);
+        when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(light, sensor));
+        DeviceNodeDto sensorNode = buildNode("sensor_1", "Sensor");
+        sensorNode.setState(null);
+
+        var conflict = assertThrows(ValidationException.class, () -> service.saveNodes(1L, List.of(
+                buildNode("light_1", "Light"), sensorNode)));
+        org.assertj.core.api.Assertions.assertThat(conflict.getErrors().get("nodes"))
+                .contains("light_1", "mode 'Next'", "_Next", "sensor_1", "enum value of InternalVariable 'preset'");
     }
 
     /**
@@ -1080,6 +1326,24 @@ class BoardStorageServiceImplTemplatePrecheckTest {
         org.assertj.core.api.Assertions.assertThat(ex.getMessage())
                 .contains("collides with another mode")
                 .contains("_next");
+    }
+
+    @Test
+    void addDeviceTemplate_distinctStatesWithTheSameSolverTokenShouldReject() {
+        DeviceTemplateDto dto = buildTemplate("T1", true);
+        dto.getManifest().setModes(List.of("LampState"));
+        dto.getManifest().setInitState("Case");
+        dto.getManifest().setWorkingStates(List.of("Case", "_Case", "ready").stream()
+                .map(name -> DeviceManifest.WorkingState.builder().name(name)
+                        .trust("trusted").privacy("public").build())
+                .toList());
+
+        BadRequestException error = assertThrows(BadRequestException.class, () ->
+                service.addDeviceTemplate(1L, dto));
+
+        org.assertj.core.api.Assertions.assertThat(error.getMessage())
+                .contains("Case", "_Case", "LampState", "collide");
+        verify(deviceTemplateRepo, never()).saveAndFlush(anyTemplatePo());
     }
 
     /*
@@ -1431,16 +1695,16 @@ class BoardStorageServiceImplTemplatePrecheckTest {
                 .contains("collides");
     }
 
-    @Test
-    void addDeviceTemplate_attackFlagIdentifierCollision_shouldReject() {
-        DeviceTemplateDto dto = buildTemplateWithVar("AttackCollision", "is_attack", null);
+    @ParameterizedTest
+    @CsvSource({"Power, is_attack", "private, level"})
+    void addDeviceTemplate_doesNotReserveSymbolsFromDisabledModelOptions(String mode, String variable) {
+        DeviceTemplateDto template = twoModeTemplate("Optional Names", "off;low", "on;high");
+        template.getManifest().setModes(List.of(mode, "Fan"));
+        template.getManifest().setInternalVariables(List.of(DeviceManifest.InternalVariable.builder()
+                .name(variable).isInside(true).falsifiableWhenCompromised(false)
+                .trust("trusted").privacy("public").lowerBound(0).upperBound(2).build()));
 
-        BadRequestException ex = assertThrows(BadRequestException.class, () ->
-                service.addDeviceTemplate(1L, dto));
-
-        org.assertj.core.api.Assertions.assertThat(ex.getMessage())
-                .contains("generated NuSMV identifier 'is_attack'")
-                .contains("collides");
+        assertDoesNotThrow(() -> service.addDeviceTemplate(1L, template));
     }
 
     @Test
@@ -1499,6 +1763,44 @@ class BoardStorageServiceImplTemplatePrecheckTest {
         DeviceTemplateDto accepted = twoModeTemplate("Shared State Value", "auto;on", "low;auto");
         accepted.getManifest().setModes(List.of("FanMode", "HvacMode"));
         assertDoesNotThrow(() -> service.addDeviceTemplate(1L, accepted));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"__Next, level, __Next", "Next, __level, __level"})
+    void addDeviceTemplate_rejectsIdentifiersThatNuSmvHidesFromTraces(
+            String mode, String variable, String hiddenIdentifier) {
+        DeviceTemplateDto template = twoModeTemplate("Hidden Trace Probe", "off;low", "on;high");
+        template.getManifest().setModes(List.of(mode, "Fan"));
+        template.getManifest().setInternalVariables(List.of(DeviceManifest.InternalVariable.builder()
+                .name(variable).isInside(true).falsifiableWhenCompromised(false)
+                .trust("trusted").privacy("public").lowerBound(0).upperBound(2).build()));
+
+        BadRequestException exception = assertThrows(BadRequestException.class,
+                () -> service.addDeviceTemplate(1L, template));
+        org.assertj.core.api.Assertions.assertThat(exception.getMessage())
+                .contains(hiddenIdentifier).contains("hides").contains("traces");
+        verify(deviceTemplateRepo, never()).saveAndFlush(anyTemplatePo());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "Next, preset, _Next, _Next",
+            "Next, off, calm, off",
+            "Next, preset, trust__Next_off, trust__Next_off",
+            "trusted, preset, calm, trusted"
+    })
+    void addDeviceTemplate_rejectsAnEnumConstantThatEqualsAnEmittedIdentifier(
+            String mode, String variable, String value, String conflictingToken) {
+        DeviceTemplateDto template = twoModeTemplate("Collision Probe", "off;low", "on;high");
+        template.getManifest().setModes(List.of(mode, "Fan"));
+        template.getManifest().setInternalVariables(List.of(DeviceManifest.InternalVariable.builder()
+                .name(variable).isInside(false).reads(true).falsifiableWhenCompromised(false)
+                .trust("trusted").privacy("public").values(List.of(value, "warm")).build()));
+
+        BadRequestException exception = assertThrows(BadRequestException.class,
+                () -> service.addDeviceTemplate(1L, template));
+        org.assertj.core.api.Assertions.assertThat(exception.getMessage()).contains(conflictingToken).contains("collides");
+        verify(deviceTemplateRepo, never()).saveAndFlush(anyTemplatePo());
     }
 
     private static DeviceTemplateDto twoModeTemplate(String name, String stateA, String stateB) {

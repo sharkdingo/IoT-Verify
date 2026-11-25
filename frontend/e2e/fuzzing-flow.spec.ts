@@ -117,6 +117,42 @@ const closeFuzzingPanelIfPresent = async (page: Page, panel: Locator) => {
 }
 
 test.describe('bounded counterexample exploration', () => {
+  test('offers device-local reported values and keeps trust-only checks out of exploration', async ({ page, request }) => {
+    const auth = await createAuthenticatedUser(request)
+    await openWorkspace(page, auth)
+    const scenePath = path.resolve(process.cwd(), '..', 'docs', 'examples', 'default-rfid-access-scene.json')
+    await page.getByTestId('scene-import-file').setInputFiles(scenePath)
+    await page.getByRole('dialog', { name: 'Replace the current scene?' })
+      .getByRole('button', { name: 'Replace scene' }).click()
+    await waitForBoardSpecCount(request, auth, 5)
+
+    await page.getByTestId('open-fuzzing-panel').click()
+    const panel = page.getByTestId('fuzzing-panel')
+    const localReading = panel.getByRole('checkbox', { name: 'Unlock for an authorized card' })
+    await expect(localReading).toBeChecked()
+    await expect(localReading).toBeEnabled()
+    await expect(panel.getByRole('checkbox', { name: 'Require trusted door control', exact: false })).toBeDisabled()
+    await expect(panel.getByRole('checkbox', { name: 'Keep card data private', exact: false })).toBeDisabled()
+
+    await panel.getByTestId('fuzz-max-iterations').fill('2')
+    const accepted = page.waitForResponse(response => response.request().method() === 'POST'
+      && new URL(response.url()).pathname === '/api/fuzz/async')
+    await panel.getByTestId('run-fuzzing').click()
+    const acceptedResponse = await accepted
+    const requested = acceptedResponse.request().postDataJSON().targetSpecIds as string[]
+    const task = await unwrap<FuzzTask>(acceptedResponse)
+    const completed = await waitForTask(request, auth, task.id)
+    expect(completed.status).toBe('COMPLETED')
+    const run = await unwrap<FuzzRun>(await request.get(`${apiBaseURL}/api/fuzz/runs/${completed.runId}`, {
+      headers: authHeaders(auth)
+    }))
+    expect(Object.values(run.eligibleSpecifications).map(spec => spec.name).sort()).toEqual([
+      'Never unlock for an unauthorized card', 'Sound the alarm for an unauthorized card', 'Unlock for an authorized card'
+    ])
+    expect([...run.eligibility.eligibleSpecIds].sort()).toEqual([...requested].sort())
+    expect(run.eligibility.ineligibleSpecs).toEqual([])
+  })
+
   test('imports a scene, finds and replays a candidate, and remains usable on mobile', async ({ page, request }, testInfo) => {
     test.setTimeout(180_000)
     page.setDefaultTimeout(20_000)
@@ -338,9 +374,37 @@ test.describe('bounded counterexample exploration', () => {
       await page.getByTestId(`verify-fuzzing-finding-${findingId}`).click()
       const verificationPanel = page.getByTestId('verification-panel')
       await expect(verificationPanel).toBeVisible()
-      await expect(page.getByTestId('fuzz-verification-handoff')).toContainText(`search run #${runId}`)
-      await expect(page.getByTestId('fuzz-verification-handoff')).toContainText('complete specification set on the current Board')
+      const handoff = page.getByTestId('fuzz-verification-handoff')
+      await expect(handoff).toContainText(`search run #${runId}`)
+      await expect(handoff).toContainText('complete specification set on the current Board')
       await expect(page.getByTestId('verification-panel')).toBeFocused()
+
+      const editorTab = await page.context().newPage()
+      try {
+        await openWorkspace(editorTab, auth)
+        await editorTab.getByTestId('inspector-tab-specs').click()
+        const target = editorTab.locator('article').filter({
+          has: editorTab.getByTestId(`edit-spec-${run.findings[0]!.violatedSpecId}`)
+        })
+        await target.getByRole('button', { name: 'Delete specification' }).click()
+        await editorTab.getByRole('dialog', { name: 'Delete specification' })
+          .getByRole('button', { name: 'Delete', exact: true }).click()
+        await expect(target).toHaveCount(0)
+
+        await page.bringToFront()
+        await expect(handoff.getByRole('alert')).toContainText('This historical target is no longer on the current Board')
+
+        await editorTab.bringToFront()
+        await editorTab.getByTestId('board-undo').click()
+        await expect(target).toBeVisible()
+
+        await page.bringToFront()
+        await expect(handoff.getByRole('alert')).toHaveCount(0)
+        await expect(handoff.getByRole('status')).toHaveCount(0)
+      } finally {
+        await editorTab.close()
+      }
+
       await page.getByTestId('verification-mode-sync').click()
       const verificationResponsePromise = page.waitForResponse(response =>
         response.request().method() === 'POST'
@@ -520,18 +584,27 @@ test.describe('bounded counterexample exploration', () => {
         response.request().method() === 'POST'
           && new URL(response.url()).pathname === '/api/fuzz/paper-domain/preview'
           && response.request().postDataJSON()?.pathLength === 4)
-      await page.getByTestId('run-fuzzing').click()
-      const staleSubmission = await staleSubmissionPromise
-      const staleBody = await staleSubmission.json()
-      expect(staleBody.code).toBe(422)
-      expect(staleBody.data?.errors?.paperDomainFingerprint).toBeTruthy()
-      await expect(panel.getByText('The Board changed before submission', { exact: false }))
-        .toBeVisible()
+      let releaseRecoveredPreview = () => {}
+      const recoveredPreviewGate = new Promise<void>(resolve => { releaseRecoveredPreview = resolve })
+      await page.route('**/api/fuzz/paper-domain/preview', async route => {
+        await recoveredPreviewGate
+        await route.continue()
+      }, { times: 1 })
+      const staleNotice = panel.getByRole('alert').filter({ hasText: 'The previous input range no longer matches the current model.' })
+      try {
+        await page.getByTestId('run-fuzzing').click()
+        const staleSubmission = await staleSubmissionPromise
+        const staleBody = await staleSubmission.json()
+        expect(staleBody.code).toBe(422)
+        expect(staleBody.data?.errors?.paperDomainFingerprint).toBeTruthy()
+        await expect(staleNotice).toBeVisible()
+      } finally {
+        releaseRecoveredPreview()
+      }
       const recoveredPaperPreview = await unwrap<{
         modelFingerprint: string
       }>(await recoveredPreviewPromise)
-      await expect(panel.getByText('The Board changed before submission', { exact: false }))
-        .toHaveCount(0)
+      await expect(staleNotice).toHaveCount(0)
       await expect(page.getByTestId('run-fuzzing')).toBeEnabled()
 
       const paperAcceptedResponsePromise = page.waitForResponse(response =>

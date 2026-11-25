@@ -435,7 +435,7 @@ describe('SystemInspector rule execution order', () => {
     await wrapper.setProps({ activeSection: 'environment' })
     await wrapper.get('article button').trigger('click')
     const evolution = wrapper.get('[data-testid="environment-evolution-airQuality"]').text()
-    expect(evolution).toContain('Written by device dynamics')
+    expect(evolution).toContain('When no autonomous assignment applies, device dynamics can set the value')
     expect(evolution).not.toContain('External input')
 
     // Reads=false must not be presented as a read, which is the claim the generator contradicts by
@@ -672,7 +672,8 @@ describe('SystemInspector rule execution order', () => {
     expect(evolution.text()).toContain('[-1, 1]')
     expect(evolution.text()).toContain('-1, 0, +1')
     expect(evolution.text()).toContain('Hall heater · on: rate 2 per step')
-    expect(evolution.text()).toContain('does not write the trace back')
+    expect(wrapper.get('[data-testid="environment-pool"]').text()).toContain('Traces never overwrite these values.')
+    expect(evolution.text()).not.toContain('Traces never overwrite these values.')
   })
 
   it('shows conflicting active definitions and prevents every environment edit', async () => {
@@ -836,6 +837,33 @@ describe('SystemInspector rule execution order', () => {
     const valueSelect = wrapper.get('[data-testid="environment-value-temperature"]')
     expect(valueSelect.find('option[value="off"]').text()).toBe('off')
     expect(valueSelect.find('option[value="on"]').text()).toBe('on')
+  })
+
+  it('shows semicolon-separated single-mode spec values as separate formula operands', () => {
+    const specification: Specification = {
+      name: 'Light states', id: 'light-states', templateId: '1', templateLabel: 'Always',
+      aConditions: [{
+        id: 'light-condition', side: 'a', deviceId: 'light-1', deviceLabel: 'Hall light',
+        targetType: 'state', key: 'state', relation: 'in', value: 'on;off'
+      }],
+      ifConditions: [], thenConditions: []
+    }
+    const lightTemplate: DeviceTemplate = {
+      name: 'Light',
+      manifest: {
+        Name: 'Light', Modes: ['SwitchState'], InitState: 'off',
+        WorkingStates: [
+          { Name: 'off', Trust: 'trusted', Privacy: 'public' },
+          { Name: 'on', Trust: 'trusted', Privacy: 'public' }
+        ]
+      }
+    }
+    const wrapper = mount(SystemInspector, {
+      props: { activeSection: 'specs', devices, deviceTemplates: [lightTemplate], specifications: [specification] },
+      global: { plugins: [i18n] }
+    })
+
+    expect(wrapper.get('[data-testid="inspector-spec-formula"]').text()).toContain('state in {"on", "off"}')
   })
 
   it('does not add a dead tab stop to a specification card', () => {

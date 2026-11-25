@@ -19,6 +19,7 @@ import type {
   Specification,
 } from '@/types/spec'
 import type { DeviceTemplate, InternalVariable } from '@/types/device'
+import type { DeviceNode } from '@/types/node'
 import { useI18n } from 'vue-i18n'
 import { getDeviceIconUrl } from '@/utils/device'
 import {
@@ -50,9 +51,9 @@ import {
   getSpecConditionValues,
   getSpecConditionVariable,
   isSpecConditionRelationSupported,
-  splitSpecConditionValues,
   validateSpecConditionDomain
 } from '@/utils/specConditionDomain'
+import { splitConditionValueList } from '@/utils/stateConditionDomain'
 import {
   mergeSourcedEnvironmentPatches,
   type EnvironmentPatchConflict
@@ -60,7 +61,9 @@ import {
 import boardApi, {
   BOARD_RESPONSE_INCOMPLETE_CODE,
   parseDeviceTemplateDeletionPreview,
+  type BoardSemanticSnapshot,
   type DefaultTemplateResetResult,
+  type DefaultTemplateRuntimeChange,
   type DeviceTemplateDeletionResult,
   type EnvironmentVariableChange
 } from '@/api/board'
@@ -192,10 +195,12 @@ const emit = defineEmits<{
   'replace-template-catalog': [templates: DeviceTemplate[]]
   'replace-template-state': [data: {
     templates: DeviceTemplate[]
+    nodes: DeviceNode[]
     environmentVariables: ModelEnvironmentVariable[]
   }]
+  'replace-board-snapshot': [snapshot: BoardSemanticSnapshot]
   'edit-history-cleared': []
-  'authoritative-state-unavailable': [keys: Array<'templates' | 'environment'>]
+  'authoritative-state-unavailable': [keys: Array<'nodes' | 'templates' | 'environment'>]
   'update:collapsed': [value: boolean]
   'update:active-section': [value: ControlCenterSection]
 }>()
@@ -1062,8 +1067,8 @@ const specForm = reactive({
 const specSaveFailure = ref<ApiErrorDetails | null>(null)
 const editingSpecBaseline = ref<Specification | null>(null)
 const specificationTargetChanged = computed(() => editingSpecBaseline.value !== null
-  && buildSpecificationSemanticKey({ ...specForm, templateId: specForm.templateId as SpecTemplateId })
-    !== buildSpecificationSemanticKey(editingSpecBaseline.value))
+  && buildSpecificationSemanticKey({ ...specForm, templateId: specForm.templateId as SpecTemplateId }, deviceModeCount)
+    !== buildSpecificationSemanticKey(editingSpecBaseline.value, deviceModeCount))
 let specDraftEpoch = 0
 const hasSpecificationConditions = computed(() =>
   specForm.aConditions.length + specForm.ifConditions.length + specForm.thenConditions.length > 0)
@@ -1430,11 +1435,13 @@ const getAvailableKeys = (deviceId: string, targetType: string): Array<{label: s
   })
 }
 
+const deviceModeCount = (id: string) => getDeviceManifestForCondition(id)?.Modes?.length || 0
+
 const specificationPresentationContext = () => ({
   t,
   resolveDevice: (id: string) => deviceNodes.value.find(node => node.id === id),
   formatToken: (id: string, value: unknown) => formatTemplateModelToken(getDeviceTemplate(id), value),
-  modeCount: (id: string) => getDeviceManifestForCondition(id)?.Modes?.length || 0
+  modeCount: deviceModeCount
 })
 
 const formatConditionPropertyLabel = (condition: Pick<SpecCondition, 'deviceId' | 'targetType' | 'key' | 'propertyScope'>) => {
@@ -1517,19 +1524,21 @@ const conditionValueFailure = computed(() => editingConditionData.targetType ===
   : '')
 
 const conditionValueOptions = computed(() => getSpecConditionValues(editingConditionData,
-  getDeviceManifestForCondition(editingConditionData.deviceId || ''), specForm.templateId))
+  getDeviceManifestForCondition(editingConditionData.deviceId || ''), specForm.templateId,
+  getConditionsForSide(editingConditionSide.value)[editingConditionIndex.value]))
 
 const isSpecSetRelation = computed(() =>
   editingConditionData.relation === 'in' || editingConditionData.relation === 'not in'
 )
 
-const splitConditionValueList = (value: unknown) => splitSpecConditionValues(value, editingConditionData.targetType)
+const splitEditedConditionValues = (value: unknown) => splitConditionValueList(value, editingConditionData.targetType,
+  deviceModeCount(editingConditionData.deviceId || ''))
 
 const conditionDomainBlockedReason = (condition: Partial<SpecCondition>): string | null =>
   validateSpecConditionDomain(condition, getDeviceManifestForCondition(condition.deviceId || ''), specForm.templateId, t)
 
 const editingConditionValueList = computed<string[]>({
-  get: () => splitConditionValueList(editingConditionData.value),
+  get: () => splitEditedConditionValues(editingConditionData.value),
   set: values => {
     editingConditionData.value = Array.from(new Set(values)).join(', ')
   }
@@ -1543,8 +1552,9 @@ watch(filteredRelationOperators, options => {
 })
 
 watch(() => editingConditionData.relation, () => {
-  if (!isSpecSetRelation.value && splitConditionValueList(editingConditionData.value).length > 1) {
-    editingConditionData.value = splitConditionValueList(editingConditionData.value)[0] || ''
+  const values = splitEditedConditionValues(editingConditionData.value)
+  if (!isSpecSetRelation.value && values.length > 1) {
+    editingConditionData.value = values[0] || ''
   }
 })
 
@@ -1565,7 +1575,7 @@ const specFormulaPreview = computed(() => buildSpecFormulaPreview({
   aConditions: specForm.aConditions,
   ifConditions: specForm.ifConditions,
   thenConditions: specForm.thenConditions
-}, { nodes: props.nodes }))
+}, { nodes: props.nodes, modeCount: deviceModeCount }))
 
 const updateFormula = () => {
   if (!currentTemplateDetail.value) {
@@ -1580,7 +1590,8 @@ const updateFormula = () => {
     ifConditions: specForm.ifConditions,
     thenConditions: specForm.thenConditions
   }, {
-    nodes: props.nodes
+    nodes: props.nodes,
+    modeCount: deviceModeCount
   })
 }
 
@@ -2348,13 +2359,18 @@ const confirmResetDefaultTemplates = async () => {
   if (isResettingDefaultTemplates.value) return
   const preview = defaultTemplateResetPreview.value
   if (!preview?.impactToken || !preview.canApply) return
+  const ownerToken = getToken()
+  const ownsCurrentSession = () => !controlCenterDisposed && isCurrentSessionToken(ownerToken)
   isResettingDefaultTemplates.value = true
   try {
     await runBoardMutation(async () => {
+      if (!ownsCurrentSession()) return
       try {
         const result = await boardApi.resetDefaultTemplates(preview.impactToken)
+        if (!ownsCurrentSession()) return
         emit('replace-template-state', {
           templates: result.currentTemplates,
+          nodes: result.currentNodes,
           environmentVariables: result.environmentVariables
         })
         emit('edit-history-cleared')
@@ -2368,26 +2384,29 @@ const confirmResetDefaultTemplates = async () => {
             variables: result.environmentChanges.length
           }))
       } catch (error: any) {
+        if (!ownsCurrentSession()) return
         console.error('Failed to reset default templates:', error)
         if (!isDefinitiveTemplateMutationRejection(error)) {
           try {
-            const [templates, environmentVariables] = await Promise.all([
-              boardApi.getDeviceTemplates(),
-              boardApi.getEnvironment()
-            ])
-            emit('replace-template-state', { templates, environmentVariables })
+            const snapshot = await boardApi.getSnapshot()
+            if (!ownsCurrentSession()) return
+            emit('replace-board-snapshot', snapshot)
             closeResetDefaultsConfirm(true)
             notifyBlocked(t('app.templateResetOutcomeRefreshed'))
           } catch (refreshError) {
+            if (!ownsCurrentSession()) return
             console.error('Failed to reconcile default template reset:', refreshError)
-            emit('authoritative-state-unavailable', ['templates', 'environment'])
+            emit('authoritative-state-unavailable', ['nodes', 'templates', 'environment'])
             notifyBlocked(t('app.templateMutationOutcomeUnknownRefreshFailed'))
           }
         } else if (Number(error?.response?.status) === 409) {
           try {
-            defaultTemplateResetPreview.value = await boardApi.previewDefaultTemplateReset()
+            const nextPreview = await boardApi.previewDefaultTemplateReset()
+            if (!ownsCurrentSession()) return
+            defaultTemplateResetPreview.value = nextPreview
             notifyBlocked(t('app.defaultTemplateResetPreviewChanged'))
           } catch (previewError) {
+            if (!ownsCurrentSession()) return
             console.error('Failed to refresh default template reset preview:', previewError)
             notifyError(t('app.defaultTemplateResetPreviewFailed'))
           }
@@ -2397,6 +2416,8 @@ const confirmResetDefaultTemplates = async () => {
         }
       }
     })
+  } catch (error) {
+    if (ownsCurrentSession()) throw error
   } finally {
     isResettingDefaultTemplates.value = false
   }
@@ -2425,6 +2446,27 @@ const defaultTemplateResetBlockerReason = (reasonCode: string): string => {
 
 const defaultTemplateResetChangesBoardModel = (result: DefaultTemplateResetResult): boolean =>
   result.affectedDevices.length > 0 || result.environmentChanges.length > 0
+
+const defaultTemplateRuntimeFieldLabels: Record<DefaultTemplateRuntimeChange['field'], string> = {
+  STATE: 'app.initState',
+  STATE_TRUST: 'app.defaultTemplateRuntimeStateTrust',
+  STATE_PRIVACY: 'app.defaultTemplateRuntimeStatePrivacy',
+  VARIABLE_NAME: 'app.defaultTemplateRuntimeVariableName',
+  VARIABLE_VALUE: 'app.defaultTemplateRuntimeVariableValue',
+  VARIABLE_TRUST: 'app.defaultTemplateRuntimeVariableTrust',
+  PRIVACY_NAME: 'app.defaultTemplateRuntimePrivacyName',
+  PRIVACY_LABEL: 'app.defaultTemplateRuntimePrivacyLabel'
+}
+
+const formatDefaultTemplateRuntimeChange = (change: DefaultTemplateRuntimeChange): string => {
+  const formatValue = (value: string | null) =>
+    value === null ? t('app.defaultTemplateRuntimeUnset') : JSON.stringify(value)
+  return t('app.defaultTemplateDeviceRuntimeChange', {
+    field: t(defaultTemplateRuntimeFieldLabels[change.field], { item: change.itemName || t('app.notAvailable') }),
+    before: formatValue(change.previousValue),
+    after: formatValue(change.currentValue)
+  })
+}
 
 const formatDefaultTemplateResetEnvironmentSnapshot = (
   value: ModelEnvironmentVariable | null | undefined,
@@ -4488,17 +4530,26 @@ watch(() => props.readOnly, readOnly => {
           </div>
         </div>
 
-        <div v-if="defaultTemplateResetPreview.affectedDevices.length" class="mt-3 text-xs">
+        <div
+          v-if="defaultTemplateResetPreview.affectedDevices.length"
+          data-testid="default-template-reset-device-changes"
+          class="mt-3 text-xs"
+        >
           <div class="font-semibold">{{ t('app.devicesUsingChangedTemplates') }}</div>
-          <div class="mt-1 max-h-20 iot-scroll-region board-text-muted">
-            <div
+          <ul class="mt-1 space-y-1 board-text-muted">
+            <li
               v-for="device in defaultTemplateResetPreview.affectedDevices"
               :key="device.deviceId"
-              class="break-words py-0.5"
+              class="break-words"
             >
               {{ device.deviceLabel }} · {{ device.templateName }}
-            </div>
-          </div>
+              <ul v-if="device.runtimeChanges.length" class="list-disc space-y-0.5 pl-5">
+                <li v-for="(change, index) in device.runtimeChanges" :key="index" class="whitespace-pre-wrap">
+                  {{ formatDefaultTemplateRuntimeChange(change) }}
+                </li>
+              </ul>
+            </li>
+          </ul>
         </div>
 
         <div

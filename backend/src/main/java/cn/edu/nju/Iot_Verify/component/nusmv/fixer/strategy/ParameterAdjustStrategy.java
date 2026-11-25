@@ -85,6 +85,7 @@ public class ParameterAdjustStrategy implements FixStrategy {
         // Step 1: bounded integer thresholds in the rules that can influence the violated property.
         // The scope is fault-first, so the targets below are too.
         Map<String, ParameterizationConfig.ParamInfo> thresholds = new LinkedHashMap<>();
+        Set<String> occupiedSymbols = FixStrategyUtils.occupiedRepairSymbols(ctx);
         List<ParameterAdjustment> adjustmentTemplate = new ArrayList<>();
         int eligibleTargetCount = 0;
         int preferredRangeEmptyIntersections = 0;
@@ -116,7 +117,7 @@ public class ParameterAdjustStrategy implements FixStrategy {
 
                 String key = "r" + ruleIdx + "_c" + condIdx;
                 String targetId = PreferredRangeSelection.targetIdFor(ctx.getTraceId(), ruleIdx, condIdx);
-                String frozenVarName = "param_" + key;
+                String frozenVarName = FixStrategyUtils.freshSolverName("param_" + key, occupiedSymbols);
                 // Bounds and display labels belong to the same frozen device, rather than later Board edits.
                 DeviceSmvData sourceDevice = DeviceReferenceResolver.resolve(cond.getDeviceName(), deviceSmvMap);
                 String deviceLabel = sourceDevice.getDeviceLabel() != null && !sourceDevice.getDeviceLabel().isBlank()

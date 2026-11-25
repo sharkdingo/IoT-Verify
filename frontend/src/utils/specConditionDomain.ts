@@ -2,6 +2,7 @@ import type { DeviceManifest, InternalVariable } from '@/types/device'
 import type { SpecCondition, SpecPropertyScope } from '@/types/spec'
 import { PRIVACY_OPTIONS, TRUST_OPTIONS, templateVariableHasEnumValues, validateNumericConditionValue } from './deviceRuntime'
 import { normalizeModelRelation } from './modelRequest'
+import { getModeStateValues, getStateConditionOptions, splitConditionValueList } from './stateConditionDomain'
 
 type Condition = Partial<SpecCondition>
 type Manifest = DeviceManifest | null | undefined
@@ -61,29 +62,17 @@ export const isSpecConditionRelationSupported = (
   return !isEnum || ENUM_RELATIONS.includes(relation)
 }
 
-const modeValues = (manifest: Manifest, modeName: string): string[] => {
-  const modes = manifest?.Modes || []
-  const modeIndex = modes.indexOf(modeName)
-  if (modeIndex < 0) return []
-  const values = new Set<string>()
-  for (const state of manifest?.WorkingStates || []) {
-    const name = typeof state?.Name === 'string' ? state.Name.trim() : ''
-    if (!name) continue
-    const parts = name.split(';')
-    if (modes.length === 1) values.add(name)
-    else if (parts.length === modes.length) {
-      const value = parts[modeIndex]?.trim()
-      if (value) values.add(value)
-    }
-  }
-  return Array.from(values)
-}
-
-export const getSpecConditionValues = (condition: Condition, manifest: Manifest, templateId: string): string[] => {
+export const getSpecConditionValues = (
+  condition: Condition, manifest: Manifest, templateId: string, original?: Condition
+): string[] => {
   switch (condition.targetType) {
     case 'api': return templateId === '7' ? ['TRUE'] : ['TRUE', 'FALSE']
-    case 'state': return (manifest?.WorkingStates || []).map(state => state.Name)
-    case 'mode': return modeValues(manifest, condition.key || '')
+    case 'state': {
+      const retained = original?.targetType === 'state' && original.deviceId === condition.deviceId
+        ? conditionValues(original, manifest) : []
+      return getStateConditionOptions(manifest, [...retained, ...conditionValues(condition, manifest)])
+    }
+    case 'mode': return getModeStateValues(manifest, condition.key || '')
     case 'variable': return getSpecConditionVariable(condition, manifest)?.Values?.map(String) || []
     case 'trust': return [...TRUST_OPTIONS]
     case 'privacy': return [...PRIVACY_OPTIONS]
@@ -91,19 +80,20 @@ export const getSpecConditionValues = (condition: Condition, manifest: Manifest,
   }
 }
 
-/** Semicolons inside a full-state tuple are part of a value, never a list separator. */
-export const splitSpecConditionValues = (value: unknown, targetType: string | undefined): string[] =>
-  String(value ?? '').split(targetType === 'state' ? /[,|]/ : /[,;|]/)
-    .map(part => part.trim()).filter(Boolean)
+const conditionValues = (condition: Condition, manifest: Manifest): string[] => {
+  const relation = normalizeModelRelation(condition.relation)
+  const value = String(condition.value ?? '').trim()
+  return relation === 'in' || relation === 'not in'
+    ? splitConditionValueList(value, condition.targetType, manifest?.Modes?.length) : [value]
+}
 
 /** Explicit inputs keep condition and whole-spec validation independent of editor state. */
 export const validateSpecConditionDomain = (
   condition: Condition, manifest: Manifest, templateId: string, t: Translate
 ): string | null => {
   const relation = normalizeModelRelation(condition.relation) || ''
-  const isSet = relation === 'in' || relation === 'not in'
   const value = String(condition.value ?? '').trim()
-  const values = isSet ? splitSpecConditionValues(value, condition.targetType) : [value]
+  const values = conditionValues(condition, manifest)
   if (condition.targetType === 'api') {
     if (!ENUM_RELATIONS.includes(relation) || values.length === 0
       || values.some(item => !['TRUE', 'FALSE'].includes(item.toUpperCase()))) {

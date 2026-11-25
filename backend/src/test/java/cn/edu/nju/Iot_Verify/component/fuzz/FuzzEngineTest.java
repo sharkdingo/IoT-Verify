@@ -91,6 +91,53 @@ class FuzzEngineTest {
     }
 
     @Test
+    void affectOnlyDeviceCannotBeASpecificationSourceForThatSharedValue() {
+        var model = FuzzModel.from(affectOnlyWriterSnapshot(List.of()));
+        var readerSpec = specificationForDevice("reader", "3", "reader_1", "variable", "weather", "=", "calm");
+        readerSpec.getAConditions().get(0).setVariableSource("reported");
+        assertDoesNotThrow(() -> model.validateSpecification(readerSpec));
+
+        var writerSpec = specificationForDevice("writer", "3", "signal_1", "variable", "weather", "=", "calm");
+        writerSpec.getAConditions().get(0).setVariableSource("reported");
+        var specError = assertThrows(FuzzModel.ModelException.class, () -> model.validateSpecification(writerSpec));
+        assertTrue(specError.getMessage().contains("'weather' is not visible to device 'signal_1'"));
+    }
+
+    @Test
+    void affectOnlyDeviceCannotBeARuleSourceForThatSharedValue() {
+        var rule = RuleDto.builder().id(1L)
+                .conditions(List.of(RuleDto.Condition.builder().deviceName("signal_1").targetType("variable")
+                        .attribute("weather").relation("=").value("calm").build()))
+                .command(RuleDto.Command.builder().deviceName("signal_1").action("turnedOn").build()).build();
+        var ruleError = assertThrows(FuzzModel.ModelException.class,
+                () -> FuzzModel.from(affectOnlyWriterSnapshot(List.of(rule))));
+        assertTrue(ruleError.getMessage().contains("Rule variable 'weather'"));
+    }
+
+    @Test
+    void affectOnlyDeviceCannotTriggerAnAssignmentUsingThatSharedValue() {
+        var snapshot = affectOnlyWriterSnapshot(List.of());
+        snapshot.templateManifests().get("SignalSwitch").getTransitions().get(0).setTrigger(
+                DeviceManifest.Trigger.builder().attribute("weather").relation("=").value("calm").build());
+
+        var error = assertThrows(FuzzModel.ModelException.class, () -> FuzzModel.from(snapshot));
+        assertTrue(error.getMessage().contains("'weather' is not readable by device 'signal_1'"));
+    }
+
+    @Test
+    void affectOnlyDeviceCanAssignItsSharedValueAndContributesItsTokenSource() {
+        var model = FuzzModel.from(affectOnlyWriterSnapshot(List.of()));
+        var states = model.simulate(new long[]{0}, 2).traceStates();
+
+        var before = states.get(0).getEnvVariables().get(0);
+        var after = states.get(1).getEnvVariables().get(0);
+        assertEquals("weather", after.getName());
+        assertEquals("calm", before.getValue());
+        assertEquals("rain", after.getValue());
+        assertEquals(ModelTokenSource.UNKNOWN, after.getModelTokenSource());
+    }
+
+    @Test
     void paperModeIsDeterministicAndUsesItsOwnSearchKernel() {
         SpecConditionDto allLegalStates = stateCondition("off,on");
         allLegalStates.setRelation("in");
@@ -279,7 +326,33 @@ class FuzzEngineTest {
     }
 
     @Test
-    void sharedEnvironmentAssignmentsFollowCapturedDeviceOrderLikeNuSmvCaseBranches() {
+    void localTransitionDoesNotAssignSameNamedSharedEnvironmentVariable() {
+        var local = numericLocalSnapshot("10", "0");
+        var counter = local.templateManifests().get("Counter");
+        counter.getInternalVariables().get(0).setName("temperature");
+        var counterDevice = local.devices().get(0);
+        counterDevice.setVariables(List.of(new VariableStateDto("temperature", "10", "trusted")));
+        counter.setTransitions(List.of(DeviceManifest.Transition.builder()
+                .name("advance-local-temperature")
+                .trigger(DeviceManifest.Trigger.builder().attribute("temperature").relation("=").value("10").build())
+                .assignments(List.of(DeviceManifest.Assignment.builder().attribute("temperature").value("30").build()))
+                .build()));
+        var shared = numericImpactSnapshot("26", "0", false);
+        var climate = shared.templateManifests().get("Climate");
+        climate.getInternalVariables().get(0).setReads(true);
+        var input = new BoardDataConverter.ModelInputSnapshot(
+                List.of(), List.of(counterDevice, shared.devices().get(0)),
+                shared.environmentVariables(), List.of(), List.of(), Map.of("Counter", counter, "Climate", climate));
+        var simulation = FuzzModel.from(input).simulate(new long[0], 2);
+
+        var localCounter = simulation.traceStates().get(1).getDevices().stream()
+                .filter(device -> "counter_1".equals(device.getDeviceId())).findFirst().orElseThrow();
+        assertEquals("30", localCounter.getVariables().get(0).getValue());
+        assertEquals("26", traceEnvironmentValue(simulation, 1, "temperature"));
+    }
+
+    @Test
+    void sharedEnvironmentAssignmentsUseCanonicalDeviceOrderLikeNuSmvCaseBranches() {
         BoardDataConverter.ModelInputSnapshot zFirstSnapshot = sharedWriteOrderSnapshot(true);
         BoardDataConverter.ModelInputSnapshot aFirstSnapshot = sharedWriteOrderSnapshot(false);
         FuzzModel zFirst = FuzzModel.from(zFirstSnapshot);
@@ -290,12 +363,13 @@ class FuzzEngineTest {
         String zFirstFormalCase = sharedWeatherFormalCase(zFirstSnapshot);
         String aFirstFormalCase = sharedWeatherFormalCase(aFirstSnapshot);
 
-        assertEquals("calm", traceEnvironmentValue(zFirstTrace, 1, "weather"));
+        assertEquals("rain", traceEnvironmentValue(zFirstTrace, 1, "weather"));
         assertEquals("rain", traceEnvironmentValue(aFirstTrace, 1, "weather"));
-        assertTrue(zFirstFormalCase.indexOf("z_device") >= 0);
-        assertTrue(zFirstFormalCase.indexOf("z_device") < zFirstFormalCase.indexOf("a_device"));
+        assertEquals(zFirstFormalCase, aFirstFormalCase);
         assertTrue(aFirstFormalCase.indexOf("a_device") >= 0);
         assertTrue(aFirstFormalCase.indexOf("a_device") < aFirstFormalCase.indexOf("z_device"));
+        assertEquals(List.of("z_device", "a_device"),
+                zFirstSnapshot.devices().stream().map(DeviceVerificationDto::getVarName).toList());
     }
 
     @Test
@@ -553,6 +627,21 @@ class FuzzEngineTest {
     }
 
     @Test
+    void paperInitialStateAndEventsResolveTheSameStateNamesAsThePreview() {
+        DeviceManifest manifest = switchManifest();
+        manifest.setWorkingStates(List.of(workingState(" off "), workingState(" on ")));
+        FuzzModel model = FuzzModel.from(snapshot(List.of(), List.of(), manifest));
+        PaperEventDomainSnapshot domain = model.paperEventDomain(1);
+        assertEquals(Set.of("off", "on"), Set.copyOf(domain.deviceDomains().get(0).legalValues()));
+
+        FuzzModel.Simulation simulation = model.simulatePaperSeed(
+                new PaperSeed(7L, List.of(new PaperEvent(PaperEvent.Type.DEVICE, "switch_1", "on", 1))),
+                domain, 1, () -> false);
+
+        assertEquals("on", simulation.traceStates().get(0).getDevices().get(0).getState());
+    }
+
+    @Test
     void paperStepZeroReplayOrdersBaselineThenOverridesThenOrdinaryEvents() {
         FuzzModel model = FuzzModel.from(snapshotWithMutableLocal(List.of()));
         PaperEventDomainSnapshot domain = model.paperEventDomain(2);
@@ -656,6 +745,7 @@ class FuzzEngineTest {
     void paperEngineRunsACompletePopulationWithOnlyLocalInitialTargets() {
         SpecConditionDto legalProfile = conditionForDevice(
                 "local_1", "variable", "profile", "in", "alpha,beta");
+        legalProfile.setVariableSource("reported");
         SpecificationDto specification = specification(
                 "local-profile-domain", "1", legalProfile);
         FuzzEngineConfig config = new FuzzEngineConfig(
@@ -860,7 +950,7 @@ class FuzzEngineTest {
     @Test
     void paperApiPredecessorsHandleNegativePolarityAndRequireAStateChange() {
         SpecificationDto apiMustStayFalse = specificationForDevice(
-                "api-must-stay-false", "1", "signal_1", "api", "turnedOn", "=", "FALSE");
+                "api-must-stay-false", "1", "signal_1", "api", "turnedOn", "=", "false");
         RuleDto signalWhenRain = RuleDto.builder()
                 .id(91L)
                 .conditions(List.of(RuleDto.Condition.builder()
@@ -893,6 +983,33 @@ class FuzzEngineTest {
         assertEquals(5.0 / 7.0, changingDistance, EPSILON);
         assertEquals(6.0 / 7.0, noOpDistance, EPSILON);
         assertEquals(1.0, noRuleDistance, EPSILON);
+    }
+
+    @Test
+    void onlyTheSelectedObservableActionProducesItsPulse() {
+        var condition = RuleDto.Condition.builder().deviceName("multi_1").targetType("state")
+                .attribute("state").relation("=").value("alpha;xray").build();
+        var changeA = RuleDto.builder().id(1L).conditions(List.of(condition))
+                .command(RuleDto.Command.builder().deviceName("multi_1").action("changeA").build()).build();
+        var changeB = RuleDto.builder().id(2L).conditions(List.of(condition))
+                .command(RuleDto.Command.builder().deviceName("multi_1").action("changeB").build()).build();
+        var changeBoth = RuleDto.builder().id(3L).conditions(List.of(condition))
+                .command(RuleDto.Command.builder().deviceName("multi_1").action("changeBoth").build()).build();
+        var neverBoth = specificationForDevice("never-both", "3", "multi_1", "api", "changeBoth", "=", "TRUE");
+
+        for (var rules : List.of(List.of(changeA, changeB), List.of(changeBoth))) {
+            var snapshot = multiModeSnapshot(List.of(neverBoth), rules);
+            var manifest = snapshot.templateManifests().get("Multi");
+            var observable = manifest.getApis().stream()
+                    .filter(api -> "changeBoth".equals(api.getName())).findFirst().orElseThrow();
+            observable.setEndState("beta;yellow");
+            observable.setSignal(true);
+            var model = FuzzModel.from(snapshot);
+            var path = model.simulate(new long[0], 2);
+            assertEquals("beta;yellow", path.traceStates().get(1).getDevices().get(0).getState());
+            assertEquals(rules.size() == 2 ? -1 : 1, model.evaluate(neverBoth, path).violationStep(),
+                    "Only the selected combined command may produce its observable pulse");
+        }
     }
 
     @Test
@@ -1261,6 +1378,81 @@ class FuzzEngineTest {
         assertEquals(List.of("31", "32"), finding.states().get(1).getTriggeredRules().stream()
                 .map(rule -> rule.getRuleId())
                 .toList());
+    }
+
+    @Test
+    void exploresPartialStateTuplesWithUnderscoreWildcards() {
+        RuleDto changeB = RuleDto.builder()
+                .id(41L)
+                .conditions(List.of(RuleDto.Condition.builder()
+                        .deviceName("multi_1").targetType("state").attribute("state")
+                        .relation("=").value("alpha;_").build()))
+                .command(RuleDto.Command.builder().deviceName("multi_1").action("changeB").build())
+                .build();
+        SpecificationDto neverYellow = specification("never-yellow", "3",
+                conditionForDevice("multi_1", "state", "state", "=", "_;yellow"));
+        SpecificationDto noConcreteState = specification("no-concrete-state", "3",
+                conditionForDevice("multi_1", "state", "state", "=", "_;_"));
+
+        FuzzEngineResult result = engine.run(new FuzzEngineInput(
+                multiModeSnapshot(List.of(neverYellow, noConcreteState), List.of(changeB)),
+                new FuzzEngineConfig(List.of(), 1, 2, 1, 3L)), null, () -> false);
+
+        assertEquals(FuzzEngineOutcome.FINDINGS_FOUND, result.outcome(), result::toString);
+        FuzzFinding finding = result.findings().get(0);
+        assertEquals("never-yellow", finding.specification().getId());
+        assertEquals(1, finding.firstViolationStep());
+        assertEquals("alpha;yellow", finding.states().get(1).getDevices().get(0).getState());
+        assertEquals("INVALID_SPECIFICATION", result.eligibility().get(1).reasonCode());
+    }
+
+    @Test
+    void modePredicatesUseTheCanonicalStateTokensInRulesAndMonitors() {
+        DeviceManifest manifest = switchManifest();
+        manifest.setInitState("Next");
+        manifest.setWorkingStates(List.of(workingState("Next"), workingState("Case"), workingState("idle")));
+        manifest.setApis(List.of(API.builder().name("enterCase").signal(false)
+                .startState("Next").endState("Case").build()));
+        var rule = RuleDto.builder().id(42L)
+                .conditions(List.of(RuleDto.Condition.builder().deviceName("switch_1").targetType("mode")
+                        .attribute("PowerMode").relation("in").value("idle, Next").build()))
+                .command(RuleDto.Command.builder().deviceName("switch_1").action("enterCase").build())
+                .build();
+        var neverCase = specificationForDevice("never-case", "3", "switch_1", "mode", "PowerMode", "=", "Case");
+        var input = snapshot(List.of(neverCase), List.of(rule), manifest);
+        input.devices().get(0).setState("Next");
+        FuzzModel model = FuzzModel.from(input);
+
+        var board = model.simulate(new long[0], 2);
+        assertEquals(1, model.evaluate(neverCase, board).violationStep());
+
+        var paper = model.simulatePaperSeed(
+                new PaperSeed(7L, List.of(new PaperEvent(PaperEvent.Type.DEVICE, "switch_1", "Next", 1))),
+                model.paperEventDomain(2), 2, () -> false);
+        assertEquals(1, model.evaluatePaper(neverCase, paper, 3).violationStep());
+        assertEquals(5.0 / 7.0,
+                model.evaluatePaper(neverCase, model.simulate(new long[0], 1), 3).distance(), EPSILON);
+    }
+
+    @Test
+    void comparesDeclaredEnumLiteralsWithoutFoldingTheirCase() {
+        DeviceManifest manifest = switchManifest();
+        manifest.getInternalVariables().get(0).setValues(List.of("True", "true", "unset"));
+        var neverLowercase = specificationForDevice("never-lowercase", "3", "switch_1", "variable", "weather", "=", "true");
+        neverLowercase.getAConditions().get(0).setVariableSource("environment");
+        var input = snapshot(List.of(neverLowercase), List.of(), manifest);
+        input.environmentVariables().get(0).setValue("True");
+        FuzzModel model = FuzzModel.from(input);
+
+        var board = model.simulate(new long[0], 1);
+        assertEquals("True", traceEnvironmentValue(board, 0, "weather"));
+        assertEquals(-1, model.evaluate(neverLowercase, board).violationStep());
+
+        var paper = model.simulatePaperSeed(
+                new PaperSeed(7L, List.of(new PaperEvent(PaperEvent.Type.ENVIRONMENT, "weather", "true", 1))),
+                model.paperEventDomain(1), 1, () -> false);
+        assertEquals("true", traceEnvironmentValue(paper, 0, "weather"));
+        assertEquals(0, model.evaluatePaper(neverLowercase, paper, 3).violationStep());
     }
 
     @Test
@@ -1977,6 +2169,26 @@ class FuzzEngineTest {
                 .apis(List.of())
                 .contents(List.of())
                 .build();
+    }
+
+    private static BoardDataConverter.ModelInputSnapshot affectOnlyWriterSnapshot(List<RuleDto> rules) {
+        var base = signalSwitchSnapshot(List.of(), rules, "off", false);
+        var writerDevice = base.devices().get(0);
+        writerDevice.setModelTokenSource(ModelTokenSource.CUSTOM);
+        var writer = base.templateManifests().get("SignalSwitch");
+        writer.getInternalVariables().get(0).setReads(false);
+        writer.setTransitions(List.of(DeviceManifest.Transition.builder().name("update shared value")
+                .trigger(DeviceManifest.Trigger.builder().attribute("PowerMode").relation("=").value("off").build())
+                .assignments(List.of(DeviceManifest.Assignment.builder().attribute("weather").value("rain").build()))
+                .build()));
+
+        var reader = provenanceManifest("Reader");
+        reader.getInternalVariables().stream().filter(variable -> "weather".equals(variable.getName()))
+                .findFirst().orElseThrow().setReads(true);
+        return new BoardDataConverter.ModelInputSnapshot(
+                List.of(), List.of(writerDevice, provenanceDevice("reader_1", "Reader", ModelTokenSource.BUNDLED)),
+                List.of(new BoardEnvironmentVariableDto("weather", "calm", "trusted", "public")),
+                rules, List.of(), Map.of("SignalSwitch", writer, "Reader", reader));
     }
 
     private static String sharedWeatherFormalCase(

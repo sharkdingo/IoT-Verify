@@ -56,6 +56,37 @@ class RuleInfluenceScopeTest {
     }
 
     @Test
+    void followsSharedTransitionAssignmentsButNotLocalAssignmentsWithTheSameName() {
+        Map<String, DeviceSmvData> devices = devices("thermometer", "room_timer", "local_timer", "wall_switch");
+        DeviceManifest.InternalVariable sharedTemperature = DeviceManifest.InternalVariable.builder()
+                .name("temperature").isInside(false).lowerBound(0).upperBound(50).naturalChangeRate("0").build();
+        DeviceManifest.InternalVariable localTemperature = DeviceManifest.InternalVariable.builder()
+                .name("temperature").isInside(true).lowerBound(0).upperBound(50).build();
+        DeviceManifest.Transition reset = DeviceManifest.Transition.builder()
+                .name("reset").startState("on")
+                .trigger(DeviceManifest.Trigger.builder().attribute("TimerMode").relation("=").value("on").build())
+                .assignments(List.of(DeviceManifest.Assignment.builder().attribute("temperature").value("20").build()))
+                .build();
+        devices.get("thermometer").getEnvVariables().put("temperature", sharedTemperature);
+        devices.get("room_timer").getSharedDeclarations().put("temperature", sharedTemperature);
+        devices.get("room_timer").setManifest(DeviceManifest.builder()
+                .internalVariables(List.of(sharedTemperature)).transitions(List.of(reset)).build());
+        devices.get("local_timer").setManifest(DeviceManifest.builder()
+                .internalVariables(List.of(localTemperature)).transitions(List.of(reset)).build());
+        SpecConditionDto pooledTemperature = condition("thermometer");
+        pooledTemperature.setTargetType("variable");
+        pooledTemperature.setVariableSource("environment");
+        pooledTemperature.setKey("temperature");
+        pooledTemperature.setValue("20");
+        SpecificationDto spec = new SpecificationDto();
+        spec.setTemplateId("3");
+        spec.setAConditions(List.of(pooledTemperature));
+        List<RuleDto> rules = List.of(rule("wall_switch", "room_timer"), rule("wall_switch", "local_timer"));
+
+        assertEquals(Optional.of(Set.of(0)), RuleInfluenceScope.relevantRuleIndices(spec, rules, devices));
+    }
+
+    @Test
     void poolValueDoesNotSearchAnActuatorThatOnlyChangesAnotherReadingOfTheSameSensor() {
         Map<String, DeviceSmvData> devices = devices("monitor", "purifier", "window");
         DeviceManifest.InternalVariable co2 = DeviceManifest.InternalVariable.builder()

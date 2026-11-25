@@ -300,6 +300,11 @@ describe('device environment-domain semantics', () => {
     })).toMatchObject({ valid: false, code: 'numericBoundsInvalid' })
 
     expect(validateManifest({
+      Name: 'Unsupported integer lower bound',
+      InternalVariables: [{ ...numericVariable, LowerBound: -2147483648, UpperBound: -2147483646 }]
+    })).toMatchObject({ valid: false, code: 'numericBoundsInvalid' })
+
+    expect(validateManifest({
       Name: 'Descending rate',
       InternalVariables: [{ ...numericVariable, NaturalChangeRate: '[2, 1]' }]
     })).toMatchObject({ valid: false, code: 'naturalChangeRateInvalid' })

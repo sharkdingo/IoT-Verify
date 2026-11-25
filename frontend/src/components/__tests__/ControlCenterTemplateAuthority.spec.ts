@@ -10,7 +10,7 @@ const boardApiMocks = vi.hoisted(() => ({
   addDeviceTemplate: vi.fn(),
   deleteDeviceTemplate: vi.fn(),
   getDeviceTemplates: vi.fn(),
-  getEnvironment: vi.fn(),
+  getSnapshot: vi.fn(),
   previewDefaultTemplateReset: vi.fn(),
   previewDeviceTemplateDeletion: vi.fn(),
   resetDefaultTemplates: vi.fn()
@@ -60,6 +60,10 @@ const template = {
   manifest
 }
 
+const device = { id: 'switch', label: 'Desk switch', templateName: template.name, state: 'on',
+  position: { x: 0, y: 0 }, width: 160, height: 120 }
+const defaultedDevice = { ...device, state: 'off' }
+
 const resetPreview = {
   operation: 'preview' as const,
   impactToken: 'reset-impact-token',
@@ -70,6 +74,7 @@ const resetPreview = {
   blockers: [],
   environmentChanges: [],
   currentTemplates: [template],
+  currentNodes: [device],
   environmentVariables: []
 }
 
@@ -215,13 +220,14 @@ describe('ControlCenter template authority recovery', () => {
   ] as const)('releases the %s confirmation before reporting %s', async (action, outcome) => {
     boardApiMocks.previewDefaultTemplateReset.mockResolvedValue(resetPreview)
     boardApiMocks.previewDeviceTemplateDeletion.mockResolvedValue(deletionPreview)
-    boardApiMocks.getEnvironment.mockResolvedValue([])
+    const recoveredSnapshot = { deviceTemplates: [template], nodes: [], environmentVariables: [], rules: [], specifications: [] }
+    boardApiMocks.getSnapshot.mockResolvedValue(recoveredSnapshot)
     const mutation = action === 'reset'
       ? boardApiMocks.resetDefaultTemplates
       : boardApiMocks.deleteDeviceTemplate
     if (outcome === 'confirmed') {
       mutation.mockResolvedValue(action === 'reset'
-        ? { ...resetPreview, operation: 'reset' }
+        ? { ...resetPreview, operation: 'reset', currentNodes: [defaultedDevice] }
         : { ...deletionPreview, operation: 'deleted', deletedTemplate: template, currentTemplates: [] })
     } else {
       mutation.mockRejectedValue(outcome.startsWith('malformed conflict')
@@ -261,6 +267,20 @@ describe('ControlCenter template authority recovery', () => {
       } else {
         expect(messageMocks.success).not.toHaveBeenCalled()
         expect(wrapper.emitted('edit-history-cleared')).toBeUndefined()
+      }
+      if (action === 'reset') {
+        if (outcome === 'reconciled') {
+          expect(wrapper.emitted('replace-board-snapshot')).toEqual([[recoveredSnapshot]])
+          expect(wrapper.emitted('replace-template-state')).toBeUndefined()
+          expect(boardApiMocks.getSnapshot).toHaveBeenCalledOnce()
+        } else {
+          expect(wrapper.emitted('replace-template-state')).toEqual([[{
+            templates: [template], nodes: [defaultedDevice], environmentVariables: []
+          }]])
+          expect(wrapper.emitted('replace-board-snapshot')).toBeUndefined()
+          expect(boardApiMocks.getSnapshot).not.toHaveBeenCalled()
+        }
+        expect(boardApiMocks.getDeviceTemplates).not.toHaveBeenCalled()
       }
       if (outcome === 'reconciled') {
         expect(messageMocks.warning).toHaveBeenCalledWith(action === 'reset'
@@ -329,11 +349,10 @@ describe('ControlCenter template authority recovery', () => {
     wrapper.unmount()
   })
 
-  it('marks templates and environment unavailable when reset reconciliation fails', async () => {
+  it('marks devices, templates and environment unavailable when reset reconciliation fails', async () => {
     boardApiMocks.previewDefaultTemplateReset.mockResolvedValue(resetPreview)
     boardApiMocks.resetDefaultTemplates.mockRejectedValue(new Error('response lost'))
-    boardApiMocks.getDeviceTemplates.mockRejectedValue(new Error('template refresh failed'))
-    boardApiMocks.getEnvironment.mockRejectedValue(new Error('environment refresh failed'))
+    boardApiMocks.getSnapshot.mockRejectedValue(new Error('snapshot refresh failed'))
     const wrapper = mountTemplates()
 
     await wrapper.get('[data-testid="reset-default-templates"]').trigger('click')
@@ -342,12 +361,40 @@ describe('ControlCenter template authority recovery', () => {
     await flushPromises()
 
     expect(wrapper.emitted('authoritative-state-unavailable'))
-      .toEqual([[['templates', 'environment']]])
+      .toEqual([[['nodes', 'templates', 'environment']]])
+    expect(wrapper.emitted('replace-template-state')).toBeUndefined()
     expect(wrapper.find('.template-reset-dialog').exists()).toBe(true)
     expect(messageMocks.success).not.toHaveBeenCalled()
     expect(messageMocks.warning).toHaveBeenCalledWith(
       i18n.global.t('app.templateMutationOutcomeUnknownRefreshFailed'))
     wrapper.unmount()
+  })
+
+  it('drops a reset reconciliation snapshot when the owning session has changed', async () => {
+    boardApiMocks.previewDefaultTemplateReset.mockResolvedValue(resetPreview)
+    boardApiMocks.resetDefaultTemplates.mockRejectedValue(new Error('response lost'))
+    let release!: (value: unknown) => void
+    boardApiMocks.getSnapshot.mockReturnValue(new Promise(resolve => { release = resolve }))
+    const wrapper = mountTemplates()
+    const tokenKey = 'iot_verify_token'
+    const previousToken = localStorage.getItem(tokenKey)
+    try {
+      await wrapper.get('[data-testid="reset-default-templates"]').trigger('click')
+      await flushPromises()
+      await wrapper.get('[data-testid="default-template-reset-confirm"]').trigger('click')
+      await flushPromises()
+      expect(boardApiMocks.getSnapshot).toHaveBeenCalledOnce()
+      localStorage.setItem(tokenKey, 'a different session')
+      release({ deviceTemplates: [], nodes: [], environmentVariables: [], rules: [], specifications: [] })
+      await flushPromises()
+      expect(wrapper.emitted('replace-board-snapshot')).toBeUndefined()
+      expect(wrapper.emitted('authoritative-state-unavailable')).toBeUndefined()
+      expect(messageMocks.warning).not.toHaveBeenCalled()
+    } finally {
+      if (previousToken === null) localStorage.removeItem(tokenKey)
+      else localStorage.setItem(tokenKey, previousToken)
+      wrapper.unmount()
+    }
   })
 
   it('marks the template catalog unavailable when deletion outcome and refresh are both unknown', async () => {

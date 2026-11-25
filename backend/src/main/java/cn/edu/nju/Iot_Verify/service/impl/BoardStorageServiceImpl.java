@@ -8,6 +8,7 @@ import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvRelationUtils;
 import cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics;
 
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvDataFactory;
+import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvNamespace;
 import cn.edu.nju.Iot_Verify.component.template.DeviceTemplateSchemaValidator;
 import cn.edu.nju.Iot_Verify.dto.RequestLimits;
 import cn.edu.nju.Iot_Verify.dto.board.BoardBatchDto;
@@ -31,6 +32,8 @@ import cn.edu.nju.Iot_Verify.dto.device.DefaultTemplateAffectedDeviceDto;
 import cn.edu.nju.Iot_Verify.dto.device.DefaultTemplateResetBlockerDto;
 import cn.edu.nju.Iot_Verify.dto.device.DefaultTemplateResetChangeDto;
 import cn.edu.nju.Iot_Verify.dto.device.DefaultTemplateResetResultDto;
+import cn.edu.nju.Iot_Verify.dto.device.DefaultTemplateRuntimeChangeDto;
+import cn.edu.nju.Iot_Verify.dto.device.DefaultTemplateRuntimeChangeDto.Field;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceDeletionResultDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceJournalSnapshot;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceMutationResultDto;
@@ -390,8 +393,9 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                         .collect(Collectors.toCollection(ArrayList::new));
                 validationNodes.set(index, next);
                 List<DeviceNodeDto> canonicalNodes = canonicalizeNodes(validationNodes, templates);
+                // Starting states are corrected one device at a time. Validate the state this write owns.
                 validateBoardReferences(
-                        userId, canonicalNodes, getRulesInternal(userId), getSpecsInternal(userId), templates);
+                        userId, canonicalNodes, getRulesInternal(userId), getSpecsInternal(userId), templates, targetId);
                 DeviceNodeDto canonicalNext = requireNode(canonicalNodes, targetId);
                 return persistTargetedNodeUpdate(
                         userId, current, index, persistedPrevious, canonicalNext, "runtime");
@@ -908,12 +912,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                     String rawName = trimToNull(value.getName());
                     DeviceManifest.InternalVariable definition = internalVariable(manifest, rawName);
                     String name = definition != null ? definition.getName() : rawName;
-                    // A value the device's state determines is corrected here rather than refused. It is a
-                    // derived fact — the generator gives `next(<device>.<var>)` a branch per state, so a
-                    // stored value survives only step 0 — and refusing it in the shared revalidation would
-                    // let one legacy row block every unrelated write to the board, the failure shape
-                    // `requireResolvedVariableSource` is deliberately scoped to avoid. Canonicalising keeps
-                    // the write working and leaves the model self-consistent.
+                    // A state-derived reading follows the selected state, while its trust remains an instance field.
                     String declared = DeviceManifestModes.stateDeclaredValue(manifest, state, name);
                     return new VariableStateDto(
                             name,
@@ -1215,14 +1214,15 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                 List<DeviceNodeDto> nodes = getNodesInternal(userId);
                 List<SpecificationDto> next = new ArrayList<>(current);
                 next.set(position, desired);
-                validateNoIdenticalSpecifications(next, nodes);
+                List<DeviceTemplateDto> templates = getDeviceTemplatesInternal(userId);
+                validateNoIdenticalSpecifications(next, nodes, templates);
                 validateBoardReferences(userId, nodes, null, next);
                 if (sameSpecificationDeletionSnapshot(before, desired)) {
                     return withUndoAvailability(userId,
                             CollectionMutationResultDto.of("unchanged", before, current));
                 }
                 SpecificationFormulaPreview.Context previewContext = SpecificationFormulaPreview.context(
-                        nodes, getDeviceTemplatesInternal(userId));
+                        nodes, templates);
                 SpecificationDto canonical = canonicalizeSpecificationForStorage(desired, previewContext);
                 SpecificationPo updated = specificationMapper.toEntity(canonical, userId);
                 updated.setListOrder(records.get(position).getListOrder());
@@ -1284,7 +1284,8 @@ public class BoardStorageServiceImpl implements BoardStorageService {
     private List<SpecificationDto> saveSpecsInternal(Long userId,
                                                      List<SpecificationDto> specs,
                                                      List<DeviceNodeDto> nodes) {
-        validateNoIdenticalSpecifications(specs, nodes);
+        List<DeviceTemplateDto> templates = getDeviceTemplatesInternal(userId);
+        validateNoIdenticalSpecifications(specs, nodes, templates);
         Set<String> retainedIds = specs.stream().map(SpecificationDto::getId).collect(Collectors.toSet());
         List<SpecificationPo> removed = specRepo.findByUserId(userId).stream()
                 .filter(spec -> !retainedIds.contains(spec.getId()))
@@ -1292,11 +1293,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         if (!removed.isEmpty()) {
             specRepo.deleteAll(removed);
         }
-        SpecificationFormulaPreview.Context previewContext = SpecificationFormulaPreview.context(
-                nodes,
-                deviceTemplateRepo.findByUserId(userId).stream()
-                        .map(deviceTemplateMapper::toDto)
-                        .toList());
+        SpecificationFormulaPreview.Context previewContext = SpecificationFormulaPreview.context(nodes, templates);
         List<SpecificationPo> pos = new ArrayList<>(specs.size());
         for (int listOrder = 0; listOrder < specs.size(); listOrder++) {
             SpecificationDto canonical = canonicalizeSpecificationForStorage(
@@ -1371,7 +1368,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
      * Existing ids in the request are updated in place; missing existing ids are deleted.
      */
     private List<RuleDto> saveRulesInternal(Long userId, List<RuleDto> rules) {
-        validateNoIdenticalRules(rules, getNodesInternal(userId));
+        validateNoIdenticalRules(userId, rules, getNodesInternal(userId));
         // Read existing rules so surviving ids keep createdAt and omitted ids can be deleted.
         Map<Long, RulePo> existingRules = ruleRepo.findByUserId(userId).stream()
                 .collect(Collectors.toMap(RulePo::getId, r -> r));
@@ -1387,13 +1384,14 @@ public class BoardStorageServiceImpl implements BoardStorageService {
             }
 
             RuleDto canonicalRule = canonicalizeRuleRelationsForStorage(r);
+            RulePo existing = existingRules.get(ruleId);
             RulePo po = ruleMapper.toEntity(canonicalRule, userId);
             po.setExecutionOrder(executionOrder);
             if (ruleId == null) {
                 ruleRepo.save(Objects.requireNonNull(po, "rule to save must not be null"));
-            } else if (existingRules.containsKey(ruleId)) {
+            } else if (existing != null) {
                 po.setId(ruleId);
-                po.setCreatedAt(existingRules.get(ruleId).getCreatedAt());
+                po.setCreatedAt(existing.getCreatedAt());
                 ruleRepo.save(Objects.requireNonNull(po, "rule to save must not be null"));
             } else {
                 log.warn("Rule id {} does not belong to user {}, inserting as new rule", ruleId, userId);
@@ -1717,15 +1715,15 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                         batch.getImpactToken().trim().getBytes(StandardCharsets.UTF_8))) {
                     throw new BoardReplacementStaleException(currentPreview);
                 }
-                List<DeviceTemplateDto> createdTemplates = batch.getTemplateSnapshots() != null
-                        ? resolveSceneTemplateSnapshots(userId, batch.getTemplateSnapshots(), batch.getNodes())
-                        : List.of();
+                List<DeviceTemplateDto> createdTemplates = resolveSceneTemplateSnapshots(
+                        userId, batch.getTemplateSnapshots(), batch.getNodes());
                 validateAuthoredSceneVariableValues(batch.getNodes(), loadTemplateManifestMap(userId));
                 List<DeviceNodeDto> nextNodes = canonicalizeNodes(userId, batch.getNodes());
                 List<RuleDto> nextRules = batch.getRules();
                 List<SpecificationDto> nextSpecs = batch.getSpecs();
-                validateNoIdenticalRules(nextRules, nextNodes);
-                validateNoIdenticalSpecifications(nextSpecs, nextNodes);
+                List<DeviceTemplateDto> templates = getDeviceTemplatesInternal(userId);
+                validateNoIdenticalRules(nextRules, nextNodes, templates);
+                validateNoIdenticalSpecifications(nextSpecs, nextNodes, templates);
                 // Every specification here is being written by this request (batch is a full replacement),
                 // so each must state its reading — unlike the shared revalidation below, which also sees
                 // already-stored specifications and tolerates an absent one.
@@ -1733,15 +1731,13 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                 safeList(nextSpecs).forEach(this::requireSpecWithinDeclaredBounds);
                 safeList(nextRules).forEach(this::requireRuleWithinDeclaredBounds);
                 validateBoardReferences(userId, nextNodes, nextRules, nextSpecs);
-                if (batch.getTemplateSnapshots() != null) {
-                    validateCompleteSceneEnvironment(userId, nextNodes, batch.getEnvironmentVariables());
-                }
+                validateCompleteSceneEnvironment(userId, nextNodes, batch.getEnvironmentVariables());
 
                 // A full replacement supplies its own pool. Projecting old values into the new
                 // domains here would reject a valid scene before its submitted pool is saved.
                 List<DeviceNodeDto> savedNodes = persistNodesInternal(userId, nextNodes);
                 List<BoardEnvironmentVariableDto> savedEnvironment = saveEnvironmentVariablesInternal(
-                        userId, savedNodes, batch.getEnvironmentVariables(), batch.getTemplateSnapshots() == null);
+                        userId, savedNodes, batch.getEnvironmentVariables(), false);
                 List<RuleDto> savedRules = saveRulesInternal(userId, batch.getRules());
                 List<SpecificationDto> savedSpecs = saveSpecsInternal(userId, batch.getSpecs(), savedNodes);
                 BoardBatchDto result = new BoardBatchDto(savedNodes, savedEnvironment, savedRules, savedSpecs);
@@ -1777,6 +1773,9 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         }
         if (batch.getSpecs() == null) {
             errors.put("specs", "Scene replacement must explicitly provide the complete specs collection");
+        }
+        if (batch.getTemplateSnapshots() == null) {
+            errors.put("templateSnapshots", "Scene replacement must explicitly provide the complete templateSnapshots collection");
         }
         addCollectionLimitError(errors, "nodes", batch.getNodes(), RequestLimits.MAX_DEVICES);
         addCollectionLimitError(errors, "environmentVariables", batch.getEnvironmentVariables(),
@@ -1858,13 +1857,10 @@ public class BoardStorageServiceImpl implements BoardStorageService {
     private List<DeviceTemplateDto> resolveSceneTemplateSnapshots(Long userId,
                                                                     List<DeviceTemplateDto> snapshots,
                                                                     List<DeviceNodeDto> nodes) {
-        if (nodes == null) {
-            throw new BadRequestException("Scene import requires a complete nodes collection.");
-        }
         Map<String, DeviceTemplateDto> snapshotsByAlias = sceneTemplateSnapshotsByAlias(snapshots);
         Map<String, DeviceTemplateDto> existingByAlias = currentTemplatesByAlias(userId);
         Set<String> referencedTemplateNames = new LinkedHashSet<>();
-        for (DeviceNodeDto node : nodes == null ? List.<DeviceNodeDto>of() : nodes) {
+        for (DeviceNodeDto node : nodes) {
             if (node != null && hasText(node.getTemplateName())) {
                 referencedTemplateNames.add(node.getTemplateName().trim());
             }
@@ -1931,7 +1927,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
 
     private Map<String, DeviceTemplateDto> sceneTemplateSnapshotsByAlias(List<DeviceTemplateDto> snapshots) {
         Map<String, DeviceTemplateDto> byAlias = new LinkedHashMap<>();
-        for (DeviceTemplateDto snapshot : snapshots == null ? List.<DeviceTemplateDto>of() : snapshots) {
+        for (DeviceTemplateDto snapshot : snapshots) {
             if (snapshot == null) {
                 throw new BadRequestException("Scene template snapshot item cannot be null.");
             }
@@ -2831,14 +2827,24 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                                          List<RuleDto> rules,
                                          List<SpecificationDto> specs,
                                          Map<String, DeviceManifest> templateManifests) {
+        validateBoardReferences(userId, nodes, rules, specs, templateManifests, null);
+    }
+
+    private void validateBoardReferences(Long userId,
+                                         List<DeviceNodeDto> nodes,
+                                         List<RuleDto> rules,
+                                         List<SpecificationDto> specs,
+                                         Map<String, DeviceManifest> templateManifests,
+                                         String runtimeEditNodeId) {
         Set<String> nodeIds = nodeIds(nodes);
         Map<String, DeviceNodeDto> nodesById = nodesById(nodes);
         Map<String, String> errors = new LinkedHashMap<>();
         validateNodeLayouts(nodes, errors);
         validateNodeTemplateRefs(nodes, errors, templateManifests);
-        validateNodeRuntimeSemantics(errors, nodes, templateManifests);
+        validateNodeRuntimeSemantics(errors, nodes, templateManifests, runtimeEditNodeId);
         validateActiveEnvironmentDomainConsistency(errors, nodes, templateManifests);
         validateActiveDiscreteWriterAgreement(errors, nodes, templateManifests);
+        validateActiveDeviceNamespaces(errors, nodes, rules, templateManifests);
         validateGeneratedMainNamespace(errors, nodes, rules, templateManifests);
 
         if (rules != null) {
@@ -3105,7 +3111,8 @@ public class BoardStorageServiceImpl implements BoardStorageService {
 
     private void validateNodeRuntimeSemantics(Map<String, String> errors,
                                                List<DeviceNodeDto> nodes,
-                                               Map<String, DeviceManifest> templateManifests) {
+                                               Map<String, DeviceManifest> templateManifests,
+                                               String runtimeEditNodeId) {
         if (nodes == null || nodes.isEmpty()) {
             return;
         }
@@ -3159,7 +3166,9 @@ public class BoardStorageServiceImpl implements BoardStorageService {
 
             validateImpactedEnvironmentDomains(errors, field, node.getTemplateName(), manifest);
             boolean hasModeStateMachine = hasModeStateMachine(manifest);
-            validateNodeState(errors, field, node, manifest);
+            if (runtimeEditNodeId == null || runtimeEditNodeId.equals(node.getId())) {
+                validateNodeState(errors, field, node, manifest);
+            }
             validateStatelessNodeFields(errors, field, node, hasModeStateMachine);
             if (hasModeStateMachine) {
                 validateNodeTrust(errors, field + ".currentStateTrust", node.getCurrentStateTrust());
@@ -3172,6 +3181,25 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         }
     }
 
+    private void validateActiveDeviceNamespaces(Map<String, String> errors, List<DeviceNodeDto> nodes,
+                                               List<RuleDto> rules,
+                                               Map<String, DeviceManifest> templateManifests) {
+        if (nodes == null || nodes.isEmpty()) return;
+        Map<String, DeviceManifest> active = new LinkedHashMap<>();
+        for (DeviceNodeDto node : nodes) {
+            if (node == null || !hasText(node.getId())) continue;
+            DeviceManifest manifest = manifestForTemplateName(node.getTemplateName(), templateManifests);
+            if (manifest != null) active.put(node.getId(), manifest);
+        }
+        try {
+            DeviceSmvNamespace.validateScene(active, rules != null ? rules.size() : 0,
+                    (device, reason) -> new ValidationException("nodes",
+                            device == null ? reason : "Device '" + device + "': " + reason));
+        } catch (ValidationException exception) {
+            exception.getErrors().forEach(errors::putIfAbsent);
+        }
+    }
+
     private void validateGeneratedMainNamespace(Map<String, String> errors,
                                                 List<DeviceNodeDto> nodes,
                                                 List<RuleDto> rules,
@@ -3180,51 +3208,17 @@ public class BoardStorageServiceImpl implements BoardStorageService {
             return;
         }
 
-        // The fix generator's reserved prefixes, checked here as well as at request time.
-        // `SmvConstants.FIX_GENERATED_NAME_PREFIXES` had exactly one consumer,
-        // `NusmvRequestValidator.rejectFixGeneratedPrefix`, which rejects by *prefix* on every verify and
-        // simulate request. This pass registers only *concrete* generated names — `lambda_r{i}_c{j}` and
-        // `param_r{i}_c{j}` for the rules and conditions that exist right now — and never looked at
-        // `condition_value_` at all. So a device named `condition_value_r0_c1` (or `param_`/`lambda_`
-        // with any index the current board does not happen to produce) was saved and then rejected on
-        // every verification until renamed.
-        //
-        // Cheaper to refuse the name once, at the boundary that owns it, than to persist a board no
-        // verification can run against.
-        for (int nodeIndex = 0; nodeIndex < nodes.size(); nodeIndex++) {
-            DeviceNodeDto node = nodes.get(nodeIndex);
-            if (node == null || !hasText(node.getId())) continue;
-            String normalized = node.getId().trim().toLowerCase(Locale.ROOT);
-            for (String prefix : SmvConstants.FIX_GENERATED_NAME_PREFIXES) {
-                if (normalized.startsWith(prefix)) {
-                    // The remedy must name something the user can actually do. A device *id* is
-                    // immutable — `renameNode` changes only the label — so the request-time wording
-                    // "Rename the device" sends a user into a loop: renaming the label re-runs this
-                    // check, which fails on the id again. Ids are caller-supplied only on scene import
-                    // (`createNode` mints `device_<uuid>`), so that is the one place to change it.
-                    errors.putIfAbsent("nodes[" + nodeIndex + "].id",
-                            "Device id '" + node.getId() + "' starts with '" + prefix
-                                    + "', which the automatic-fix generator reserves for its own "
-                                    + "variables. A device id cannot be changed after creation: use a "
-                                    + "different id in the imported scene, or delete this device and "
-                                    + "add it again.");
-                    break;
-                }
-            }
-        }
-
         Map<String, String> generated = new LinkedHashMap<>();
         Map<String, DeviceManifest.InternalVariable> environment =
                 collectRequiredEnvironmentVariables(nodes, templateManifests);
         for (String name : environment.keySet()) {
-            registerGeneratedMainIdentifier(generated, "a_" + name,
+            registerGeneratedMainIdentifier(generated, SmvConstants.ENVIRONMENT_POOL_PREFIX + name,
                     "shared environment value '" + name + "'");
         }
 
         registerGeneratedMainIdentifier(generated, SmvConstants.NUSMV_COMPROMISED_POINT_COUNT,
                 "attack-budget accounting");
         if (rules != null) {
-            Map<String, DeviceNodeDto> nodeById = nodesById(nodes);
             for (int ruleIndex = 0; ruleIndex < rules.size(); ruleIndex++) {
                 RuleDto rule = rules.get(ruleIndex);
                 String ruleLabel = ruleDisplayName(rule, ruleIndex);
@@ -3234,25 +3228,6 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                 registerGeneratedMainIdentifier(generated,
                         SmvConstants.AUTOMATION_LINK_ATTACK_PREFIX + ruleIndex,
                         "attack analysis for automation rule '" + ruleLabel + "'");
-
-                List<RuleDto.Condition> conditions = rule == null ? null : rule.getConditions();
-                if (conditions == null) {
-                    continue;
-                }
-                for (int conditionIndex = 0; conditionIndex < conditions.size(); conditionIndex++) {
-                    RuleDto.Condition condition = conditions.get(conditionIndex);
-                    if (condition == null) {
-                        continue;
-                    }
-                    registerGeneratedMainIdentifier(generated,
-                            "lambda_r" + ruleIndex + "_c" + conditionIndex,
-                            "automatic-fix condition selection for '" + ruleLabel + "'");
-                    if (isParameterizableBoardCondition(condition, nodeById, templateManifests)) {
-                        registerGeneratedMainIdentifier(generated,
-                                "param_r" + ruleIndex + "_c" + conditionIndex,
-                                "automatic-fix parameter adjustment for '" + ruleLabel + "'");
-                    }
-                }
             }
         }
 
@@ -3285,35 +3260,6 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         return rule != null && hasText(rule.getRuleString())
                 ? rule.getRuleString().trim()
                 : "rule " + (ruleIndex + 1);
-    }
-
-    private boolean isParameterizableBoardCondition(RuleDto.Condition condition,
-                                                     Map<String, DeviceNodeDto> nodeById,
-                                                     Map<String, DeviceManifest> templateManifests) {
-        String relation = SmvRelationUtils.normalizeRelation(condition.getRelation());
-        if (relation == null
-                || !Set.of(">", ">=", "<", "<=").contains(relation)
-                || !hasText(condition.getValue())) {
-            return false;
-        }
-        try {
-            Double.parseDouble(condition.getValue().trim());
-        } catch (NumberFormatException e) {
-            return false;
-        }
-        DeviceNodeDto node = nodeById.get(condition.getDeviceName());
-        if (node == null) {
-            return false;
-        }
-        DeviceManifest manifest = manifestForTemplateName(node.getTemplateName(), templateManifests);
-        if (manifest == null || !hasText(condition.getAttribute())) {
-            return false;
-        }
-        DeviceManifest.InternalVariable variable = internalVariable(manifest, condition.getAttribute());
-        if (variable == null) {
-            variable = EnvironmentDomainUtils.resolveImpactDomain(manifest, condition.getAttribute());
-        }
-        return variable != null && variable.getLowerBound() != null && variable.getUpperBound() != null;
     }
 
     private void validateImpactedEnvironmentDomains(Map<String, String> errors,
@@ -3534,7 +3480,14 @@ public class BoardStorageServiceImpl implements BoardStorageService {
             errors.putIfAbsent(field + ".state", "State is required for device templates with modes");
             return;
         }
-        validateStateValues(errors, field + ".state", manifest, "=", node.getState());
+        List<String> modes = DeviceManifestModes.modeNames(manifest);
+        Map<String, List<String>> authored = DeviceManifestModes.authoredModeStates(manifest);
+        var values = ManifestConditionSemantics.resolveStatePattern(node.getState(), modes,
+                (mode, state) -> authored.getOrDefault(mode, List.of()).contains(state) ? state : null);
+        if (values.size() != modes.size()) {
+            errors.putIfAbsent(field + ".state",
+                    "Device state must specify one declared state for each mode: " + node.getState());
+        }
     }
 
     private void validateStatelessNodeFields(Map<String, String> errors,
@@ -3859,7 +3812,8 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                 if (!hasSignalApi(manifest, key)) {
                     errors.putIfAbsent(field + ".key", "Unknown or non-signal API for specification: " + key);
                 }
-                validateBooleanValues(errors, field + ".value", relation, condition.getValue());
+                validateLiteralValues(errors, field + ".value", relation, condition.getValue(),
+                        ManifestConditionSemantics.API_SIGNAL_LITERALS, "TRUE or FALSE");
             }
             case "state" -> {
                 validateEnumRelation(errors, field + ".relation", relation, "state");
@@ -3984,15 +3938,13 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                                      DeviceManifest manifest,
                                      String relation,
                                      String rawValue) {
-        Map<String, List<String>> modeStates = DeviceManifestModes.modeStates(manifest);
+        Map<String, List<String>> modeStates = DeviceManifestModes.authoredModeStates(manifest);
         List<String> modes = DeviceManifestModes.modeNames(manifest);
         if (modes.isEmpty() || modeStates.isEmpty()) {
             errors.putIfAbsent(field, "Device template has no legal states");
             return;
         }
-        List<String> candidates = ("in".equals(relation) || "not in".equals(relation))
-                ? SmvRelationUtils.splitStateRuleValues(rawValue, modes.size())
-                : List.of(rawValue.trim());
+        List<String> candidates = SmvRelationUtils.stateConditionValues(rawValue, relation, modes.size());
         if (candidates.isEmpty()) {
             errors.putIfAbsent(field, "State condition value cannot be empty");
             return;
@@ -4015,7 +3967,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                                     String mode,
                                     String relation,
                                     String rawValue) {
-        Map<String, List<String>> modeStates = DeviceManifestModes.modeStates(manifest);
+        Map<String, List<String>> modeStates = DeviceManifestModes.authoredModeStates(manifest);
         List<String> legalStates = modeStates.get(mode);
         if (legalStates == null || legalStates.isEmpty()) {
             errors.putIfAbsent(field, "Mode has no legal values: " + mode);
@@ -4033,19 +3985,11 @@ public class BoardStorageServiceImpl implements BoardStorageService {
             return;
         }
         for (String candidate : candidates) {
-            String cleaned = DeviceSmvDataFactory.cleanStateName(candidate);
-            if (cleaned == null || !legalStates.contains(cleaned)) {
+            if (!legalStates.contains(candidate)) {
                 errors.putIfAbsent(field, "Illegal mode value '" + candidate + "' for mode '" + mode + "'");
                 return;
             }
         }
-    }
-
-    private void validateBooleanValues(Map<String, String> errors,
-                                       String field,
-                                       String relation,
-                                       String rawValue) {
-        validateLiteralValues(errors, field, relation, rawValue, Set.of("TRUE", "FALSE"), "TRUE or FALSE");
     }
 
     private void validateTrustValues(Map<String, String> errors,
@@ -4321,7 +4265,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                 requireAdditionalCapacity("rules", nextRules.size(), 1, RequestLimits.MAX_RULES);
                 nextRules.add(canonicalRule);
                 List<DeviceNodeDto> currentNodes = getNodesInternal(userId);
-                validateNoIdenticalRules(nextRules, currentNodes);
+                validateNoIdenticalRules(userId, nextRules, currentNodes);
                 validateBoardReferences(userId, currentNodes, nextRules, null);
                 RulePo po = ruleMapper.toEntity(canonicalRule, userId);
                 // After deletions, execution_order has gaps — the list size is no longer the next available
@@ -4369,7 +4313,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                 List<RuleDto> next = new ArrayList<>(current);
                 next.set(position, canonical);
                 List<DeviceNodeDto> nodes = getNodesInternal(userId);
-                validateNoIdenticalRules(next, nodes);
+                validateNoIdenticalRules(userId, next, nodes);
                 validateBoardReferences(userId, nodes, next, null);
                 if (sameRuleDeletionSnapshot(before, canonical)) {
                     return withUndoAvailability(userId,
@@ -4450,13 +4394,22 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         return List.copyOf(validated);
     }
 
-    private void validateNoIdenticalRules(List<RuleDto> rules, List<DeviceNodeDto> nodes) {
+    private void validateNoIdenticalRules(Long userId, List<RuleDto> rules, List<DeviceNodeDto> nodes) {
+        if (rules != null && rules.size() >= 2) {
+            validateNoIdenticalRules(rules, nodes, getDeviceTemplatesInternal(userId));
+        }
+    }
+
+    private void validateNoIdenticalRules(List<RuleDto> rules, List<DeviceNodeDto> nodes,
+                                           List<DeviceTemplateDto> templates) {
         List<RuleDto> safeRules = rules == null ? List.of() : rules;
+        Map<String, Integer> modeCounts = DeviceManifestModes.boardModeCounts(nodes, templates);
         for (int left = 0; left < safeRules.size(); left++) {
             RuleDto candidate = safeRules.get(left);
             for (int right = 0; right < left; right++) {
                 RuleDto existing = safeRules.get(right);
-                if (RuleSemanticSignature.exactlyMatches(candidate, existing)) {
+                if (RuleSemanticSignature.exactlyMatches(candidate, existing,
+                        device -> modeCounts.getOrDefault(device, 0))) {
                     String reason = "The board cannot contain two identical automation rules: "
                                     + describeRuleForUser(existing, nodes)
                                     + ". Change the trigger or action, or remove the duplicate.";
@@ -4524,8 +4477,10 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         return "IF " + (conditions.isBlank() ? "condition" : conditions) + " THEN " + target;
     }
 
-    private void validateNoIdenticalSpecifications(List<SpecificationDto> specs, List<DeviceNodeDto> nodes) {
+    private void validateNoIdenticalSpecifications(List<SpecificationDto> specs, List<DeviceNodeDto> nodes,
+                                                    List<DeviceTemplateDto> templates) {
         List<SpecificationDto> safeSpecs = specs == null ? List.of() : specs;
+        Map<String, Integer> modeCounts = DeviceManifestModes.boardModeCounts(nodes, templates);
         Set<String> ids = new HashSet<>();
         for (int index = 0; index < safeSpecs.size(); index++) {
             SpecificationDto spec = safeSpecs.get(index);
@@ -4539,7 +4494,8 @@ public class BoardStorageServiceImpl implements BoardStorageService {
             SpecificationDto candidate = safeSpecs.get(left);
             for (int right = 0; right < left; right++) {
                 SpecificationDto existing = safeSpecs.get(right);
-                if (SpecificationSemanticSignature.exactlyMatches(candidate, existing)) {
+                if (SpecificationSemanticSignature.exactlyMatches(candidate, existing,
+                        device -> modeCounts.getOrDefault(device, 0))) {
                     String reason = "The board cannot contain two identical specifications: "
                                     + describeSpecificationForUser(existing, nodes)
                                     + ". Change a checked condition or remove the duplicate.";
@@ -4942,6 +4898,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                 currentRules, affectedRuleIds, target.getRules());
         List<SpecificationDto> nextSpecs = replacePositionedSpecs(
                 currentSpecs, affectedSpecIds, target.getSpecs());
+        target.getSpecs().forEach(item -> requireRestorableSpecification(item.getSpec()));
 
         requireTotalCapacity("devices", nextNodes.size(), RequestLimits.MAX_DEVICES);
         requireTotalCapacity("rules", nextRules.size(), RequestLimits.MAX_RULES);
@@ -5230,7 +5187,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
     }
 
     private List<RuleDto> saveRulesForJournal(Long userId, List<RuleDto> desired) {
-        validateNoIdenticalRules(desired, getNodesInternal(userId));
+        validateNoIdenticalRules(userId, desired, getNodesInternal(userId));
         Map<Long, RulePo> existing = ruleRepo.findByUserId(userId).stream()
                 .collect(Collectors.toMap(RulePo::getId, rule -> rule));
         Set<Long> desiredIds = desired.stream().map(RuleDto::getId)
@@ -5389,7 +5346,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         insertAtRecordedPosition(nextRules, restoreAt, restored);
         List<DeviceNodeDto> currentNodes = getNodesInternal(userId);
         requireAdditionalCapacity("rules", nextRules.size() - 1, 1, RequestLimits.MAX_RULES);
-        validateNoIdenticalRules(nextRules, currentNodes);
+        validateNoIdenticalRules(userId, nextRules, currentNodes);
         validateBoardReferences(userId, currentNodes, nextRules, null);
 
         RulePo po = ruleMapper.toEntity(restored, userId);
@@ -5506,6 +5463,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         }
         existing.removeIf(candidate -> specId.equals(candidate.getId()));
         if (target != null) {
+            requireRestorableSpecification(target);
             target.setId(specId);
             requireAdditionalCapacity(
                     "specifications", existing.size(), 1, RequestLimits.MAX_SPECS);
@@ -5519,6 +5477,15 @@ public class BoardStorageServiceImpl implements BoardStorageService {
             validateBoardReferences(userId, currentNodes, null, existing);
         }
         saveSpecsInternal(userId, existing, currentNodes);
+    }
+
+    private void requireRestorableSpecification(SpecificationDto target) {
+        try {
+            requireResolvedVariableSource(target);
+        } catch (ValidationException e) {
+            throw new ConflictException(
+                    "This edit would restore a specification without a valid variableSource.");
+        }
     }
 
     private boolean validSingleRecordJournalTransition(BoardEditJournalPo entry) {
@@ -5821,6 +5788,11 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                     templateNuSmvValidator.runTemplateNuSmvPrecheck(userId, dto.getName(), dto.getManifest());
                 }
 
+                if (!plan.nodesToUpdate().isEmpty()) {
+                    nodeRepo.saveAll(plan.nodesToUpdate().stream()
+                            .map(node -> deviceNodeMapper.toEntity(node, userId))
+                            .toList());
+                }
                 List<DeviceNodeDto> nodes = getNodesInternal(userId);
                 validateBoardReferences(userId, nodes, getRulesInternal(userId), getSpecsInternal(userId));
                 List<BoardEnvironmentVariableDto> savedEnvironment =
@@ -5841,6 +5813,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                         .blockers(List.of())
                         .environmentChanges(preview.getEnvironmentChanges())
                         .currentTemplates(currentTemplates)
+                        .currentNodes(nodes)
                         .environmentVariables(savedEnvironment)
                         .build();
             });
@@ -5939,27 +5912,39 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         List<DeviceNodeDto> nodes = getNodesInternal(userId).stream()
                 .sorted(Comparator.comparing(node -> firstText(node != null ? node.getId() : null, "")))
                 .toList();
+        List<DeviceNodeDto> projectedNodes = new ArrayList<>(nodes);
+        List<DeviceNodeDto> nodesToUpdate = new ArrayList<>();
+        Map<String, List<DefaultTemplateRuntimeChangeDto>> runtimeChangesByDevice = new HashMap<>();
+        for (int i = 0; i < nodes.size(); i++) {
+            DeviceNodeDto node = nodes.get(i);
+            if (node == null || !hasText(node.getTemplateName())
+                    || !defaultNames.contains(node.getTemplateName().trim().toLowerCase(Locale.ROOT))) continue;
+            DeviceNodeDto projected = copyDeviceNode(node);
+            canonicalizeRuntime(projected, manifestForTemplateName(node.getTemplateName(), prospectiveManifests));
+            List<DefaultTemplateRuntimeChangeDto> runtimeChanges = defaultTemplateRuntimeChanges(node, projected);
+            if (!runtimeChanges.isEmpty()) {
+                projectedNodes.set(i, projected);
+                nodesToUpdate.add(projected);
+                runtimeChangesByDevice.put(node.getId(), runtimeChanges);
+            }
+        }
         List<RuleDto> rules = getRulesInternal(userId);
         List<SpecificationDto> specs = getSpecsInternal(userId).stream()
                 .sorted(Comparator.comparing(spec -> firstText(spec != null ? spec.getId() : null, "")))
                 .toList();
         List<BoardEnvironmentVariableDto> previousEnvironment = getEnvironmentVariablesInternal(userId);
-        List<BoardEnvironmentVariableDto> projectedEnvironment = projectEnvironmentVariablesForNodes(
-                previousEnvironment, nodes, prospectiveManifests, true);
-        List<EnvironmentVariableChangeDto> environmentChanges = withEnvironmentModelTokenSources(
-                diffEnvironmentVariables(previousEnvironment, projectedEnvironment),
-                environmentModelTokenSources(nodes, currentTemplates),
-                environmentModelTokenSources(nodes, prospectiveTemplates));
 
         List<DefaultTemplateAffectedDeviceDto> affectedDevices = nodes.stream()
                 .filter(Objects::nonNull)
                 .filter(node -> hasText(node.getTemplateName()))
-                .filter(node -> Boolean.TRUE.equals(semanticsChangedByName.get(
-                        node.getTemplateName().trim().toLowerCase(Locale.ROOT))))
+                .filter(node -> runtimeChangesByDevice.containsKey(node.getId())
+                        || Boolean.TRUE.equals(semanticsChangedByName.get(
+                                node.getTemplateName().trim().toLowerCase(Locale.ROOT))))
                 .map(node -> DefaultTemplateAffectedDeviceDto.builder()
                         .deviceId(node.getId())
                         .deviceLabel(hasText(node.getLabel()) ? node.getLabel() : node.getTemplateName())
                         .templateName(node.getTemplateName())
+                        .runtimeChanges(runtimeChangesByDevice.getOrDefault(node.getId(), List.of()))
                         .build())
                 .toList();
 
@@ -5969,16 +5954,33 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                     "Resetting bundled defaults would exceed the limit of 100 device types. Delete unused custom types first.");
         }
         try {
-            validateBoardReferences(userId, nodes, rules, specs, prospectiveManifests);
+            validateBoardReferences(userId, projectedNodes, rules, specs, prospectiveManifests);
         } catch (ValidationException e) {
             validationErrors.putAll(e.getErrors());
         }
+
+        List<BoardEnvironmentVariableDto> projectedEnvironment = null;
+        List<EnvironmentVariableChangeDto> environmentChanges = List.of();
+        try {
+            projectedEnvironment = projectEnvironmentVariablesForNodes(
+                    previousEnvironment, projectedNodes, prospectiveManifests, true);
+            addCollectionLimitError(validationErrors, "environmentVariables",
+                    projectedEnvironment, RequestLimits.MAX_ENVIRONMENT_VARIABLES);
+            environmentChanges = withEnvironmentModelTokenSources(
+                    diffEnvironmentVariables(previousEnvironment, projectedEnvironment),
+                    environmentModelTokenSources(nodes, currentTemplates),
+                    environmentModelTokenSources(projectedNodes, prospectiveTemplates));
+        } catch (ValidationException e) {
+            // Projection errors must not hide other incompatibilities in the same reset.
+            e.getErrors().forEach(validationErrors::putIfAbsent);
+        }
+
         List<DefaultTemplateResetBlockerDto> blockers = resetBlockers(
                 validationErrors, nodes, rules, specs);
         BoardEditHistoryState editHistory = editJournal.historyState(userId);
         String impactToken = defaultTemplateResetImpactToken(
                 currentTemplates, defaultDtos, nodes, rules, specs, previousEnvironment,
-                changes, environmentChanges, validationErrors, editHistory);
+                changes, affectedDevices, environmentChanges, validationErrors, editHistory);
 
         DefaultTemplateResetResultDto preview = DefaultTemplateResetResultDto.builder()
                 .operation("preview")
@@ -5990,11 +5992,51 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                 .blockers(blockers)
                 .environmentChanges(environmentChanges)
                 .currentTemplates(currentTemplates)
+                .currentNodes(nodes)
                 .environmentVariables(previousEnvironment)
                 .build();
         return new DefaultTemplateResetPlan(
-                preview, List.copyOf(defaultDefinitions), projectedEnvironment,
+                preview, List.copyOf(defaultDefinitions), List.copyOf(nodesToUpdate), projectedEnvironment,
                 Map.copyOf(validationErrors));
+    }
+
+    private List<DefaultTemplateRuntimeChangeDto> defaultTemplateRuntimeChanges(
+            DeviceNodeDto previous, DeviceNodeDto current) {
+        List<DefaultTemplateRuntimeChangeDto> changes = new ArrayList<>();
+        addRuntimeChange(changes, Field.STATE, null, previous.getState(), current.getState());
+        addRuntimeChange(changes, Field.STATE_TRUST, null, previous.getCurrentStateTrust(), current.getCurrentStateTrust());
+        addRuntimeChange(changes, Field.STATE_PRIVACY, null, previous.getCurrentStatePrivacy(), current.getCurrentStatePrivacy());
+
+        // The reset projection keeps the entry order and cardinality while normalizing each value.
+        List<VariableStateDto> previousVariables = safeList(previous.getVariables());
+        List<VariableStateDto> currentVariables = safeList(current.getVariables());
+        for (int i = 0; i < previousVariables.size(); i++) {
+            VariableStateDto before = previousVariables.get(i);
+            if (before == null) continue;
+            VariableStateDto after = currentVariables.get(i);
+            String itemName = after.getName() != null ? after.getName() : before.getName();
+            addRuntimeChange(changes, Field.VARIABLE_NAME, null, before.getName(), after.getName());
+            addRuntimeChange(changes, Field.VARIABLE_VALUE, itemName, before.getValue(), after.getValue());
+            addRuntimeChange(changes, Field.VARIABLE_TRUST, itemName, before.getTrust(), after.getTrust());
+        }
+        List<PrivacyStateDto> previousPrivacies = safeList(previous.getPrivacies());
+        List<PrivacyStateDto> currentPrivacies = safeList(current.getPrivacies());
+        for (int i = 0; i < previousPrivacies.size(); i++) {
+            PrivacyStateDto before = previousPrivacies.get(i);
+            if (before == null) continue;
+            PrivacyStateDto after = currentPrivacies.get(i);
+            String itemName = after.getName() != null ? after.getName() : before.getName();
+            addRuntimeChange(changes, Field.PRIVACY_NAME, null, before.getName(), after.getName());
+            addRuntimeChange(changes, Field.PRIVACY_LABEL, itemName, before.getPrivacy(), after.getPrivacy());
+        }
+        return List.copyOf(changes);
+    }
+
+    private static void addRuntimeChange(List<DefaultTemplateRuntimeChangeDto> changes, Field field,
+                                         String itemName, String before, String after) {
+        if (!Objects.equals(before, after)) {
+            changes.add(new DefaultTemplateRuntimeChangeDto(field, itemName, before, after));
+        }
     }
 
     Map<String, ModelTokenSource> environmentModelTokenSources(
@@ -6105,11 +6147,13 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         }
         LinkedHashMap<String, DefaultTemplateResetBlockerDto> blockers = new LinkedHashMap<>();
         for (Map.Entry<String, String> entry : errors.entrySet()) {
-            String label = resetBlockerLabel(entry.getKey(), nodes, rules, specs);
+            String reasonCode = resetBlockerReasonCode(entry.getKey());
+            String label = "ENVIRONMENT_POOL_INCOMPATIBLE".equals(reasonCode)
+                    ? "Environment Pool" : resetBlockerLabel(entry.getKey(), nodes, rules, specs);
             String key = label + "\n" + entry.getValue();
             blockers.putIfAbsent(key, DefaultTemplateResetBlockerDto.builder()
                     .itemLabel(label)
-                    .reasonCode(resetBlockerReasonCode(entry.getKey()))
+                    .reasonCode(reasonCode)
                     .reason(entry.getValue())
                     .build());
         }
@@ -6123,7 +6167,8 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         if (normalized.startsWith("specs[") || normalized.startsWith("specifications[")) {
             return "SPECIFICATION_INCOMPATIBLE";
         }
-        if (normalized.startsWith("environmentvariables[") || normalized.startsWith("environment.")) {
+        if ("environmentvariables".equals(normalized)
+                || normalized.startsWith("environmentvariables[") || normalized.startsWith("environment.")) {
             return "ENVIRONMENT_POOL_INCOMPATIBLE";
         }
         return "BOARD_MODEL_INCOMPATIBLE";
@@ -6166,6 +6211,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
             List<SpecificationDto> specs,
             List<BoardEnvironmentVariableDto> environment,
             List<DefaultTemplateResetChangeDto> changes,
+            List<DefaultTemplateAffectedDeviceDto> affectedDevices,
             List<EnvironmentVariableChangeDto> environmentChanges,
             Map<String, String> validationErrors,
             BoardEditHistoryState editHistory) {
@@ -6178,6 +6224,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         impact.put("specifications", specs);
         impact.put("environmentVariables", environment);
         impact.put("templateChanges", changes);
+        impact.put("affectedDevices", affectedDevices);
         impact.put("environmentChanges", environmentChanges);
         impact.put("validationErrors", validationErrors);
         impact.put("editHistoryImpactToken", editHistory.impactToken());
@@ -6192,6 +6239,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
     private record DefaultTemplateResetPlan(
             DefaultTemplateResetResultDto preview,
             List<DeviceTemplatePo> defaultDefinitions,
+            List<DeviceNodeDto> nodesToUpdate,
             List<BoardEnvironmentVariableDto> projectedEnvironment,
             Map<String, String> validationErrors) {
     }

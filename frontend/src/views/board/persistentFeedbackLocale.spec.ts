@@ -34,6 +34,7 @@ describe('persistent workspace feedback language', () => {
       isAsyncTaskCancelledError: () => false, isFuzzTaskRecoveryPendingError: () => true,
       notifyInfo: vi.fn(), boardLifecycleDisposed: false, loadTaskInbox: vi.fn().mockResolvedValue(true)
     }
+    ports.captureBoardRunOwner = () => () => !ports.boardLifecycleDisposed
     let noticeAtPoll: unknown
     ports.pollAsyncFuzzing = vi.fn(async () => {
       noticeAtPoll = ports.fuzzingSettingsNotice.value

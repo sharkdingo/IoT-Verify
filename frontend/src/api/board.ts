@@ -541,6 +541,19 @@ export type DefaultTemplateResetBlockerReasonCode =
     | 'ENVIRONMENT_POOL_INCOMPATIBLE'
     | 'BOARD_MODEL_INCOMPATIBLE'
 
+const defaultTemplateRuntimeChangeFields = [
+    'STATE', 'STATE_TRUST', 'STATE_PRIVACY',
+    'VARIABLE_NAME', 'VARIABLE_VALUE', 'VARIABLE_TRUST',
+    'PRIVACY_NAME', 'PRIVACY_LABEL'
+] as const
+
+export interface DefaultTemplateRuntimeChange {
+    field: typeof defaultTemplateRuntimeChangeFields[number]
+    itemName?: string
+    previousValue: string | null
+    currentValue: string | null
+}
+
 export interface DefaultTemplateResetResult {
     operation: 'preview' | 'reset';
     impactToken: string;
@@ -555,6 +568,7 @@ export interface DefaultTemplateResetResult {
         deviceId: string;
         deviceLabel: string;
         templateName: string;
+        runtimeChanges: DefaultTemplateRuntimeChange[];
     }>;
     blockers: Array<{
         itemLabel: string;
@@ -563,6 +577,7 @@ export interface DefaultTemplateResetResult {
     }>;
     environmentChanges: EnvironmentVariableChange[];
     currentTemplates: DeviceTemplate[];
+    currentNodes: DeviceNode[];
     environmentVariables: ModelEnvironmentVariable[];
 }
 
@@ -2135,6 +2150,8 @@ const validateDefaultTemplateResetResult = (
             `${context}.environmentChanges[${index}]`
         ))
     const currentTemplates = requireResponseArray<DeviceTemplate>(result, context, 'currentTemplates')
+    const currentNodes = requireResponseArray<DeviceNode>(result, context, 'currentNodes')
+        .map((node, index) => validateBoardNodeResult(node, `${context}.currentNodes[${index}]`))
     const environmentVariables = requireResponseArray<ModelEnvironmentVariable>(result, context, 'environmentVariables')
     if (templateChanges.length === 0) {
         throw new BoardResponseContractError(context, 'templateChanges must describe the bundled defaults')
@@ -2164,6 +2181,8 @@ const validateDefaultTemplateResetResult = (
             throw new BoardResponseContractError(context, `templateChanges[${index}].semanticsChanged must be boolean`)
         }
     })
+    const currentNodeIds = new Set(currentNodes.map(node => node.id))
+    const affectedDeviceIds = new Set<string>()
     affectedDevices.forEach((device, index) => {
         const row = requireResponseRecord(device, context)
         for (const field of ['deviceId', 'deviceLabel', 'templateName']) {
@@ -2171,6 +2190,22 @@ const validateDefaultTemplateResetResult = (
                 throw new BoardResponseContractError(context, `affectedDevices[${index}].${field} is required`)
             }
         }
+        if (!currentNodeIds.has(row.deviceId) || affectedDeviceIds.has(row.deviceId)) {
+            throw new BoardResponseContractError(context, 'affectedDevices must identify distinct currentNodes')
+        }
+        affectedDeviceIds.add(row.deviceId)
+        const deviceContext = `${context}.affectedDevices[${index}]`
+        const runtimeChanges = requireResponseArray<unknown>(row, deviceContext, 'runtimeChanges')
+        runtimeChanges.forEach((value, changeIndex) => {
+            const changeContext = `${deviceContext}.runtimeChanges[${changeIndex}]`
+            const change = requireResponseRecord(value, changeContext)
+            if (!defaultTemplateRuntimeChangeFields.includes(change.field)
+                || (change.itemName !== undefined && typeof change.itemName !== 'string')
+                || ![change.previousValue, change.currentValue].every(item => item === null || typeof item === 'string')
+                || change.previousValue === change.currentValue) {
+                throw new BoardResponseContractError(changeContext, 'a runtime change needs a known field and distinct before and after values')
+            }
+        })
     })
     blockers.forEach((blocker, index) => {
         const row = requireResponseRecord(blocker, context)
@@ -2203,6 +2238,7 @@ const validateDefaultTemplateResetResult = (
         'currentTemplates'
     )
     requireUniqueIdentities(currentTemplates, template => Number(template.id), context, 'currentTemplates')
+    requireUniqueIdentities(currentNodes, node => node.id, context, 'currentNodes')
     requireUniqueIdentities(environmentVariables, variable => variable.name, context, 'environmentVariables')
 
     const environmentByName = new Map(environmentVariables.map(variable => [variable.name, variable]))
@@ -2231,7 +2267,7 @@ const validateDefaultTemplateResetResult = (
             }
         }
     }
-    return result as DefaultTemplateResetResult
+    return { ...result, currentNodes } as DefaultTemplateResetResult
 }
 
 /** A suggestion as the user reviewed it; the token authorizes it but is not part of what they chose. */
@@ -2338,7 +2374,11 @@ export default {
         if (!isModelFingerprint(value.verification) || !isModelFingerprint(value.simulation)) {
             throw new BoardResponseContractError('Board model comparison', 'both model fingerprints are required')
         }
-        return { verification: value.verification, simulation: value.simulation }
+        const version = value.modelSemanticsVersion
+        if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 1) {
+            throw new BoardResponseContractError('Board model comparison', 'modelSemanticsVersion must be a positive integer')
+        }
+        return { verification: value.verification, simulation: value.simulation, modelSemanticsVersion: version }
     },
     getNodes: async (): Promise<DeviceNode[]> => {
         const nodes = requireResponseArray<DeviceNode>(

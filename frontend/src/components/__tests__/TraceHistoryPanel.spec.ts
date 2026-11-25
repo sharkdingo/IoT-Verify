@@ -120,6 +120,7 @@ const snapshot = (specificationCount: number) => ({
   environmentVariableCount: 0,
   deviceTemplateCount: 4,
   modelFingerprint: 'a'.repeat(64),
+  modelSemanticsVersion: 1,
   templatesFrozen: true as const
 })
 
@@ -347,7 +348,7 @@ describe('TraceHistoryPanel two-layer semantics', () => {
       expect(comparison.text()).toContain(actualI18n.global.t('app.historyModelComparing'))
       await wrapper.setProps({ modelComparisonLoading: false })
       expect(comparison.text()).toContain(actualI18n.global.t('app.historyModelUnavailable'))
-      await wrapper.setProps({ currentModelFingerprints: { verification: 'a'.repeat(64), simulation: 'b'.repeat(64) } })
+      await wrapper.setProps({ currentModelFingerprints: { verification: 'a'.repeat(64), simulation: 'b'.repeat(64), modelSemanticsVersion: 1 } })
       expect(comparison.text()).toContain(actualI18n.global.t('app.historyModelUnchanged'))
       expect(wrapper.emitted()).toEqual({})
     } finally { wrapper.unmount(); actualI18n.global.locale.value = previousLocale }
@@ -848,7 +849,7 @@ describe('TraceHistoryPanel two-layer semantics', () => {
     counterexamples: []
   })
 
-  const currentModels = { verification: 'a'.repeat(64), simulation: 'a'.repeat(64) }
+  const currentModels = { verification: 'a'.repeat(64), simulation: 'a'.repeat(64), modelSemanticsVersion: 1 }
 
   it('warns during execution without turning a changed model into cancellation', () => {
     const task: VerificationTaskSummary = { id: 61, initiator: 'USER', status: 'RUNNING',
@@ -917,6 +918,12 @@ describe('TraceHistoryPanel two-layer semantics', () => {
     expect((wrapper.get('[data-testid="view-verification-trace-41"]').element as HTMLButtonElement).disabled).toBe(false)
     await fix.trigger('click')
     expect(wrapper.emitted('fix-verification-trace')?.length ?? 0).toBe(comparison === 'UNCHANGED' ? 1 : 0)
+    if (comparison === 'UNCHANGED') {
+      await wrapper.setProps({ rejectedVerificationRepairTraceIds: new Set([41]) })
+      expect(fix.attributes('disabled')).toBeDefined()
+      expect(wrapper.get(`#${fix.attributes('aria-describedby')}`).text()).toContain('modeling version')
+      expect(wrapper.get('[data-testid="view-verification-trace-41"]').attributes('disabled')).toBeUndefined()
+    }
     wrapper.unmount()
   })
 
@@ -1447,7 +1454,7 @@ describe('TraceHistoryPanel two-layer semantics', () => {
         ...baseProps,
         activeLayer: 'results',
         resultFilter: 'fuzzing',
-        currentModelFingerprints: { verification: 'b'.repeat(64), simulation: 'a'.repeat(64) },
+        currentModelFingerprints: { verification: 'b'.repeat(64), simulation: 'a'.repeat(64), modelSemanticsVersion: 1 },
         fuzzingRuns: [run]
       },
       global: { plugins: [i18n] }

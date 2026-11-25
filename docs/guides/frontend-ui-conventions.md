@@ -20,6 +20,10 @@ and added to the library. Clear states the transition to zero usage and retained
 export reports only included dependencies. The server-owned preview and concurrency rules
 are defined in [the Board API](../api/board.md#boardbatchdto-scene-import-fields).
 
+The import confirmation keeps the irreversible replacement and the number of undo/redo
+entries it clears visible with the actions. The comparison table and repair details
+scroll independently on short screens.
+
 An import failure must provide a usable next step. When a repair is unambiguous, show it
 in the replacement preview: conflicting template definitions get distinct names, and
 state-fixed variable corrections show the device, old/new values and reason. Use an
@@ -181,14 +185,18 @@ user must act**.
   squeeze device names and conditions into narrow columns. During apply, strategy
   selection, alternatives, search ranges and search actions remain locked to the reviewed proposal.
   A response from an old authentication session cannot adopt rules, close the current dialog or
-  display feedback in the new session. Incomplete searches use plain next-step wording; an empty
-  executed-rule list is neutral information and does not imply a passed verification.
-  Fault-localization counts appear only after a successful load or trusted search result; loading and
-  failure never imply zero related rules. Remaining pre-existing violations describe only the listed
+  display feedback in the new session. A partial list of verified options states that some options
+  were not checked. Proposal cards show one old-to-new threshold change. An empty executed-rule
+  list is neutral information and does not imply a passed verification.
+  Fault-localization counts appear after a successful load or trusted search result. The count stays
+  unavailable while localization loads or if it fails, including rejection of a historical modeling
+  version. Remaining pre-existing violations describe only the listed
   requirements that this option leaves failing, without claiming that no other requirement was repaired.
   Rejected changes explain that preserving already-satisfied requirements is part of acceptance.
   Confirmed apply adopts the returned rules through the shared semantic commit, including canvas
   edges, inspector focus, verdict staleness and journal availability; it does not read rules again.
+  The apply request and receipt share the Board's edit queue so a refresh from another tab can
+  reconcile the scene after the receipt has been applied.
   The success message names the applied edit and undo availability; the proposal owns its evidence
   and remaining violations. Condition-change and removed-rule names wrap inside narrow cards.
   Fault-localization and strategy-request failures retain message keys and diagnostic snapshots;
@@ -203,6 +211,10 @@ user must act**.
   a changed model still requires verification and a new proposal. Unclassified infrastructure errors
   remain unconfirmed writes and trigger reconciliation. Failure acknowledgements do not repeat an
   identical title as their body summary. The close icon uses the shared keyboard-accessible hint.
+  When a search cannot confirm the template comparison, its recovery action reruns the selected
+  strategy. Apply becomes available after a new result confirms the templates still match.
+  A stale signed suggestion withdraws the previous proposals for the selected strategy. The same
+  search action keeps the user's input ranges and requires the user to review the new proposal.
   Once all strategies finish with a proof, inapplicability or a search-budget outcome and no verified option, the outcome
   gives a next step: review the failing states and opposing rules or requirements, then adjust inputs
   and verify again. Budget-limited results retain their unfinished-search title and reason; the review
@@ -595,9 +607,11 @@ area from its compact track; steppers and task cancellation reuse the panel icon
 
 Local progress for verification, simulation, and exploration retains translation keys and translates
 them when rendered. A language change must update the current phase, cancellation state, and task
-indicator without waiting for another response. Exploration target recovery names only the eligible
-specifications it selects; a target-selection error stays beside those targets instead of repeating
-below the form or expanding unrelated advanced settings.
+indicator without waiting for another response. Each run type accepts one submission while any
+pending Board edit is being saved. Closing the panel for a watched background task leaves its
+result in Run History, without reopening the panel or starting playback. Exploration target recovery
+names only the eligible specifications it selects; a target-selection error stays beside those
+targets instead of repeating below the form or expanding unrelated advanced settings.
 
 Recommendation panels keep their header and close action outside a single scrolling body. Long
 results use the available viewport height rather than a fixed 500/560px cap; short screens must not
@@ -649,6 +663,10 @@ separate the canvas from raised surfaces and keep muted text legible without hea
   invalidate comparison evidence immediately and refresh it; late responses cannot restore a stale
   identity. Geometry/display-name edits preserve a match. Failed current reads and absent historical
   evidence use distinct neutral unknown notices, while a confirmed difference uses warning ink.
+  A different execution version gets its own history/result label. Historical replay remains
+  available, and verification offers a fresh run before repair can be used.
+  A server rejection of a repair source retires that trace's repair actions for the current
+  Board session, including when a cached comparison previously matched.
 - **Write with the bare role; fill under white ink with `--<role>-fill`.** Dark-theme role ink is pale
   and cannot also carry a white label. Filled controls use dedicated readable fills. Primary hover darkens
   in light mode and brightens in dark mode; both remain readable. Use the dedicated destructive hover.
@@ -996,8 +1014,8 @@ so successful completion has no separate empty-state presentation path.
 
 | Terminal view | Content |
 | :--- | :--- |
-| **Changes** | Group previous/current device values, environment changes, and automations executed to reach the selected state. Exploration inputs are a separate group. |
-| **State details** | Group complete device state-machine values and reported readings, actual home environment values, and source/sensitivity labels or compromised links, including unchanged values. |
+| **Changes** | Group previous and selected device and environment values, and automations executed to reach the selected state. Exploration inputs are a separate group. |
+| **State details** | Group the selected state's complete device state-machine values and reported readings, actual home environment values, and source/sensitivity labels or compromised links, including unchanged values. |
 | **Run info** | Counterexamples retain the violated requirement, checked expression, model scope and generation diagnostics, plus a link to the owning verification run. Simulations retain actual/requested transitions, model scope, diagnostics and the executed SMV download. |
 
 Playback, previous/next state, numeric seeking, the numbered timeline and violation location
@@ -1436,8 +1454,8 @@ Keep the short blocking reason with its disabled Save action.
 Environment rows show the initial value, domain, effective shared labels, and separate reader/writer
 counts. Expanding a row exposes its existing value editor and device-navigation links, grouped by
 read or affect capability. Evolution and advanced label edits are separate disclosures. Search
-matches variable names, values, labels and related devices. The panel explains that a run starts
-from this value and does not write its trace back; model ownership and evolution remain defined by
+matches variable names, values, labels and related devices. The inventory introduction explains
+which run modes use the initial values and that traces do not overwrite them. Model ownership and evolution are defined by
 [shared value semantics](../architecture/shared-value-semantics.md). Validation and unavailable
 data stay inline rather than implying an empty or successfully saved pool. A focused field's
 diagnostic scrolls into view without moving focus; inactive fields cannot move the user's scroll position.
@@ -1621,11 +1639,14 @@ status polling means tracking stopped, not that execution timed out. Resuming a 
 failure, and resuming exploration also clears the previous settings or recovery notice.
 An unconfirmed cancellation restores the latest known phase without replacing a newer poll response.
 A rejected cancellation with a confirmed terminal status displays that status immediately.
+The cancellation response only changes tracking for the task that received the request.
 Watching a task from history opens its owning progress panel. The compact task indicator is shown
 when workflow panels are closed, so it does not repeat their task controls. While an asynchronous
 verification or simulation is running, the panel shows its submission snapshot rather than the
 current settings draft. Simulation steps, compromise assumptions and sensitivity propagation come
 from the accepted task. A pending cancellation remains visible even when a poll updates the phase.
+Exploration keeps tracking the task until the server reports a terminal outcome, including
+completion while the cancellation request is outstanding.
 Cancellation confirmations use the visible task status in the inbox or progress panel; the canvas
 receives one toast when those panels are closed. Polling the same local cancellation adds no second
 toast. Cancellation observed from another session still receives a notification.
@@ -1695,8 +1716,9 @@ Irreversible replacement and the exact undo-history loss stay visible; template 
 rule-order handling expand
 separately. Template import uses a keyboard-operable button, with format and repository guidance in
 contextual help. Template loading describes a read, not default initialization. Reset summaries count
-processed templates without claiming all definitions changed; blocked deletion shows the referencing
-devices with wrapping names instead of an irrelevant irreversibility notice.
+processed templates without claiming all definitions changed. If the reset response is lost, the
+Board reloads the full scene and keeps the reset outcome unconfirmed. Blocked deletion shows the
+referencing devices with wrapping names instead of an irrelevant irreversibility notice.
 Contextual help's enlarged pointer target must leave adjacent actions clickable; check both locales
 because longer text can wrap the controls and conceal an overlap in the other locale.
 Verification mode explanations have one visible owner beside the mode controls, without repeating

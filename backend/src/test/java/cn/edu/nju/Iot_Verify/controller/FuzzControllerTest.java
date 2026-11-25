@@ -39,22 +39,6 @@ class FuzzControllerTest {
     @Mock private FuzzService fuzzService;
 
     @Test
-    void currentModelFingerprintUsesCanonicalRouteAndResultEnvelope() throws Exception {
-        FuzzController controller = new FuzzController(fuzzService);
-        String fingerprint = "a".repeat(64);
-        when(fuzzService.getCurrentModelFingerprint(7L)).thenReturn(fingerprint);
-
-        Result<String> result = controller.getCurrentModelFingerprint(7L);
-        Method method = FuzzController.class.getMethod("getCurrentModelFingerprint", Long.class);
-
-        assertEquals(List.of("/model-fingerprint"),
-                List.of(method.getAnnotation(GetMapping.class).value()));
-        assertEquals(200, result.getCode());
-        assertEquals(fingerprint, result.getData());
-        verify(fuzzService).getCurrentModelFingerprint(7L);
-    }
-
-    @Test
     void paperDomainPreviewUsesCanonicalRouteAndResultEnvelope() throws Exception {
         FuzzController controller = new FuzzController(fuzzService);
         FuzzPaperDomainPreviewRequestDto request =

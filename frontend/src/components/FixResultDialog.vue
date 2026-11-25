@@ -8,10 +8,11 @@ import HintTooltip from '@/components/common/HintTooltip.vue'
 import boardApi from '@/api/board'
 import { FIX_RESPONSE_INCOMPLETE_CODE } from '@/utils/fixResponse'
 import { generationIssueReasonKey } from '@/utils/generationIssue'
+import { normalizeModelRelation } from '@/utils/modelRequest'
 import { errorDetails, technicalErrorLines, type ApiErrorDetails } from '@/utils/userMessage'
 import { requestInteractiveCancellation } from '@/utils/interactiveCancellation'
 import { formatModelTokenBySource } from '@/utils/modelTokenDisplay'
-import { formatRelationGlyph } from '@/utils/modelPresentation'
+import { formatRelationGlyph, formatRelationWords } from '@/utils/modelPresentation'
 import { useAuth } from '@/stores/auth'
 import { specTemplateDetails } from '@/assets/config/specTemplates'
 import type {
@@ -36,12 +37,15 @@ const props = defineProps<{
   traceId: number
   violatedSpecId?: string
   violatedSpecName?: string
+  applyOnBoard: (write: () => Promise<FixApplyResult | null>) => Promise<FixApplyResult | null>
 }>()
 
 const emit = defineEmits<{
   'update:visible': [value: boolean]
-  'applied': [result: FixApplyResult]
+  'applied': [traceId: number]
   'outcome-uncertain': []
+  'reverify': []
+  'model-semantics-changed': [traceId: number]
 }>()
 
 const { t } = useI18n()
@@ -90,15 +94,17 @@ const selectedStrategyFailure = computed(() => {
   return failure ? formatFixFailure(failure) : null
 })
 const selectedStrategyFailureTone = computed(() => [
-  'app.fixSearchOutcomeUnknown', 'app.fixSearchCancelledWithoutResult', 'app.fixSearchEndedWithoutResult'
+  'app.fixSearchOutcomeUnknown', 'app.fixSearchCancelledWithoutResult', 'app.fixSearchEndedWithoutResult',
+  'app.fixSuggestionStale'
 ].includes(strategyErrors.value[selectedStrategy.value]?.key || '') ? 'warning' : 'danger')
 const strategyWarnings = ref<Partial<Record<FixStrategyName, string[]>>>({})
 const fixResult = ref<FixResult | null>(null)
+const historicalModelRetired = ref(false)
 // Which listed alternative each strategy's Apply acts on; absent means the first, the smallest change.
 // A strategy's list is only ever replaced through invalidateStrategyResult, which clears its entry.
 const selectedAlternativeIndex = ref<Partial<Record<FixStrategyName, number>>>({})
 const faultLocalization = ref<FaultLocalizationResult | null>(null)
-const faultRules = ref<FaultRule[]>([])
+const faultRules = ref<FaultRule[] | null>(null)
 const selectedStrategy = ref<FixStrategyName>('parameter')
 const applyingFix = ref(false)
 const parameterTargetCatalog = ref<ParameterTarget[]>([])
@@ -237,6 +243,18 @@ const fixApplyErrorKey = (error: any) => {
   return fixResponseErrorKey(error, 'app.failedToApplyFix')
 }
 
+const isHistoricalModelRejection = (error: any) => error?.response?.status === 409
+  && error?.response?.data?.data?.reasonCode === 'MODEL_SEMANTICS_CHANGED'
+
+const retireHistoricalModel = (traceId: number) => {
+  if (historicalModelRetired.value) return
+  historicalModelRetired.value = true
+  fixResult.value = null
+  strategyErrors.value = {}
+  selectedAlternativeIndex.value = {}
+  emit('model-semantics-changed', traceId)
+}
+
 const displayedFixWarnings = computed(() => Array.from(new Set([
   ...(faultLocalization.value?.warnings || []),
   ...(fixResult.value?.warnings || [])
@@ -292,36 +310,20 @@ const formatModelToken = (value: unknown, source: ModelTokenSource) => {
   return formatModelTokenBySource(source, value, t)
 }
 
-// Condition-change prose uses words; compact parameter targets use relation glyphs.
-const formatRelation = (value: unknown) => {
-  const raw = String(value ?? '').trim()
-  const normalized = raw.toLowerCase().replace(/_/g, ' ')
-  const labels: Record<string, string> = {
-    '=': t('app.relationEquals'),
-    '==': t('app.relationEquals'),
-    '!=': t('app.relationNotEquals'),
-    '>': t('app.relationGreater'),
-    '<': t('app.relationLess'),
-    '>=': t('app.relationGreaterEqual'),
-    '<=': t('app.relationLessEqual'),
-    in: t('app.relationIn'),
-    'not in': t('app.relationNotIn')
+const formatParameterTarget = (target: ParameterTarget, includeOriginal = true) => t(
+  includeOriginal ? 'app.fixParameterTargetLabel' : 'app.fixParameterAdjustmentTargetLabel', {
+    rule: target.rulePosition,
+    device: target.deviceLabel,
+    attribute: formatModelToken(target.attribute, target.modelTokenSource),
+    relation: formatRelationGlyph(target.relation),
+    original: formatModelToken(target.originalValue, target.modelTokenSource)
   }
-  return labels[normalized] || raw
-}
+)
 
-const formatPreferredRangeTarget = (adjustment: ParameterTarget) => t('app.fixParameterTargetLabel', {
-  rule: adjustment.rulePosition,
-  device: adjustment.deviceLabel,
-  attribute: formatModelToken(adjustment.attribute, adjustment.modelTokenSource),
-  relation: formatRelationGlyph(adjustment.relation),
-  original: formatModelToken(adjustment.originalValue, adjustment.modelTokenSource)
-})
-
-const parameterAdjustmentByTargetId = computed(() => {
+const parameterTargetById = computed(() => {
   const byTargetId = new Map<string, ParameterTarget>()
-  parameterTargetCatalog.value.forEach(adjustment => {
-    if (adjustment.targetId) byTargetId.set(adjustment.targetId, adjustment)
+  parameterTargetCatalog.value.forEach(target => {
+    if (target.targetId) byTargetId.set(target.targetId, target)
   })
   return byTargetId
 })
@@ -331,7 +333,7 @@ const parameterAdjustmentByTargetId = computed(() => {
  * the catalog. The row renders its problem beside the offending input.
  */
 const preferredRangeRowViews = computed(() => preferredRangeRows.value.flatMap(row => {
-  const target = parameterAdjustmentByTargetId.value.get(row.targetId)
+  const target = parameterTargetById.value.get(row.targetId)
   return target ? [{ row, target, issue: preferredRangeIssueOf(row, target) }] : []
 }))
 
@@ -384,12 +386,16 @@ const suggestionIsCurrent = (suggestion: FixSuggestion) =>
 const templateSnapshotAllowsApply = computed(() =>
   fixResult.value?.templateSnapshotComparison === 'UNCHANGED')
 
+const templateComparisonNeedsRetry = computed(() => Boolean(currentSuggestion.value)
+  && fixResult.value?.templateSnapshotComparison === 'UNAVAILABLE')
+
 /**
  * Why the listed option cannot be applied, or '' when nothing blocks it or no option is listed.
  *
  * A disabled submit has to say why inline, and both the disabled state and the `aria-describedby`
- * target derive from this one value so they cannot disagree. Rendered only beside an Apply button:
- * with no option there is nothing to apply, and the Limitations list owns the snapshot fact instead.
+ * target derive from this one value so they cannot disagree. When comparison is temporarily
+ * unavailable the same explanation accompanies Search again instead of a disabled Apply.
+ * With no option, the Limitations list owns the snapshot fact.
  * NOT_CHECKED only accompanies a refused incomplete-source search, which lists no option, so it
  * never reaches here. Excludes the apply request itself: the button already renders "Applying…"
  * with a spinner, and repeating that as an explanation would be duplicate feedback.
@@ -496,6 +502,10 @@ const fetchFaultRules = async () => {
     faultRules.value = result.faultRules
   } catch (error: any) {
     if (requestVersion !== dialogRequestVersion || traceId !== props.traceId || !props.visible) return
+    if (isHistoricalModelRejection(error)) {
+      retireHistoricalModel(traceId)
+      return
+    }
     console.error('Failed to fetch fault rules:', error)
     faultLoadError.value = {
       key: fixResponseErrorKey(error, 'app.failedToLoadFaultLocalization'),
@@ -573,7 +583,7 @@ const reportStrategyError = (strategy: FixStrategyName, key: string, error?: unk
 
 const fetchFixSuggestions = async (strategy: FixStrategyName = selectedStrategy.value) => {
   if (!props.traceId || applyingFix.value || strategyLoading.value || activeFixRequestId.value || unresolvedFixRequestId.value
-    || dialogWideSkipAttempt.value) return
+    || dialogWideSkipAttempt.value || historicalModelRetired.value) return
 
   const authToken = getToken()
   if (!authToken) {
@@ -626,7 +636,7 @@ const fetchFixSuggestions = async (strategy: FixStrategyName = selectedStrategy.
       { authToken, requestId, signal: controller.signal }
     )
     postSettledWithTerminalEvidence = true
-    if (requestVersion !== dialogRequestVersion || traceId !== props.traceId || !props.visible) return
+    if (requestVersion !== dialogRequestVersion || traceId !== props.traceId || !props.visible || historicalModelRetired.value) return
     strategyWarnings.value[strategy] = result.warnings || []
     if (strategy === 'parameter') {
       lastParameterRequestFingerprint.value = requestFingerprint
@@ -643,8 +653,11 @@ const fetchFixSuggestions = async (strategy: FixStrategyName = selectedStrategy.
     if (outcomeUnknown) unresolvedFixRequestId.value = requestId
     if (requestVersion === dialogRequestVersion && traceId === props.traceId && props.visible
       && error?.name !== 'CanceledError' && error?.code !== 'ERR_CANCELED') {
-      console.error('Failed to fetch fix suggestions:', error)
-      reportStrategyError(strategy, fixResponseErrorKey(error, 'app.failedToLoadFixSuggestions'), error)
+      if (isHistoricalModelRejection(error)) retireHistoricalModel(traceId)
+      else if (!historicalModelRetired.value) {
+        console.error('Failed to fetch fix suggestions:', error)
+        reportStrategyError(strategy, fixResponseErrorKey(error, 'app.failedToLoadFixSuggestions'), error)
+      }
     }
     if (outcomeUnknown) beginUnknownFixRecovery(requestId)
   } finally {
@@ -702,8 +715,9 @@ const handleOpen = () => {
     return
   }
   fixResult.value = null
+  historicalModelRetired.value = false
   faultLocalization.value = null
-  faultRules.value = []
+  faultRules.value = null
   faultLoadError.value = null
   strategyLoading.value = null
   strategyErrors.value = {}
@@ -727,14 +741,16 @@ const trySelectedStrategy = () => fetchFixSuggestions(selectedStrategy.value)
 
 // Apply the exact signed suggestion after the server checks the complete formal-model snapshot.
 const applyFix = async (suggestion: FixSuggestion) => {
-  if (!props.traceId || applyingFix.value) return
+  if (!props.traceId || applyingFix.value || !suggestion || currentSuggestion.value !== suggestion) return
   const traceId = props.traceId
+  const requestVersion = dialogRequestVersion
   const authToken = getToken()
   if (!authToken) {
     notifyBlocked(t('app.fixAuthenticationRequired'))
     return
   }
   const ownsApply = () => getToken() === authToken
+  const ownsDialog = () => requestVersion === dialogRequestVersion && traceId === props.traceId && props.visible
   if (!templateSnapshotAllowsApply.value) {
     notifyBlocked(fixResult.value?.templateSnapshotComparison === 'CHANGED'
       ? t('app.fixTemplateSnapshotChangedLimitation')
@@ -751,39 +767,47 @@ const applyFix = async (suggestion: FixSuggestion) => {
     confirmText: t('app.removeRulesAndApply'),
     customClass: 'fix-removal-confirm'
   })) return
-  if (!ownsApply()) return
+  if (!ownsApply() || !ownsDialog() || currentSuggestion.value !== suggestion || applyDisabled.value) return
+  const preferredRanges = suggestion.strategy === 'parameter' ? lastPreferredRangeSelections.value : undefined
   applyingFix.value = true
   try {
-    const result = await boardApi.applyFix(
-      traceId,
-      suggestion,
-      suggestion.strategy === 'parameter' ? lastPreferredRangeSelections.value : undefined
-    )
-    if (!ownsApply()) return
-    if (!result.applied || !result.verificationEvidenceReused) {
-      void acknowledgeFailure({
-        title: t('app.failedToApplyFix'),
-        message: t('app.failedToApplyFix'),
-        suggestion: t('app.fixApplyRejectedNextStep'),
-        details: technicalErrorLines(errorDetails({ message: result.message }))
-      })
-      return
-    }
-    emit('applied', result)
-    emit('update:visible', false)
+    const result = await props.applyOnBoard(async () => {
+      if (!ownsApply() || !ownsDialog() || currentSuggestion.value !== suggestion || !templateSnapshotAllowsApply.value) return null
+      return boardApi.applyFix(traceId, suggestion, preferredRanges)
+    })
+    if (!result || !ownsApply()) return
+    emit('applied', traceId)
+    if (ownsDialog()) emit('update:visible', false)
   } catch (error: any) {
     if (!ownsApply()) return
-    console.error('Failed to apply fix:', error)
+    if (isHistoricalModelRejection(error)) {
+      if (ownsDialog()) retireHistoricalModel(traceId)
+      return
+    }
     const status = Number(error?.response?.status)
     const reasonCode = error?.response?.data?.data?.reasonCode
+    if (status === 400 && reasonCode === 'FIX_SUGGESTION_STALE') {
+      if (ownsDialog()) {
+        const { strategy } = suggestion
+        delete strategyWarnings.value[strategy]
+        invalidateStrategyResult(strategy)
+        strategyErrors.value[strategy] = {
+          key: 'app.fixSuggestionStale', suggestionKey: 'app.fixSuggestionStaleNextStep',
+          diagnostics: errorDetails(error)
+        }
+      }
+      return
+    }
+    console.error('Failed to apply fix:', error)
     const definitiveRejection = Number.isFinite(status)
       && ((status >= 400 && status < 500)
         || (status === 503 && reasonCode === 'FIX_APPLY_PREFLIGHT_UNAVAILABLE'))
     if (!definitiveRejection) {
       emit('outcome-uncertain')
-      emit('update:visible', false)
+      if (ownsDialog()) emit('update:visible', false)
       return
     }
+    if (!ownsDialog()) return
     // Drift, stale targets, and service-unavailable preflight failures occur before the write.
     const messageKey = fixApplyErrorKey(error)
     void acknowledgeFailure({
@@ -852,9 +876,12 @@ const hasAlternatives = computed(() => currentAlternatives.value.length > 1)
 // Only an explicit false means the listing was cut short; the validator guarantees a boolean on VERIFIED.
 const alternativesIncomplete = computed(() => currentStrategyAttempt.value?.alternativesComplete === false)
 
+const visibleFaultRules = computed(() => faultLoading.value || faultLoadError.value ? null : faultRules.value)
+
 const localizedFaultLocalizationSummary = computed(() => {
-  if (faultLoading.value || faultLoadError.value || !faultLocalization.value) return ''
-  return faultRules.value.length > 0
+  const rules = visibleFaultRules.value
+  if (rules === null) return ''
+  return rules.length > 0
     ? t('app.faultLocalizationScopeCaveat')
     : t('app.faultLocalizationNoRuleCaveat')
 })
@@ -862,11 +889,13 @@ const localizedFaultLocalizationSummary = computed(() => {
 const strategyAttemptReasonLabel = (status: FixStrategyAttemptStatus) => t(`app.fixAttemptReason.${status}`)
 
 const parameterAdjustmentMakesRuleUnreachable = (adjustment: ParameterAdjustment) => {
-  const relation = adjustment.relation.trim().toLowerCase()
+  // The proposal bounds include user preferences; only the target's device bounds limit its readings.
+  const target = parameterTargetById.value.get(adjustment.targetId)
+  const relation = normalizeModelRelation(adjustment.relation)
   const newValue = Number(adjustment.newValue)
-  if (!Number.isSafeInteger(newValue)) return false
-  return (['>', 'gt'].includes(relation) && newValue === adjustment.upperBound)
-    || (['<', 'lt'].includes(relation) && newValue === adjustment.lowerBound)
+  if (!target || !Number.isSafeInteger(newValue)) return false
+  return (relation === '>' && newValue === target.upperBound)
+    || (relation === '<' && newValue === target.lowerBound)
 }
 
 /**
@@ -1042,10 +1071,9 @@ const searchAnnouncement = computed(() => {
 
 const footerActionsRef = ref<HTMLElement | null>(null)
 
-// When a search settles, the footer swaps Try for Apply or for nothing, and the focused button goes
-// with it. Hand focus to the replacement action, or to the dialog when there is none.
-watch(strategyLoading, async (loading, previous) => {
-  if (loading !== null || previous === null || !props.visible) return
+// A settled request can replace the focused footer action. Restore focus only if it was lost.
+watch([strategyLoading, applyingFix], async ([loading, applying], [previousLoading, previouslyApplying]) => {
+  if (loading !== null || applying || (previousLoading === null && !previouslyApplying) || !props.visible) return
   await nextTick()
   const actions = footerActionsRef.value
   const dialog = actions?.closest<HTMLElement>('[role="dialog"]')
@@ -1083,7 +1111,7 @@ const formatConditionAdjustment = (adjustment: NonNullable<FixSuggestion['condit
   const device = adjustment.deviceLabel || t('app.unknownModelItem')
   const condition = [
     `${device}.${formatModelToken(adjustment.attribute, adjustment.modelTokenSource)}`,
-    formatRelation(adjustment.relation),
+    formatRelationWords(adjustment.relation, t),
     adjustment.value === undefined
       ? undefined
       : formatModelToken(adjustment.value, adjustment.modelTokenSource)
@@ -1467,7 +1495,7 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
               </div>
               <!-- With an option listed, the footer says this beside the Apply it disables. -->
               <div
-                v-else-if="anotherStrategyLoading && !currentSuggestion"
+                v-else-if="anotherStrategyLoading && (!currentSuggestion || templateComparisonNeedsRetry)"
                 id="fix-another-strategy-running"
                 data-testid="fix-another-strategy-running"
                 class="mb-4 rounded-lg border board-border-subtle board-bg-muted px-4 py-3 text-xs board-text-muted"
@@ -1538,13 +1566,10 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
                             :key="idx"
                             class="board-note rounded-lg p-3"
                           >
-                            <div class="flex flex-wrap items-start justify-between gap-2">
-                              <div class="min-w-0 flex items-center gap-2">
-                                <span
-                                  class="min-w-0 break-words px-2 py-0.5 board-meta-chip text-xs rounded font-semibold"
-                                >{{ formatPreferredRangeTarget(adj) }}</span>
-                              </div>
-                              <span class="text-xs board-text-muted">{{ t('app.rangeLabel') }}: [{{ adj.lowerBound }}, {{ adj.upperBound }}]</span>
+                            <div class="flex items-start">
+                              <span
+                                class="min-w-0 break-words px-2 py-0.5 board-meta-chip text-xs rounded font-semibold"
+                              >{{ formatParameterTarget(adj, false) }}</span>
                             </div>
                             <div class="flex items-center gap-2 mt-2">
                               <span class="px-2 py-1 board-meta-chip rounded font-mono text-sm line-through">{{ adj.originalValue }}</span>
@@ -1694,7 +1719,7 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
                 </p>
               </div>
 
-              <div v-else-if="!currentStrategyLoading" class="rounded-lg border border-dashed border-[color:var(--border-strong)] board-bg-muted px-4 py-5 text-center board-text-muted">
+              <div v-else-if="!currentStrategyLoading && !historicalModelRetired" class="rounded-lg border border-dashed border-[color:var(--border-strong)] board-bg-muted px-4 py-5 text-center board-text-muted">
                 <span class="material-symbols-outlined mb-2 block text-3xl board-text-muted" aria-hidden="true">science</span>
                 <p class="font-semibold">{{ t('app.fixStrategyNotTried') }}</p>
               </div>
@@ -1725,7 +1750,7 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
                       class="grid grid-cols-1 sm:grid-cols-[minmax(0,1.6fr)_1fr_1fr_auto] gap-2 items-end"
                     >
                       <p class="min-w-0 text-sm board-text-strong">
-                        <span :id="`fix-range-target-${row.targetId}`" class="block break-words font-medium">{{ formatPreferredRangeTarget(target) }}</span>
+                        <span :id="`fix-range-target-${row.targetId}`" class="block break-words font-medium">{{ formatParameterTarget(target) }}</span>
                         <span class="text-xs board-text-muted">{{ t('app.parameterTemplateRange', { lower: target.lowerBound, upper: target.upperBound }) }}</span>
                       </p>
                       <label class="board-form-label">
@@ -1813,33 +1838,23 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
             <summary class="flex cursor-pointer list-none items-center gap-2 py-3">
                 <span class="material-symbols-outlined board-text-muted" aria-hidden="true">search</span>
                 <span class="font-semibold board-text-strong">{{ t('app.faultLocalization') }}</span>
-                <span v-if="!faultLoading && !faultLoadError" data-testid="fix-fault-count" class="ml-auto px-2 py-0.5 board-meta-chip text-xs rounded-full">{{ t('app.rulesCount', { count: faultRules.length }) }}</span>
+                <span v-if="visibleFaultRules" data-testid="fix-fault-count" class="ml-auto px-2 py-0.5 board-meta-chip text-xs rounded-full group-open:hidden">{{ t('app.rulesCount', { count: visibleFaultRules.length }) }}</span>
                 <span class="material-symbols-outlined board-text-muted group-open:rotate-180" aria-hidden="true">expand_more</span>
             </summary>
             <div class="pb-3">
-              <p data-testid="fix-fault-summary" class="text-sm board-text-muted">
-                {{ faultLoading ? t('app.loadingFaultLocalization') : faultLoadError
-                  ? t('app.faultLocalization') : t('app.faultRulesIdentified', { count: faultRules.length }) }}
+              <p v-if="faultLoading || visibleFaultRules" data-testid="fix-fault-summary" class="flex items-center gap-2 text-sm board-text-muted">
+                <span v-if="faultLoading" class="material-symbols-outlined animate-spin" aria-hidden="true">progress_activity</span>
+                {{ faultLoading ? t('app.loadingFaultLocalization') : t('app.faultRulesIdentified', { count: visibleFaultRules?.length }) }}
               </p>
               <p v-if="localizedFaultLocalizationSummary" class="my-2 text-xs leading-relaxed board-text-muted">{{ localizedFaultLocalizationSummary }}</p>
-              <div v-if="faultLoading" class="flex items-center justify-center gap-2 py-8 text-sm board-text-muted">
-                <span class="material-symbols-outlined animate-spin" aria-hidden="true">progress_activity</span>
-                {{ t('app.loadingFaultLocalization') }}
-              </div>
-              <div v-else-if="faultLoadError" class="py-8 board-text-danger" role="alert" data-testid="fix-fault-failure">
+              <div v-if="faultLoadError" class="py-8 board-text-danger" role="alert" data-testid="fix-fault-failure">
                 <span class="material-symbols-outlined text-3xl" aria-hidden="true">error</span>
                 <p class="mt-2 text-sm font-medium">{{ faultLoadFailure?.message }}</p>
                 <FailureDetails v-if="faultLoadFailure" v-bind="faultLoadFailure" />
               </div>
-              <div v-else-if="faultRules.length === 0" class="text-center py-8 board-text-muted">
-                <span class="material-symbols-outlined text-4xl mb-2 block" aria-hidden="true">info</span>
-                <p>{{ t('app.noFaultRulesFound') }}</p>
-                <p class="text-xs mt-1">{{ t('app.violationMayBeDeviceTransitions') }}</p>
-              </div>
-              
-              <div v-else class="space-y-2">
+              <div v-else-if="visibleFaultRules?.length" class="space-y-2">
                 <div 
-                  v-for="(rule, idx) in faultRules"
+                  v-for="(rule, idx) in visibleFaultRules"
                   :key="idx"
                   class="border board-border-subtle rounded-lg p-3 hover:board-control-hover hover:board-text-strong transition-colors"
                   :class="{ 'border-[color:var(--warning-border)] board-chip-warning': rule.conflicting }"
@@ -1873,7 +1888,8 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
 
       <!-- Footer: dismiss on the left, the one primary action on the right.
            At most one of Apply, Try and "try another strategy" shows: Try until the strategy lists an
-           option, then Apply the selected one. A settled outcome would only repeat on retry, so it
+           option, then Apply the selected one or retry an unavailable template comparison. A settled
+           search outcome would only repeat on retry, so it
            offers the next untried strategy instead, or nothing once all were tried. Apply and Try
            used to sit at the end of the scroll body, where the strategy detail is routinely ~300px
            taller than the fold: the action landed 19px past
@@ -1902,7 +1918,7 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
 
         <div ref="footerActionsRef" class="contents">
           <button
-            v-if="currentSuggestion"
+            v-if="currentSuggestion && !templateComparisonNeedsRetry"
             type="button"
             data-testid="fix-apply-current"
             class="iot-dialog-btn"
@@ -1930,6 +1946,18 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
           </button>
 
           <button
+            v-else-if="historicalModelRetired"
+            type="button"
+            data-testid="fix-reverify-current-board"
+            aria-describedby="fix-search-needs-verification"
+            class="iot-dialog-btn iot-dialog-btn--primary"
+            @click="emit('reverify')"
+          >
+            <span class="material-symbols-outlined" aria-hidden="true">fact_check</span>
+            {{ t('app.configureCurrentBoardVerification') }}
+          </button>
+
+          <button
             v-else-if="dialogWideSkipAttempt"
             type="button"
             data-testid="fix-search-blocked"
@@ -1948,7 +1976,7 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
             :disabled="strategyLoading !== null || Boolean(rangeBlockedReasonIds)"
             :aria-label="currentStrategyAttempt || strategyErrors[selectedStrategy]
               ? t('app.retryFixStrategy') : t('app.tryFixStrategy')"
-            :aria-describedby="[anotherStrategyLoading ? 'fix-another-strategy-running' : '', currentStrategyLoading && selectedStrategyFailure ? 'fix-search-failure' : '', rangeBlockedReasonIds]
+            :aria-describedby="[templateComparisonNeedsRetry ? 'fix-apply-readiness' : '', anotherStrategyLoading ? 'fix-another-strategy-running' : '', selectedStrategyFailure ? 'fix-search-failure' : '', rangeBlockedReasonIds]
               .filter(Boolean).join(' ') || undefined"
             @click="trySelectedStrategy"
             class="iot-dialog-btn iot-dialog-btn--primary"
@@ -1978,12 +2006,12 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(isDialogOpen,
           </button>
         </div>
         <p
-          v-if="dialogWideSkipAttempt"
+          v-if="dialogWideSkipAttempt || historicalModelRetired"
           id="fix-search-needs-verification"
           data-testid="fix-search-needs-verification"
           class="basis-full text-xs leading-5 board-text-muted"
         >
-          {{ t('app.fixSearchNeedsNewVerification') }}
+          {{ t(historicalModelRetired ? 'app.runBoardSemanticsChanged' : 'app.fixSearchNeedsNewVerification') }}
         </p>
       </div>
     </div>

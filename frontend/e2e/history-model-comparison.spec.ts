@@ -83,6 +83,94 @@ test('a requirement rename preserves the checked model and the name frozen in hi
   await expect(page.getByTestId('verification-result-stale-banner')).toBeHidden()
 })
 
+test('a historical modeling version stays replayable and cannot repair the current board', async ({ page, request }) => {
+  const auth = await createAuthenticatedUser(request)
+  await seedBoard(request, auth)
+  const result = validateVerificationResult(await unwrap<VerificationResult>(await request.post(`${apiBaseURL}/api/verify`, {
+    headers: headers(auth), data: settings
+  })))
+  if (result.historyPersistence.status !== 'SAVED') throw new Error('Verification history was not saved')
+  const runId = result.historyPersistence.runId
+  const traceId = result.traces[0]?.id
+  expect(traceId).toBeGreaterThan(0)
+  expect(result.modelSnapshot.modelFingerprint).toBe((await currentModels(request, auth)).verification)
+
+  // The saved run and replay come from the real backend. Change only the modeling version delivered to the client.
+  const previousSemanticsVersion = result.modelSnapshot.modelSemanticsVersion - 1
+  await page.route(/\/api\/verify\/(?:runs(?:\/\d+(?:\/traces)?)?|traces\/\d+)$/, async route => {
+    const endpoint = new URL(route.request().url()).pathname
+    const runList = endpoint === '/api/verify/runs'
+    if (!runList && endpoint !== `/api/verify/runs/${runId}` && endpoint !== `/api/verify/runs/${runId}/traces`
+      && endpoint !== `/api/verify/traces/${traceId}`) {
+      await route.continue()
+      return
+    }
+    const response = await route.fetch()
+    const body = await response.json()
+    const priorVersion = (entry: any) => entry?.modelSnapshot
+      ? { ...entry, modelSnapshot: { ...entry.modelSnapshot, modelSemanticsVersion: previousSemanticsVersion } } : entry
+    body.data = Array.isArray(body.data)
+      ? body.data.map(entry => !runList || entry.id === runId ? priorVersion(entry) : entry) : priorVersion(body.data)
+    await route.fulfill({ response, json: body })
+  })
+  await seedCompletionSession(page, auth)
+  await page.goto(`/#/board?run=verification:${runId}`)
+  const dialog = page.getByTestId('verification-result-dialog')
+  await expect(dialog.getByTestId('verification-result-stale-banner')).toContainText('modeling version')
+  await expect(dialog.getByTestId('verification-trace-fix')).toHaveCount(0)
+  await expect(dialog.getByTestId('verification-result-reverify')).toBeEnabled()
+  await dialog.getByTestId('verification-trace-replay').click()
+  await expect(page.getByTestId('trace-model-version-warning')).toContainText('modeling version')
+  await page.getByTestId('trace-timeline-close').click()
+
+  await openHistory(page)
+  await expect(page.getByTestId(`verification-history-model-comparison-${runId}`)).toHaveAttribute('data-state', 'SEMANTICS_CHANGED')
+  await page.getByTestId(`run-evidence-verification-${runId}`).locator('summary').click()
+  await expect(page.getByTestId(`fix-verification-trace-${traceId}`)).toBeDisabled()
+  await expect(page.getByTestId(`view-verification-trace-${traceId}`)).toBeEnabled()
+
+  await page.getByTestId(`open-verification-run-${runId}`).click()
+  await dialog.getByTestId('verification-result-reverify').click()
+  await clickUnderTooltip(page, page.getByTestId('verification-mode-sync'))
+  await clickUnderTooltip(page, page.getByTestId('run-verification'))
+  await expect(dialog.getByTestId('verification-trace-fix')).toBeVisible()
+  await expect(dialog.getByTestId('verification-result-reverify')).toHaveCount(0)
+})
+
+test('retires the rejected repair source when the current fingerprint still matches', async ({ page, request }) => {
+  const auth = await createAuthenticatedUser(request)
+  await seedBoard(request, auth)
+  const result = validateVerificationResult(await unwrap<VerificationResult>(await request.post(`${apiBaseURL}/api/verify`, {
+    headers: headers(auth), data: settings
+  })))
+  if (result.historyPersistence.status !== 'SAVED') throw new Error('Verification history was not saved')
+  const { runId } = result.historyPersistence
+  const traceId = result.traces[0]?.id
+  expect(traceId).toBeGreaterThan(0)
+  expect(result.modelSnapshot.modelFingerprint).toBe((await currentModels(request, auth)).verification)
+
+  await page.route(`**/api/verify/traces/${traceId}/fault-rules`, route => route.fulfill({ status: 409,
+    json: { code: 409, message: 'Verify the current board again.', data: { reasonCode: 'MODEL_SEMANTICS_CHANGED' } } }))
+  await seedCompletionSession(page, auth)
+  await page.goto(`/#/board?run=verification:${runId}`)
+  const dialog = page.getByTestId('verification-result-dialog')
+  await dialog.getByTestId('verification-trace-fix').click()
+  const repair = page.getByTestId('fix-result-dialog')
+  await expect(repair.getByTestId('fix-reverify-current-board')).toBeVisible()
+  await repair.getByTestId('fix-result-header').getByRole('button', { name: 'Close', exact: true }).click()
+
+  await expect(dialog.getByTestId('verification-result-stale-banner')).toContainText('modeling version')
+  await expect(dialog.getByTestId('verification-trace-fix')).toHaveCount(0)
+  await expect(dialog.getByTestId('verification-result-reverify')).toBeEnabled()
+  await dialog.getByTestId('close-verification-result').click()
+
+  await openHistory(page)
+  await expect(page.getByTestId(`verification-history-model-comparison-${runId}`)).toHaveAttribute('data-state', 'UNCHANGED')
+  await page.getByTestId(`run-evidence-verification-${runId}`).locator('summary').click()
+  await expect(page.getByTestId(`fix-verification-trace-${traceId}`)).toBeDisabled()
+  await expect(page.getByTestId(`view-verification-trace-${traceId}`)).toBeEnabled()
+})
+
 const openHistory = async (page: Page) => {
   await expect(page.locator('[data-testid="open-history-panel"]:visible, [data-testid="restore-action-dock"]:visible').first()).toBeVisible()
   const restore = page.getByTestId('restore-action-dock')

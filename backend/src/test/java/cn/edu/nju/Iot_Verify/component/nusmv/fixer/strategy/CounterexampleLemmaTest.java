@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -42,7 +43,7 @@ class CounterexampleLemmaTest {
     private final CounterexampleLemma.Attempt attempt = CounterexampleLemma.plan(
                     augmentedRules,
                     Map.of("r0_c0", "lambda_r0_c0", "r0_c1", "lambda_r0_c1", "r0_c2", "lambda_r0_c2"),
-                    Map.of("r0_c2", valueChosenBy("condition_value_r0_c2")))
+                    Map.of("r0_c2", valueChosenBy("condition_value_r0_c2")), Set.of())
             .attempt(candidateRules);
 
     @Test
@@ -57,6 +58,18 @@ class CounterexampleLemmaTest {
         assertTrue(probes.get(3).rule() == candidateRules.get(0) && probes.get(4).rule() == candidateRules.get(0),
                 "guard probes name the verified candidate's rule instance");
         assertEquals(probes.size(), probes.stream().map(GuardProbe::name).distinct().count());
+    }
+
+    @Test
+    void probeAllocationSkipsEnumNamesAndStillReadsTheActualProbeValues() {
+        var rules = List.of(rule(temperature));
+        var enumSymbols = Set.of(SmvConstants.GUARD_PROBE_PREFIX + "0", SmvConstants.GUARD_PROBE_PREFIX + "2");
+        var allocated = CounterexampleLemma.plan(rules, Map.of("r0_c0", "lambda_r0_c0"), Map.of(), enumSymbols)
+                .attempt(rules);
+
+        assertEquals(List.of(1, 3, 4), allocated.probes().stream().map(GuardProbe::id).toList());
+        assertEquals(CounterexampleLemma.REFUTES_ALL, allocated.learn(rejectedOn("target", trace(
+                assign(1, TRUE) + assign(3, TRUE) + assign(4, TRUE))), specs("target")));
     }
 
     @Test
@@ -107,7 +120,7 @@ class CounterexampleLemmaTest {
                         List.of(rule(warm, somebody)),
                         Map.of("r0_c0", "lambda_r0_c0", "r0_c1", "lambda_r0_c1"),
                         Map.of("r0_c0", valueChosenBy("condition_value_r0_c0"),
-                                "r0_c1", valueChosenBy("condition_value_r0_c1")))
+                                "r0_c1", valueChosenBy("condition_value_r0_c1")), Set.of())
                 .attempt(List.of(rule(condition("sensor_1", "temperature", "variable", ">", "27"))));
 
         String lemma = chosen.learn(rejectedOn("target", trace(
@@ -144,7 +157,7 @@ class CounterexampleLemmaTest {
     void probesThatContradictTheReportedGuardTeachNothing() {
         RuleDto.Condition hot = condition("sensor_1", "temperature", "variable", ">", "30");
         CounterexampleLemma.Attempt fixedOnly = CounterexampleLemma.plan(
-                        List.of(rule(hot)), Map.of("r0_c0", "lambda_r0_c0"), Map.of())
+                        List.of(rule(hot)), Map.of("r0_c0", "lambda_r0_c0"), Map.of(), Set.of())
                 .attempt(List.of(rule(condition("sensor_1", "temperature", "variable", ">", "30"))));
 
         // Every condition held, yet the guard is reported false: the path is not of the model described.
@@ -185,17 +198,17 @@ class CounterexampleLemmaTest {
         RuleDto.Condition hot = condition("sensor_1", "temperature", "variable", ">", "30");
         RuleDto.Condition open = condition("door_1", "Mode", "mode", "=", "open");
 
-        assertNull(CounterexampleLemma.plan(List.of(rule(hot, open)), Map.of("r0_c0", "lambda_r0_c0"), Map.of()),
+        assertNull(CounterexampleLemma.plan(List.of(rule(hot, open)), Map.of("r0_c0", "lambda_r0_c0"), Map.of(), Set.of()),
                 "a condition without a search variable");
         assertNull(CounterexampleLemma.plan(List.of(rule(hot, null)), Map.of("r0_c0", "lambda_r0_c0",
-                "r0_c1", "lambda_r0_c1"), Map.of()), "a missing condition");
-        assertNull(CounterexampleLemma.plan(List.of(rule(hot)), Map.of("r1_c0", "lambda_r1_c0"), Map.of()),
+                "r0_c1", "lambda_r0_c1"), Map.of(), Set.of()), "a missing condition");
+        assertNull(CounterexampleLemma.plan(List.of(rule(hot)), Map.of("r1_c0", "lambda_r1_c0"), Map.of(), Set.of()),
                 "a key past the rules");
-        assertNull(CounterexampleLemma.plan(List.of(rule(hot)), Map.of("c0", "lambda_c0"), Map.of()),
+        assertNull(CounterexampleLemma.plan(List.of(rule(hot)), Map.of("c0", "lambda_c0"), Map.of(), Set.of()),
                 "a malformed key");
         RuleDto.Condition approximately = condition("sensor_1", "temperature", "variable", "~", "30");
         assertNull(CounterexampleLemma.plan(List.of(rule(approximately)), Map.of("r0_c0", "lambda_r0_c0"),
-                Map.of("r0_c0", valueChosenBy("condition_value_r0_c0"))), "an unsupported chosen relation");
+                Map.of("r0_c0", valueChosenBy("condition_value_r0_c0")), Set.of()), "an unsupported chosen relation");
     }
 
     @Test

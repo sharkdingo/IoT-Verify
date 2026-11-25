@@ -10,8 +10,8 @@ import java.util.List;
 /**
  * Per-value semantic provenance for one environment variable in a frozen verification/simulation run.
  *
- * <p>This makes historical counterexamples self-explanatory: every transition can be attributed to
- * either a user declaration or a disclosed abstraction, without consulting the current Board.
+ * <p>Describes ordinary evolution when no autonomous assignment applies. It is frozen model
+ * evidence rather than a record of the cause of an individual trace step.
  */
 @Data
 @Builder
@@ -26,13 +26,12 @@ public class EnvironmentValueProvenanceDto {
     }
 
     /**
-     * Authorship category determines evolution semantics.
+     * Authorship category describes who contributes to ordinary evolution.
      *
      * <ul>
-     * <li>EXOGENOUS: no device declares ImpactedVariables; may take any declared value each step
-     *     (deliberate abstraction for discrete, exact for numeric with natural rate).</li>
-     * <li>DEVICE_CONTROLLED: at least one device declares ImpactedVariables; stutters when no
-     *     declared effect applies (exact semantics).</li>
+     * <li>EXOGENOUS: no device declares ImpactedVariables. Discrete values may take any declared
+     *     value each step. Numeric values follow the declared natural rate.</li>
+     * <li>DEVICE_CONTROLLED: one device declares ImpactedVariables for this value.</li>
      * <li>COMPOSED: several devices declare ImpactedVariables. Numeric effects sum, which is
      *     MEDIC's additive {@code env.D.v}. Discrete writers must agree: a scene whose declared
      *     effects assign different values to one discrete value is rejected at board assembly,
@@ -98,7 +97,7 @@ public class EnvironmentValueProvenanceDto {
     /** For numeric: upper bound of the declared domain. */
     private Integer upperBound;
 
-    /** For numeric: natural evolution rate (e.g., "increase" / "decrease" / "stable"). */
+    /** For numeric: declared natural change rate, for example {@code 0} or {@code [-1, 1]}. */
     private String naturalChangeRate;
 
     /** For discrete: the declared values (enum or boolean). */
@@ -117,7 +116,7 @@ public class EnvironmentValueProvenanceDto {
 
     /**
      * Human-readable summary of the evolution rule for user-facing disclosure.
-     * Example: "External input (weather); may change to any declared value each step (deliberate abstraction)."
+     * The summary covers ordinary evolution in steps without an active autonomous assignment.
      */
     private String evolutionSummary;
 }

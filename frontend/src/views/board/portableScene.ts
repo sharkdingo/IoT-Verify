@@ -1,6 +1,7 @@
 import { REQUEST_LIMITS } from '@/constants/requestLimits'
 import { normalizeTemplateLookupName } from '@/utils/templateUsage'
 import { buildSpecDeviceRefsFromConditions, buildSpecFormula } from '@/utils/spec'
+import { isConcreteDeviceState, trimAuthoredDeviceState } from '@/utils/stateConditionDomain'
 import { normalizeModelRelation, normalizeNuSmvDeviceName } from '@/utils/modelRequest'
 import { MANIFEST_VALIDATION_MESSAGE_KEYS, validateManifest } from '@/utils/device'
 import { canonicalizeTemplateManifest } from '@/utils/templateManifestCanonicalization'
@@ -64,12 +65,12 @@ export const createSceneCodec = (t: Translate) => {
     throw new Error(t('app.sceneImportCollectionTooLarge', { field, limit: maximum }))
   }
 
-  const normalizeSceneString = (value: unknown, field = 'value') => {
+  const normalizeSceneString = (value: unknown, field = 'value', trim = (text: string) => text.trim()) => {
     if (value === undefined || value === null) return ''
     if (typeof value !== 'string') {
       throw new Error(t('app.sceneImportStringRequired', { field }))
     }
-    return value.trim()
+    return trim(value)
   }
 
   const rejectSceneInternalField = (row: unknown, field: string) => {
@@ -229,7 +230,7 @@ export const createSceneCodec = (t: Translate) => {
     if (row.position.y === undefined || row.position.y === null) {
       throw new Error(t('app.sceneImportMissingField', { field: `devices[${index}].position.y` }))
     }
-    const state = normalizeSceneString(row.state, `devices[${index}].state`)
+    const state = normalizeSceneString(row.state, `devices[${index}].state`, trimAuthoredDeviceState)
     const variables = normalizeSceneVariables(row.variables, `devices[${index}].variables`)
     const privacies = normalizeScenePrivacies(row.privacies, `devices[${index}].privacies`)
 
@@ -288,7 +289,7 @@ export const createSceneCodec = (t: Translate) => {
   const sceneTemplateHasStateMachine = (template?: DeviceTemplate): boolean =>
     Boolean(template?.manifest?.Modes?.length && template.manifest?.WorkingStates?.length)
 
-  const assertSceneDeviceRuntimeShape = (
+  const assertSceneDeviceRuntime = (
     rawDevices: unknown[],
     devices: DeviceNode[],
     templates: DeviceTemplate[]
@@ -297,10 +298,16 @@ export const createSceneCodec = (t: Translate) => {
       const template = sceneTemplateForDevice(device, templates)
       if (!template) return
       const raw = rawDevices[index] as any
-      const rawState = normalizeSceneString(raw?.state, `devices[${index}].state`)
+      const stateField = `devices[${index}].state`
+      const rawState = normalizeSceneString(raw?.state, stateField, trimAuthoredDeviceState)
       const hasStateMachine = sceneTemplateHasStateMachine(template)
       if (hasStateMachine && !rawState) {
         throw new Error(t('app.sceneImportStateRequiredForStatefulDevice', { index: index + 1, label: device.label }))
+      }
+      if (hasStateMachine && !isConcreteDeviceState(template.manifest, rawState)) {
+        throw new Error(t('app.sceneImportDeviceStateUnavailable', {
+          index: index + 1, label: device.label, state: rawState, field: stateField
+        }))
       }
       if (!hasStateMachine && rawState) {
         throw new Error(t('app.sceneImportStateForbiddenForStatelessDevice', { index: index + 1, label: device.label }))
@@ -803,7 +810,11 @@ export const createSceneCodec = (t: Translate) => {
     }))
 
     const { state, currentStateTrust, currentStatePrivacy, ...portable } = normalized
-    const hasStateMachine = sceneTemplateHasStateMachine(sceneTemplateForDevice(normalized, templates))
+    const template = sceneTemplateForDevice(normalized, templates)
+    const hasStateMachine = sceneTemplateHasStateMachine(template)
+    if (hasStateMachine && !isConcreteDeviceState(template?.manifest, state)) {
+      throw new Error(t('app.sceneExportDeviceStateUnavailable', { label: normalized.label, state }))
+    }
     return {
       ...portable,
       ...(hasStateMachine ? {
@@ -1006,7 +1017,7 @@ export const createSceneCodec = (t: Translate) => {
     const templates = normalizeSceneTemplates(payload.templates)
     const devices = payload.devices.map((device: unknown, index: number) => normalizeSceneDevice(device, index, templates))
     assertUniqueSceneDeviceIds(devices)
-    assertSceneDeviceRuntimeShape(payload.devices, devices, templates)
+    assertSceneDeviceRuntime(payload.devices, devices, templates)
     const scene: BoardSceneModel = {
       schema: SCENE_FILE_SCHEMA,
       version: SCENE_FILE_VERSION,
@@ -1020,6 +1031,9 @@ export const createSceneCodec = (t: Translate) => {
     assertSceneTemplateCoverage(scene)
     assertSceneEnvironmentCoverage(scene)
     const labelsByDeviceId = new Map(scene.devices.map(device => [device.id, device.label]))
+    const modesByDeviceId = new Map(scene.devices.map(device => [
+      device.id, sceneTemplateForDevice(device, scene.templates)?.manifest.Modes?.length
+    ]))
     scene.specs = scene.specs.map(spec => ({
       ...spec,
       aConditions: spec.aConditions.map(condition => ({
@@ -1037,7 +1051,7 @@ export const createSceneCodec = (t: Translate) => {
     })).map(spec => ({
       ...spec,
       formula: buildSpecFormula(spec, {
-        nodes: scene.devices
+        nodes: scene.devices, modeCount: deviceId => modesByDeviceId.get(deviceId)
       }),
       devices: buildSpecDeviceRefsFromConditions([
         ...spec.aConditions,

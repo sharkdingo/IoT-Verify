@@ -6,7 +6,7 @@ scenario into NuSMV. Request and response field tables live in
 [spec-templates.md](spec-templates.md); identity rules live in
 [device-identity.md](device-identity.md).
 
-Verified against code on 2026-10-18. Primary sources:
+Verified against code on 2026-11-25. Primary sources:
 `SmvGenerator`, `DeviceSmvDataFactory`, `SmvModelValidator`,
 `SmvDeviceModuleBuilder`, `SmvMainModuleBuilder`, `SmvSpecificationBuilder`, and
 `SmvTraceParser`, `NusmvExecutor`, and `NusmvTempArtifactCleaner`.
@@ -108,14 +108,18 @@ also force users to author internal identifiers. State-dependent effects belong 
 specifications.
 
 A stateful template's `InitState` is deterministic and must match one complete
-`WorkingState` tuple. Partial tuples and `_` are reserved for API/Transition endpoints
-that intentionally change only selected modes; they cannot be used to hide an
-unspecified model starting state.
+`WorkingState` tuple. An explicit device starting state supplies one declared state
+per mode. Tuple segments are trimmed individually when looking up a starting state's
+declared variable values. The lookup preserves case and spaces inside a state name.
+API and transition endpoints can act on selected modes with partial tuples. Each
+concrete segment and each mode trigger names an authored state in its own mode
+before generation converts the name to a NuSMV atom.
+Single-mode state names follow the same segment rules as multi-mode names. The
+emitted domain, template and instance initial states, command endpoints, and trace
+labels use the same authored name after trimming its boundary whitespace.
 
-The attack model never widens `Values` or `LowerBound..UpperBound`. Every variable must
-choose one domain form explicitly; boolean readings use
-`Values: ["TRUE", "FALSE"]`. An omitted domain is rejected instead of silently becoming
-boolean.
+The attack model never widens a variable's declared domain. See the
+[device template contract](../api/board.md#devicetemplatedto) for domain declarations.
 
 Evolution is scope-sensitive. A device-local variable follows its declared Transition
 assignment, WorkingState Dynamic, or numeric `NaturalChangeRate`; if none applies, it
@@ -126,10 +130,10 @@ state declares nothing does the template default (first enum literal, lower boun
 `Transitions` assignment on the same variable disqualifies the derivation, because transition branches
 precede the state branches in the same `case` and therefore override what the state declares.
 
-`DeviceManifestModes.localInitialValue` owns this missing-value derivation for Board
-creation, formal model generation, and bounded exploration. Omitted local runtime
-overrides use it; the explorer still rejects present null, blank, or out-of-domain
-values rather than replacing them with defaults.
+`DeviceManifestModes.localInitialValue` owns the initial-value precedence for Board
+creation, formal generation, bounded exploration, and repair comparison. It uses the
+state-derived value when one exists. An independent instance value takes precedence
+over the template default. An invalid independent value is rejected.
 
 The guarantee is about step 0, not about every step. The state branches read the **unprimed** mode inside
 `next()`, so after a step in which the mode changes the variable still carries the value the previous
@@ -465,12 +469,18 @@ user-facing Immediate specification `AG(IF -> AX(THEN))`.
 - command actions must exist in the target template;
 - command loss under attack applies at the target guard as described above.
 
-An API pulse is true for one step only when at least one affected mode actually changes
-from the API's complete `StartState` tuple into its complete `EndState` tuple. Merely
-remaining in the end state does not satisfy an API condition. Template validation rejects
-stateless APIs, no-effect APIs, API variable assignments, and duplicate signal APIs with
-indistinguishable state transitions. Triggered `Transition.Assignments` are validated
-against declared target domains so accepted template behavior is never silently ignored.
+An API pulse is true for one step only when a selected rule delivers that exact command and at
+least one mode written by the command changes. The selected rule's execution probe supplies the
+action identity. Different commands can produce the same state tuple without emitting this pulse,
+and repeating a command that keeps all its written modes unchanged does not emit it. Template
+validation rejects stateless APIs, no-effect APIs, API variable assignments, and duplicate signal APIs with
+indistinguishable state transitions. Triggered `Transition.Assignments` are validated against
+declared target domains. Their [local and shared write scopes](shared-value-semantics.md#6-device-effects)
+follow the assigning template. Integer transition guards, assignments, and numeric Board conditions
+use ASCII digits with an optional sign. Numeric variable bounds in a manifest are limited to
+`-2147483647` through `2147483647` by NuSMV's range syntax.
+Mode references in rules, specifications, and autonomous trigger guards use the names declared in
+the template. Formal compilation resolves those authored names to the emitted NuSMV identifiers.
 An accepted autonomous Transition has one modeled effect only: one concrete mode update
 or one variable assignment. Combined/multi-mode/multi-assignment effects are rejected at
 template and generation boundaries because independently generated `next(...)` branches
@@ -499,11 +509,11 @@ Enum/mode/boolean trigger values use equality/inequality and numeric thresholds 
 inside the declared range, preventing an accepted transition from silently becoming
 impossible or tautological.
 
-Rule order resolves overlapping actions atomically. If a higher-priority matching API
-shares any affected mode with a lower API, the lower API is blocked as a whole; APIs with
-disjoint affected modes may execute together. State updates, execution probes, and
-trust/privacy propagation all use that same selected action and the API's full start-state
-guard.
+Rule order resolves overlapping actions atomically. An earlier rule whose raw guard holds
+blocks a later command if their write sets overlap in any mode. The earlier rule can block
+even when another rule blocks it in turn. A blocked command writes none of its modes.
+Disjoint selected commands may execute together. State updates, execution probes, and
+trust/privacy propagation share this selection, including the API's full start-state guard.
 
 Request validation rejects known semantic mismatches before execution. A residual
 generation-time condition failure disables that rule with guard `FALSE`, increments
@@ -697,6 +707,9 @@ safe nor violated.
 Mode/state/module identifiers are normalized through the generator's canonical helper.
 Template variable and impacted-variable names are cross-referenced structurally and are
 therefore rejected at persistence time if they are illegal rather than silently renamed.
+Variable enum literals preserve their declared case when an assignment or `Dynamics` effect
+writes a value. The [API signal Boolean syntax](spec-templates.md#condition--smv-expression)
+is a separate kind of condition.
 
 Two prohibitions therefore apply to author-supplied names, both enforced at template
 admission rather than by renaming. An `InternalVariable` name must not begin with `a_`
@@ -713,9 +726,27 @@ The validator also rejects case-insensitive collisions with generated identifier
 as environment aliases, trust/privacy labels, event signals, attack fields, and auto-fix
 parameters.
 
-Trace parsing reverses only known generated namespaces. A real user variable whose
-literal name begins with `a_`, `trust_`, or `privacy_` remains that literal variable; it
-is not guessed from its prefix.
+NuSMV interns enum constants for the whole scene. The scene validator rejects exact collisions
+between enum literals and emitted device fields, even across devices, or with scalar names in
+the main module such as shared-pool aliases and rule playback probes. Separate device modules
+may declare the same mode name, and enum literals remain case-sensitive. An emitted mode or
+internal variable identifier beginning with `__` is rejected because NuSMV hides it in traces.
+Board and exploration validation check the symbols used by ordinary runs. Formal generation
+also checks privacy symbols when privacy is enabled and attack symbols for the attack options
+and devices included in that run.
+
+Rule and specification condition values identify states by their authored names, preserving
+case and interior spaces. A bare state value selects the one mode that declares that spelling.
+For a multi-mode state tuple, semicolons separate mode positions and a blank or `_` segment
+leaves that mode unconstrained. Use commas or pipes between tuple candidates in a membership
+condition. Formal verification and bounded exploration resolve these names before translating
+them into model tokens, even when two different modes use the same emitted token.
+
+Trace parsing uses the captured declarations. A legal variable such as `trust_score` keeps its
+literal name when it does not collide with a generated identifier. New verification, simulation,
+and exploration traces report the authored working-state names. Parameterized repair maps those
+names back to the solver atoms for its initial-state constraints. A state value chosen by the
+repair solver is converted back to its authored name before returning the rule change.
 
 ## Related
 

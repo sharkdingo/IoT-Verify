@@ -74,6 +74,36 @@ class SmvGeneratorFixesTest {
         return dto;
     }
 
+    @Test
+    void modelValidatorRejectsUnrepresentableNumericTransitionLiteralsAndLowerBound() {
+        var amount = numericVar("amount", true, -2, 2);
+        var trigger = DeviceManifest.Trigger.builder().attribute("amount").relation("=").value("+\u0661").build();
+        var assignment = DeviceManifest.Assignment.builder().attribute("amount").value("-1").build();
+        var transition = DeviceManifest.Transition.builder().name("reset").trigger(trigger)
+                .assignments(List.of(assignment)).build();
+        var manifest = DeviceManifest.builder().internalVariables(List.of(amount)).transitions(List.of(transition)).build();
+        var model = Map.of("counter_1", buildSmvData("counter_1", "Counter", List.of(), Map.of(), List.of(amount), manifest));
+
+        assertAll(
+                () -> assertTrue(assertThrows(SmvGenerationException.class, () -> validator.validate(model))
+                        .getMessage().contains("numeric trigger 'amount'")),
+                () -> {
+                    trigger.setValue("+1");
+                    assignment.setValue("-\u0661");
+                    assertTrue(assertThrows(SmvGenerationException.class, () -> validator.validate(model))
+                            .getMessage().contains("assigns non-integer"));
+                },
+                () -> {
+                    assignment.setValue("-1");
+                    amount.setLowerBound(Integer.MIN_VALUE);
+                    amount.setUpperBound(Integer.MIN_VALUE + 2);
+                    trigger.setValue("-2147483647");
+                    assignment.setValue("-2147483646");
+                    assertTrue(assertThrows(SmvGenerationException.class, () -> validator.validate(model))
+                            .getMessage().contains("-2147483647"));
+                });
+    }
+
     /** 构建一个最小的 DeviceSmvData（单 mode 或多 mode） */
     private DeviceSmvData buildSmvData(String varName, String templateName,
                                        List<String> modes,
@@ -87,6 +117,11 @@ class SmvGeneratorFixesTest {
         smv.getModes().addAll(modes);
         smv.getModeStates().putAll(modeStates);
         smv.getVariables().addAll(vars);
+        for (DeviceManifest.InternalVariable variable : vars) {
+            if (!Boolean.TRUE.equals(variable.getIsInside())) {
+                smv.getSharedDeclarations().put(variable.getName(), variable);
+            }
+        }
         smv.setManifest(manifest);
         smv.setSensor(manifest.getApis() == null || manifest.getApis().isEmpty());
         if (manifest.getImpactedVariables() != null) {
@@ -792,6 +827,7 @@ class SmvGeneratorFixesTest {
                 List.of("Mode"), Map.of("Mode", List.of("running")),
                 List.of(timeVar), manifest);
         smv.getEnvVariables().put("time", timeVar);
+        smv.getSharedDeclarations().put("time", timeVar);
         smv.getCurrentModeStates().put("Mode", "running");
 
         DeviceVerificationDto dto = new DeviceVerificationDto();

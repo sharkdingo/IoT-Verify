@@ -3,7 +3,7 @@ import type { RuleDto, RuleForm } from '@/types/rule'
 import type { SpecCondition, Specification } from '@/types/spec'
 import { specTemplateDetails } from '@/assets/config/specTemplates'
 import { normalizeModelRelation } from './modelRequest'
-import { splitSpecConditionValues } from './specConditionDomain'
+import { splitConditionValueList } from './stateConditionDomain'
 
 export interface ModelPresentationContext {
   t: (key: string, values?: Record<string, string | number>) => string
@@ -17,6 +17,23 @@ export const formatRelationGlyph = (relation?: string): string => {
   const canonical = normalizeModelRelation(relation) ?? relation ?? ''
   return ({ '!=': '≠', '>=': '≥', '<=': '≤', in: '∈', 'not in': '∉' } as Record<string, string>)[canonical]
     || canonical
+}
+
+const relationWordKeys = new Map([
+  ['=', 'app.relationEquals'],
+  ['!=', 'app.relationNotEquals'],
+  ['>', 'app.relationGreater'],
+  ['<', 'app.relationLess'],
+  ['>=', 'app.relationGreaterEqual'],
+  ['<=', 'app.relationLessEqual'],
+  ['in', 'app.relationIn'],
+  ['not in', 'app.relationNotIn']
+])
+
+export const formatRelationWords = (relation: string | null | undefined, t: (key: string) => string): string => {
+  const canonical = normalizeModelRelation(relation) ?? ''
+  const key = relationWordKeys.get(canonical)
+  return key ? t(key) || canonical : canonical
 }
 
 export const presentRule = (rule: RuleForm | RuleDto, context: ModelPresentationContext) => {
@@ -79,7 +96,8 @@ export const specConditionValueLabel = (condition: Pick<SpecCondition,
   }
   const relation = normalizeModelRelation(condition.relation)
   return relation === 'in' || relation === 'not in'
-    ? splitSpecConditionValues(condition.value, condition.targetType).map(formatValue).filter(Boolean).join(', ')
+    ? splitConditionValueList(condition.value, condition.targetType, context.modeCount?.(condition.deviceId))
+      .map(formatValue).filter(Boolean).join(', ')
     : formatValue(condition.value)
 }
 

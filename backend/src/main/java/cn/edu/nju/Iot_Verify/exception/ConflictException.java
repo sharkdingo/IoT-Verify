@@ -15,7 +15,7 @@ public class ConflictException extends BaseException {
         this(message, cause, null, null);
     }
 
-    private ConflictException(String message, Throwable cause, String reasonCode, String field) {
+    protected ConflictException(String message, Throwable cause, String reasonCode, String field) {
         super(409, message, cause);
         this.reasonCode = reasonCode;
         this.field = field;

@@ -62,7 +62,8 @@ const modelSnapshot = (specificationCount: number) => ({
   specificationCount,
   environmentVariableCount: 1,
   deviceTemplateCount: 2,
-  templatesFrozen: true
+  templatesFrozen: true,
+  modelSemanticsVersion: 1
 })
 
 const playbackScene = () => ({
@@ -296,6 +297,16 @@ const validCompletedSimulationTask = () => ({
 })
 
 describe('verification and simulation response contracts', () => {
+  it('requires explicit modeling version evidence and preserves historical version zero', () => {
+    const result = validVerification()
+    const withVersion = (modelSemanticsVersion: unknown) => ({ ...result,
+      modelSnapshot: { ...result.modelSnapshot, modelSemanticsVersion } })
+    expect(validateVerificationResult(withVersion(0)).modelSnapshot.modelSemanticsVersion).toBe(0)
+    for (const value of [undefined, null, -1, 1.5, '1']) {
+      expect(() => validateVerificationResult(withVersion(value))).toThrow(/modelSemanticsVersion/)
+    }
+  })
+
   it('retains valid fingerprints and rejects malformed comparison evidence', () => {
     const result = validVerification()
     const captured = { ...result.modelSnapshot, modelFingerprint: 'a'.repeat(64) }

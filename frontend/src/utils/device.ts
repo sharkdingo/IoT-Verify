@@ -253,6 +253,8 @@ export interface NaturalChangeRateRange {
 const isJavaInteger = (value: number): boolean =>
     Number.isInteger(value) && value >= -2147483648 && value <= 2147483647
 
+const isNuSmvRangeBound = (value: number): boolean => isJavaInteger(value) && value !== -2147483648
+
 /** Parse exactly the rate syntax accepted by the template JSON schema. */
 export const parseNaturalChangeRate = (value: unknown): NaturalChangeRateRange | null => {
     if (typeof value !== 'string'
@@ -503,16 +505,16 @@ export const validateManifest = (obj: any): ManifestValidationResult => {
         const hasValues = Array.isArray(variable.Values) && variable.Values.length > 0
         const hasLowerField = Object.prototype.hasOwnProperty.call(variable, 'LowerBound')
         const hasUpperField = Object.prototype.hasOwnProperty.call(variable, 'UpperBound')
-        if ((hasLowerField && !isJavaInteger(variable.LowerBound))
-            || (hasUpperField && !isJavaInteger(variable.UpperBound))) {
+        if ((hasLowerField && !isNuSmvRangeBound(variable.LowerBound))
+            || (hasUpperField && !isNuSmvRangeBound(variable.UpperBound))) {
             return invalidManifest(
                 'numericBoundsInvalid',
-                `InternalVariable "${variable.Name}" bounds must be 32-bit integers`,
+                `InternalVariable "${variable.Name}" bounds must be integers from -2147483647 to 2147483647`,
                 { kind: 'InternalVariable', name: variable.Name }
             )
         }
-        const hasLower = isJavaInteger(variable.LowerBound)
-        const hasUpper = isJavaInteger(variable.UpperBound)
+        const hasLower = isNuSmvRangeBound(variable.LowerBound)
+        const hasUpper = isNuSmvRangeBound(variable.UpperBound)
         if (hasValues === (hasLower && hasUpper) || hasLower !== hasUpper) {
             return invalidManifest(
                 'internalVariableDomainRequired',

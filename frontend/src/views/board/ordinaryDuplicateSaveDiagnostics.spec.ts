@@ -37,7 +37,7 @@ const setup = (error: unknown, recovered = false) => {
     refreshRules: vi.fn().mockResolvedValue(recovered),
     refreshSpecifications: vi.fn(async () => { if (recovered) specifications.value = [{}]; return recovered }),
     reloadUndoAvailability: vi.fn(), ruleExists: () => recovered,
-    isSameSpecification: () => recovered, buildSpecFormula: () => 'G off',
+    isSameSpecification: () => recovered, deviceModeCount: () => undefined, buildSpecFormula: () => 'G off',
     buildSpecDeviceRefsFromConditions: () => [], nextTick: () => Promise.resolve(),
     t: (key: string) => key, notifyBlocked: vi.fn(), notifyError: vi.fn(),
     extractApiErrorMessage: (cause: unknown, fallback: string) => localizedErrorMessage(cause, fallback, 'zh-CN')

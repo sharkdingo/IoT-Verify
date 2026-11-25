@@ -17,7 +17,6 @@ const props = defineProps<{
   currentRuleIds: string[]
   formatDeviceToken: (device: TraceDevice, value: unknown) => string
   formatEnvironmentToken: (name: string, value: unknown) => string
-  environmentTitle?: (name: string, value: string) => string
 }>()
 const { t } = useI18n()
 const currentDevices = computed(() => new Set(props.currentDeviceIds.map(normalizePlaybackDeviceId)))
@@ -63,7 +62,7 @@ const securityLabel = (device: TraceDevice, labels: string[]) => labels
         {{ t('app.playbackActualEnvironment') }}<span>{{ environmentVariables.length }}</span>
       </h3>
       <dl class="playback-evidence__environment">
-        <div v-for="variable in environmentVariables" :key="variable.name" :title="environmentTitle?.(variable.name, variable.value)">
+        <div v-for="variable in environmentVariables" :key="variable.name">
           <dt>{{ formatEnvironmentToken(variable.name, variable.name) }}</dt>
           <dd class="font-mono">{{ variable.value?.trim() ? formatEnvironmentToken(variable.name, variable.value) : t('app.notAvailable') }}</dd>
         </div>

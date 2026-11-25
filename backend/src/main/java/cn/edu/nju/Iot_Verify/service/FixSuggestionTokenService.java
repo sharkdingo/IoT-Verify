@@ -5,7 +5,7 @@ import cn.edu.nju.Iot_Verify.dto.fix.ConditionAdjustment;
 import cn.edu.nju.Iot_Verify.dto.fix.FixSuggestionDto;
 import cn.edu.nju.Iot_Verify.dto.fix.ParameterAdjustment;
 import cn.edu.nju.Iot_Verify.dto.fix.PreferredRange;
-import cn.edu.nju.Iot_Verify.exception.BadRequestException;
+import cn.edu.nju.Iot_Verify.exception.FixSuggestionStaleException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -29,7 +29,8 @@ import java.util.TreeMap;
 @RequiredArgsConstructor
 public class FixSuggestionTokenService {
 
-    private static final int TOKEN_VERSION = 2;
+    // Previously issued suggestions were proved under older shared-value transition semantics.
+    private static final int TOKEN_VERSION = 3;
     private static final Duration TOKEN_TTL = Duration.ofMinutes(15);
     private static final Base64.Encoder ENCODER = Base64.getUrlEncoder().withoutPadding();
     private static final Base64.Decoder DECODER = Base64.getUrlDecoder();
@@ -63,12 +64,12 @@ public class FixSuggestionTokenService {
                                    FixSuggestionDto suggestion, String token,
                                    Map<String, PreferredRange> preferredRanges) {
         if (suggestion == null || token == null || token.isBlank()) {
-            throw staleToken();
+            throw new FixSuggestionStaleException();
         }
         try {
             String[] parts = token.trim().split("\\.", -1);
             if (parts.length != 2 || !MessageDigest.isEqual(sign(parts[0]), DECODER.decode(parts[1]))) {
-                throw staleToken();
+                throw new FixSuggestionStaleException();
             }
             TokenPayload payload = objectMapper.readValue(DECODER.decode(parts[0]), TokenPayload.class);
             if (payload.version() != TOKEN_VERSION
@@ -79,17 +80,17 @@ public class FixSuggestionTokenService {
                     || !MessageDigest.isEqual(
                             payload.suggestionDigest().getBytes(StandardCharsets.UTF_8),
                             suggestionDigest(suggestion, preferredRanges).getBytes(StandardCharsets.UTF_8))) {
-                throw staleToken();
+                throw new FixSuggestionStaleException();
             }
             FixSuggestionDto trusted = objectMapper.treeToValue(suggestionNode(suggestion), FixSuggestionDto.class);
             restoreInternalLocators(trusted, payload);
             trusted.setRemovedRuleIndices(payload.removedRuleIndices());
             trusted.setSuggestionToken(null);
             return trusted;
-        } catch (BadRequestException e) {
+        } catch (FixSuggestionStaleException e) {
             throw e;
         } catch (Exception e) {
-            throw staleToken();
+            throw new FixSuggestionStaleException();
         }
     }
 
@@ -143,12 +144,12 @@ public class FixSuggestionTokenService {
         if (parameters.size() != parameterLocators.size()
                 || conditions.size() != conditionLocators.size()
                 || payload.removedRuleIndices() == null) {
-            throw staleToken();
+            throw new FixSuggestionStaleException();
         }
         for (int i = 0; i < parameters.size(); i++) {
             ParameterLocator locator = parameterLocators.get(i);
             if (locator == null || locator.ruleIndex() < 0 || locator.conditionIndex() < 0) {
-                throw staleToken();
+                throw new FixSuggestionStaleException();
             }
             parameters.get(i).setRuleIndex(locator.ruleIndex());
             parameters.get(i).setConditionIndex(locator.conditionIndex());
@@ -156,7 +157,7 @@ public class FixSuggestionTokenService {
         for (int i = 0; i < conditions.size(); i++) {
             ConditionLocator locator = conditionLocators.get(i);
             if (locator == null || locator.ruleIndex() < 0 || locator.conditionIndex() < 0) {
-                throw staleToken();
+                throw new FixSuggestionStaleException();
             }
             conditions.get(i).setRuleIndex(locator.ruleIndex());
             conditions.get(i).setConditionIndex(locator.conditionIndex());
@@ -168,11 +169,6 @@ public class FixSuggestionTokenService {
         Mac mac = Mac.getInstance("HmacSHA256");
         mac.init(new SecretKeySpec(jwtConfig.getSecret().getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
         return mac.doFinal(encodedPayload.getBytes(StandardCharsets.US_ASCII));
-    }
-
-    private BadRequestException staleToken() {
-        return new BadRequestException(
-                "This fix suggestion is stale or no longer matches the displayed proposal. Run the fix again before applying it.");
     }
 
     private record TokenPayload(int version, Long userId, Long traceId, String strategy, long expiresAt,

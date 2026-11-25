@@ -2,6 +2,7 @@ package cn.edu.nju.Iot_Verify.component.aitool.verification;
 
 import cn.edu.nju.Iot_Verify.component.ai.LlmRequestControl;
 import cn.edu.nju.Iot_Verify.component.ai.LlmRequestControlHolder;
+import cn.edu.nju.Iot_Verify.exception.ModelSemanticsChangedException;
 import cn.edu.nju.Iot_Verify.exception.ResourceNotFoundException;
 import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
 import cn.edu.nju.Iot_Verify.exception.SmvGenerationException;
@@ -245,6 +246,18 @@ class FixViolationToolTest {
 
         assertEquals("NOT_FOUND", node.get("errorCode").asText());
         assertEquals(404, node.get("status").asInt());
+    }
+
+    @Test
+    void execute_historicalEvidenceRequiresNewVerification() throws Exception {
+        when(fixService.fix(anyLong(), anyLong(), any(), any()))
+                .thenThrow(new ModelSemanticsChangedException());
+
+        JsonNode result = objectMapper.readTree(tool.execute("{\"traceId\":1}"));
+
+        assertEquals("MODEL_SEMANTICS_CHANGED", result.path("errorCode").asText());
+        assertEquals(409, result.path("status").asInt());
+        assertFalse(result.has("suggestions"));
     }
 
     @Test

@@ -6,12 +6,14 @@ import cn.edu.nju.Iot_Verify.dto.rule.RuleSimilarityResultDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.service.BoardStorageService;
 import cn.edu.nju.Iot_Verify.util.RuleSemanticSignature;
+import cn.edu.nju.Iot_Verify.component.template.DeviceManifestModes;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
+import java.util.function.ToIntFunction;
 
 /** Deterministic duplicate checks and the separate, explicit AI similarity decision. */
 @Slf4j
@@ -78,7 +80,8 @@ similarity 达到 0.8 及以上会强制转人工复核。
 
     public DuplicateRuleCheckResultDto checkDuplicate(Long userId, RuleDto newRule) {
         newRule = RuleCandidateNormalizer.normalize(newRule);
-        List<RuleDto> existingRules = safeList(boardStorageService.getRules(userId));
+        var snapshot = boardStorageService.getSemanticSnapshot(userId);
+        List<RuleDto> existingRules = snapshot.rules();
         log.debug("Duplicate rule check request: userId={}, existingRules={}", userId, existingRules.size());
         if (existingRules.isEmpty()) {
             return DuplicateRuleCheckResultDto.builder()
@@ -86,7 +89,8 @@ similarity 达到 0.8 及以上会强制转人工复核。
                     .matchType("none").reasonCode("NO_EXISTING_RULES").reason("no existing rules")
                     .message("No existing rules to compare. This is the first rule.").build();
         }
-        return checkDuplicateDeterministically(newRule, existingRules);
+        return checkDuplicateDeterministically(newRule, existingRules,
+                DeviceManifestModes.boardModeCounts(snapshot.nodes(), snapshot.deviceTemplates()));
     }
 
     public RuleSimilarityResultDto checkSimilarity(Long userId, RuleDto newRule) {
@@ -108,16 +112,23 @@ similarity 达到 0.8 及以上会强制转人工复核。
         return list == null ? Collections.emptyList() : list;
     }
 
-    private DuplicateRuleCheckResultDto checkDuplicateDeterministically(RuleDto newRule, List<RuleDto> existingRules) {
-        RuleSemanticSignature.Signature newSignature = RuleSemanticSignature.from(newRule);
+    private DuplicateRuleCheckResultDto checkDuplicateDeterministically(
+            RuleDto newRule, List<RuleDto> existingRules, Map<String, Integer> modeCounts) {
+        ToIntFunction<String> modeCountForDevice = device -> modeCounts.getOrDefault(device, 0);
+        RuleSemanticSignature.Signature newSignature = RuleSemanticSignature.from(newRule, modeCountForDevice);
         DuplicateCandidate best = DuplicateCandidate.none();
 
         for (RuleDto existingRule : existingRules) {
             if (newRule.getId() != null && newRule.getId().equals(existingRule.getId())) {
                 continue;
             }
+            if (RuleSemanticSignature.exactlyMatches(newRule, existingRule, modeCountForDevice)) {
+                best = new DuplicateCandidate(true, true, displayRule(existingRule), 1.0, "exact",
+                        "EXACT_MATCH", "same trigger conditions and same action");
+                break;
+            }
             DuplicateCandidate candidate = compare(
-                    newSignature, RuleSemanticSignature.from(existingRule), existingRule);
+                    newSignature, RuleSemanticSignature.from(existingRule, modeCountForDevice), existingRule);
             if (candidate.similarity > best.similarity) {
                 best = candidate;
             }
@@ -143,12 +154,6 @@ similarity 达到 0.8 及以上会强制转人工复核。
         }
 
         String matchedRule = displayRule(existingRule);
-        if (candidate.conditionKeys().equals(existing.conditionKeys())) {
-            return new DuplicateCandidate(true, true, matchedRule, 1.0, "exact",
-                    "EXACT_MATCH",
-                    "same trigger conditions and same action");
-        }
-
         if (!candidate.conditionKeys().isEmpty() && !existing.conditionKeys().isEmpty()) {
             if (existing.conditionKeys().containsAll(candidate.conditionKeys())
                     || candidate.conditionKeys().containsAll(existing.conditionKeys())) {

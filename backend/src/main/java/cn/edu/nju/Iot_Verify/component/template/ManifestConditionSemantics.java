@@ -2,14 +2,21 @@ package cn.edu.nju.Iot_Verify.component.template;
 
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvDataFactory;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
+import cn.edu.nju.Iot_Verify.util.SmvIntegerLiteral;
 
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.BiFunction;
+import java.util.function.Function;
 
 /** Manifest facts shared by storage, model admission, and recommendation validation. */
 public final class ManifestConditionSemantics {
+    public static final Set<String> API_SIGNAL_LITERALS = Set.of("TRUE", "FALSE");
+
     private ManifestConditionSemantics() {
     }
 
@@ -33,7 +40,7 @@ public final class ManifestConditionSemantics {
         } else if (variable.getLowerBound() != null && variable.getUpperBound() != null) {
             for (String candidate : candidates) {
                 try {
-                    int parsed = Integer.parseInt(candidate.trim());
+                    int parsed = SmvIntegerLiteral.parse(candidate);
                     if (parsed < variable.getLowerBound() || parsed > variable.getUpperBound()) {
                         return new ValueIssue(ValueError.OUT_OF_RANGE, candidate);
                     }
@@ -49,32 +56,58 @@ public final class ManifestConditionSemantics {
         return value == null ? "" : value.trim().replace(" ", "");
     }
 
+    /** Canonical case for the Boolean literal text of an API specification condition. */
+    public static String canonicalApiSignalValue(String value) {
+        return value == null ? null : value.trim().toUpperCase(Locale.ROOT);
+    }
+
     public static boolean isLegalState(String rawCandidate, List<String> modes,
-                                       Map<String, List<String>> statesByMode) {
-        if (!hasText(rawCandidate) || modes == null || modes.isEmpty()
-                || statesByMode == null || statesByMode.isEmpty()) return false;
+                                       Map<String, List<String>> authoredStatesByMode) {
+        return !resolveStatePattern(rawCandidate, modes,
+                (mode, state) -> authoredStatesByMode.getOrDefault(mode, List.of()).contains(state) ? state : null)
+                .isEmpty();
+    }
+
+    public static <M> Map<M, String> resolveStatePattern(String rawCandidate, List<M> modes,
+                                                        BiFunction<M, String, String> resolveState) {
+        return resolveStatePattern(rawCandidate, modes, resolveState, reason -> Map.of());
+    }
+
+    /** Resolve the authored state within each mode before comparing or emitting its solver atom. */
+    public static <M> Map<M, String> resolveStatePattern(String rawCandidate, List<M> modes,
+                                                        BiFunction<M, String, String> resolveState,
+                                                        Function<String, Map<M, String>> invalid) {
+        if (!hasText(rawCandidate) || modes == null || modes.isEmpty()) {
+            return invalid.apply("state condition requires a value and at least one device mode");
+        }
         String candidate = rawCandidate.trim();
+        Map<M, String> resolved = new LinkedHashMap<>();
         if (candidate.contains(";")) {
             String[] segments = candidate.split(";", -1);
-            if (segments.length != modes.size()) return false;
-            boolean hasConcreteSegment = false;
-            for (int i = 0; i < modes.size(); i++) {
-                String cleaned = DeviceSmvDataFactory.cleanStateName(segments[i]);
-                if (!hasText(cleaned) || "_".equals(cleaned)) continue;
-                List<String> legalStates = statesByMode.get(modes.get(i));
-                if (legalStates == null || !legalStates.contains(cleaned)) return false;
-                hasConcreteSegment = true;
+            if (segments.length != modes.size()) {
+                return invalid.apply("state tuple '" + candidate + "' does not match the device mode count");
             }
-            return hasConcreteSegment;
+            for (int i = 0; i < modes.size(); i++) {
+                String state = segments[i].trim();
+                if (DeviceSmvDataFactory.isWildcardStateSegment(state)) continue;
+                M mode = modes.get(i);
+                String value = resolveState.apply(mode, state);
+                if (value == null) {
+                    return invalid.apply("state value '" + state + "' is not declared for mode '" + mode + "'");
+                }
+                resolved.put(mode, value);
+            }
+            return resolved.isEmpty() ? invalid.apply("state tuple has no concrete mode segment") : resolved;
         }
-        String cleaned = DeviceSmvDataFactory.cleanStateName(candidate);
-        if (!hasText(cleaned)) return false;
-        int matches = 0;
-        for (String mode : modes) {
-            List<String> states = statesByMode.get(mode);
-            if (states != null && states.contains(cleaned)) matches++;
+        for (M mode : modes) {
+            String value = resolveState.apply(mode, candidate);
+            if (value == null) continue;
+            if (!resolved.isEmpty()) {
+                return invalid.apply("state value '" + candidate + "' is ambiguous across modes");
+            }
+            resolved.put(mode, value);
         }
-        return matches == 1;
+        return resolved.isEmpty() ? invalid.apply("state value '" + candidate + "' is not declared") : resolved;
     }
 
     public static DeviceManifest.API findApi(DeviceManifest manifest, String apiName) {
