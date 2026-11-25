@@ -109,7 +109,7 @@ jobs:
 
   live-ai:
     name: Live AI end-to-end
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     needs: preflight
     # A missing secret skips this job instead of failing it. The repository check is repeated rather than

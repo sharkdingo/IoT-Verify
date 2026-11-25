@@ -2,8 +2,8 @@ name: Setup NuSMV
 description: Install NuSMV 2.7.1, from cache when available, and export NUSMV_PATH.
 
 # The tarball is ~10MB and its install is deterministic: fixed URL, verified sha256, no build step.
-# It was re-downloaded in every job of every run. Caching is safe here precisely because the key
-# pins the exact version and runner image — a different version or image misses rather than reuses.
+# Cache the upstream binary by version, digest, OS and architecture. The runtime libraries come
+# from the runner. Workflows using this action pin Ubuntu 24.04 for libxml2.so.2.
 inputs:
   version:
     description: NuSMV release to install
@@ -22,8 +22,6 @@ runs:
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ github.workspace }}/.nusmv
-        # Runner image is part of the key: the binary links against system libedit/libxml2, so a
-        # different image must not reuse a build validated against another one.
         key: nusmv-${{ inputs.version }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.sha256 }}
 
     - name: Install runtime libraries
@@ -57,9 +55,7 @@ runs:
         nusmv_bin="$(find "$GITHUB_WORKSPACE/.nusmv" -path '*/bin/NuSMV' -type f | head -n 1)"
         test -n "$nusmv_bin"
         chmod +x "$nusmv_bin"
+        printf 'quit\n' | "$nusmv_bin" -int >/dev/null
         echo "$(dirname "$nusmv_bin")" >> "$GITHUB_PATH"
         echo "NUSMV_PATH=$nusmv_bin" >> "$GITHUB_ENV"
-        # Prove the binary actually runs on this image rather than trusting the cache blindly.
-        "$nusmv_bin" -h >/dev/null 2>&1 || "$nusmv_bin" -help >/dev/null 2>&1 || true
-        "$nusmv_bin" -source /dev/null >/dev/null 2>&1 || true
         echo "NuSMV ready: $nusmv_bin"

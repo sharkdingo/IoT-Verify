@@ -2,7 +2,7 @@
 
 Two E2E tiers selected by affected code, plus a separate live-AI gate.
 
-Verified against code on 2026-10-31 for test ownership, weekly infrastructure checks and exclusive tier execution. Sources: `.github/workflows/`,
+Verified against code on 2026-11-25 for runner selection and E2E counts. Sources: `.github/workflows/`,
 `.github/ci-risk-router.mjs`, `.github/check-ci-results.mjs`, `.github/scripts/run-e2e.sh`, `frontend/playwright.config.ts`,
 `frontend/scripts/run-e2e.mjs`, and `frontend/e2e/live-ai-no-mock.spec.ts`.
 
@@ -37,7 +37,7 @@ download an artifact that no job created. Full-selected routes skip these Fast j
 
 The smoke subset is tagged **per test** with `@smoke`, selected by
 [`playwright.config.ts`](../../frontend/playwright.config.ts), and used by both local and CI runners.
-The ordinary suite selects 109 cases; the 18 live-AI cases remain separate. Smoke is included
+The ordinary suite selects 117 cases. The 18 live-AI cases remain separate. Smoke is included
 in the ordinary suite and selects eight critical cases (seven browser journeys and one HTTP
 authentication check):
 
@@ -278,6 +278,8 @@ as an artifact, which is reuse of a verified build rather than a stale one.
 
 ## Other decisions
 
+- **NuSMV runner**: Jobs that launch NuSMV pin `ubuntu-24.04` because the upstream Linux binary
+  needs `libxml2.so.2`. The setup action checks that NuSMV starts before exporting `NUSMV_PATH`.
 - **Concurrency cancellation** on non-`main` refs. A superseded push is wasted capacity and leaves a
   misleading red X on an old commit. `main` never cancels: every landed commit needs its own verdict.
 - **Fail-fast ordering**: route → the selected tier's checks/builds → browser tests.
