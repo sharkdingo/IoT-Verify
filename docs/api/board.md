@@ -3,8 +3,8 @@
 Field-level contract for `/api/board` — the persisted canvas (nodes, rules, specs,
 layout), device templates, and AI-backed recommendation endpoints.
 
-`GET /api/board/snapshot` returns `BoardSemanticSnapshotDto` with `nodes`,
-`environmentVariables`, `rules`, `specifications`, and `deviceTemplates` captured under one
+`GET /api/board/snapshot` returns `BoardWorkspaceSnapshotDto` with `nodes`,
+`environmentVariables`, `rules`, `specifications`, `deviceTemplates`, and `editHistory` captured under one
 user-row lock and transaction. Standalone captures share read ownership, so concurrent captures
 can overlap while Board writes still require exclusive ownership. Calls joining an existing
 transaction retain the exclusive capture path because their caller may write afterwards.
@@ -117,9 +117,9 @@ URL delimiters, and internal whitespace. Device identity validation is defined i
 | POST | `/api/board/specs` | `SpecificationDto` → `CollectionMutationResultDto<SpecificationDto>` | Create exactly one validated specification. An existing `id` returns `409` without overwriting the original or recording history. Reversible: the result carries `canUndo`/`canRedo`, and the journal entry records the list position so a redo re-creates it where it was |
 | PUT | `/api/board/specs/{specId}` | `SpecificationUpdateRequestDto` → `CollectionMutationResultDto<SpecificationDto>` | Edit one requirement with complete `expected` and `desired` snapshots; see [targeted rule/specification edits](#targeted-rulespecification-edits) |
 | DELETE | `/api/board/specs/{specId}` | `SpecificationDto` (the confirmed current snapshot) → `CollectionMutationResultDto<SpecificationDto>` | Delete only when the id and authored specification semantics still match; a stale snapshot returns `409` without writing, and a missing specification returns `404`. Reversible: the result carries `canUndo`/`canRedo`, and undo restores the specification at its recorded list position (same `entity_order` mechanism as rules). Missing or impossible recorded positions return `409` without writing |
-| GET | `/api/board/edits/availability` | → `BoardUndoResultDto` (`applied: false`, `AVAILABILITY_ONLY`, all four semantic collections empty) | Current undo/redo availability from the per-user edit journal, with no side effects. Read `canUndo`/`canRedo` only — the empty collections are not an authoritative board state. Read on board load so the affordance survives reload, a second tab, and another device |
-| POST | `/api/board/edits/undo` | → `BoardUndoResultDto` | Reverse the newest reversible edit: device create/update/rename/delete, Environment Pool update, rule/spec create/update/delete, rule reorder, or an assistant rule edit / automatic-fix rule-set update. Returns authoritative nodes, Environment Pool, rules, specs, and remaining availability. Device deletion restores the complete cascade under the original rule ids and collection positions. `applied: false` with `NOTHING_TO_APPLY` when there is no history — a normal, idempotent outcome. `409` when any affected state changed after the edit was recorded, leaving the board untouched. History is capped at the 50 most recent edits per account; confirmed scene replacement/clear is a history boundary. Ordinal allocation is fenced by a unique `(user_id, sequence)` constraint, so a concurrent write fails rather than producing two entries that share a position |
-| POST | `/api/board/edits/redo` | → `BoardUndoResultDto` | Re-apply the oldest undone edit. Same conflict and idempotency rules. A new edit discards the abandoned redo branch |
+| GET | `/api/board/edits/availability` | → `BoardUndoResultDto` (`applied: false`, `AVAILABILITY_ONLY`, all four semantic collections empty) | Standalone, read-only availability. Use it to detect drift and refresh the complete Board snapshot before enabling actions for the newer revision |
+| POST | `/api/board/edits/undo` | `BoardEditRequestDto` → `BoardUndoResultDto` | Reverse the newest reversible edit in the reviewed history. Returns authoritative nodes, Environment Pool, rules, specs, and remaining availability. Device deletion restores the complete cascade under the original rule ids and collection positions |
+| POST | `/api/board/edits/redo` | `BoardEditRequestDto` → `BoardUndoResultDto` | Re-apply the oldest undone edit in the reviewed history. Same conflict rules as undo. A new edit discards the abandoned redo branch |
 | GET | `/api/board/edits/clear-preview` | → `BoardEditHistoryClearPreviewDto` | Return the current entry count, availability, and opaque impact token that must be shown/bound to an explicit history-clear confirmation |
 | POST | `/api/board/edits/clear` | `BoardEditHistoryClearRequestDto` → `BoardUndoResultDto` (`applied: false`, `HISTORY_CLEARED`, empty collections, both availability flags false) | Explicitly discard unusable undo/redo history without changing any Board collection. The SHA-256 `impactToken` from the preview is required; if any entry is added, undone, redone, changed, or removed before submit, stale confirmation returns `409` and preserves all history |
 | GET | `/api/board/replacement-preview` | → `BoardReplacementPreviewDto` | Return the opaque impact token plus authoritative current scene counts and `editHistoryEntryCount` that must be shown before a full scene replacement/clear |
@@ -369,11 +369,12 @@ the proposed name changes are shown for review.
 
 `DeviceDeleteRequestDto` is `{ impactToken }`, copied opaquely from the latest server
 deletion preview. `DeviceDeletionResultDto` uses `operation=preview` for the read-only preview and
-`operation=deleted` after commit; it returns the deleted device, exact `removedRules` /
-`removedSpecifications`, itemized `environmentChanges`, and authoritative
-`currentNodes` / `environmentVariables` / `currentRules` / `currentSpecifications`. A committed
-deletion also returns required `canUndo` / `canRedo`; previews omit them because they do not edit
-the journal.
+`operation=deleted` after commit. It returns the targeted device, exact `removedRules` and
+`removedSpecifications`, itemized `environmentChanges`, and the current Board. The latter consists of
+`currentNodes`, `environmentVariables`, `currentRules`, `currentSpecifications`, `deviceTemplates`,
+and `canUndo`, `canRedo` and `editHistoryRevision`. All fields are captured in the transaction that
+computes the impact or commits the deletion, so the browser can adopt the current Board from that
+response. The preview reads the journal and leaves it untouched.
 The preview's opaque `impactToken` binds the complete server-calculated device, rule,
 specification, and Environment Pool effect; it intentionally does not require clients to
 submit internal rule/spec ids. If any actual impact set differs from the preview, the endpoint returns
@@ -450,9 +451,10 @@ privacy keys with values `public|private`. Template variables with `IsInside=fal
 are not saved on a device instance; they are board-level environment variables
 stored through `/api/board/environment`.
 
-All ordinary creation paths materialize the same device-local starting values: the template initial
-state, and for each local variable the value that state declares in its `Dynamics` — falling back to the
-enum's first value or the bounded number's lower bound only when that state declares none. The state is
+All ordinary creation paths materialize the same device-local starting values from the configured
+starting state, using the template initial state when the request omits it. Each local variable
+defaults to the selected state's `Dynamics` value when declared, otherwise to the enum's first value
+or the bounded number's lower bound. The state is
 what fixes the variable, because a `Dynamics` value is a standing constraint on being in that state, not
 an action. Defaulting the two independently produced a device whose own step 0 contradicted itself
 (`InitState: away` beside `location = garage`), on six bundled templates;
@@ -883,10 +885,24 @@ Returned by `/api/board/edits/availability`, `/undo`, `/redo`, and `/clear`.
 | `nodes` / `environmentVariables` | `DeviceNodeDto[]` / `BoardEnvironmentVariableDto[]` | Authoritative post-operation collections; replace local state outright |
 | `rules` / `specs` | `RuleDto[]` / `SpecificationDto[]` | Authoritative post-operation collections; replace local state outright. All four collections are empty for `AVAILABILITY_ONLY`, where they are **not** a board state |
 | `canUndo` / `canRedo` | `boolean` | Remaining availability from the journal, reported even when nothing was applied |
+| `editHistoryRevision` | `String` | Opaque identity of the current undo and redo targets |
+
+`BoardEditRequestDto` is `{ expectedEditHistoryRevision }`. The browser copies the revision from
+`snapshot.editHistory` (`{ canUndo, canRedo, editHistoryRevision }`), the receipt of an applied
+reversible edit, or an undo/redo result. Unchanged targeted edits do not issue a new revision.
+An availability-only read detects a change. Only adopting the matching Board snapshot authorizes an
+action on the changed history. The server checks the expected revision under its Board write lock
+before selecting an entry. A mismatch returns `409` and preserves the Board and journal. After
+refreshing, the user can deliberately request the action again.
+
+The account journal keeps up to 50 reversible edits. Device creation, layout and runtime edits,
+renames, deletions, Environment Pool changes, rule and specification edits, rule reorders, and
+assistant or automatic-fix rule-set updates can create entries. A confirmed scene replacement or
+clear ends that history. The unique `(user_id, sequence)` constraint enforces distinct positions.
 
 An applied undo always reports `canRedo=true`, and an applied redo always reports
 `canUndo=true`, because the operation just made its inverse available. `NOTHING_TO_APPLY`
-reports the requested direction as unavailable.
+reports the requested direction as unavailable when the supplied revision is still current.
 
 Restoring a rule preserves its original id and server-recorded `createdAt`, including
 device deletion cascades and automatic-fix rule-set history. That time comes from the

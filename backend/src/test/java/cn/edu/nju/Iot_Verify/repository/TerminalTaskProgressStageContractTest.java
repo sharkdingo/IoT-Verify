@@ -40,7 +40,7 @@ class TerminalTaskProgressStageContractTest {
     private static final List<String> TERMINAL_TRANSITIONS = List.of(
             "completeTaskIfRunning",
             "failTaskIfActive",
-            "failExpiredActiveTasks",
+            "failExpiredTask",
             "cancelTaskIfStillActive");
 
     private static final List<String> TASK_REPOSITORIES = List.of(

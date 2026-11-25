@@ -45,8 +45,11 @@ public class ChatExecutionLeaseGuard {
                 lease.getActiveExecutionExpiresAt(),
                 lease.getExecutionStopRequested(),
                 checkedAt);
+        requireLeaseAtCommit(userId, sessionId, executionId, checkedAt, checkedAtNanos);
+    }
 
-        // Long tool work must not hold the lease row; acquire the fence only at commit.
+    private void requireLeaseAtCommit(Long userId, String sessionId, String executionId,
+                                      LocalDateTime checkedAt, long checkedAtNanos) {
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void beforeCommit(boolean readOnly) {
@@ -67,8 +70,8 @@ public class ChatExecutionLeaseGuard {
     }
 
     /**
-     * Acquires the lease row immediately for a short transaction that performs an
-     * irreversible in-process side effect before the database commit.
+     * Acquires the chat row before a short write that may lock another row. In particular,
+     * task cancellation follows the same chat-before-task order as account deletion.
      */
     public void requireCurrentExecutionLeaseAndLock() {
         String executionId = UserContextHolder.getChatExecutionId();
@@ -82,12 +85,15 @@ public class ChatExecutionLeaseGuard {
         }
         ChatSessionPo session = sessionRepository.findByIdAndUserIdForUpdate(sessionId, userId)
                 .orElseThrow(this::leaseLost);
+        long checkedAtNanos = System.nanoTime();
+        LocalDateTime checkedAt = currentDatabaseTime();
         requireOwnedLease(
                 executionId,
                 session.getActiveExecutionId(),
                 session.getActiveExecutionExpiresAt(),
                 session.getExecutionStopRequested(),
-                currentDatabaseTime());
+                checkedAt);
+        requireLeaseAtCommit(userId, sessionId, executionId, checkedAt, checkedAtNanos);
     }
 
     private void requireOwnedLease(String expectedExecutionId,

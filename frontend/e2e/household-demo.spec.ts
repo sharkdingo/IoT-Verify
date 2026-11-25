@@ -1,6 +1,7 @@
 import path from 'node:path'
 import { type APIRequestContext, type Page } from '@playwright/test'
 import { apiBaseURL, createAuthenticatedUser, expect, test, type AuthUser } from './support/auth'
+import { expectSameBoardScene } from './support/boardSnapshot'
 import { dismissHintTooltips } from './support/tooltips'
 
 test.setTimeout(180_000)
@@ -104,11 +105,19 @@ test('household entrance: explain a real failure, edit in place, retain owner ac
   await page.screenshot({ path: testInfo.outputPath('04-risk-fixed-functions-preserved.png') })
   await page.getByTestId('close-verification-result').click()
   await page.getByTestId('board-undo').click()
-  await expect.poll(() => readBoard(request, auth)).toEqual(before)
+  await expect(page.getByText('已还原自动化规则。', { exact: true })).toBeVisible()
+  const undone = await readBoard(request, auth)
+  expectSameBoardScene(undone, before)
+  expect(undone.editHistory).toMatchObject({ canUndo: false, canRedo: true })
+  expect(undone.editHistory.editHistoryRevision).not.toBe(before.editHistory.editHistoryRevision)
   await check(page, 1)
   await page.getByTestId('close-verification-result').click()
   await page.getByTestId('board-redo').click()
-  await expect.poll(() => readBoard(request, auth)).toEqual(after)
+  await expect(page.getByText('已重做：更新自动化规则。', { exact: true })).toBeVisible()
+  const redone = await readBoard(request, auth)
+  expectSameBoardScene(redone, after)
+  expect(redone.editHistory).toMatchObject({ canUndo: true, canRedo: false })
+  expect(redone.editHistory.editHistoryRevision).not.toBe(undone.editHistory.editHistoryRevision)
   await check(page, 0)
   await testInfo.attach('verified-demo-results', { contentType: 'application/json',
     body: Buffer.from(JSON.stringify({ baseline, repaired }, null, 2)) })

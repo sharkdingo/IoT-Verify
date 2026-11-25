@@ -58,6 +58,7 @@ export const createPagedRequestCoordinator = () => {
   return {
     beginReplace,
     beginAppend,
+    hasPendingReplace: () => latestReplaceRequestId !== null,
     invalidate,
     isCurrent,
     finish

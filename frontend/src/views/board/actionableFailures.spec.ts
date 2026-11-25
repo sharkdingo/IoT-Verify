@@ -304,7 +304,7 @@ describe('persistent failure presentation', () => {
 describe('run failure details', () => {
   it.each(['verification', 'simulation'])('preserves the %s cause behind localized copy', kind => {
     const ports: Record<string, any> = {
-      computed, isModelPlaybackActive: ref(false), verificationError: ref(null), simulationError: ref(null),
+      computed, automaticRunPresentation: () => 'foreground', verificationError: ref(null), simulationError: ref(null),
       errorDetails, technicalErrorLines, t, notifyError: vi.fn(),
       isCompletedTaskResultUnavailableError: () => false, isFuzzCompletedResultUnavailableError: () => false,
       RUN_RESPONSE_INCOMPLETE_CODE: 'RUN_RESPONSE_INCOMPLETE', FUZZ_RESPONSE_INCOMPLETE_CODE: 'FUZZ_RESPONSE_INCOMPLETE',

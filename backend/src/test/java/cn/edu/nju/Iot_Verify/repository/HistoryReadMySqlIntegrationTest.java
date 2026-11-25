@@ -232,13 +232,24 @@ class HistoryReadMySqlIntegrationTest {
         BoardEditJournal journal = new BoardEditJournal(journalRepository, new ObjectMapper());
         for (int state = 0; state < 4; state++) {
             long userId = 100L + state;
-            if ((state & 1) != 0) journalRepository.save(journalEntry(userId, 1L, false));
-            if ((state & 2) != 0) journalRepository.save(journalEntry(userId, 2L, true));
+            Long undoSequence = (state & 1) != 0 ? 2L : null;
+            Long redoSequence = (state & 2) != 0 ? 3L : null;
+            BoardEditJournalPo newest = null;
+            if (undoSequence != null) {
+                journalRepository.save(journalEntry(userId, 1L, false));
+                newest = journalRepository.save(journalEntry(userId, undoSequence, false));
+            }
+            if (redoSequence != null) {
+                journalRepository.save(journalEntry(userId, redoSequence, true));
+                newest = journalRepository.save(journalEntry(userId, 4L, true));
+            }
             journalRepository.flush();
             entityManager.clear();
             SqlCapture.STATEMENTS.get().clear();
 
-            assertEquals(new BoardUndoAvailability((state & 1) != 0, (state & 2) != 0), journal.availability(userId));
+            Long lastEditId = newest == null ? null : newest.getId();
+            assertEquals(new BoardUndoAvailability(lastEditId, undoSequence, redoSequence),
+                    journal.availability(userId));
 
             var selects = selects();
             assertEquals(1, selects.size());

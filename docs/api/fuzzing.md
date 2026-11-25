@@ -273,7 +273,9 @@ Lease creation, renewal, and expiry comparison use the database clock, so JVM ti
 host-clock differences cannot make another instance expire healthy work. Another backend
 instance leaves a live lease untouched and only converts an expired active lease to `FAILED`;
 this prevents a rolling deployment from terminating work owned by a healthy instance while
-still recovering work abandoned by a stopped process. Start and renewal both require the
+still recovering work abandoned by a stopped process. Recovery follows the
+[same row-lock and expiry recheck as verification](verification.md#post-apiverifyasync--asynchronous).
+Start and renewal both require the
 persisted lease to remain unexpired, so a delayed local Future cannot revive abandoned work
 in the interval before recovery maintenance runs. Worker success and failure require the same
 live owner and lease, use the database clock for terminal timestamps, and cannot commit stale
@@ -295,14 +297,10 @@ fast task cannot finish before its persisted creation timestamp.
   while `size` defaults to `100` (`1..200`); rows are newest first.
 - `GET /api/fuzz/tasks/{id}` and `GET /api/fuzz/tasks/{id}/progress`: owned task detail
   and progress.
-- `POST /api/fuzz/tasks/{id}/cancel`: returns `TaskCancellationResultDto`; terminal
-  writes use atomic status predicates, so cancellation cannot later become completion.
-  Status reads follow the shared [cancellation transaction ordering](../architecture/verification-flow.md#sync-async-and-simulation).
-  Locally queued work is removed immediately when this instance owns it. The response
-  reports no remaining execution only after that pre-start removal is definitive;
-  otherwise it conservatively reports that execution may still be stopping while a local
-  worker unwinds or another instance reconciles the cancellation. A running worker retains
-  its capacity permit until its `finally` cleanup completes.
+- `POST /api/fuzz/tasks/{id}/cancel` returns the shared
+  [`TaskCancellationResultDto`](verification.md#taskcancellationresultdto) and follows the same
+  [cancellation transaction ordering](../architecture/verification-flow.md#sync-async-and-simulation).
+  A running exploration retains its capacity permit until its `finally` cleanup completes.
 - `DELETE /api/fuzz/tasks/{id}`: dismisses only failed/cancelled tasks. Active work must
   be cancelled first; completed results are deleted through run history.
 

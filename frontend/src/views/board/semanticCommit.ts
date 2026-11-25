@@ -1,3 +1,4 @@
+import type { BoardUndoAvailability } from '@/types/boardEdit'
 import type { DeviceNode } from '@/types/node'
 import type { ModelEnvironmentVariable } from '@/types/model'
 import type { RuleForm } from '@/types/rule'
@@ -24,7 +25,7 @@ export interface BoardSemanticScene {
   /** Authoritative specification list, when the mutation returned one. */
   specs?: Specification[]
   /** Undo availability the server reported, when this mutation is reversible. */
-  availability?: { canUndo?: boolean; canRedo?: boolean }
+  availability?: Partial<BoardUndoAvailability>
   /** False only when the server explicitly confirmed that the request changed no model state. */
   semanticChanged?: boolean
 }
@@ -64,7 +65,7 @@ export interface BoardSemanticCommitPorts {
    */
   markVerificationResultStale: () => void
   /** Mirrors server-reported undo availability. Omitted availability must not clear real history. */
-  syncUndoAvailability: (availability: { canUndo?: boolean; canRedo?: boolean }) => void
+  syncUndoAvailability: (availability: Partial<BoardUndoAvailability>) => void
   /** Drops an inspector focus whose target no longer exists in the authoritative collections. */
   clearDanglingFocus: (scene: { nodes?: DeviceNode[]; rules?: RuleForm[]; specs?: Specification[] }) => void
 }
@@ -88,9 +89,7 @@ export const createBoardSemanticCommit = (ports: BoardSemanticCommitPorts) =>
 
     ports.clearDanglingFocus(scene)
 
-    // Callers pass the whole mutation DTO, so the real protection is inside `syncUndoAvailability`:
-    // it copies `canUndo`/`canRedo` only when each is actually a boolean, so a non-reversible
-    // mutation that omits them cannot clear real server history.
+    // Pass the revision together with the collections the user has just seen change.
     if (scene.availability) ports.syncUndoAvailability(scene.availability)
 
     if (scene.semanticChanged !== false) ports.markVerificationResultStale()

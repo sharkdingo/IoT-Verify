@@ -1,5 +1,5 @@
 import { openRecommendation, collapseRecommendation } from './support/recommendations'
-import { expectSameBoardSnapshot } from './support/boardSnapshot'
+import { expectSameBoardScene, expectSameBoardSnapshot } from './support/boardSnapshot'
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -181,7 +181,7 @@ test.describe('live AI full-stack audit', () => {
         expect(added.command).toMatchObject({ deviceName: 'live_target', action: scene.action })
         expect(added.command.contentDevice ?? null).toBe(scene.contentDevice ?? null)
         expect(added.command.content ?? null).toBe(scene.content ?? null)
-        expectSameBoardSnapshot(after, { ...before, rules: [added] })
+        expectSameBoardScene(after, { ...before, rules: [added] })
         await page.screenshot({ path: testInfo.outputPath('rule-flow.png'), fullPage: true })
         const undoResponse = page.waitForResponse(response => response.request().method() === 'POST'
           && new URL(response.url()).pathname === '/api/board/edits/undo')
@@ -190,7 +190,7 @@ test.describe('live AI full-stack audit', () => {
         const undoBody = await undo.json()
         expect(undo.ok(), JSON.stringify(undoBody)).toBeTruthy()
         expect(undoBody.data.applied).toBe(true)
-        expectSameBoardSnapshot(await readData('snapshot'), before)
+        expectSameBoardScene(await readData('snapshot'), before)
         await testInfo.attach('applied-and-undone', { contentType: 'application/json', body: Buffer.from(JSON.stringify({
           scenario: scene.id, language, requestId: input.requestId, writeStatus: write.status(), undoStatus: undo.status(), added
         })) })
@@ -335,7 +335,7 @@ test.describe('live AI full-stack audit', () => {
         expect(added.ifConditions).toEqual([])
         expect(added.thenConditions).toEqual([])
       }
-      expectSameBoardSnapshot(after, { ...before, [collection]: [...before[collection], added] })
+      expectSameBoardScene(after, { ...before, [collection]: [...before[collection], added] })
       expect(availability.canUndo).toBe(true)
       const undoResponse = page.waitForResponse(response => response.request().method() === 'POST'
         && new URL(response.url()).pathname === '/api/board/edits/undo')
@@ -348,7 +348,7 @@ test.describe('live AI full-stack audit', () => {
       })) })
       expect(undo.ok(), JSON.stringify(undoBody)).toBeTruthy()
       expect(undoBody.data.applied).toBe(true)
-      expectSameBoardSnapshot(restored, before)
+      expectSameBoardScene(restored, before)
       applied.push(kind)
       await expect(page.getByTestId('board-undo')).toBeDisabled()
     }
@@ -397,12 +397,14 @@ test.describe('live AI full-stack audit', () => {
     const withoutConditionIds = (spec: any) => ({ ...spec,
       ...Object.fromEntries(['aConditions', 'ifConditions', 'thenConditions'].map(group =>
         [group, spec[group].map(({ id: _id, ...condition }: any) => condition)])) })
-    expectSameBoardSnapshot({ ...after, specifications: after.specifications.map(withoutConditionIds) }, { ...before,
+    expectSameBoardScene({ ...after, specifications: after.specifications.map(withoutConditionIds) }, { ...before,
       specifications: before.specifications.map((spec: any) =>
         withoutConditionIds(spec.id === original.id ? { ...spec, name: desiredName } : spec)) })
-    const undone = await request.post(`${apiBaseURL}/api/board/edits/undo`, { headers, data: null })
+    const undone = await request.post(`${apiBaseURL}/api/board/edits/undo`, {
+      headers, data: { expectedEditHistoryRevision: after.editHistory.editHistoryRevision }
+    })
     expect(undone.ok(), await undone.text()).toBeTruthy()
-    expectSameBoardSnapshot(await readData('board/snapshot'), before)
+    expectSameBoardScene(await readData('board/snapshot'), before)
   })
 
   test('returns a validated scene recommendation and streams a tool-backed board answer', async ({ request }) => {
@@ -660,11 +662,13 @@ test.describe('live AI full-stack audit', () => {
       expect(added.createdAt).toEqual(expect.any(String))
       expect(added.createdAt).not.toBe('')
       expect(before.rules.map((rule: any) => rule.id)).not.toContain(added.id)
-      // Full raw snapshots retain rule IDs/timestamps, original order, and every other collection.
-      expectSameBoardSnapshot(after, { ...before, rules: [...before.rules, added] })
+      // Compare every collection, including rule IDs, timestamps, and original order.
+      expectSameBoardScene(after, { ...before, rules: [...before.rules, added] })
       expect(availabilityBody.data.canUndo).toBe(true)
 
-      const undo = await request.post(`${apiBaseURL}/api/board/edits/undo`, { headers: H })
+      const undo = await request.post(`${apiBaseURL}/api/board/edits/undo`, {
+        headers: H, data: { expectedEditHistoryRevision: after.editHistory.editHistoryRevision }
+      })
       const undoBody = await undo.json()
       const restoredResponse = await request.get(`${apiBaseURL}/api/board/snapshot`, { headers: H })
       const restoredBody = await restoredResponse.json()
@@ -680,7 +684,7 @@ test.describe('live AI full-stack audit', () => {
       expect(undoBody.data.rules).toEqual(before.rules)
       expect(restoredResponse.ok(), await restoredResponse.text()).toBeTruthy()
       expect(restoredBody.code, JSON.stringify(restoredBody)).toBe(200)
-      expectSameBoardSnapshot(restoredBody.data, before)
+      expectSameBoardScene(restoredBody.data, before)
     }
   })
 
@@ -776,7 +780,7 @@ test.describe('live AI full-stack audit', () => {
       expect(hasTool(applied, ['apply_fix'])).toBeTruthy()
       await expect(page.getByTestId('chat-protected-confirmation')).toHaveCount(0)
       const after = await readData('/api/board/snapshot')
-      expectSameBoardSnapshot(after, { ...before, rules: before.rules.filter((rule: any) => rule.id !== unsafe.id) })
+      expectSameBoardScene(after, { ...before, rules: before.rules.filter((rule: any) => rule.id !== unsafe.id) })
       expect((await readData('/api/board/edits/availability')).canUndo).toBe(true)
       const finalReply = await turn('请重新正式验证当前画布，攻击和隐私检查仍关闭。说明全部要求现在的结论、触发条件是否可达和任何剩余问题。不要修改任何内容。')
       expect(hasTool(finalReply, ['verify_model', 'verify_model_async'])).toBeTruthy()

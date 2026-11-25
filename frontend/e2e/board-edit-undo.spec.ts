@@ -61,6 +61,7 @@ type RawBoardSnapshot = {
   environmentVariables: Array<{ name: string; value: string; trust: string; privacy: string }>
   rules: Array<{ id: number }>
   specifications: Array<{ id: string }>
+  editHistory: { canUndo: boolean; canRedo: boolean; editHistoryRevision: string }
 }
 
 const boardSnapshot = async (
@@ -198,6 +199,63 @@ test.describe('board edit undo and redo', () => {
     await expect(undoButton(page)).toBeEnabled()
     await undoButton(page).click()
     await expect.poll(async () => (await ruleIds(request, auth)).length).toBe(before.length)
+  })
+
+  test('refreshes a stale undo target before a second deliberate undo', async ({ page, context, request }) => {
+    const auth = await createAuthenticatedUser(request, { usernamePrefix: 'undoTab' })
+    const writer = await context.newPage()
+    await seedSession(writer, auth)
+    await writer.goto('/#/board')
+    await expect(writer.getByTestId('scene-import')).toBeEnabled()
+    const headers = { Authorization: `Bearer ${auth.token}` }
+    const addLight = async (id: string, label: string, x: number) => {
+      // The request context writes through the real API without the browser's invalidation broadcast.
+      const response = await writer.request.post(`${apiBaseURL}/api/board/nodes`, {
+        headers, data: {
+          devices: [{ id, label, templateName: 'Light', state: 'off', position: { x, y: 200 }, width: 176, height: 128 }],
+          environmentVariablePatches: []
+        }
+      })
+      expect(response.ok(), await response.text()).toBe(true)
+    }
+    await addLight('observed_light', 'Observed light', 150)
+    await seedSession(page, auth)
+    await page.bringToFront()
+    await page.goto('/#/board')
+    const observed = page.locator('[data-node-id="observed_light"]')
+    const later = page.locator('[data-node-id="later_light"]')
+    await expect(observed).toContainText('Observed light')
+    await expect(undoButton(page)).toBeEnabled()
+    const seen = await boardSnapshot(request, auth)
+
+    await addLight('later_light', 'Later light', 420)
+    const beforeUndo = await boardSnapshot(request, auth)
+    expect(await later.count()).toBe(0)
+    const waitForUndo = () => page.waitForResponse(response => response.request().method() === 'POST'
+      && new URL(response.url()).pathname === '/api/board/edits/undo')
+    const firstUndo = waitForUndo()
+    await undoButton(page).click()
+    const rejected = await firstUndo
+    expect(rejected.status()).toBe(409)
+    expect((await rejected.json()).data.reasonCode).toBe('BOARD_EDIT_HISTORY_CHANGED')
+    expect(rejected.request().postDataJSON()).toEqual({ expectedEditHistoryRevision: seen.editHistory.editHistoryRevision })
+    await expect(later).toContainText('Later light')
+    await expect(page.getByText('Another edit changed the undo history. The board has been refreshed. Review it and try again.',
+      { exact: true })).toBeVisible()
+    await expect(undoButton(page)).toBeEnabled()
+    expect(await boardSnapshot(request, auth)).toEqual(beforeUndo)
+
+    const secondUndo = waitForUndo()
+    await undoButton(page).click()
+    const applied = await secondUndo
+    expect(applied.ok(), await applied.text()).toBe(true)
+    expect(applied.request().postDataJSON()).toEqual({
+      expectedEditHistoryRevision: beforeUndo.editHistory.editHistoryRevision
+    })
+    await expect(later).toHaveCount(0)
+    await expect(observed).toContainText('Observed light')
+    await expect(redoButton(page)).toBeEnabled()
+    expect((await boardSnapshot(request, auth)).nodes.map(node => node.id)).toEqual(['observed_light'])
   })
 
   test('reconciles undo availability when a committed edit response is incomplete', async ({ page, request }) => {

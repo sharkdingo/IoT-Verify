@@ -88,7 +88,7 @@ describe('field feedback in production Board mutation handlers', () => {
     if (kind === 'environment') await state.saveEnvironmentVariables(patch('25'), complete)
     else await state.handleDeviceRuntimeSave('thermostat', { variables: [{ name: 'threshold', value: '25' }] }, complete)
     expect(kind === 'environment' ? state.refreshBoardSnapshot : state.refreshDevices).toHaveBeenCalledOnce()
-    expect(state.reloadUndoAvailability).toHaveBeenCalledOnce()
+    expect(state.reloadUndoAvailability).toHaveBeenCalledTimes(kind === 'runtime' ? 1 : 0)
     expect(complete).toHaveBeenCalledExactlyOnceWith(false, undefined)
     expect(state.commitSemanticScene).not.toHaveBeenCalled()
   })

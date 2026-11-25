@@ -104,8 +104,13 @@ test('a confirmed scene import refreshes another visible window like a targeted 
     })
     expect(lifecycle).toEqual({ visibilityState: 'visible', events: { focus: 0, visibility: 0 } })
     expect(snapshot.data.nodes.map((node: { id: string }) => node.id)).toEqual(['imported_lamp'])
+    expect(undo.data.editHistoryRevision).toEqual(expect.stringMatching(/\S/))
+    expect(snapshot.data.editHistory).toEqual({
+      canUndo: false, canRedo: false, editHistoryRevision: undo.data.editHistoryRevision
+    })
     expect.soft(observedReads.snapshot).toBeGreaterThan(0)
     expect.soft(observedReads.fingerprints).toBeGreaterThan(0)
+    expect(observedReads.undo).toBe(0)
     await expect.soft(observer.getByTestId('board-undo')).toBeDisabled()
     await expect.soft(observer.locator('.device-node').filter({ hasText: 'Observer original lamp' })).toHaveCount(0)
   } finally {

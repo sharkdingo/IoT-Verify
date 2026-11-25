@@ -2293,7 +2293,8 @@ class BoardStorageServiceImplTemplatePrecheckTest {
     private static BoardEditHistoryState historyState(int entryCount, String tokenCharacter) {
         return new BoardEditHistoryState(
                 entryCount,
-                new BoardUndoAvailability(entryCount > 0, false),
+                entryCount > 0 ? new BoardUndoAvailability((long) entryCount, (long) entryCount, null)
+                        : BoardUndoAvailability.EMPTY,
                 tokenCharacter.repeat(64));
     }
 }

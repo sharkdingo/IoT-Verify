@@ -28,6 +28,7 @@ public class CollectionMutationResultDto<T> {
      */
     private Boolean canUndo;
     private Boolean canRedo;
+    private String editHistoryRevision;
 
     public static <T> CollectionMutationResultDto<T> of(String operation,
                                                          T affectedItem,
@@ -35,13 +36,15 @@ public class CollectionMutationResultDto<T> {
         List<T> items = currentItems != null ? currentItems : List.of();
         // Undo availability is attached by the caller only where the mutation is reversible.
         return new CollectionMutationResultDto<>(
-                operation, affectedItem, items, items.size(), null, null);
+                operation, affectedItem, items, items.size(), null, null, null);
     }
 
     /** Attaches the post-mutation undo availability read from the edit journal. */
-    public CollectionMutationResultDto<T> withUndoAvailability(boolean canUndo, boolean canRedo) {
+    public CollectionMutationResultDto<T> withUndoAvailability(boolean canUndo, boolean canRedo,
+                                                                String editHistoryRevision) {
         this.canUndo = canUndo;
         this.canRedo = canRedo;
+        this.editHistoryRevision = editHistoryRevision;
         return this;
     }
 }

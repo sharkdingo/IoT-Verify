@@ -32,4 +32,9 @@ public class ConflictException extends BaseException {
     public static ConflictException duplicateTemplate(String name) {
         return new ConflictException("Device template already exists: " + name);
     }
+
+    public static ConflictException boardEditHistoryChanged() {
+        return new ConflictException("Board edit history changed. Review the current Board and try again.",
+                null, "BOARD_EDIT_HISTORY_CHANGED", "expectedEditHistoryRevision");
+    }
 }

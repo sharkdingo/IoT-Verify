@@ -15,6 +15,7 @@ import { indexDeviceTemplates, resolveImpactEnvironmentDefinition } from '@/util
 import { normalizeTemplateLookupName } from '@/utils/templateUsage'
 import { formatBuiltInModelToken } from '@/utils/modelTokenDisplay'
 import { resolveEffectiveNodeState } from '@/utils/canvas/nodeState'
+import { isConcreteDeviceState } from '@/utils/stateConditionDomain'
 import { confirmDestructive } from '@/utils/feedback'
 import { deviceIconFor } from '@/utils/deviceIcon'
 import FailureDetails from '@/components/FailureDetails.vue'
@@ -25,6 +26,7 @@ import {
   TRUST_OPTIONS,
   buildDeviceRuntimeConfig,
   createDeviceRuntimeDraft,
+  findTemplateWorkingState,
   getTemplateLocalVariables,
   getTemplateVariableDefaultValue,
   syncStateDerivedVariables,
@@ -230,9 +232,9 @@ const materializeSubmittedRuntimeDraft = (
   runtime: DeviceRuntimeConfig
 ): DeviceRuntimeDraft => {
   const draft = createDeviceRuntimeDraft()
-  resetDeviceRuntimeDraft(draft, template)
+  const state = runtime.state === undefined ? undefined : normalizeRuntimeDraftValue(runtime.state)
+  resetDeviceRuntimeDraft(draft, template, state)
 
-  if (runtime.state !== undefined) draft.state = normalizeRuntimeDraftValue(runtime.state)
   if (runtime.currentStateTrust !== undefined) {
     draft.currentStateTrust = normalizeRuntimeDraftValue(runtime.currentStateTrust, true)
   }
@@ -313,6 +315,18 @@ const runtimeWorkingStates = computed(() =>
   getTemplateWorkingStates(currentTemplate.value)
 )
 
+const runtimeStateOptions = computed(() => {
+  const template = currentTemplate.value
+  const options = new Map(runtimeWorkingStates.value.map(state => [state.Name, state.Name]))
+  // Keep an existing instance's spelling selectable even when the template uses different padding.
+  for (const state of [runtimeDraftBaseline.value.state, runtimeDraft.value.state]) {
+    if (isConcreteDeviceState(template?.manifest, state)) {
+      options.set(findTemplateWorkingState(template, state)?.Name ?? state, state)
+    }
+  }
+  return [...options.values()]
+})
+
 const runtimeInternalVariables = computed(() =>
   getTemplateLocalVariables(currentTemplate.value)
 )
@@ -334,13 +348,13 @@ watch(() => runtimeDraft.value.state, state => {
   syncStateDerivedVariables(runtimeDraft.value.variables, currentTemplate.value, state)
 })
 
-const runtimeStateTemplateDefaults = computed(() => {
-  const state = runtimeWorkingStates.value.find(item => item.Name === runtimeDraft.value.state)
-  return {
-    trust: state?.Trust || 'trusted',
-    privacy: state?.Privacy || 'public'
-  }
-})
+const runtimeDeclaredState = computed(() => findTemplateWorkingState(currentTemplate.value, runtimeDraft.value.state))
+const runtimeStateTemplateDefaults = computed(() => ({
+  trust: runtimeDeclaredState.value?.Trust || 'trusted',
+  privacy: runtimeDeclaredState.value?.Privacy || 'public'
+}))
+const runtimeVariableIsStateDerived = (name: string) =>
+  Boolean(runtimeDeclaredState.value) && templateVariableIsStateDerived(currentTemplate.value, name)
 
 const runtimeHasModes = computed(() => {
   const m = currentTemplate.value?.manifest
@@ -409,13 +423,15 @@ const variableInputPlaceholder = (variable: InternalVariable) => {
 
 const createRuntimeDraftFromNode = () => {
   const template = currentTemplate.value
-  const draft = createDeviceRuntimeDraft()
-  resetDeviceRuntimeDraft(draft, template)
-
   const node = currentNode.value
+  const state = node?.state && runtimeHasModes.value
+    ? resolveEffectiveNodeState(node.state, template?.manifest)
+    : undefined
+  const draft = createDeviceRuntimeDraft()
+  resetDeviceRuntimeDraft(draft, template, state)
+
   if (node) {
-    if (runtimeHasModes.value && node.state) {
-      draft.state = resolveEffectiveNodeState(node.state, template?.manifest, draft.state)
+    if (state !== undefined) {
       draft.currentStateTrust = node.currentStateTrust || ''
       draft.currentStatePrivacy = node.currentStatePrivacy || ''
     }
@@ -474,9 +490,8 @@ const reconcileRuntimeDraftForSchemaChange = () => {
 
   const currentStateContext = runtimeStateContext(currentDraft)
   const baselineStateContext = runtimeStateContext(baselineDraft)
-  const supportedStates = new Set(runtimeWorkingStates.value.map(state => state.Name))
   const stateContextFitsCurrentSchema = runtimeHasModes.value
-    && supportedStates.has(currentStateContext.state)
+    && isConcreteDeviceState(currentTemplate.value?.manifest, currentStateContext.state)
     && (!currentStateContext.currentStateTrust
       || TRUST_OPTIONS.some(option => option === currentStateContext.currentStateTrust))
     && (!currentStateContext.currentStatePrivacy
@@ -1194,8 +1209,8 @@ const deviceSpecs = computed(() => {
                         v-model="runtimeDraft.state"
                         data-testid="device-runtime-state"
                       >
-                        <option v-for="state in runtimeWorkingStates" :key="state.Name" :value="state.Name">
-                          {{ formatStateForDisplay(state.Name, state.Name) }}
+                        <option v-for="state in runtimeStateOptions" :key="state" :value="state">
+                          {{ formatStateForDisplay(state, state) }}
                         </option>
                       </FieldSelect>
                     </label>
@@ -1232,7 +1247,7 @@ const deviceSpecs = computed(() => {
                             the fallback is live and the value really is the user's.
                           -->
                           <div
-                            v-if="templateVariableIsStateDerived(currentTemplate, variable.Name)"
+                            v-if="runtimeVariableIsStateDerived(variable.Name)"
                             :data-testid="`device-runtime-variable-derived-${variable.Name}`"
                             class="flex min-w-0 items-center gap-2 rounded-lg border border-dashed board-border-subtle board-bg-muted px-3 py-2"
                           >

@@ -54,8 +54,8 @@ Verified against code on 2026-10-26.
 | PUT | `/api/board/rules/{ruleId}` | Edit one unchanged automation rule in place | [board.md](board.md#targeted-rulespecification-edits) |
 | DELETE | `/api/board/rules/{ruleId}` | Delete one automation rule when its confirmed snapshot is still current | [board.md](board.md) |
 | GET | `/api/board/edits/availability` | Current undo/redo availability from the per-user edit journal | [board.md](board.md) |
-| POST | `/api/board/edits/undo` | Reverse the newest reversible Board edit, including device updates, Environment Pool edits, and automatic fixes | [board.md](board.md) |
-| POST | `/api/board/edits/redo` | Re-apply the oldest undone board edit | [board.md](board.md) |
+| POST | `/api/board/edits/undo` | Reverse the newest edit in the reviewed Board history | [board.md](board.md) |
+| POST | `/api/board/edits/redo` | Re-apply the oldest undone edit in the reviewed Board history | [board.md](board.md) |
 | GET | `/api/board/edits/clear-preview` | Preview the exact undo/redo history impact for confirmation | [board.md](board.md) |
 | POST | `/api/board/edits/clear` | Token-confirmed discard of undo/redo history without changing Board data | [board.md](board.md) |
 | GET | `/api/board/replacement-preview` | Preview authoritative current-scene counts and obtain the confirmation impact token | [board.md](board.md) |

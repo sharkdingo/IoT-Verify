@@ -1,7 +1,7 @@
-import { onBeforeUnmount, onMounted, readonly, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, readonly, ref } from 'vue'
 
 import boardApi from '@/api/board'
-import type { BoardUndoResult } from '@/types/boardEdit'
+import { isBoardEditHistoryRevision, type BoardUndoAvailability, type BoardUndoResult } from '@/types/boardEdit'
 import { resolveBoardUndoIntent, targetOwnsNativeUndo } from './boardUndoShortcut'
 
 /**
@@ -63,36 +63,26 @@ export const useBoardUndo = (options: {
     reconciled?: boolean
   ) => void
 }) => {
-  const canUndo = ref(false)
-  const canRedo = ref(false)
+  const observedHistory = ref<BoardUndoAvailability | null>(null)
+  const canUndo = computed(() => observedHistory.value?.canUndo ?? false)
+  const canRedo = computed(() => observedHistory.value?.canRedo ?? false)
   const isApplying = ref(false)
-  // Bumped by every applied undo/redo. An availability read runs outside the mutation queue, so one
-  // started before an undo could otherwise land after it and overwrite the post-undo availability
-  // with the pre-undo journal state.
+  // A read started before an applied edit must not trigger a refresh based on an older observation.
   let availabilityEpoch = 0
-  // Latest-started read wins among reads from the same mutation epoch. Without this, two foreground
-  // refreshes can complete out of order and let the older request overwrite the newer one.
+  // Latest-started read wins among reads from the same mutation epoch.
   let availabilityReadSequence = 0
 
-  const assignAvailability = (availability: { canUndo?: boolean, canRedo?: boolean }) => {
-    if (typeof availability.canUndo === 'boolean') canUndo.value = availability.canUndo
-    if (typeof availability.canRedo === 'boolean') canRedo.value = availability.canRedo
-  }
-
-  /**
-   * Mirrors the availability the server returned with an ordinary mutation.
-   *
-   * Reversible mutations report it; the rest omit it, and omitting must not silently clear a real
-   * availability, so a missing value is ignored rather than treated as false.
-   */
-  const syncAvailability = (availability: { canUndo?: boolean, canRedo?: boolean }) => {
-    if (typeof availability.canUndo !== 'boolean'
-      && typeof availability.canRedo !== 'boolean') return
-    // This is called by authoritative mutation responses. Invalidate every availability read that
-    // began before the mutation committed, including reads raced by ordinary edits rather than only
-    // undo/redo itself.
+  /** Adopt only the history paired with the visible Board or a committed user edit. */
+  const syncAvailability = ({ canUndo, canRedo, editHistoryRevision }: Partial<BoardUndoAvailability>) => {
+    if (typeof canUndo !== 'boolean' || typeof canRedo !== 'boolean') return
+    if (!isBoardEditHistoryRevision(editHistoryRevision)) {
+      // Scene replacement clears history even though its receipt needs no revision.
+      if (canUndo || canRedo) return
+      observedHistory.value = null
+    } else {
+      observedHistory.value = { canUndo, canRedo, editHistoryRevision }
+    }
     availabilityEpoch += 1
-    assignAvailability(availability)
   }
 
   const apply = async (direction: 'undo' | 'redo') => {
@@ -101,19 +91,18 @@ export const useBoardUndo = (options: {
       options.report('blocked', direction)
       return
     }
+    const observed = observedHistory.value
+    if (!observed || !(direction === 'undo' ? observed.canUndo : observed.canRedo)) return
 
     isApplying.value = true
     try {
-      const result = await options.submit(() => boardApi.applyBoardEditUndo(direction))
-      // Availability comes from the journal even when nothing was applied, so a stale local
-      // guess is corrected rather than persisted.
-      syncAvailability(result)
-      if (!result.applied) {
-        options.report('nothing', direction)
-        return
-      }
-      options.applyResult(result)
-      options.onApplied?.(result)
+      await options.submit(async () => {
+        const result = await boardApi.applyBoardEditUndo(direction, observed.editHistoryRevision)
+        if (result.applied) options.applyResult(result)
+        syncAvailability(result)
+        if (result.applied) options.onApplied?.(result)
+        else options.report('nothing', direction)
+      })
     } catch (error) {
       // A queued request can be rejected because the board went away, not because the undo failed.
       if (options.isIgnorableError?.(error)) return
@@ -126,35 +115,32 @@ export const useBoardUndo = (options: {
       // rejected by the client contract parser. Reconcile both through the mutation queue before
       // describing the outcome, and never claim the board was unchanged when it is unknown.
       const reconciled = await options.reconcile().catch(() => false)
-      await loadAvailability()
       options.report(status === 409 ? 'conflict' : 'failed', direction, error, reconciled)
     } finally {
       isApplying.value = false
     }
   }
 
-  /**
-   * Loads availability from the server, so a fresh page has the right affordance before the user
-   * does anything. Failure is silent and preserves the last confirmed values; inventing either
-   * availability or unavailability would misdescribe server history.
-   */
-  const loadAvailability = async () => {
+  /** A standalone read can detect drift. Only a Board refresh can adopt the newer revision. */
+  const hasHistoryChanged = async (): Promise<boolean> => {
     const epoch = availabilityEpoch
     const readSequence = ++availabilityReadSequence
     try {
       const availability = await boardApi.getBoardEditAvailability()
       // A mutation landed while this was in flight, or a later refresh was already requested.
-      if (epoch !== availabilityEpoch || readSequence !== availabilityReadSequence) return
-      assignAvailability(availability)
+      if (epoch !== availabilityEpoch || readSequence !== availabilityReadSequence) return false
+      return observedHistory.value === null
+        ? availability.canUndo || availability.canRedo
+        : availability.editHistoryRevision !== observedHistory.value.editHistoryRevision
     } catch {
-      // Leaving undo disabled never destroys work; claiming it is available might.
+      return false
     }
   }
 
   const handleKeydown = (event: KeyboardEvent) => {
     if (targetOwnsNativeUndo(event.target)) return
     const intent = resolveBoardUndoIntent(event)
-    if (!intent) return
+    if (!intent || !(intent === 'undo' ? canUndo.value : canRedo.value)) return
     // Only claim the keystroke once we are sure it is ours, so the browser's own undo still
     // works everywhere we decline.
     event.preventDefault()
@@ -165,10 +151,10 @@ export const useBoardUndo = (options: {
   onBeforeUnmount(() => window.removeEventListener('keydown', handleKeydown))
 
   return {
-    canUndo: readonly(canUndo),
-    canRedo: readonly(canRedo),
+    canUndo,
+    canRedo,
     isApplying: readonly(isApplying),
-    loadAvailability,
+    hasHistoryChanged,
     syncAvailability,
     undo: () => apply('undo'),
     redo: () => apply('redo')

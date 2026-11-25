@@ -206,7 +206,9 @@ test('Chinese editors retain real concurrent duplicate diagnostics and reconcile
       expect(after[collection]).toHaveLength(before[collection].length + 1)
       expect(after[collection].slice(0, before[collection].length)).toEqual(before[collection])
       expect(after[collection].at(-1)).toEqual(saved.affectedItem)
-      expect(after).toEqual({ ...before, [collection]: after[collection] })
+      expect(after).toEqual({ ...before, [collection]: after[collection], editHistory: {
+        canUndo: true, canRedo: false, editHistoryRevision: saved.editHistoryRevision
+      } })
       expect(heldPosts).toBe(1)
       evidence.push({ kind, race: 'Real API write between completed pre-check and delayed real editor POST',
         rejection: { status: response.status(), message: body.message, ...body.data },
@@ -350,7 +352,9 @@ test('Chinese editors retain real server range rejections without losing a local
     expect(after[collection]).toHaveLength(before[collection].length + 1)
     expect(after[collection].slice(0, before[collection].length)).toEqual(before[collection])
     expect(after[collection].at(-1)).toEqual(saved.affectedItem)
-    expect(after).toEqual({ ...before, [collection]: after[collection] })
+    expect(after).toEqual({ ...before, [collection]: after[collection], editHistory: {
+      canUndo: true, canRedo: false, editHistoryRevision: saved.editHistoryRevision
+    } })
     await testInfo.attach(`${kind}-corrected-numeric-write`, { contentType: 'application/json',
       body: Buffer.from(JSON.stringify({ before, after, history: await history(),
         operation: 'Edit the retained temperature condition to 1, then save without request injection' })) })

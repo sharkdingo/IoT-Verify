@@ -125,7 +125,7 @@ class BoardStorageServiceImplBatchTest {
         // The real journal always answers; reversible-mutation paths stamp this onto their result
         // without a null check, so an unstubbed mock would not model the real collaborator.
         lenient().when(editJournal.availability(anyLong()))
-                .thenReturn(new BoardUndoAvailability(false, false));
+                .thenReturn(BoardUndoAvailability.EMPTY);
         lenient().when(editJournal.historyState(anyLong()))
                 .thenReturn(historyState(0, "0"));
     }
@@ -1151,7 +1151,8 @@ class BoardStorageServiceImplBatchTest {
     private static BoardEditHistoryState historyState(int entryCount, String tokenCharacter) {
         return new BoardEditHistoryState(
                 entryCount,
-                new BoardUndoAvailability(entryCount > 0, false),
+                entryCount > 0 ? new BoardUndoAvailability((long) entryCount, (long) entryCount, null)
+                        : BoardUndoAvailability.EMPTY,
                 tokenCharacter.repeat(64));
     }
 
@@ -3181,6 +3182,7 @@ class BoardStorageServiceImplBatchTest {
         devicePo.setId("sensor1");
 
         DeviceTemplateDto.DeviceManifest manifest = DeviceTemplateDto.DeviceManifest.builder()
+                .name("Temperature Sensor")
                 .internalVariables(List.of(
                         DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
                                 .name("temperature")
@@ -3191,10 +3193,6 @@ class BoardStorageServiceImplBatchTest {
                                 .values(List.of("10", "20", "30"))
                                 .build()))
                 .build();
-        DeviceTemplateDto template = new DeviceTemplateDto();
-        template.setName("Temperature Sensor");
-        template.setManifest(manifest);
-
         SpecificationDto spec = new SpecificationDto();
         spec.setId("spec1");
         spec.setName("Safety requirement");
@@ -3211,7 +3209,8 @@ class BoardStorageServiceImplBatchTest {
         spec.setIfConditions(List.of());
         spec.setThenConditions(List.of());
 
-        DeviceTemplatePo templatePo = new DeviceTemplatePo();
+        DeviceTemplatePo templatePo = DeviceTemplatePo.builder().userId(1L).name("Temperature Sensor")
+                .manifestJson(JsonUtils.toJson(manifest)).build();
         SpecificationPo specPo = new SpecificationPo();
 
         when(nodeRepo.findByUserId(1L)).thenReturn(List.of(devicePo));

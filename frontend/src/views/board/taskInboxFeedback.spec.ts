@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import ts from 'typescript'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { describe, expect, it, vi } from 'vitest'
 import { createPagedRequestCoordinator } from '@/utils/pagedRequestCoordinator'
 import { errorDetails, localizedErrorMessage, type ApiErrorDetails } from '@/utils/userMessage'
@@ -49,15 +49,22 @@ const openingContext = () => {
   const state = context()
   const ports = Object.assign(state.ports, {
     loadTaskInbox: state.load, taskInboxBackgroundRefreshPromise: null as Promise<boolean> | null,
-    isModelPlaybackActive: ref(false), historyPanelIntentEpoch: 0,
-    historyDetailRequests: { invalidate: vi.fn() }, closeOtherWorkflowSurfaces: vi.fn(),
-    activeHistoryLayer: ref<'tasks' | 'results'>('results'), showHistoryPanel: ref(false),
+    isModelPlaybackActive: ref(false), isSceneReplacementInProgress: ref(false), historyPanelIntentEpoch: 0,
+    pendingHistoryRunTarget: null,
+    historyDetailRequests: { invalidate: vi.fn() }, closeResultSurfaces: vi.fn(),
+    activeWorkflowPanel: ref<{ kind: 'history' } | null>(null), computed,
+    activeHistoryLayer: ref<'tasks' | 'results'>('results'),
     unreadFuzzNotifications: ref([{ taskId: 7, kind: 'FAILED' as const }]),
     persistFuzzNotificationState: vi.fn(), notifyBlocked: vi.fn(),
-    clearFuzzNotifications: null as any, isCurrentHistoryPanelIntent: null as any
+    refreshCurrentBoardModelFingerprints: vi.fn().mockResolvedValue(undefined),
+    isAnyRecommendationRunning: vi.fn<() => boolean>().mockReturnValue(false),
+    showHistoryPanel: null as any, isCurrentHistoryPanelIntent: null as any
   })
-  ports.clearFuzzNotifications = bind('clearFuzzNotifications', ports)
-  ports.isCurrentHistoryPanelIntent = bind('isCurrentHistoryPanelIntent', ports)
+  for (const name of ['showHistoryPanel', 'clearFuzzNotifications', 'isCurrentHistoryPanelIntent', 'refreshHistoryLayer',
+    'setHistoryLayer', 'retireHistoryPanelIntent', 'closeWorkflowPanel', 'closeOtherWorkflowSurfaces',
+    'canOpenWorkflowPanel', 'openHistoryPanel']) {
+    Object.assign(ports, { [name]: bind(name, ports) })
+  }
   return { ports, open: bind('openTaskInbox', ports),
     refreshInBackground: bind('refreshTaskInboxInBackground', ports) }
 }
@@ -97,6 +104,15 @@ describe('task inbox read failures', () => {
     expect(ports.unreadFuzzNotifications.value).toEqual([])
     expect(ports.persistFuzzNotificationState).toHaveBeenCalledOnce()
     expect(ports.taskInboxError.value).toBeNull()
+  })
+
+  it('opens Task Status directly while recommendations are still generating', async () => {
+    const { ports, open } = openingContext()
+    ports.isAnyRecommendationRunning.mockReturnValue(true)
+    await open()
+    expect(ports.showHistoryPanel.value).toBe(true)
+    expect(ports.activeHistoryLayer.value).toBe('tasks')
+    expect(ports.notifyBlocked).not.toHaveBeenCalled()
   })
 
   it('keeps known rows and a persistent retry reason instead of only a toast', async () => {

@@ -39,6 +39,7 @@ import cn.edu.nju.Iot_Verify.exception.ValidationException;
 import cn.edu.nju.Iot_Verify.exception.PersistedDataIntegrityException;
 import cn.edu.nju.Iot_Verify.exception.AsyncTaskQuotaExceededException;
 import cn.edu.nju.Iot_Verify.exception.ConflictException;
+import cn.edu.nju.Iot_Verify.exception.ResourceNotFoundException;
 import cn.edu.nju.Iot_Verify.po.TracePo;
 import cn.edu.nju.Iot_Verify.po.UserPo;
 import cn.edu.nju.Iot_Verify.po.VerificationTaskPo;
@@ -81,7 +82,6 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.lang.reflect.Method;
 import java.io.File;
-import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
@@ -146,6 +146,7 @@ class VerificationServiceImplBuildResultTest {
         }
         when(progress.getProgress()).thenReturn(37);
         assertEquals(37, service.getTaskProgress(1L, 7L));
+        when(taskRepository.findProgressByIdAndUserId(7L, 2L)).thenReturn(Optional.empty());
         assertThrows(cn.edu.nju.Iot_Verify.exception.ResourceNotFoundException.class,
                 () -> service.getTaskProgress(2L, 7L));
         verify(taskRepository, never()).findByIdAndUserId(any(), any());
@@ -167,8 +168,11 @@ class VerificationServiceImplBuildResultTest {
     @Mock private BoardDataConverter boardDataConverter;
 
     private static class DirectThreadPoolTaskExecutor extends ThreadPoolTaskExecutor {
+        private Runnable beforeExecution = () -> {};
+
         @Override
         public void execute(Runnable task) {
+            beforeExecution.run();
             task.run();
         }
     }
@@ -201,7 +205,7 @@ class VerificationServiceImplBuildResultTest {
     }
 
     private VerificationServiceImpl service;
-    private ThreadPoolTaskExecutor verificationTaskExecutor;
+    private DirectThreadPoolTaskExecutor verificationTaskExecutor;
     private ThreadPoolTaskExecutor syncVerificationExecutor;
     private TransactionTemplate transactionTemplate;
     private Method buildVerificationResult;
@@ -229,6 +233,10 @@ class VerificationServiceImplBuildResultTest {
         lenient().when(taskRepository.currentDatabaseTime()).thenAnswer(invocation -> LocalDateTime.now());
         lenient().when(taskRepository.findByIdForUpdate(anyLong())).thenAnswer(invocation -> Optional.of(
                 VerificationTaskPo.builder().id(invocation.getArgument(0)).build()));
+        var queuedProgress = mock(VerificationTaskProgressProjection.class);
+        lenient().when(queuedProgress.getStatus()).thenReturn(VerificationTaskPo.TaskStatus.PENDING);
+        lenient().when(taskRepository.findProgressByIdAndUserId(anyLong(), anyLong()))
+                .thenReturn(Optional.of(queuedProgress));
         lenient().when(taskRepository.updateProgressIfActive(anyLong(), anyInt(), any(), anyString(), any(LocalDateTime.class)))
                 .thenReturn(1);
         lenient().when(userRepository.findByIdForUpdate(anyLong())).thenReturn(Optional.of(new UserPo()));
@@ -470,13 +478,6 @@ class VerificationServiceImplBuildResultTest {
         File jsonFile = new File(smvFile.getParentFile(), "request.json");
         assertTrue(jsonFile.exists());
         return new ObjectMapper().readTree(jsonFile);
-    }
-
-    @SuppressWarnings("unchecked")
-    private Set<Long> cancelledTaskIds() throws Exception {
-        Field f = AbstractAsyncTaskService.class.getDeclaredField("cancelledTasks");
-        f.setAccessible(true);
-        return (Set<Long>) f.get(service);
     }
 
     // --- effectiveSpecs = 0: all specs filtered out -> inconclusive ---
@@ -1048,6 +1049,21 @@ class VerificationServiceImplBuildResultTest {
     }
 
     @Test
+    void submitVerification_doesNotEnqueueTaskCancelledAfterCreation() {
+        CapturingThreadPoolTaskExecutor executor = new CapturingThreadPoolTaskExecutor();
+        VerificationServiceImpl queuedService = serviceWithVerificationExecutor(executor);
+        VerificationTaskProgressProjection cancelled = mock(VerificationTaskProgressProjection.class);
+        when(cancelled.getStatus()).thenReturn(VerificationTaskPo.TaskStatus.CANCELLED);
+        when(taskRepository.findProgressByIdAndUserId(1000L, 1L)).thenReturn(Optional.of(cancelled));
+
+        Long taskId = queuedService.submitVerification(
+                1L, makeRequest(singleDevice(), List.of(), List.of(makeEffectiveSpec("s1")), false, 0, false));
+
+        assertEquals(1000L, taskId);
+        assertNull(executor.capturedTask());
+    }
+
+    @Test
     void submitVerification_queueRejected_removesUndispatchedTaskAndThrowsServiceUnavailable() {
         VerificationServiceImpl rejectingService = serviceWithVerificationExecutor(new RejectingThreadPoolTaskExecutor());
         VerificationTaskPo savedTask = VerificationTaskPo.builder()
@@ -1351,7 +1367,8 @@ class VerificationServiceImplBuildResultTest {
         File smv = createTempModelFile();
         when(smvGenerator.generateWithEnvironment(anyLong(), anyList(), anyList(), anyList(), anyList(),
                 any(), anyBoolean(), any(), any())).thenAnswer(invocation -> {
-            cancelledTaskIds().add(71L);
+            assertTrue(service.requestLocalExecutionStop(71L));
+            Thread.interrupted();
             return generateResult(smv, List.of(makeEffectiveSpec("s1")));
         });
 
@@ -1370,7 +1387,8 @@ class VerificationServiceImplBuildResultTest {
         when(smvGenerator.generateWithEnvironment(anyLong(), anyList(), anyList(), anyList(), anyList(),
                 any(), anyBoolean(), any(), any())).thenReturn(generateResult(smv, List.of(makeEffectiveSpec("s1"))));
         when(nusmvExecutor.execute(any(File.class))).thenAnswer(invocation -> {
-            cancelledTaskIds().add(72L);
+            assertTrue(service.requestLocalExecutionStop(72L));
+            Thread.interrupted();
             return NusmvResult.success("output", List.of(new SpecCheckResult("expr", false, "trace")));
         });
 
@@ -1824,6 +1842,7 @@ class VerificationServiceImplBuildResultTest {
                 .status(VerificationTaskPo.TaskStatus.COMPLETED)
                 .specResultsJson("not valid json")
                 .build();
+        when(userRepository.findByIdForShare(1L)).thenReturn(Optional.of(new UserPo()));
         when(taskRepository.findCompletedRunForUpdate(
                 32L, 1L, VerificationTaskPo.TaskStatus.COMPLETED))
                 .thenReturn(Optional.of(run));
@@ -1835,7 +1854,12 @@ class VerificationServiceImplBuildResultTest {
         long deletedCount = service.deleteRun(1L, 32L, 3L);
 
         assertEquals(3L, deletedCount);
-        verify(taskRepository).deleteCompletedRun(
+        InOrder deletion = inOrder(userRepository, taskRepository, traceRepository);
+        deletion.verify(userRepository).findByIdForShare(1L);
+        deletion.verify(taskRepository).findCompletedRunForUpdate(
+                32L, 1L, VerificationTaskPo.TaskStatus.COMPLETED);
+        deletion.verify(traceRepository).deleteByUserIdAndVerificationTaskId(1L, 32L);
+        deletion.verify(taskRepository).deleteCompletedRun(
                 32L, 1L, VerificationTaskPo.TaskStatus.COMPLETED);
         verifyNoInteractions(traceMapper, verificationTaskMapper);
     }
@@ -1844,6 +1868,7 @@ class VerificationServiceImplBuildResultTest {
     void confirmedRunDeletionRejectsEvidenceAddedAfterPreview() {
         VerificationTaskPo run = VerificationTaskPo.builder()
                 .id(32L).userId(1L).status(VerificationTaskPo.TaskStatus.COMPLETED).build();
+        when(userRepository.findByIdForShare(1L)).thenReturn(Optional.of(new UserPo()));
         when(taskRepository.findCompletedRunForUpdate(
                 32L, 1L, VerificationTaskPo.TaskStatus.COMPLETED))
                 .thenReturn(Optional.of(run));
@@ -1861,6 +1886,7 @@ class VerificationServiceImplBuildResultTest {
     void confirmedRunDeletionRejectsConcurrentEvidenceChangeDuringDelete() {
         VerificationTaskPo run = VerificationTaskPo.builder()
                 .id(32L).userId(1L).status(VerificationTaskPo.TaskStatus.COMPLETED).build();
+        when(userRepository.findByIdForShare(1L)).thenReturn(Optional.of(new UserPo()));
         when(taskRepository.findCompletedRunForUpdate(
                 32L, 1L, VerificationTaskPo.TaskStatus.COMPLETED))
                 .thenReturn(Optional.of(run));
@@ -1870,6 +1896,15 @@ class VerificationServiceImplBuildResultTest {
         assertThrows(ConflictException.class, () -> service.deleteRun(1L, 32L, 3L));
 
         verify(taskRepository, never()).deleteCompletedRun(anyLong(), anyLong(), any());
+    }
+
+    @Test
+    void runDeletionReturnsNotFoundWithoutAccessingRunRowsWhenOwnerIsGone() {
+        when(userRepository.findByIdForShare(1L)).thenReturn(Optional.empty());
+
+        assertThrows(ResourceNotFoundException.class, () -> service.deleteRun(1L, 32L));
+
+        verifyNoInteractions(taskRepository, traceRepository);
     }
 
     @Test
@@ -1934,12 +1969,13 @@ class VerificationServiceImplBuildResultTest {
 
     @Test
     void verifyAsync_cancelledBeforeRun_skipsGeneration() throws Exception {
-        cancelledTaskIds().add(8L);
+        verificationTaskExecutor.beforeExecution = () -> assertTrue(service.requestLocalExecutionStop(8L));
 
         service.verifyAsync(
                 1L, 8L, makeRequest(singleDevice(), List.of(), List.of(makeEffectiveSpec("s1")), false, 0, false));
 
-        verify(smvGenerator, never()).generate(anyLong(), anyList(), anyList(), anyList(), any(), anyBoolean(), any());
+        verify(taskRepository, never()).startTaskIfStillPending(anyLong(), any(), any(), anyInt(),
+                anyString(), any(), anyString(), any(), any());
     }
 
     @Test
@@ -2068,28 +2104,20 @@ class VerificationServiceImplBuildResultTest {
     // ==================== terminal-state progress tests ====================
 
     @Test
-    void maintainTaskLeases_recoversExpiredTasksWithoutScanningAndSavingAllActiveRows() {
-        when(taskRepository.failExpiredActiveTasks(
-                eq(VerificationTaskPo.TaskStatus.FAILED),
-                any(LocalDateTime.class),
-                eq(VerificationOutcome.INCONCLUSIVE),
-                anyString(),
-                anyString(),
-                eq(List.of(VerificationTaskPo.TaskStatus.PENDING, VerificationTaskPo.TaskStatus.RUNNING)),
-                any(LocalDateTime.class)))
-                .thenReturn(2);
+    void maintainTaskLeases_locksExpiryCandidateBeforeConditionalFailure() {
+        var activeStatuses = List.of(VerificationTaskPo.TaskStatus.PENDING, VerificationTaskPo.TaskStatus.RUNNING);
+        when(taskRepository.findExpiredActiveTaskIds(eq(activeStatuses), any(LocalDateTime.class)))
+                .thenReturn(List.of(60L));
+        when(taskRepository.findByIdForUpdate(60L)).thenReturn(Optional.of(new VerificationTaskPo()));
 
         service.maintainTaskLeases();
 
-        verify(taskRepository).failExpiredActiveTasks(
-                eq(VerificationTaskPo.TaskStatus.FAILED),
-                any(LocalDateTime.class),
-                eq(VerificationOutcome.INCONCLUSIVE),
-                anyString(),
-                anyString(),
-                eq(List.of(VerificationTaskPo.TaskStatus.PENDING, VerificationTaskPo.TaskStatus.RUNNING)),
-                any(LocalDateTime.class));
-        verify(taskRepository, never()).save(any(VerificationTaskPo.class));
+        InOrder recovery = inOrder(taskRepository);
+        recovery.verify(taskRepository).findExpiredActiveTaskIds(eq(activeStatuses), any(LocalDateTime.class));
+        recovery.verify(taskRepository).findByIdForUpdate(60L);
+        recovery.verify(taskRepository).failExpiredTask(eq(60L), eq(VerificationTaskPo.TaskStatus.FAILED),
+                any(LocalDateTime.class), eq(VerificationOutcome.INCONCLUSIVE), anyString(), anyString(),
+                eq(activeStatuses), any(LocalDateTime.class));
     }
 
     @Test

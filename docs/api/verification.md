@@ -233,18 +233,24 @@ every ten seconds using the database clock. Worker start and renewal require the
 worker id and a still-unexpired lease; an expired queued or running worker cannot revive
 its row. Startup and rolling deployment maintenance therefore leave another instance's
 live task untouched and atomically mark only expired `PENDING`/`RUNNING` rows `FAILED`.
+Maintenance reads expired candidate IDs without locking the status range. For each candidate,
+it takes the same row lock used by cancellation and rechecks status and lease before recording
+failure. Tasks cancelled or renewed after discovery keep their current state.
 Worker completion and failure also require that same live ownership, while user cancellation
 remains authoritative regardless of the worker. Lease, start, and terminal transitions use the
 database clock and clear ownership on a committed terminal state. Local queued/running work is stopped
-when renewal proves that this instance no longer owns it.
+through its task-specific Future when renewal proves that this instance no longer owns it.
 
 Progress updates are fenced by that same worker id and unexpired lease. Terminal transactions
 lock the task row before sampling the microsecond database time and before persisting linked
 verification counterexamples or simulation traces. This prevents a lock-delayed worker from
 publishing stale evidence and keeps creation/completion ordering valid even for sub-second tasks.
+Deleting a historical verification, simulation, or exploration result holds a shared user lock
+before touching the task and its evidence, so it cannot interleave with deletion of the same account.
 
 Verification and simulation progress reads confirm task ownership through a scalar query selecting
-only persisted progress and status. The response retains local-worker progress precedence, then
+only persisted progress and status. The response retains local-worker progress precedence after a
+successful database write, then
 persisted progress, then the terminal-state fallback; missing or foreign tasks still return `404`.
 Progress polling does not hydrate frozen input, model text, or diagnostic payloads.
 
@@ -592,7 +598,7 @@ state and frozen-request JSON in a filesort; full-detail integrity validation is
 
 ### `TaskCancellationResultDto`
 
-Used by both verification and simulation cancellation endpoints. An HTTP 200 means the
+Used by verification, simulation, and [exploration](fuzzing.md) cancellation endpoints. An HTTP 200 means the
 request was evaluated, not that cancellation won the race.
 
 | Field | Type | Notes |
@@ -601,11 +607,13 @@ request was evaluated, not that cancellation won the race.
 | `cancellationAccepted` | `Boolean` | `true` only when an active task was atomically changed to `CANCELLED` |
 | `cancellationOutcome` | `ACCEPTED \| ALREADY_CANCELLED \| ALREADY_COMPLETED \| ALREADY_FAILED \| NO_LONGER_CANCELLABLE` | User-facing result of the attempt |
 | `taskStatus` | `PENDING \| RUNNING \| COMPLETED \| FAILED \| CANCELLED` | Authoritative status after the attempt |
-| `executionMayStillBeStopping` | `Boolean` | The persisted status is already `CANCELLED`, but queued or running work may still exist locally or on another backend instance; `false` is returned only when this instance definitively removed the queued execution before it started |
+| `executionMayStillBeStopping` | `Boolean` | For `ACCEPTED`, true unless this instance removed the queued execution before it started. For `ALREADY_CANCELLED`, reports whether the local stop could still be in progress. Other outcomes return false. |
 
 Clients must branch on `cancellationOutcome`; they must not turn every HTTP 200 into
 "cancelled successfully". The frontend also verifies that the returned `taskId`,
 outcome, accepted flag, and status agree before updating the task UI.
+The [cancellation transaction](../architecture/verification-flow.md#sync-async-and-simulation)
+controls when the backend may signal the worker.
 
 ---
 
@@ -1493,6 +1501,7 @@ changed; apply does not repeat the expensive strategy search.
 | `message` | `String` | English API summary for logs and non-localized callers; the frontend uses the structured fields above to render a localized, scope-qualified result instead of treating this text as an unconditional guarantee |
 | `rules` | `RuleDto[]` | The full persisted rule list after applying. The frontend validates its count and directly replaces the Board rule collection from this authoritative snapshot; it refreshes separately only when the apply response itself is unconfirmed. |
 | `canUndo` / `canRedo` | `boolean` | Required authoritative Board-edit availability. A successful apply is one reversible `RULE_SET/UPDATE` edit and returns `true` / `false` |
+| `editHistoryRevision` | `String` | Revision of the [Board edit history](board.md#boardundoresultdto) after applying the repair |
 
 Applying a suggestion is one user action even when it edits, reorders, adds, or removes multiple
 rules. Undo restores the exact ordered pre-fix rule collection under the original rule ids; redo

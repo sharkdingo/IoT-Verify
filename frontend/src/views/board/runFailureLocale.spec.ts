@@ -10,6 +10,8 @@ import FailureDetails from '@/components/FailureDetails.vue'
 import FuzzingPanel from '@/components/FuzzingPanel.vue'
 import { errorDetails, technicalErrorLines } from '@/utils/userMessage'
 import { getFuzzActiveTaskLimit, getFuzzStoredTaskLimit } from '@/utils/fuzzingResponse'
+import { createPagedRequestCoordinator } from '@/utils/pagedRequestCoordinator'
+import { chooseRunPresentation, foregroundRunBlock } from './runPresentation'
 
 const board = readFileSync(join(process.cwd(), 'src/views/Board.vue'), 'utf8')
 const start = board.indexOf('<script setup')
@@ -39,16 +41,18 @@ const surface = (prefix: string): string => {
 const setup = () => {
   const ports: Record<string, any> = {
     computed, ref, errorDetails, technicalErrorLines, getFuzzActiveTaskLimit, getFuzzStoredTaskLimit,
+    chooseRunPresentation, foregroundRunBlock, historyDetailRequests: createPagedRequestCoordinator(),
     t: (key: string, params?: Record<string, unknown>) => i18n.global.t(key, params || {}),
     RUN_RESPONSE_INCOMPLETE_CODE: 'RUN_RESPONSE_INCOMPLETE', FUZZ_RESPONSE_INCOMPLETE_CODE: 'FUZZ_RESPONSE_INCOMPLETE',
     verificationError: ref(null), simulationError: ref(null), fuzzingError: ref(null),
-    verificationResult: ref(null), isModelPlaybackActive: ref(false),
+    verificationResult: ref(null), isModelPlaybackActive: ref(false), openModalDepth: ref(0),
     dismissResultDialog: vi.fn(), dismissSimulationResultDialog: vi.fn()
   }
   for (const name of ['CompletedTaskResultUnavailableError', 'FuzzCompletedResultUnavailableError',
     'isCompletedTaskResultUnavailableError', 'isFuzzCompletedResultUnavailableError', 'fuzzTaskQuotaMessage',
     'asyncTaskQuotaMessage', 'formalOperationBusyMessage', 'makeRunFailure', 'formatRunFailure', 'runFailureTitle',
-    'runFailureDiagnostics', 'fuzzingFailureDetails', 'fuzzingErrorMessage', 'presentRunFailure',
+    'runFailureDiagnostics', 'fuzzingFailureDetails', 'fuzzingErrorMessage', 'automaticRunPresentationBlock',
+    'automaticRunPresentation', 'presentRunFailure',
     'verificationVerdictTone', 'verificationResultStatus']) ports[name] = bind(name, ports)
   return ports
 }
@@ -159,7 +163,7 @@ describe('run failure language and recovery', () => {
     let stop!: () => void
     Object.assign(ports, {
       isVerifying: ref(false), isSimulating: ref(false), verificationTasks: ref([]), simulationTasks: ref([]),
-      showVerificationPanel: ref(false), showSimulationPanel: ref(false),
+      activeWorkflowPanel: ref(null), historyPanelIntentEpoch: 0, pendingHistoryRunTarget: null,
       asyncVerificationTask: ref({ taskId: null }), asyncSimulationTask: ref({ taskId: null }),
       asyncVerificationActive: ref(false), asyncSimulationActive: ref(false),
       verificationCancelRequested: ref(false), simulationCancelRequested: ref(false),
@@ -170,6 +174,10 @@ describe('run failure language and recovery', () => {
       loadTaskInbox: vi.fn(), [`pollAsync${kind === 'verification' ? 'Verification' : 'Simulation'}`]:
         () => new Promise((_resolve, reject) => { stop = () => reject(new Error('poll aborted')) })
     })
+    for (const name of ['showVerificationPanel', 'showSimulationPanel', 'tracksRun', 'verificationPanelTracksRun',
+      'simulationPanelTracksRun', 'retireHistoryPanelIntent', 'openRunPanel', 'setRunPanelView']) {
+      ports[name] = bind(name, ports)
+    }
     const pending = bind(kind === 'verification' ? 'watchVerificationTask' : 'watchSimulationTask', ports)(7)
     try {
       expect(ports[`${kind}Error`].value).toBeNull()

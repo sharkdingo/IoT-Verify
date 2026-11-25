@@ -220,7 +220,10 @@ describe('ControlCenter template authority recovery', () => {
   ] as const)('releases the %s confirmation before reporting %s', async (action, outcome) => {
     boardApiMocks.previewDefaultTemplateReset.mockResolvedValue(resetPreview)
     boardApiMocks.previewDeviceTemplateDeletion.mockResolvedValue(deletionPreview)
-    const recoveredSnapshot = { deviceTemplates: [template], nodes: [], environmentVariables: [], rules: [], specifications: [] }
+    const recoveredSnapshot = {
+      deviceTemplates: [template], nodes: [], environmentVariables: [], rules: [], specifications: [],
+      editHistory: { canUndo: false, canRedo: false, editHistoryRevision: '0:0:0' }
+    }
     boardApiMocks.getSnapshot.mockResolvedValue(recoveredSnapshot)
     const mutation = action === 'reset'
       ? boardApiMocks.resetDefaultTemplates
@@ -385,7 +388,10 @@ describe('ControlCenter template authority recovery', () => {
       await flushPromises()
       expect(boardApiMocks.getSnapshot).toHaveBeenCalledOnce()
       localStorage.setItem(tokenKey, 'a different session')
-      release({ deviceTemplates: [], nodes: [], environmentVariables: [], rules: [], specifications: [] })
+      release({
+        deviceTemplates: [], nodes: [], environmentVariables: [], rules: [], specifications: [],
+        editHistory: { canUndo: false, canRedo: false, editHistoryRevision: '0:0:0' }
+      })
       await flushPromises()
       expect(wrapper.emitted('replace-board-snapshot')).toBeUndefined()
       expect(wrapper.emitted('authoritative-state-unavailable')).toBeUndefined()

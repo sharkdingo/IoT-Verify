@@ -294,6 +294,7 @@ public class FixServiceImpl implements FixService {
                 .rules(saved)
                 .canUndo(Boolean.TRUE.equals(mutation.getCanUndo()))
                 .canRedo(Boolean.TRUE.equals(mutation.getCanRedo()))
+                .editHistoryRevision(mutation.getEditHistoryRevision())
                 .build();
     }
 

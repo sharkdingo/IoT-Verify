@@ -17,6 +17,8 @@ import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
 import cn.edu.nju.Iot_Verify.dto.board.BoardLayoutDto;
 import cn.edu.nju.Iot_Verify.dto.board.BoardReplacementPreviewDto;
 import cn.edu.nju.Iot_Verify.dto.board.BoardUndoResultDto;
+import cn.edu.nju.Iot_Verify.dto.board.BoardEditAvailabilityDto;
+import cn.edu.nju.Iot_Verify.dto.board.BoardWorkspaceSnapshotDto;
 import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
 import cn.edu.nju.Iot_Verify.dto.board.CollectionMutationResultDto;
 import cn.edu.nju.Iot_Verify.dto.board.EnvironmentMutationResultDto;
@@ -106,6 +108,7 @@ import java.time.LocalDateTime;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.*;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -201,8 +204,22 @@ public class BoardStorageServiceImpl implements BoardStorageService {
 
     @Override
     public BoardSemanticSnapshotDto getSemanticSnapshot(Long userId) {
+        return mapSemanticSnapshot(captureBoardState(userId, () -> readSemanticSnapshotRows(userId)));
+    }
+
+    @Override
+    public BoardWorkspaceSnapshotDto getBoardSnapshot(Long userId) {
+        var captured = captureBoardState(userId,
+                () -> new WorkspaceSnapshotRows(readSemanticSnapshotRows(userId), editJournal.availability(userId)));
+        var history = captured.editHistory();
+        return new BoardWorkspaceSnapshotDto(mapSemanticSnapshot(captured.scene()),
+                new BoardEditAvailabilityDto(history.canUndo(), history.canRedo(), history.editHistoryRevision()));
+    }
+
+    /** Capture scalar and JSON rows under the account lock; standalone readers decode after releasing it. */
+    private <T> T captureBoardState(Long userId, Supplier<T> read) {
         boolean enclosingTransaction = TransactionSynchronizationManager.isActualTransactionActive();
-        TransactionCallback<SemanticSnapshotRows> capture = status -> {
+        TransactionCallback<T> capture = status -> {
             if (enclosingTransaction) {
                 // The caller may write later; retain exclusive ownership instead of upgrading a shared lock.
                 requireActiveUserForWrite(userId);
@@ -214,20 +231,15 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                     chatExecutionLeaseGuard.requireCurrentExecutionLease();
                 }
             }
-            return readSemanticSnapshotRows(userId);
+            return read.get();
         };
-        SemanticSnapshotRows rows;
         if (enclosingTransaction) {
             synchronized (getUserWriteLock(userId)) {
-                rows = transactionTemplate.execute(capture);
+                return transactionTemplate.execute(capture);
             }
-        } else {
-            // Shared user-row ownership admits parallel captures and still excludes every Board writer.
-            rows = transactionTemplate.execute(capture);
         }
-        // All scalar/JSON columns were captured under the user lock. Standalone reads release
-        // their lock and connection before decoding; an enclosing transaction keeps its ownership.
-        return mapSemanticSnapshot(rows);
+        // Shared user-row ownership admits parallel captures and excludes Board writers.
+        return transactionTemplate.execute(capture);
     }
 
     /** Package-private full replacement used by semantic precheck tests; not an external service contract. */
@@ -306,6 +318,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                         .currentCount(savedNodes.size())
                         .canUndo(availability.canUndo())
                         .canRedo(availability.canRedo())
+                        .editHistoryRevision(availability.editHistoryRevision())
                         .build();
             });
         }
@@ -490,6 +503,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                         .currentCount(savedNodes.size())
                         .canUndo(availability.canUndo())
                         .canRedo(availability.canRedo())
+                        .editHistoryRevision(availability.editHistoryRevision())
                         .build();
             });
         }
@@ -510,11 +524,13 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                 List<RuleDto> currentRules = getRulesInternal(userId);
                 List<SpecificationDto> currentSpecs = getSpecsInternal(userId);
                 List<BoardEnvironmentVariableDto> currentEnvironment = getEnvironmentVariablesInternal(userId);
+                List<DeviceTemplateDto> templates = getDeviceTemplatesInternal(userId);
                 List<DeviceNodeDto> projectedNodes = currentNodes.stream()
                         .filter(node -> !targetId.equals(node.getId()))
                         .toList();
                 List<BoardEnvironmentVariableDto> projectedEnvironment =
-                        projectEnvironmentVariablesForNodes(userId, projectedNodes);
+                        projectEnvironmentVariablesForNodes(currentEnvironment, projectedNodes,
+                                templateManifestMap(templates), false);
                 List<RuleDto> removedRules = currentRules.stream()
                         .filter(rule -> ruleReferencesNode(rule, targetId))
                         .toList();
@@ -523,6 +539,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                         .toList();
                 List<EnvironmentVariableChangeDto> environmentChanges =
                         diffEnvironmentVariables(currentEnvironment, projectedEnvironment);
+                BoardUndoAvailability availability = editJournal.availability(userId);
 
                 return DeviceDeletionResultDto.builder()
                         .operation("preview")
@@ -536,6 +553,10 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                         .environmentChanges(environmentChanges)
                         .currentRules(currentRules)
                         .currentSpecifications(currentSpecs)
+                        .deviceTemplates(templates)
+                        .canUndo(availability.canUndo())
+                        .canRedo(availability.canRedo())
+                        .editHistoryRevision(availability.editHistoryRevision())
                         .build();
             });
         }
@@ -632,8 +653,10 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                         .environmentChanges(diffEnvironmentVariables(previousEnvironment, savedEnvironment))
                         .currentRules(savedRules)
                         .currentSpecifications(savedSpecs)
+                        .deviceTemplates(getDeviceTemplatesInternal(userId))
                         .canUndo(availability.canUndo())
                         .canRedo(availability.canRedo())
+                        .editHistoryRevision(availability.editHistoryRevision())
                         .build();
             });
         }
@@ -799,6 +822,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                 .currentCount(current.size())
                 .canUndo(availability != null ? availability.canUndo() : null)
                 .canRedo(availability != null ? availability.canRedo() : null)
+                .editHistoryRevision(availability != null ? availability.editHistoryRevision() : null)
                 .build();
     }
 
@@ -1118,6 +1142,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                         .currentCount(savedNodes.size())
                         .canUndo(availability.canUndo())
                         .canRedo(availability.canRedo())
+                        .editHistoryRevision(availability.editHistoryRevision())
                         .build();
             });
         }
@@ -2014,6 +2039,8 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                                         List<SpecificationPo> specifications,
                                         List<DeviceTemplatePo> deviceTemplates) {}
 
+    private record WorkspaceSnapshotRows(SemanticSnapshotRows scene, BoardUndoAvailability editHistory) {}
+
     private SemanticSnapshotRows readSemanticSnapshotRows(Long userId) {
         return new SemanticSnapshotRows(
                 nodeRepo.findByUserId(userId),
@@ -2411,6 +2438,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                 .currentCount(saved.size())
                 .canUndo(availability != null ? availability.canUndo() : null)
                 .canRedo(availability != null ? availability.canRedo() : null)
+                .editHistoryRevision(availability != null ? availability.editHistoryRevision() : null)
                 .build();
     }
 
@@ -4574,7 +4602,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
 
     @Override
     public BoardUndoResultDto undoLastEdit(Long userId) {
-        return applyJournalDirection(userId, true);
+        return applyJournalDirection(userId, true, null);
     }
 
     @Override
@@ -4590,7 +4618,15 @@ public class BoardStorageServiceImpl implements BoardStorageService {
 
     @Override
     public BoardUndoResultDto redoLastUndoneEdit(Long userId) {
-        return applyJournalDirection(userId, false);
+        return applyJournalDirection(userId, false, null);
+    }
+
+    @Override
+    public BoardUndoResultDto applyBoardEdit(Long userId, boolean undo, String expectedEditHistoryRevision) {
+        if (!hasText(expectedEditHistoryRevision)) {
+            throw new BadRequestException("Expected Board edit history revision is required.");
+        }
+        return applyJournalDirection(userId, undo, expectedEditHistoryRevision);
     }
 
     @Override
@@ -4623,7 +4659,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                 }
                 editJournal.clear(userId);
                 return journalStatusResult(
-                        "HISTORY_CLEARED", new BoardUndoAvailability(false, false));
+                        "HISTORY_CLEARED", BoardUndoAvailability.EMPTY);
             });
         }
     }
@@ -4639,6 +4675,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         result.setSpecs(List.of());
         result.setCanUndo(availability.canUndo());
         result.setCanRedo(availability.canRedo());
+        result.setEditHistoryRevision(availability.editHistoryRevision());
         return result;
     }
 
@@ -4651,10 +4688,14 @@ public class BoardStorageServiceImpl implements BoardStorageService {
      * expressed as "make this record look like this snapshot", and a single code path can serve
      * them.
      */
-    private BoardUndoResultDto applyJournalDirection(Long userId, boolean undo) {
+    private BoardUndoResultDto applyJournalDirection(Long userId, boolean undo, String expectedEditHistoryRevision) {
         synchronized (getUserWriteLock(userId)) {
             return transactionTemplate.execute(status -> {
                 requireActiveUserForWrite(userId);
+                if (expectedEditHistoryRevision != null
+                        && !expectedEditHistoryRevision.equals(editJournal.availability(userId).editHistoryRevision())) {
+                    throw ConflictException.boardEditHistoryChanged();
+                }
 
                 BoardEditJournalPo entry = (undo
                         ? editJournal.nextToUndo(userId)
@@ -4703,6 +4744,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         result.setSpecs(getSpecsInternal(userId));
         result.setCanUndo(availability.canUndo());
         result.setCanRedo(availability.canRedo());
+        result.setEditHistoryRevision(availability.editHistoryRevision());
         return result;
     }
 
@@ -5517,7 +5559,9 @@ public class BoardStorageServiceImpl implements BoardStorageService {
     private <T> CollectionMutationResultDto<T> withUndoAvailability(
             Long userId, CollectionMutationResultDto<T> result) {
         BoardUndoAvailability availability = editJournal.availability(userId);
-        return result.withUndoAvailability(availability.canUndo(), availability.canRedo());
+        // An unchanged targeted mutation did not create the head and cannot attest that it was seen.
+        String revision = "unchanged".equals(result.getOperation()) ? null : availability.editHistoryRevision();
+        return result.withUndoAvailability(availability.canUndo(), availability.canRedo(), revision);
     }
 
     private boolean sameRuleDeletionSnapshot(RuleDto expected, RuleDto current) {

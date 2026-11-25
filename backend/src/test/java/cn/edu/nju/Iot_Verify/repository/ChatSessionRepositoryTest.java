@@ -6,6 +6,8 @@ import cn.edu.nju.Iot_Verify.security.UserContextHolder;
 import cn.edu.nju.Iot_Verify.service.ChatExecutionLeaseGuard;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
@@ -15,7 +17,6 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
-import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -28,7 +29,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.locks.LockSupport;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -37,6 +37,9 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.AdditionalAnswers.delegatesTo;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.mock;
 
 @DataJpaTest(properties = {
         "spring.jpa.database-platform=org.hibernate.dialect.H2Dialect",
@@ -194,15 +197,20 @@ class ChatSessionRepositoryTest {
         }
     }
 
-    @Test
+    @ParameterizedTest
+    @ValueSource(booleans = { false, true })
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
-    void executionLeaseGuardRejectsCommitAfterLeaseExpiresDuringBusinessWork() {
+    void executionLeaseGuardRejectsCommitAfterLeaseExpiresDuringBusinessWork(boolean lockEarly) {
         LocalDateTime now = inTransaction(repository::currentDatabaseTime);
-        saveSession(activeSession(
+        ChatSessionPo session = activeSession(
                 "guard-expiry",
                 "current-execution",
-                now.plus(Duration.ofMillis(250))));
-        ChatExecutionLeaseGuard guard = new ChatExecutionLeaseGuard(repository);
+                now.plusSeconds(1));
+        session.setTitle("before");
+        saveSession(session);
+        ChatSessionRepository clockedRepository = mock(ChatSessionRepository.class, delegatesTo(repository));
+        doReturn(now, now.plusSeconds(2)).when(clockedRepository).currentDatabaseTime();
+        ChatExecutionLeaseGuard guard = new ChatExecutionLeaseGuard(clockedRepository);
         AtomicBoolean initialCheckPassed = new AtomicBoolean(false);
 
         UserContextHolder.setUserId(1L);
@@ -211,11 +219,15 @@ class ChatSessionRepositoryTest {
         try {
             assertThrows(ConflictException.class, () -> new TransactionTemplate(transactionManager)
                     .executeWithoutResult(status -> {
-                        guard.requireCurrentExecutionLease();
+                        if (lockEarly) guard.requireCurrentExecutionLeaseAndLock();
+                        else guard.requireCurrentExecutionLease();
                         initialCheckPassed.set(true);
-                        LockSupport.parkNanos(Duration.ofMillis(500).toNanos());
+                        ChatSessionPo pending = repository.findById("guard-expiry").orElseThrow();
+                        pending.setTitle("attempted write");
+                        repository.saveAndFlush(pending);
                     }));
             assertTrue(initialCheckPassed.get(), "The lease must expire after the initial check");
+            assertEquals("before", inTransaction(() -> repository.findById("guard-expiry").orElseThrow().getTitle()));
         } finally {
             UserContextHolder.clear();
         }

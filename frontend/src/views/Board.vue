@@ -613,6 +613,8 @@ import {
   notifySuccess
 } from '@/utils/feedback'
 import { countResponseTriggerWarnings, getVerificationOutcome, groupVerificationEvidence, presentSpecificationResult } from './board/verificationResult'
+import { chooseRunPresentation, foregroundRunBlock, type FuzzVerificationHandoffSource,
+  type BoardWorkflowPanel, type RunPanelKind, type RunPanelView, type RunPresentation } from './board/runPresentation'
 import {
   applyBoardRunTarget,
   hasUnusableBoardRunParams,
@@ -775,7 +777,7 @@ import boardApi, {
   BOARD_RESPONSE_INCOMPLETE_CODE,
   type CollectionMutationResult,
   type BoardReplacementPreview,
-  type BoardSemanticSnapshot,
+  type BoardWorkspaceSnapshot,
   type DeviceLayout,
   type DeviceRecommendation,
   type EnvironmentVariablePatchResult,
@@ -2035,12 +2037,13 @@ let externallyRefreshedRemovedNodeIds: ReadonlySet<string> | null = null
 
 const replaceNodesFromServer = (
   source: DeviceNode[],
-  options: { externalRefresh?: boolean } = {}
+  options: { externalRefresh?: boolean, locallyRemovedNodeId?: string } = {}
 ) => {
   const incomingNodes = getVisibleDeviceNodes(source)
   const incomingIds = new Set(incomingNodes.map(node => node.id))
   externallyRefreshedRemovedNodeIds = options.externalRefresh
-    ? new Set(nodes.value.filter(node => !incomingIds.has(node.id)).map(node => node.id))
+    ? new Set(nodes.value.filter(node => node.id !== options.locallyRemovedNodeId && !incomingIds.has(node.id))
+      .map(node => node.id))
     : null
   try {
     nodes.value = reconcileBoardNodeSnapshot(
@@ -3660,7 +3663,7 @@ watch(
 
 type DeviceDeletionOutcome = {
   responseConfirmed: boolean
-  stalePreview?: boolean
+  stalePreview?: 'refreshed' | 'refresh-failed'
 }
 
 const forceDeleteNode = async (
@@ -3672,13 +3675,7 @@ const forceDeleteNode = async (
     const bundledEnvironmentNamesBeforeDelete = [...bundledBoardEnvironmentNames.value]
     try {
       const mutation = await boardApi.deleteNode(nodeId, impactToken)
-      commitSemanticScene({
-        nodes: mutation.currentNodes,
-        environmentVariables: mutation.environmentVariables,
-        rules: mutation.currentRules,
-        specs: mutation.currentSpecifications,
-        availability: mutation
-      })
+      adoptBoardSnapshot(mutation.snapshot, nodeId)
       // Suppress individual environment change notifications; the summary notification below
       // already includes the environment variable count, so separate toasts would be redundant.
       reportEnvironmentChanges(mutation.environmentChanges, bundledEnvironmentNamesBeforeDelete, true)
@@ -3687,10 +3684,9 @@ const forceDeleteNode = async (
       console.error('Failed to delete device', error)
       const message = extractApiErrorMessage(error, t('app.deleteDeviceFailedRetry'))
       if (error?.response?.status === 409) {
-        await Promise.all([refreshDevices(), refreshEnvironmentVariables(), refreshRules(), refreshSpecifications()])
-        await reloadUndoAvailability()
-        notifyBlocked(message)
-        return { responseConfirmed: false, stalePreview: true }
+        const refreshed = await refreshSceneForReconciliation()
+        notifyBlocked(refreshed ? message : t('app.deviceDeletionPreviewRefreshFailed'))
+        return { responseConfirmed: false, stalePreview: refreshed ? 'refreshed' : 'refresh-failed' }
       } else if (error?.response?.status === 404) {
         const refreshed = await refreshSceneForReconciliation()
         if (refreshed) markVerificationResultStale()
@@ -3721,7 +3717,7 @@ const forceDeleteNode = async (
 const deleteCurrentNodeWithConfirm = async (nodeId: string) => {
   if (deletePreviewLoading.value || deleteConfirmSubmitting.value || deleteConfirmDialogVisible.value) return
   if (!ensurePlaybackClosedForMutation()) return
-  if (!ensureBoardDataReady(['nodes', 'environment', 'rules', 'specs'])) return
+  if (!ensureBoardDataReady(['templates', 'nodes', 'environment', 'rules', 'specs'])) return
   const currentNode = resolveCurrentBoardNode(nodes.value, nodeId)
   if (!currentNode) return
 
@@ -3731,6 +3727,7 @@ const deleteCurrentNodeWithConfirm = async (nodeId: string) => {
     : null
   const requestEpoch = ++deletePreviewRequestEpoch
   deletePreviewNodeId = nodeId
+  const ownsPreview = () => requestEpoch === deletePreviewRequestEpoch && deletePreviewNodeId === nodeId
   deletePreviewLoading.value = true
   deleteConfirmReviewSnapshotKey.value = null
   deleteConfirmDialogData.node = currentNode
@@ -3742,44 +3739,29 @@ const deleteCurrentNodeWithConfirm = async (nodeId: string) => {
   deleteConfirmDialogData.impactToken = ''
   deleteConfirmDialogVisible.value = true
   try {
-    const preview = await enqueueBoardMutation(async () => {
-      const response = await boardApi.previewNodeDeletion(nodeId)
-      if (requestEpoch !== deletePreviewRequestEpoch
-        || deletePreviewNodeId !== nodeId
-        || !resolveCurrentBoardNode(nodes.value, nodeId)) return null
-
-      replaceNodesFromServer(response.currentNodes)
-      environmentVariables.value = response.environmentVariables
-      rules.value = response.currentRules
-      specifications.value = response.currentSpecifications
-      syncRuleDerivedEdges()
-      return response
+    await enqueueBoardMutation(async () => {
+      const preview = await boardApi.previewNodeDeletion(nodeId)
+      if (!ownsPreview()) return
+      adoptBoardSnapshot(preview.snapshot)
+      if (!ownsPreview()) return
+      const { removedRules, removedSpecifications, environmentChanges } = preview
+      deleteConfirmDialogData.node = preview.deletedDevice
+      deleteConfirmDialogData.hasRelations = removedRules.length > 0
+        || removedSpecifications.length > 0
+        || environmentChanges.length > 0
+      deleteConfirmDialogData.relationCount = {
+        rules: removedRules.length,
+        specs: removedSpecifications.length
+      }
+      deleteConfirmDialogData.relatedRules = removedRules.map((rule, index) =>
+        rule.name || t('app.ruleNumber', { number: index + 1 }))
+      deleteConfirmDialogData.relatedSpecs = removedSpecifications.map(spec => spec.name)
+      deleteConfirmDialogData.environmentChanges = environmentChanges
+      deleteConfirmDialogData.impactToken = preview.impactToken.trim()
+      deleteConfirmReviewSnapshotKey.value = currentDeletionReviewSnapshotKey()
     })
-    if (!preview) return
-    if (requestEpoch !== deletePreviewRequestEpoch
-      || deletePreviewNodeId !== nodeId
-      || !resolveCurrentBoardNode(nodes.value, nodeId)) return
-    const impactToken = preview.impactToken?.trim()
-    if (!impactToken) throw new Error(t('app.deviceDeletionPreviewFailed'))
-    const relatedRules = preview.removedRules
-    const relatedSpecs = preview.removedSpecifications
-    const environmentChanges = preview.environmentChanges
-    deleteConfirmDialogData.node = preview.deletedDevice
-    deleteConfirmDialogData.hasRelations = relatedRules.length > 0
-      || relatedSpecs.length > 0
-      || environmentChanges.length > 0
-    deleteConfirmDialogData.relationCount = {
-      rules: relatedRules.length,
-      specs: relatedSpecs.length
-    }
-    deleteConfirmDialogData.relatedRules = relatedRules.map((rule, index) =>
-      rule.name || t('app.ruleNumber', { number: index + 1 }))
-    deleteConfirmDialogData.relatedSpecs = relatedSpecs.map(spec => spec.name)
-    deleteConfirmDialogData.environmentChanges = environmentChanges
-    deleteConfirmDialogData.impactToken = impactToken
-    deleteConfirmReviewSnapshotKey.value = currentDeletionReviewSnapshotKey()
   } catch (error: any) {
-    if (requestEpoch !== deletePreviewRequestEpoch || deletePreviewNodeId !== nodeId) return
+    if (!ownsPreview()) return
     if (error?.response?.status === 404) {
       const refreshed = await enqueueBoardMutation(refreshSceneForReconciliation).catch(() => false)
       if (refreshed && !resolveCurrentBoardNode(nodes.value, nodeId)) {
@@ -3787,12 +3769,12 @@ const deleteCurrentNodeWithConfirm = async (nodeId: string) => {
         notifyBlocked(t('app.deviceDeleteOutcomeRefreshed'))
         return
       }
-      if (requestEpoch !== deletePreviewRequestEpoch || deletePreviewNodeId !== nodeId) return
+      if (!ownsPreview()) return
     }
     clearDeleteConfirmDialog()
     notifyError(localizedErrorMessage(error, t('app.deviceDeletionPreviewFailed'), locale.value))
   } finally {
-    if (requestEpoch === deletePreviewRequestEpoch && deletePreviewNodeId === nodeId) {
+    if (ownsPreview()) {
       deletePreviewLoading.value = false
       deletePreviewNodeId = null
     }
@@ -3869,7 +3851,7 @@ const confirmDelete = async () => {
     if (!outcome) return
     if (outcome.stalePreview) {
       clearDeleteConfirmDialog()
-      reopenDeletionPreview = true
+      reopenDeletionPreview = outcome.stalePreview === 'refreshed'
       return
     }
     if (outcome.responseConfirmed) {
@@ -4495,13 +4477,13 @@ const replaceTemplateState = (state: {
   boardDataLoadState.nodes = 'ready'
   boardDataLoadState.templates = 'ready'
   boardDataLoadState.environment = 'ready'
-  void reloadUndoAvailability()
+  void reloadUndoAvailability('outside-queue')
 }
 
 const replaceTemplateCatalog = (templates: DeviceTemplate[]) => {
   deviceTemplates.value = templates
   boardDataLoadState.templates = 'ready'
-  void reloadUndoAvailability()
+  void reloadUndoAvailability('outside-queue')
 }
 
 const handleAuthoritativeBoardStateUnavailable = (
@@ -4550,9 +4532,9 @@ const refreshEnvironmentVariables = async (): Promise<boolean> => {
   }
 }
 
-const adoptBoardSnapshot = (snapshot: BoardSemanticSnapshot) => {
+const adoptBoardSnapshot = (snapshot: BoardWorkspaceSnapshot, locallyRemovedNodeId?: string) => {
   deviceTemplates.value = snapshot.deviceTemplates
-  replaceNodesFromServer(snapshot.nodes, { externalRefresh: true })
+  replaceNodesFromServer(snapshot.nodes, { externalRefresh: true, locallyRemovedNodeId })
   environmentVariables.value = snapshot.environmentVariables
   rules.value = snapshot.rules
   specifications.value = snapshot.specifications
@@ -4561,9 +4543,8 @@ const adoptBoardSnapshot = (snapshot: BoardSemanticSnapshot) => {
   hydratedBoardAuthScopeEpoch = boardAuthScopeEpoch
   allBoardDataKeys.forEach(key => { boardDataLoadState[key] = 'ready' })
   boardSnapshotError.value = null
+  syncBoardUndoAvailability(snapshot.editHistory)
   void refreshCurrentBoardModelFingerprints()
-  // A full reload also reconciles any journal changes made alongside the snapshot data.
-  void loadBoardUndoAvailability()
 }
 
 const refreshBoardSnapshot = async (): Promise<boolean> => {
@@ -4712,16 +4693,12 @@ const saveEnvironmentVariables = async (
           // snapshot so the inspector cannot keep ghost entries.
           const refreshed = await refreshBoardSnapshot()
           if (!isRequestCurrent()) return
-          await reloadUndoAvailability()
-          if (!isRequestCurrent()) return
           if (refreshed) markVerificationResultStale()
           notifyBlocked(refreshed
             ? t('app.environmentVariableStaleRefreshed')
             : t('app.environmentVariableStaleRefreshFailed'))
         } else if (!isDefinitiveMutationRejection(e)) {
           const refreshed = await refreshBoardSnapshot()
-          if (!isRequestCurrent()) return
-          await reloadUndoAvailability()
           if (!isRequestCurrent()) return
           if (refreshed) markVerificationResultStale()
           notifyBlocked(refreshed
@@ -5134,9 +5111,7 @@ const showSceneImportError = async (error: any) => {
 }
 
 const refreshSceneForReconciliation = async (): Promise<boolean> => {
-  // Reconciliation follows an unknown mutation outcome.  Read the semantic board through the
-  // atomic snapshot endpoint so templates, nodes, rules, specs and environment cannot come from
-  // different writes made by another tab while this recovery decision is being made.
+  // Adopt templates and their dependent collections from the same server snapshot.
   return refreshBoardSnapshot()
 }
 
@@ -6758,7 +6733,7 @@ onBeforeUnmount(() => {
 //
 // Called through a late-bound reference because `useBoardUndo` is set up further down this file and
 // `const` does not hoist.
-let reloadUndoAvailability: () => Promise<void> = async () => undefined
+let reloadUndoAvailability: (placement?: 'outside-queue') => Promise<void> = async () => undefined
 
 const refreshDevicesFromChat = async () => enqueueBoardMutation(async () => {
   const ok = await refreshDevices()
@@ -6898,7 +6873,7 @@ const presentRunFailure = (
   kind: 'verification' | 'simulation', messageKey: string, error?: unknown, present = true
 ) => {
   const failure = makeRunFailure(messageKey, error)
-  if (present && !isModelPlaybackActive.value) {
+  if (automaticRunPresentation(present) === 'foreground') {
     if (kind === 'verification') verificationError.value = failure
     else simulationError.value = failure
     return
@@ -6913,7 +6888,7 @@ const presentRunFailure = (
     discardLabel: () => t('app.close'),
     onAction: () => {
       if (!isCurrentBoardAuthScope(ownerAuthScopeEpoch) || currentAuthUserId.value !== ownerUserId) return true
-      if (!ensureHistoricalPlaybackUiAdmission()) return false
+      if (openModalDepth.value > 0 || !ensureHistoricalPlaybackUiAdmission()) return false
       closeOtherWorkflowSurfaces()
       if (kind === 'verification') verificationError.value = failure
       else simulationError.value = failure
@@ -8139,16 +8114,9 @@ const invalidateForFullSceneReplacement = () => {
   notifyUndoJournalCleared()
 }
 
-/**
- * Whole-scene replacement/clear can also replace template snapshots, so the server drops the
- * journal. The journal is authoritative; re-read it so the UI cannot offer an unreachable undo.
- */
+/** Discard the prior revision when the server confirms a Board edit-history boundary. */
 const notifyUndoJournalCleared = () => {
-  // The server discarded the whole journal, so nothing is reversible — applied locally at once
-  // because the re-read below is fire-and-forget, and until it lands the button would still offer an
-  // undo that can only answer "nothing to undo".
   syncBoardUndoAvailability({ canUndo: false, canRedo: false })
-  void loadBoardUndoAvailability()
 }
 
 const formatRelationForDisplay = (relation: unknown): string => {
@@ -8870,6 +8838,9 @@ const simulationReadinessIssue = computed(() => formalRunReadinessIssue('simulat
 }))
 
 const verificationRunBlockedReason = computed(() => {
+  if (isVerifying.value && !verificationPanelTracksRun.value) {
+    return t('app.verificationAnotherRunInProgress')
+  }
   if (!verificationForm.isAsync && synchronousSimulationRunning.value) {
     return t('app.formalOperationBusy')
   }
@@ -8942,7 +8913,6 @@ const asyncVerificationTask = ref<{
   statusKey: 'app.taskInitializing'
 })
 const asyncVerificationActive = ref(false)
-const cancellingVerificationTask = ref(false)
 const verificationCancelRequested = ref(false)
 
 const asyncFuzzingTask = ref<{
@@ -8955,10 +8925,27 @@ const asyncFuzzingTask = ref<{
   statusKey: 'app.taskInitializing'
 })
 const isFuzzing = ref(false)
-const asyncFuzzingActive = ref(false)
-const cancellingFuzzingTask = ref(false)
 const fuzzingCancelRequested = ref(false)
-const showFuzzingPanel = ref(false)
+// Selection owns the foreground only. Task polling and cancellation survive panel switches.
+const activeWorkflowPanel = shallowRef<BoardWorkflowPanel | null>(null)
+const showVerificationPanel = computed(() => activeWorkflowPanel.value?.kind === 'verification')
+const showSimulationPanel = computed(() => activeWorkflowPanel.value?.kind === 'simulation')
+const showFuzzingPanel = computed(() => activeWorkflowPanel.value?.kind === 'fuzzing')
+const showHistoryPanel = computed(() => activeWorkflowPanel.value?.kind === 'history')
+
+const tracksRun = (kind: RunPanelKind): boolean => {
+  const panel = activeWorkflowPanel.value
+  return panel?.kind === kind && panel.view === 'run'
+}
+const verificationPanelTracksRun = computed(() => tracksRun('verification'))
+const simulationPanelTracksRun = computed(() => tracksRun('simulation'))
+const fuzzingPanelTracksRun = computed(() => tracksRun('fuzzing'))
+
+// A launch still needs live previews while waiting for Board saves. A frozen task uses its own summary.
+const fuzzingPreviewsInUse = computed(() =>
+  (isFuzzing.value && asyncFuzzingTask.value.taskId === null)
+  || (showFuzzingPanel.value && (!fuzzingPanelTracksRun.value || !fuzzingWatchedTask.value)))
+
 const showFuzzingResultDialog = ref(false)
 const fuzzingResult = ref<FuzzingRun | null>(null)
 const fuzzingError = ref<RunFailure | null>(null)
@@ -9100,7 +9087,8 @@ const refreshPaperDomainPreview = async () => {
     clearTimeout(paperDomainPreviewTimer)
     paperDomainPreviewTimer = null
   }
-  if (fuzzingForm.explorationMode !== 'PAPER_COMPATIBLE'
+  if (!fuzzingPreviewsInUse.value
+    || fuzzingForm.explorationMode !== 'PAPER_COMPATIBLE'
     || !validPaperPathLength()
     || !fuzzingPreviewPrerequisitesReady.value) {
     invalidatePaperDomainPreview()
@@ -9163,7 +9151,7 @@ const refreshFuzzingWorkloadPreview = async () => {
     clearTimeout(fuzzingWorkloadPreviewTimer)
     fuzzingWorkloadPreviewTimer = null
   }
-  if (!showFuzzingPanel.value
+  if (!fuzzingPreviewsInUse.value
     || !hasValidFuzzingBudget(fuzzingForm)
     || !fuzzingPreviewPrerequisitesReady.value) {
     invalidateFuzzingWorkloadPreview()
@@ -9212,19 +9200,19 @@ const scheduleFuzzingWorkloadPreview = () => {
 
 watch(
   [
-    showFuzzingPanel,
+    fuzzingPreviewsInUse,
     () => fuzzingForm.explorationMode,
     () => fuzzingForm.pathLength,
     paperDomainSemanticKey,
     fuzzingPreviewPrerequisitesReady
   ],
-  ([visible, mode]) => {
+  ([inUse, mode]) => {
     invalidatePaperDomainPreview()
     if (mode !== 'PAPER_COMPATIBLE' && paperDomainStaleRecoveryActive.value) {
       paperDomainStaleRecoveryActive.value = false
       fuzzingError.value = null
     }
-    if (visible
+    if (inUse
       && mode === 'PAPER_COMPATIBLE'
       && validPaperPathLength()
       && fuzzingPreviewPrerequisitesReady.value) {
@@ -9235,10 +9223,10 @@ watch(
 )
 
 watch(
-  [showFuzzingPanel, fuzzingWorkloadSemanticKey, fuzzingPreviewPrerequisitesReady],
-  ([visible]) => {
+  [fuzzingPreviewsInUse, fuzzingWorkloadSemanticKey, fuzzingPreviewPrerequisitesReady],
+  ([inUse]) => {
     invalidateFuzzingWorkloadPreview()
-    if (visible && hasValidFuzzingBudget(fuzzingForm) && fuzzingPreviewPrerequisitesReady.value) {
+    if (inUse && hasValidFuzzingBudget(fuzzingForm) && fuzzingPreviewPrerequisitesReady.value) {
       scheduleFuzzingWorkloadPreview()
     }
   },
@@ -9459,7 +9447,6 @@ const fuzzingHistoryRequests = createPagedRequestCoordinator()
 const historyDetailRequests = createPagedRequestCoordinator()
 let historyPanelIntentEpoch = 0
 let fuzzingHistoryAppendPromise: Promise<boolean> | null = null
-const showHistoryPanel = ref(false)
 const activeHistoryLayer = ref<HistoryLayer>('results')
 const activeHistoryResultFilter = ref<HistoryResultFilter>('all')
 const loadingTaskHistory = ref(false)
@@ -9708,8 +9695,22 @@ const watchedSimulationTaskIds = computed(() => {
 
 const watchedFuzzingTaskIds = computed(() => {
   const taskId = asyncFuzzingTask.value.taskId
-  return isFuzzing.value && asyncFuzzingActive.value && taskId ? [taskId] : []
+  return isFuzzing.value && taskId ? [taskId] : []
 })
+
+const watchedTaskId = (kind: RunPanelKind): number | undefined => {
+  const ids = kind === 'verification' ? watchedVerificationTaskIds
+    : kind === 'simulation' ? watchedSimulationTaskIds : watchedFuzzingTaskIds
+  return ids.value[0]
+}
+
+const isWatchedTaskCancellationPending = (kind: RunPanelKind): boolean => {
+  const taskId = watchedTaskId(kind)
+  return taskId !== undefined && pendingTaskActionKeys.value.has(taskActionKey('cancel', kind, taskId))
+}
+const cancellingVerificationTask = computed(() => isWatchedTaskCancellationPending('verification'))
+const cancellingSimulationTask = computed(() => isWatchedTaskCancellationPending('simulation'))
+const cancellingFuzzingTask = computed(() => isWatchedTaskCancellationPending('fuzzing'))
 
 const activeVerificationTasks = computed(() =>
   verificationTasks.value.filter(task => isActiveTaskStatus(task.status))
@@ -9742,8 +9743,8 @@ const miniTaskItems = computed(() => {
     progress: number
   }> = []
 
-  const currentVerificationId = asyncVerificationTask.value.taskId
-  if (isVerifying.value && asyncVerificationActive.value && currentVerificationId) {
+  const currentVerificationId = watchedTaskId('verification')
+  if (currentVerificationId) {
     items.push({
       key: `verification-${currentVerificationId}`,
       kind: 'verification',
@@ -9765,8 +9766,8 @@ const miniTaskItems = computed(() => {
     })
   }
 
-  const currentFuzzingId = asyncFuzzingTask.value.taskId
-  if (isFuzzing.value && asyncFuzzingActive.value && currentFuzzingId) {
+  const currentFuzzingId = watchedTaskId('fuzzing')
+  if (currentFuzzingId) {
     items.push({
       key: `fuzzing-${currentFuzzingId}`,
       kind: 'fuzzing',
@@ -9788,8 +9789,8 @@ const miniTaskItems = computed(() => {
     })
   }
 
-  const currentSimulationId = asyncSimulationTask.value.taskId
-  if (isSimulating.value && asyncSimulationActive.value && currentSimulationId) {
+  const currentSimulationId = watchedTaskId('simulation')
+  if (currentSimulationId) {
     items.push({
       key: `simulation-${currentSimulationId}`,
       kind: 'simulation',
@@ -10207,8 +10208,7 @@ const refreshAllBoardState = async (): Promise<boolean> => {
   return results.every(Boolean)
 }
 
-const refreshHistoryLayer = async (layer: HistoryLayer = activeHistoryLayer.value): Promise<boolean> => {
-  historyDetailRequests.invalidate()
+const refreshHistoryLayer = async (layer: HistoryLayer): Promise<boolean> => {
   // Result loading already refreshes fingerprints alongside the fuzzing history request.
   if (layer === 'results') return loadHistoryResults()
   const [loaded] = await Promise.all([
@@ -10219,8 +10219,8 @@ const refreshHistoryLayer = async (layer: HistoryLayer = activeHistoryLayer.valu
 }
 
 const setHistoryLayer = async (layer: HistoryLayer) => {
-  const intentEpoch = ++historyPanelIntentEpoch
-  historyDetailRequests.invalidate()
+  retireHistoryPanelIntent()
+  const intentEpoch = historyPanelIntentEpoch
   activeHistoryLayer.value = layer
   const loaded = await refreshHistoryLayer(layer)
   if (!loaded || !isCurrentHistoryPanelIntent(intentEpoch, layer)) return
@@ -10234,8 +10234,8 @@ const setHistoryLayer = async (layer: HistoryLayer) => {
 }
 
 const setHistoryResultFilter = async (filter: HistoryResultFilter) => {
-  const intentEpoch = ++historyPanelIntentEpoch
-  historyDetailRequests.invalidate()
+  retireHistoryPanelIntent()
+  const intentEpoch = historyPanelIntentEpoch
   activeHistoryResultFilter.value = filter
   if (showHistoryPanel.value
     && activeHistoryLayer.value === 'results'
@@ -10247,49 +10247,49 @@ const setHistoryResultFilter = async (filter: HistoryResultFilter) => {
   }
 }
 
-const closeHistoryPanel = (invalidatePendingDetail = true) => {
+const retireHistoryPanelIntent = (cancelPendingRun = true) => {
   historyPanelIntentEpoch += 1
-  if (invalidatePendingDetail) historyDetailRequests.invalidate()
-  showHistoryPanel.value = false
+  if (!cancelPendingRun || !pendingHistoryRunTarget) return
+  const target = pendingHistoryRunTarget
+  pendingHistoryRunTarget = null
+  if (appliedDeepLinkTarget !== target) return
+  historyDetailRequests.invalidate()
+  if (isSameBoardRunTarget(deepLinkTarget.value, target)) clearRunDeepLink()
+}
+
+const closeWorkflowPanel = (kind?: BoardWorkflowPanel['kind']) => {
+  if (kind === undefined || activeWorkflowPanel.value?.kind === kind) {
+    activeWorkflowPanel.value = null
+  }
+}
+
+const closeHistoryPanel = (cancelPendingRun = true) => {
+  retireHistoryPanelIntent(cancelPendingRun)
+  closeWorkflowPanel('history')
+}
+
+const openRunPanel = (kind: RunPanelKind, view: RunPanelView, handoff: FuzzVerificationHandoffSource | null = null) => {
+  retireHistoryPanelIntent()
+  activeWorkflowPanel.value = kind === 'verification' ? { kind, view, handoff } : { kind, view }
+}
+
+const setRunPanelView = (kind: RunPanelKind, view: RunPanelView) => {
+  const panel = activeWorkflowPanel.value
+  if (panel?.kind === kind && panel.view !== view) {
+    activeWorkflowPanel.value = { ...panel, view }
+  }
 }
 
 // Workflow panels share one closing path; inline authoring disclosures remain available.
 const closeOtherWorkflowSurfaces = () => {
   closeResultSurfaces()
-  showSimulationPanel.value = false
-  showVerificationPanel.value = false
-  showFuzzingPanel.value = false
+  if (!showHistoryPanel.value) closeWorkflowPanel()
 }
 
-const toggleHistoryPanel = async (layer: HistoryLayer = activeHistoryLayer.value) => {
-  if (showHistoryPanel.value && activeHistoryLayer.value === layer) {
-    closeHistoryPanel()
-    return
-  }
-  if (isModelPlaybackActive.value) {
-    notifyBlocked(t('app.playbackReadOnlyCloseFirst'))
-    return
-  }
-  if (isAnyRecommendationRunning()) {
-    notifyBlocked(t('app.recommendationGenerationInProgress'))
-    return
-  }
-
-  closeOtherWorkflowSurfaces()
-
-  const intentEpoch = ++historyPanelIntentEpoch
-  historyDetailRequests.invalidate()
-  activeHistoryLayer.value = layer
-  showHistoryPanel.value = true
-  const loaded = await refreshHistoryLayer(layer)
-  if (!loaded || !isCurrentHistoryPanelIntent(intentEpoch, layer)) return
-  if (layer === 'results') {
-    if (activeHistoryResultFilter.value === 'all' || activeHistoryResultFilter.value === 'fuzzing') {
-      clearVisibleFuzzResultNotifications()
-    }
-  } else {
-    clearFuzzNotifications('FAILED')
-  }
+const openHistoryPanel = async (layer: HistoryLayer) => {
+  closeResultSurfaces()
+  activeWorkflowPanel.value = { kind: 'history' }
+  await setHistoryLayer(layer)
 }
 
 const formatRunTimestamp = (value?: string): string => {
@@ -10300,13 +10300,11 @@ const formatRunTimestamp = (value?: string): string => {
 }
 
 const refreshHistoryTasks = () => {
-  historyDetailRequests.invalidate()
-  return loadTaskInbox()
+  if (showHistoryPanel.value && activeHistoryLayer.value === 'tasks') return setHistoryLayer('tasks')
 }
 
 const refreshHistoryResults = () => {
-  historyDetailRequests.invalidate()
-  return loadHistoryResults()
+  if (showHistoryPanel.value && activeHistoryLayer.value === 'results') return setHistoryLayer('results')
 }
 
 const deleteVerificationRun = async (run: VerificationRunSummary) => {
@@ -10405,12 +10403,11 @@ const openVerificationRun = async (
 
 const watchVerificationTask = async (taskId: number) => {
   if (isVerifying.value) {
-    if (asyncVerificationTask.value.taskId === taskId) {
-      showVerificationPanel.value = true
+    if (asyncVerificationActive.value && asyncVerificationTask.value.taskId === taskId) {
+      if (!verificationPanelTracksRun.value) openRunPanel('verification', 'run')
     } else {
       notifyInfo(t('app.taskWatchAlreadyActive'))
     }
-    closeHistoryPanel()
     return
   }
   const ownsRun = captureBoardRunOwner()
@@ -10419,14 +10416,12 @@ const watchVerificationTask = async (taskId: number) => {
   isVerifying.value = true
   asyncVerificationActive.value = true
   verificationCancelRequested.value = false
-  cancellingVerificationTask.value = false
   asyncVerificationTask.value = {
     taskId,
     progress: normalizeTaskProgress(taskSummary?.progress),
     statusKey: taskProgressStatusKey(taskSummary?.progressStage, taskSummary?.status)
   }
-  closeHistoryPanel()
-  showVerificationPanel.value = true
+  openRunPanel('verification', 'run')
   try {
     await pollAsyncVerification(taskId)
   } catch (error: any) {
@@ -10435,14 +10430,14 @@ const watchVerificationTask = async (taskId: number) => {
         verificationError.value = null
         if (!verificationCancelRequested.value) notifyInfo(t('app.verificationCancelled'))
       } else {
-        presentRunFailure('verification', 'app.verificationFailed', error, showVerificationPanel.value)
+        presentRunFailure('verification', 'app.verificationFailed', error, verificationPanelTracksRun.value)
       }
     }
   } finally {
     if (ownsRun()) {
+      setRunPanelView('verification', 'settings')
       isVerifying.value = false
       asyncVerificationActive.value = false
-      cancellingVerificationTask.value = false
       verificationCancelRequested.value = false
       await loadTaskInbox({ showLoading: false })
     }
@@ -10451,12 +10446,11 @@ const watchVerificationTask = async (taskId: number) => {
 
 const watchSimulationTask = async (taskId: number) => {
   if (isSimulating.value) {
-    if (asyncSimulationTask.value.taskId === taskId) {
-      showSimulationPanel.value = true
+    if (asyncSimulationActive.value && asyncSimulationTask.value.taskId === taskId) {
+      openRunPanel('simulation', 'run')
     } else {
       notifyInfo(t('app.taskWatchAlreadyActive'))
     }
-    closeHistoryPanel()
     return
   }
   const ownsRun = captureBoardRunOwner()
@@ -10465,14 +10459,12 @@ const watchSimulationTask = async (taskId: number) => {
   isSimulating.value = true
   asyncSimulationActive.value = true
   simulationCancelRequested.value = false
-  cancellingSimulationTask.value = false
   asyncSimulationTask.value = {
     taskId,
     progress: normalizeTaskProgress(taskSummary?.progress),
     statusKey: taskProgressStatusKey(taskSummary?.progressStage, taskSummary?.status)
   }
-  closeHistoryPanel()
-  showSimulationPanel.value = true
+  openRunPanel('simulation', 'run')
   /*
    * Same exposure as a run started from the panel, and reached more often: watching a task from the
    * inbox is exactly when a user carries on editing. `handleSimulate` documents the mechanism.
@@ -10486,46 +10478,21 @@ const watchSimulationTask = async (taskId: number) => {
       simulationHistoryRequests.invalidate()
       simulationRuns.value = [summary, ...simulationRuns.value.filter(item => item.id !== summary.id)]
     }
-    /*
-     * Adopted only when this run is the one about to be shown, which is why the write sits below the
-     * deferral branches rather than straight after the poll.
-     *
-     * `lastSimulationResult` owns the replay context and its derived states. Adopting an arriving run
-     * would replace the visible trajectory, while the canvas still owns the opened run's frozen scene.
-     * Playback admission permits replaying history while an async run is pending, so completion must
-     * remain in history until that replay is closed.
-     */
-    if (!showSimulationPanel.value) {
-      notifySimulationOutcome(result, true)
-      return
-    }
-    if (traceAnimationState.value.visible || simulationAnimationState.value.visible) {
-      notifySimulationOutcome(result, true)
-      notifyAutomaticPlaybackDeferredForReplay(result, watchSubmissionSceneChanges)
-      return
-    }
-    if (isLiveBoardEditorVisible.value) {
-      notifySimulationOutcome(result, true)
-      notifyAutomaticPlaybackDeferred()
-      return
-    }
-    showSimulationPanel.value = false
-    adoptSimulationRunResult(result, watchSubmissionSceneChanges)
-    openSimulationAnimationFromSavedStates()
+    deliverSimulationRunResult(result, watchSubmissionSceneChanges)
   } catch (error: any) {
     if (ownsRun() && !isPollingAbortedError(error)) {
       if (isAsyncTaskCancelledError(error)) {
         simulationError.value = null
         if (!simulationCancelRequested.value) notifyInfo(t('app.simulationCancelled'))
       } else {
-        presentRunFailure('simulation', 'app.simulationFailed', error, showSimulationPanel.value)
+        presentRunFailure('simulation', 'app.simulationFailed', error, simulationPanelTracksRun.value)
       }
     }
   } finally {
     if (ownsRun()) {
+      setRunPanelView('simulation', 'settings')
       isSimulating.value = false
       asyncSimulationActive.value = false
-      cancellingSimulationTask.value = false
       simulationCancelRequested.value = false
       await loadTaskInbox({ showLoading: false })
     }
@@ -10577,10 +10544,8 @@ const presentFuzzingRun = (run: FuzzingRun) => {
 
 const deliverCompletedFuzzingRun = (taskId: number, run: FuzzingRun) => {
   untrackFuzzTask(taskId)
-  const wantsResult = showFuzzingPanel.value
-  const deferredForReplay = wantsResult && isModelPlaybackActive.value
-  showFuzzingPanel.value = false
-  if (wantsResult && !deferredForReplay) {
+  const presentation = completeRunPresentation('fuzzing')
+  if (presentation === 'foreground') {
     void refreshCurrentBoardModelFingerprints()
     presentFuzzingRun(run)
     return
@@ -10592,17 +10557,19 @@ const deliverCompletedFuzzingRun = (taskId: number, run: FuzzingRun) => {
   if (!notificationShown) return
   if (run.outcome === 'BUDGET_EXHAUSTED') notifyInfo(fuzzingCompletionMessage(run))
   else notifyBlocked(fuzzingCompletionMessage(run))
-  if (deferredForReplay) notifyInfo(t('app.fuzzResultDeferredForPlayback'))
+  if (presentation !== 'background') {
+    notifyInfo(t(presentation === 'playback'
+      ? 'app.fuzzResultDeferredForPlayback' : 'app.fuzzResultDeferredForModal'))
+  }
 }
 
 const watchFuzzingTask = async (taskId: number) => {
   if (isFuzzing.value) {
     if (asyncFuzzingTask.value.taskId === taskId) {
-      showFuzzingPanel.value = true
+      openRunPanel('fuzzing', 'run')
     } else {
       notifyInfo(t('app.taskWatchAlreadyActive'))
     }
-    closeHistoryPanel()
     return
   }
 
@@ -10612,20 +10579,17 @@ const watchFuzzingTask = async (taskId: number) => {
   // the only truthful source after a refresh or after the current Board has changed.
   fuzzingWatchedTask.value = taskSummary || null
   fuzzingSettingsNotice.value = null
-  isFuzzing.value = true
-  asyncFuzzingActive.value = true
-  fuzzingCancelRequested.value = false
-  cancellingFuzzingTask.value = false
-  fuzzingError.value = null
-  paperDomainStaleRecoveryActive.value = false
   asyncFuzzingTask.value = {
     taskId,
     progress: normalizeTaskProgress(taskSummary?.progress),
     statusKey: taskProgressStatusKey(taskSummary?.progressStage, taskSummary?.status)
   }
+  isFuzzing.value = true
+  fuzzingCancelRequested.value = false
+  fuzzingError.value = null
+  paperDomainStaleRecoveryActive.value = false
   trackFuzzTask(taskId)
-  closeHistoryPanel()
-  showFuzzingPanel.value = true
+  openRunPanel('fuzzing', 'run')
   try {
     const run = await pollAsyncFuzzing(taskId)
     if (ownsRun()) deliverCompletedFuzzingRun(taskId, run)
@@ -10638,7 +10602,7 @@ const watchFuzzingTask = async (taskId: number) => {
       } else if (isFuzzTaskRecoveryPendingError(error)) {
         fuzzingError.value = null
         fuzzingSettingsNotice.value = { key: 'app.fuzzResultRecoveryPending' }
-        if (!showFuzzingPanel.value) notifyInfo(fuzzingSettingsNoticeMessage.value)
+        if (!fuzzingPanelTracksRun.value) notifyInfo(fuzzingSettingsNoticeMessage.value)
       } else if (isFuzzCompletedResultUnavailableError(error)) {
         fuzzingError.value = makeRunFailure('app.failedToLoadFuzzingRun', error)
         markFuzzNotificationUnread({
@@ -10651,7 +10615,7 @@ const watchFuzzingTask = async (taskId: number) => {
       } else {
         console.error('Fuzz task watch failed:', error)
         fuzzingError.value = makeRunFailure('app.fuzzSearchFailed', error)
-        if (showFuzzingPanel.value) {
+        if (fuzzingPanelTracksRun.value) {
           untrackFuzzTask(taskId)
         } else {
           markFuzzNotificationUnread({
@@ -10666,9 +10630,8 @@ const watchFuzzingTask = async (taskId: number) => {
     }
   } finally {
     if (ownsRun()) {
+      setRunPanelView('fuzzing', 'settings')
       isFuzzing.value = false
-      asyncFuzzingActive.value = false
-      cancellingFuzzingTask.value = false
       fuzzingCancelRequested.value = false
       fuzzingWatchedTask.value = null
       await loadTaskInbox({ showLoading: false })
@@ -10680,8 +10643,8 @@ const cancelVerificationTaskFromInbox = (taskId: number) => withTaskActionLock(
   taskActionKey('cancel', 'verification', taskId),
   async () => {
     try {
-      if (asyncVerificationTask.value.taskId === taskId) {
-        await cancelAsyncVerification()
+      if (watchedTaskId('verification') === taskId) {
+        await cancelWatchedVerification(taskId)
       } else {
         const result = await boardApi.cancelTask(taskId)
         if (boardLifecycleDisposed) return
@@ -10703,8 +10666,8 @@ const cancelSimulationTaskFromInbox = (taskId: number) => withTaskActionLock(
   taskActionKey('cancel', 'simulation', taskId),
   async () => {
     try {
-      if (asyncSimulationTask.value.taskId === taskId) {
-        await cancelAsyncSimulation()
+      if (watchedTaskId('simulation') === taskId) {
+        await cancelWatchedSimulation(taskId)
       } else {
         const result = await simulationApi.cancelTask(taskId)
         if (boardLifecycleDisposed) return
@@ -10726,8 +10689,8 @@ const cancelFuzzingTaskFromInbox = (taskId: number) => withTaskActionLock(
   taskActionKey('cancel', 'fuzzing', taskId),
   async () => {
     try {
-      if (asyncFuzzingTask.value.taskId === taskId) {
-        await cancelAsyncFuzzing()
+      if (watchedTaskId('fuzzing') === taskId) {
+        await cancelWatchedFuzzing(taskId)
       } else {
         const result = await fuzzingApi.cancelTask(taskId)
         if (boardLifecycleDisposed) return
@@ -10804,15 +10767,7 @@ const openTaskInbox = async () => {
     notifyBlocked(t('app.playbackReadOnlyCloseFirst'))
     return
   }
-  const intentEpoch = ++historyPanelIntentEpoch
-  historyDetailRequests.invalidate()
-  closeOtherWorkflowSurfaces()
-  activeHistoryLayer.value = 'tasks'
-  showHistoryPanel.value = true
-  const loaded = await loadTaskInbox()
-  if (loaded && isCurrentHistoryPanelIntent(intentEpoch, 'tasks')) {
-    clearFuzzNotifications('FAILED')
-  }
+  await openHistoryPanel('tasks')
 }
 
 const miniTaskCancelLabel = (kind: 'verification' | 'fuzzing' | 'simulation') => kind === 'verification'
@@ -11285,16 +11240,9 @@ const selectAndPlayFuzzingFinding = async (
   }
 }
 
-type FuzzVerificationHandoffSource = {
-  runId: number
-  specificationId?: string
-  specificationLabel?: string
-  modelSnapshot?: ModelRunSnapshot
-}
-
-const fuzzVerificationHandoffSource = ref<FuzzVerificationHandoffSource | null>(null)
 const fuzzVerificationHandoff = computed(() => {
-  const source = fuzzVerificationHandoffSource.value
+  const panel = activeWorkflowPanel.value
+  const source = panel?.kind === 'verification' ? panel.handoff : null
   if (!source) return null
   const targetPresent = source.specificationId === undefined
     || specifications.value.some(spec => spec.id === source.specificationId)
@@ -11337,12 +11285,9 @@ const availableFuzzRunForFinding = (finding: FuzzingFindingSummary | FuzzingFind
  * Capture the evidence before dismissing the result. The verification panel compares that saved
  * evidence with the live Board throughout the handoff.
  */
-const showVerificationPanelForHandoff = () => {
-  closeHistoryPanel()
+const showVerificationPanelForHandoff = (source: FuzzVerificationHandoffSource | null) => {
   dismissFuzzingResult()
-  showSimulationPanel.value = false
-  showFuzzingPanel.value = false
-  showVerificationPanel.value = true
+  openRunPanel('verification', 'settings', source)
 }
 
 const openFormalVerificationForFuzzFinding = (finding: FuzzingFindingSummary | FuzzingFinding) => {
@@ -11350,49 +11295,31 @@ const openFormalVerificationForFuzzFinding = (finding: FuzzingFindingSummary | F
   const specificationLabel = finding.violatedSpec?.name
     || ('specificationLabel' in finding ? finding.specificationLabel : '')
     || finding.violatedSpecId
-  fuzzVerificationHandoffSource.value = {
+  showVerificationPanelForHandoff({
     runId: finding.fuzzTaskId,
     specificationId: finding.violatedSpecId,
     specificationLabel,
     modelSnapshot: sourceRun?.modelSnapshot
-  }
-  showVerificationPanelForHandoff()
+  })
 }
 
 const openFormalVerificationForCurrentBoard = () => {
   const sourceRun = fuzzingResult.value
-  fuzzVerificationHandoffSource.value = sourceRun ? {
+  showVerificationPanelForHandoff(sourceRun ? {
     runId: sourceRun.id,
     modelSnapshot: sourceRun.modelSnapshot
-  } : null
-  showVerificationPanelForHandoff()
+  } : null)
 }
 
-const closeVerificationPanel = () => {
-  showVerificationPanel.value = false
-  fuzzVerificationHandoffSource.value = null
-}
+const closeVerificationPanel = () => closeWorkflowPanel('verification')
 
-/**
- * Reset the workspace to a clean state.
- *
- * The logo button lives in the board header regardless of what's open or which deep-link the URL holds,
- * and it's visually interactive (cursor, hover fade). Users who click it expect *something*, not a
- * no-op. Pushing to `/board` when already there does nothing — Vue Router skips same-route navigation,
- * the component doesn't remount, overlays stay open, and the URL's deep-link state persists.
- *
- * This gives the click a purpose: close every floating overlay and clear the deep-link target, leaving
- * a clean board. It's an escape hatch — "get me back to just the canvas" — which is exactly what "click
- * the logo to go home" means in a single-page workspace app where the board *is* home.
- */
+// The logo returns to the canvas without interrupting running tasks.
 const resetWorkspace = () => {
-  // Close playback overlays (they block other interactions)
-  if (traceAnimationState.value.visible) closeTraceAnimation()
-  if (simulationAnimationState.value.visible) closeSimulationTimeline()
-  // Close floating tool panels
-  if (showVerificationPanel.value) closeVerificationPanel()
-  if (showSimulationPanel.value) closeSimulationPanel()
-  // Clear deep-link target (so reopening a panel starts fresh rather than resuming the linked run)
+  closePlaybackForNavigation()
+  closeResultSurfaces()
+  pendingHistoryRunTarget = null
+  retireHistoryPanelIntent(false)
+  closeWorkflowPanel()
   if (route.query.run || route.query.trace || route.query.finding) {
     void router.replace({ query: applyBoardRunTarget(route.query, null) })
   }
@@ -11401,6 +11328,7 @@ const resetWorkspace = () => {
 const reuseFuzzingSettings = () => {
   const run = fuzzingResult.value
   if (!run) return
+  if (!canOpenTaskSettings('fuzzing')) return
   const eligibleCurrentIds = new Set(knownFuzzEligibleSpecifications.value.map(spec => spec.id))
   const usedFrozenAllTargets = run.targetSpecIds.length === 0
   const historicalTargetIds = usedFrozenAllTargets
@@ -11424,14 +11352,10 @@ const reuseFuzzingSettings = () => {
       ? { key: 'app.fuzzSettingsReusedWithMissingTargets', params: { count: unavailableTargetCount } }
       : { key: 'app.fuzzSettingsReused' }
   dismissFuzzingResult()
-  closeHistoryPanel()
-  showSimulationPanel.value = false
-  showVerificationPanel.value = false
-  showFuzzingPanel.value = true
+  openRunPanel('fuzzing', 'settings')
 }
 
 // Floating panel visibility state
-const showVerificationPanel = ref(false)
 const verificationActionButtonRef = ref<HTMLButtonElement | null>(null)
 
 // 异步模拟任务状态
@@ -11449,28 +11373,32 @@ const synchronousVerificationRunning = computed(() =>
   isVerifying.value && !asyncVerificationActive.value)
 const synchronousSimulationRunning = computed(() =>
   isSimulating.value && !asyncSimulationActive.value)
-const cancellingSimulationTask = ref(false)
 const simulationCancelRequested = ref(false)
 
 const notifyTaskCancellationResult = (
-  kind: 'verification' | 'fuzzing' | 'simulation',
+  kind: RunPanelKind,
   result: TaskCancellationResult
 ) => {
-  const task = t(kind === 'verification'
+  const taskLabel = t(kind === 'verification'
     ? 'app.verificationTaskName'
     : kind === 'fuzzing' ? 'app.fuzzTaskName' : 'app.simulationTaskName')
-  const statusVisible = (showHistoryPanel.value && activeHistoryLayer.value === 'tasks')
-    || (kind === 'verification' ? showVerificationPanel.value
-      : kind === 'fuzzing' ? showFuzzingPanel.value : showSimulationPanel.value)
+  const task = `${taskLabel} #${result.taskId}`
+  const statusVisible = () => {
+    if (tracksRun(kind) && watchedTaskId(kind) === result.taskId) return true
+    if (!showHistoryPanel.value || activeHistoryLayer.value !== 'tasks') return false
+    const tasks = kind === 'verification' ? verificationTasks.value
+      : kind === 'simulation' ? simulationTasks.value : fuzzingTasks.value
+    return tasks.some(row => row.id === result.taskId && row.status !== 'COMPLETED')
+  }
   switch (result.cancellationOutcome) {
     case 'ACCEPTED':
-      if (statusVisible) return
+      if (statusVisible()) return
       notifyInfo(t(result.executionMayStillBeStopping
           ? 'app.taskCancellationAcceptedStopping'
           : 'app.taskCancellationAccepted', { task }))
       break
     case 'ALREADY_CANCELLED':
-      if (statusVisible) return
+      if (statusVisible()) return
       notifyInfo(t('app.taskAlreadyCancelled', { task }))
       break
     case 'ALREADY_COMPLETED':
@@ -11491,18 +11419,18 @@ const notifyTaskCancellationResult = (
   }
 }
 
-// Floating panel visibility state
-const showSimulationPanel = ref(false)
-const closeSimulationPanel = () => {
-  showSimulationPanel.value = false
-}
+const closeSimulationPanel = () => closeWorkflowPanel('simulation')
+const closeFuzzingPanel = () => closeWorkflowPanel('fuzzing')
 
 // These are non-modal tool panels: the canvas behind them stays live and focus is
 // deliberately not trapped, so they render as `role="region"` rather than
 // `role="dialog"`. `useModalAccessibility` is reused here only for Escape-to-close and
 // focus restoration. Anything that claims `role="dialog"` + `aria-modal="true"` must
 // keep `trapFocus` on.
-const floatingPanelAccessibility = { trapFocus: false } as const
+const floatingPanelAccessibility = {
+  trapFocus: false,
+  shouldRestoreFocus: () => !automaticRunPresentationBlock()
+} as const
 const {
   setDialogRef: setVerificationPanelRef,
   handleModalKeydown: handleVerificationPanelKeydown
@@ -11583,13 +11511,31 @@ const handleFixModelSemanticsChanged = (traceId: number) => {
   void refreshCurrentBoardModelFingerprints()
 }
 
-const cancelAsyncVerification = async () => {
-  const taskId = asyncVerificationTask.value.taskId
-  if (!taskId || cancellingVerificationTask.value) return
+const presentTaskCancellationFailure = async (error: unknown, title: string, selected: boolean) => {
+  const suggestion = t('app.cancelFailureNextStep')
+  if (automaticRunPresentation(selected) === 'foreground') {
+    await acknowledgeFailure({ title, message: localizedErrorMessage(error, title, locale.value),
+      suggestion, ...errorDetails(error) })
+    return
+  }
+  console.error(title, error)
+  notifyError(`${title} — ${suggestion}`)
+}
 
+const cancelTaskFromProgress = (kind: RunPanelKind, cancel: (taskId: number) => Promise<void>) => {
+  const taskId = watchedTaskId(kind)
+  if (taskId === undefined) return
+  return withTaskActionLock(taskActionKey('cancel', kind, taskId), () => cancel(taskId))
+}
+
+const cancelAsyncVerification = () => cancelTaskFromProgress('verification', cancelWatchedVerification)
+const cancelAsyncSimulation = () => cancelTaskFromProgress('simulation', cancelWatchedSimulation)
+const cancelAsyncFuzzing = () => cancelTaskFromProgress('fuzzing', cancelWatchedFuzzing)
+
+const cancelWatchedVerification = async (taskId: number) => {
   const ownsCancellation = () => !boardLifecycleDisposed && asyncVerificationTask.value.taskId === taskId
+  const initiatedInProgress = verificationPanelTracksRun.value
   verificationCancelRequested.value = true
-  cancellingVerificationTask.value = true
   try {
     const result = await boardApi.cancelTask(taskId)
     if (!ownsCancellation()) return
@@ -11597,24 +11543,18 @@ const cancelAsyncVerification = async () => {
     asyncVerificationTask.value.statusKey = taskProgressStatusKey(undefined, result.taskStatus)
     verificationCancelRequested.value = result.cancellationAccepted
       || result.cancellationOutcome === 'ALREADY_CANCELLED'
-  } catch (error: any) {
+  } catch (error) {
     if (!ownsCancellation()) return
     verificationCancelRequested.value = false
-    const msg = localizedErrorMessage(error, t('app.failedToCancelVerificationTask'), locale.value)
-    await acknowledgeFailure({ title: t('app.failedToCancelVerificationTask'), message: msg,
-      suggestion: t('app.cancelFailureNextStep'), ...errorDetails(error) })
-  } finally {
-    if (ownsCancellation()) cancellingVerificationTask.value = false
+    await presentTaskCancellationFailure(error, t('app.failedToCancelVerificationTask'),
+      initiatedInProgress && verificationPanelTracksRun.value)
   }
 }
 
-const cancelAsyncSimulation = async () => {
-  const taskId = asyncSimulationTask.value.taskId
-  if (!taskId || cancellingSimulationTask.value) return
-
+const cancelWatchedSimulation = async (taskId: number) => {
   const ownsCancellation = () => !boardLifecycleDisposed && asyncSimulationTask.value.taskId === taskId
+  const initiatedInProgress = simulationPanelTracksRun.value
   simulationCancelRequested.value = true
-  cancellingSimulationTask.value = true
   try {
     const result = await simulationApi.cancelTask(taskId)
     if (!ownsCancellation()) return
@@ -11622,24 +11562,18 @@ const cancelAsyncSimulation = async () => {
     asyncSimulationTask.value.statusKey = taskProgressStatusKey(undefined, result.taskStatus)
     simulationCancelRequested.value = result.cancellationAccepted
       || result.cancellationOutcome === 'ALREADY_CANCELLED'
-  } catch (error: any) {
+  } catch (error) {
     if (!ownsCancellation()) return
     simulationCancelRequested.value = false
-    const msg = localizedErrorMessage(error, t('app.failedToCancelSimulationTask'), locale.value)
-    await acknowledgeFailure({ title: t('app.failedToCancelSimulationTask'), message: msg,
-      suggestion: t('app.cancelFailureNextStep'), ...errorDetails(error) })
-  } finally {
-    if (ownsCancellation()) cancellingSimulationTask.value = false
+    await presentTaskCancellationFailure(error, t('app.failedToCancelSimulationTask'),
+      initiatedInProgress && simulationPanelTracksRun.value)
   }
 }
 
-const cancelAsyncFuzzing = async () => {
-  const taskId = asyncFuzzingTask.value.taskId
-  if (!taskId || cancellingFuzzingTask.value) return
-
+const cancelWatchedFuzzing = async (taskId: number) => {
   const ownsCancellation = () => !boardLifecycleDisposed && asyncFuzzingTask.value.taskId === taskId
+  const initiatedInProgress = fuzzingPanelTracksRun.value
   fuzzingCancelRequested.value = true
-  cancellingFuzzingTask.value = true
   try {
     const result = await fuzzingApi.cancelTask(taskId)
     if (!ownsCancellation()) return
@@ -11647,15 +11581,11 @@ const cancelAsyncFuzzing = async () => {
     asyncFuzzingTask.value.statusKey = taskProgressStatusKey(undefined, result.taskStatus)
     fuzzingCancelRequested.value = result.cancellationAccepted
       || result.cancellationOutcome === 'ALREADY_CANCELLED'
-  } catch (error: any) {
+  } catch (error) {
     if (!ownsCancellation()) return
     fuzzingCancelRequested.value = false
-    console.error('Failed to cancel fuzzing task:', error)
-    await acknowledgeFailure({ title: t('app.failedToCancelFuzzingTask'),
-      message: localizedErrorMessage(error, t('app.failedToCancelFuzzingTask'), locale.value),
-      suggestion: t('app.cancelFailureNextStep'), ...errorDetails(error) })
-  } finally {
-    if (ownsCancellation()) cancellingFuzzingTask.value = false
+    await presentTaskCancellationFailure(error, t('app.failedToCancelFuzzingTask'),
+      initiatedInProgress && fuzzingPanelTracksRun.value)
   }
 }
 
@@ -11692,7 +11622,7 @@ const handleFixOutcomeUncertain = async () => {
   try {
     const refreshed = await refreshPromise
     if (!ownsBoard()) return
-    await reloadUndoAvailability()
+    await reloadUndoAvailability('outside-queue')
     if (!ownsBoard()) return
     notifyBlocked(refreshed
       ? t('app.fixApplyOutcomeUnconfirmedAfterRefresh')
@@ -11712,97 +11642,72 @@ const waitForPendingFixRefresh = async () => {
   }
 }
 
-// 面板互斥切换函数
-const togglePanel = (panel: 'simulation' | 'fuzzing' | 'verification') => {
+const canOpenWorkflowPanel = (kind: BoardWorkflowPanel['kind']) => {
   if (isModelPlaybackActive.value) {
     notifyBlocked(t('app.playbackReadOnlyCloseFirst'))
-    return
+    return false
   }
   if (isAnyRecommendationRunning()) {
     notifyBlocked(t('app.recommendationGenerationInProgress'))
+    return false
+  }
+  if (kind === 'fuzzing' && isSceneReplacementInProgress.value) {
+    notifyBlocked(t('app.sceneReplacementInProgress'))
+    return false
+  }
+  return true
+}
+
+const isRunKindActive = (kind: RunPanelKind) => kind === 'verification' ? isVerifying.value
+  : kind === 'simulation' ? isSimulating.value : isFuzzing.value
+
+const canOpenTaskSettings = (kind: RunPanelKind) => {
+  if (isRunKindActive(kind)) {
+    notifyInfo(t('app.taskSettingsBlockedByActiveRun'))
+    return false
+  }
+  return canOpenWorkflowPanel(kind)
+}
+
+const togglePanel = (kind: RunPanelKind) => {
+  if (activeWorkflowPanel.value?.kind === kind) {
+    closeWorkflowPanel(kind)
     return
   }
+  if (!canOpenWorkflowPanel(kind)) return
 
+  if (kind === 'fuzzing') {
+    dismissAllNotifications()
+    if (!isFuzzing.value) fuzzingWatchedTask.value = null
+    fuzzingSettingsNotice.value = null
+  }
   dismissCompletionNotifications()
   closeResultSurfaces()
-  closeHistoryPanel()
-  
-  if (panel === 'simulation') {
-    if (showSimulationPanel.value) {
-      showSimulationPanel.value = false
-    } else {
-      showSimulationPanel.value = true
-      showFuzzingPanel.value = false
-      showVerificationPanel.value = false
-    }
-  } else if (panel === 'fuzzing') {
-    if (showFuzzingPanel.value) {
-      showFuzzingPanel.value = false
-    } else {
-      showFuzzingPanel.value = true
-      showSimulationPanel.value = false
-      showVerificationPanel.value = false
-    }
-  } else {
-    if (showVerificationPanel.value) {
-      showVerificationPanel.value = false
-    } else {
-      showVerificationPanel.value = true
-      showSimulationPanel.value = false
-      showFuzzingPanel.value = false
-    }
-  }
+  openRunPanel(kind, isRunKindActive(kind) ? 'run' : 'settings')
 }
 
-const openSimulationFromActionDock = () => {
-  togglePanel('simulation')
-}
-
-const openVerificationFromActionDock = () => {
-  fuzzVerificationHandoffSource.value = null
-  togglePanel('verification')
-}
-
-const openFuzzingFromActionDock = () => {
-  if (isSceneReplacementInProgress.value) {
-    notifyBlocked(t('app.sceneReplacementInProgress'))
-    return
-  }
-  // Dismiss earlier scene/task notices before placing a tool panel beneath them.
-  dismissAllNotifications()
-  if (!isFuzzing.value) fuzzingWatchedTask.value = null
-  fuzzingSettingsNotice.value = null
-  togglePanel('fuzzing')
-}
-
-/**
- * Route a failed run in Task Status back to the panel that owns launching it.
- *
- * Reuses the action-dock openers so the panel's own guards still apply (playback lock, scene
- * replacement, a running recommendation) and so `togglePanel` performs its usual transition,
- * including closing the history panel. Not a re-submit: the board may have changed since the run,
- * so the user confirms the settings against the current scene.
- */
-const reopenTaskSettings = (kind: 'verification' | 'fuzzing' | 'simulation') => {
-  if (kind === 'fuzzing') openFuzzingFromActionDock()
-  else if (kind === 'simulation') openSimulationFromActionDock()
-  else openVerificationFromActionDock()
+const reopenTaskSettings = (kind: RunPanelKind) => {
+  if (!canOpenTaskSettings(kind)) return
+  dismissCompletionNotifications()
+  closeResultSurfaces()
+  if (kind === 'fuzzing') fuzzingSettingsNotice.value = null
+  openRunPanel(kind, 'settings')
 }
 
 const openHistoryFromActionDock = () => {
+  if (showHistoryPanel.value) {
+    closeHistoryPanel()
+    return
+  }
+  if (!canOpenWorkflowPanel('history')) return
   if (unreadFuzzNotificationCount.value > 0) {
     const layer: HistoryLayer = unreadFailedFuzzCount.value > 0 ? 'tasks' : 'results'
     if (layer === 'results') activeHistoryResultFilter.value = 'fuzzing'
-    void toggleHistoryPanel(layer)
+    void openHistoryPanel(layer)
     return
   }
-  // Land on the layer that has something to show. "Task Status" tracks work still in flight, so
-  // with nothing running it renders "No tasks need attention" -- which reads as "no results" to
-  // someone who just finished a run and came here to read the verdict. Reviewing a real VIOLATED
-  // run this way, the completed result was one unvisited tab away and the empty inbox was all the
-  // user saw. When work is genuinely active the inbox is still the right landing place.
   const workInFlight = isVerifying.value || isSimulating.value || isFuzzing.value
-  void toggleHistoryPanel(workInFlight ? 'tasks' : 'results')
+  void openHistoryPanel(workInFlight ? 'tasks' : 'results')
 }
 
 // 模拟时间轴动画状态
@@ -11973,6 +11878,19 @@ const simulationPlaybackSemantics = computed(
 )
 const isModelPlaybackActive = isAnimationLocked
 
+// An arriving result cannot take ownership of a replay or a focus-trapping surface.
+const automaticRunPresentationBlock = () => foregroundRunBlock(isModelPlaybackActive.value, openModalDepth.value > 0)
+
+const automaticRunPresentation = (selected: boolean) =>
+  chooseRunPresentation(selected && !historyDetailRequests.hasPendingReplace(), automaticRunPresentationBlock())
+
+const completeRunPresentation = (kind: RunPanelKind) => {
+  const selected = tracksRun(kind)
+  const presentation = automaticRunPresentation(selected)
+  if (selected) closeWorkflowPanel(kind)
+  return presentation
+}
+
 const hidePlaybackPanel = () => {
   playbackPanelOpen.value = false
   void nextTick(() => document.querySelector<HTMLButtonElement>('[data-testid="playback-panel-toggle"]')?.focus())
@@ -12012,7 +11930,7 @@ const {
   canUndo: canUndoBoardEdit,
   canRedo: canRedoBoardEdit,
   isApplying: isApplyingBoardEditUndo,
-  loadAvailability: loadBoardUndoAvailability,
+  hasHistoryChanged: hasBoardUndoHistoryChanged,
   syncAvailability: syncBoardUndoAvailability,
   undo: undoBoardEdit,
   redo: redoBoardEdit
@@ -12024,7 +11942,6 @@ const {
     environmentVariables: result.environmentVariables,
     rules: result.rules,
     specs: result.specs,
-    availability: result,
     semanticChanged: hasRecommendationSceneChanged({
       nodes: nodes.value, environmentVariables: environmentVariables.value, rules: rules.value,
       specifications: specifications.value, deviceTemplates: deviceTemplates.value
@@ -12065,6 +11982,11 @@ const {
       return
     }
     if (reasonCode === 'conflict') {
+      const conflict = error as { response?: { data?: { data?: { reasonCode?: string } } } }
+      if (conflict?.response?.data?.data?.reasonCode === 'BOARD_EDIT_HISTORY_CHANGED') {
+        notifyBlocked(t(reconciled ? 'app.boardUndoHistoryChanged' : 'app.boardUndoConflictRefreshFailed'))
+        return
+      }
       notifyBlocked(t(reconciled
         ? 'app.boardUndoConflict'
         : 'app.boardUndoConflictRefreshFailed'))
@@ -12144,7 +12066,7 @@ offerClearUnusableUndoHistory = async () => {
   } catch (error) {
     if (isPollingAbortedError(error)
       || error instanceof BoardMutationAdmissionCancelledError) return
-    await loadBoardUndoAvailability()
+    await reloadUndoAvailability('outside-queue')
     if ((error as { response?: { status?: number } })?.response?.status === 409) {
       notifyBlocked(t('app.boardUndoClearHistoryStale'))
       return
@@ -12156,7 +12078,11 @@ offerClearUnusableUndoHistory = async () => {
 }
 
 // Bind the late reference the assistant refresh helpers above call, now that it exists.
-reloadUndoAvailability = loadBoardUndoAvailability
+reloadUndoAvailability = async placement => {
+  if (!await hasBoardUndoHistoryChanged()) return
+  if (placement === 'outside-queue') await requestBoardSnapshotRefresh({ force: true })
+  else await refreshBoardSnapshot()
+}
 
 // Register this after playback refs exist. A watcher evaluates its computed source
 // immediately while collecting dependencies, so registering it earlier would hit the
@@ -12445,17 +12371,17 @@ const ensureLiveBoardEditorClosedForPlayback = (): boolean => {
   return false
 }
 
-const notifyAutomaticPlaybackDeferred = () => {
-  notifyInfo(t('app.simulationPlaybackDeferredForEditor'))
-}
-
 /** Saved results stay in history; other results need a local owner until explicitly opened or discarded. */
-const notifyAutomaticPlaybackDeferredForReplay = (
+const notifyAutomaticPlaybackDeferred = (
   result: SimulationResultView,
-  submissionSceneChanges: number
+  submissionSceneChanges: number,
+  presentation: Exclude<RunPresentation, 'foreground'>
 ) => {
   if (result.historyPersistence.status === 'SAVED') {
-    notifyInfo(t('app.simulationPlaybackDeferredForReplay'))
+    if (presentation !== 'background') {
+      notifyInfo(t(presentation === 'playback'
+        ? 'app.simulationPlaybackDeferredForReplay' : 'app.simulationPlaybackDeferredForModal'))
+    }
     return
   }
   const ownerAuthScopeEpoch = boardAuthScopeEpoch
@@ -12468,7 +12394,7 @@ const notifyAutomaticPlaybackDeferredForReplay = (
     discardLabel: t('app.discardLocalResult'),
     onAction: () => {
       if (!isCurrentBoardAuthScope(ownerAuthScopeEpoch) || currentAuthUserId.value !== ownerUserId) return true
-      if (!ensureHistoricalPlaybackUiAdmission()) return false
+      if (openModalDepth.value > 0 || !ensureHistoricalPlaybackUiAdmission()) return false
       closeOtherWorkflowSurfaces()
       adoptSimulationRunResult(result, submissionSceneChanges)
       openSimulationAnimationFromSavedStates()
@@ -12477,6 +12403,17 @@ const notifyAutomaticPlaybackDeferredForReplay = (
     onClose: () => unsavedRunNotifications.delete(close)
   })
   unsavedRunNotifications.add(close)
+}
+
+const deliverSimulationRunResult = (result: SimulationResultView, submissionSceneChanges: number) => {
+  const presentation = completeRunPresentation('simulation')
+  if (presentation === 'foreground') {
+    adoptSimulationRunResult(result, submissionSceneChanges)
+    openSimulationAnimationFromSavedStates()
+    return
+  }
+  notifySimulationOutcome(result, result.historyPersistence.status === 'SAVED')
+  notifyAutomaticPlaybackDeferred(result, submissionSceneChanges, presentation)
 }
 
 const ensurePlaybackClosedForMutation = (): boolean => {
@@ -12498,13 +12435,7 @@ let playInterval: ReturnType<typeof setInterval> | null = null
  * are the board's viewport controls and must survive every one of these, because a result panel is
  * exactly when a user zooms to look at what it points at.
  */
-/** Embedded recommendations stay in the Control Center and do not occupy the canvas workspace. */
-const isWorkflowPanelOpen = computed(() =>
-  showVerificationPanel.value ||
-  showSimulationPanel.value ||
-  showFuzzingPanel.value ||
-  showHistoryPanel.value
-)
+const isWorkflowPanelOpen = computed(() => activeWorkflowPanel.value !== null)
 
 /*
  * There is no `isCanvasMapHidden…` predicate any more, because the collision it guarded against cannot
@@ -12577,7 +12508,7 @@ const selectAndPlayTrace = (traceIndex: number) => {
   if (traces && traceIndex >= 0 && traceIndex < traces.length) {
     const trace = traces[traceIndex]
     if (hasPersistedVerificationTrace(verificationResult.value, trace)) {
-      void openVerificationTraceFromHistory(trace.id)
+      void openRunTarget({ kind: 'verification', runId: trace.verificationTaskId, traceId: trace.id })
       return
     }
     resetPlaybackTerminal()
@@ -13038,6 +12969,45 @@ const closeSimulationTimeline = (clearDeepLink = true) => {
   if (clearDeepLink) clearRunDeepLink()
 }
 
+const deliverVerificationRunResult = (result: VerificationResult, submissionSceneChanges: number): RunPresentation => {
+  const presentation = completeRunPresentation('verification')
+  const historyStatus = result.historyPersistence.status
+  const unconfirmedSave = historyStatus === 'FAILED' || historyStatus === 'OUTCOME_UNKNOWN'
+  if (unconfirmedSave) {
+    notifyBlocked(t(historyStatus === 'OUTCOME_UNKNOWN'
+      ? 'app.verificationHistorySaveOutcomeUnknown' : 'app.verificationHistorySaveFailed'))
+  }
+  if (presentation === 'foreground') {
+    adoptVerificationRunResult(result, submissionSceneChanges)
+    notifyVerificationOutcome(result, { presenting: true })
+    return presentation
+  }
+  notifyVerificationOutcome(result)
+  if (unconfirmedSave) {
+    const ownsRun = captureBoardRunOwner()
+    let close!: () => void
+    close = notifyAvailableResult({
+      title: t('app.verificationTemporaryResultTitle'),
+      message: t('app.verificationTemporaryResultMessage'),
+      actionLabel: t('app.openResult'),
+      discardLabel: t('app.discardLocalResult'),
+      onAction: () => {
+        if (!ownsRun()) return true
+        if (openModalDepth.value > 0 || !ensureHistoricalPlaybackUiAdmission()) return false
+        closeOtherWorkflowSurfaces()
+        adoptVerificationRunResult(result, submissionSceneChanges)
+        return true
+      },
+      onClose: () => unsavedRunNotifications.delete(close)
+    })
+    unsavedRunNotifications.add(close)
+  } else if (presentation !== 'background') {
+    notifyInfo(t(presentation === 'playback'
+      ? 'app.verificationResultDeferredForPlayback' : 'app.verificationResultDeferredForModal'))
+  }
+  return presentation
+}
+
 const handleVerify = async (): Promise<boolean> => {
   if (isVerifying.value) return false
   const isAsync = verificationForm.isAsync
@@ -13051,10 +13021,10 @@ const handleVerify = async (): Promise<boolean> => {
   }
   // Claim the same slot that Watch uses before the board queue can suspend submission.
   const ownsRun = captureBoardRunOwner()
+  setRunPanelView('verification', 'run')
   isVerifying.value = true
   asyncVerificationActive.value = isAsync
   verificationCancelRequested.value = false
-  cancellingVerificationTask.value = false
   if (isAsync) asyncVerificationTask.value = { taskId: null, progress: 0, statusKey: 'app.taskInitializing' }
 
   try {
@@ -13101,49 +13071,12 @@ const handleVerify = async (): Promise<boolean> => {
       return ownsRun()
     }
 
-    // Sync verification (original logic)
-    const presented = await boardApi.verify(req)
+    const result = await boardApi.verify(req)
     if (!ownsRun()) return false
-    // Same window as the async path (see `pollAsyncVerification`): this await is long enough for the user
-    // to open a replay, and `closeResultDialog` nulls `verificationResult` when they do, so assigning it
-    // here would raise the modal dialog over a running trace.
-    if (isModelPlaybackActive.value) {
-      notifyVerificationOutcome(presented)
-      if (['FAILED', 'OUTCOME_UNKNOWN'].includes(presented.historyPersistence.status)) {
-        notifyBlocked(presented.historyPersistence.status === 'OUTCOME_UNKNOWN'
-            ? t('app.verificationHistorySaveOutcomeUnknown')
-            : t('app.verificationHistorySaveFailed'))
-        let close!: () => void
-        close = notifyAvailableResult({
-          title: t('app.verificationTemporaryResultTitle'),
-          message: t('app.verificationTemporaryResultMessage'),
-          actionLabel: t('app.openResult'),
-          discardLabel: t('app.discardLocalResult'),
-          onAction: () => {
-            if (!ownsRun()) return true
-            if (!ensureHistoricalPlaybackUiAdmission()) return false
-            closeOtherWorkflowSurfaces()
-            adoptVerificationRunResult(presented, verifySubmissionSceneChanges)
-            return true
-          },
-          onClose: () => unsavedRunNotifications.delete(close)
-        })
-        unsavedRunNotifications.add(close)
-      } else {
-        notifyInfo(t('app.verificationResultDeferredForPlayback'))
-      }
-      // Refresh confirmed saved runs and reconcile an uncertain save without claiming the local result exists there.
-      void loadVerificationRuns(false)
-      return true
-    }
-    adoptVerificationRunResult(presented, verifySubmissionSceneChanges)
-    if (['FAILED', 'OUTCOME_UNKNOWN'].includes(presented.historyPersistence.status)) {
-      notifyBlocked(presented.historyPersistence.status === 'OUTCOME_UNKNOWN'
-          ? t('app.verificationHistorySaveOutcomeUnknown')
-          : t('app.verificationHistorySaveFailed'))
+    if (deliverVerificationRunResult(result, verifySubmissionSceneChanges) !== 'foreground'
+      || result.historyPersistence.status !== 'SAVED') {
       void loadVerificationRuns(false)
     }
-    notifyVerificationOutcome(verificationResult.value, { presenting: true })
     return true
 
   } catch (error: any) {
@@ -13156,23 +13089,16 @@ const handleVerify = async (): Promise<boolean> => {
       if (!verificationCancelRequested.value) notifyInfo(t('app.verificationCancelled'))
     } else {
       console.error('Verification failed:', error)
-      presentRunFailure('verification', 'app.verificationFailed', error, !isAsync || showVerificationPanel.value)
+      presentRunFailure('verification', 'app.verificationFailed', error, verificationPanelTracksRun.value)
     }
     return false
   } finally {
     if (ownsRun()) {
+      setRunPanelView('verification', 'settings')
       isVerifying.value = false
       asyncVerificationActive.value = false
-      cancellingVerificationTask.value = false
       verificationCancelRequested.value = false
     }
-  }
-}
-
-const runVerification = async () => {
-  const completed = await handleVerify()
-  if (completed && !verificationForm.isAsync) {
-    closeVerificationPanel()
   }
 }
 
@@ -13183,12 +13109,11 @@ const runFuzzing = async (): Promise<boolean> => {
     return false
   }
   const ownsRun = captureBoardRunOwner()
-  isFuzzing.value = true
-  fuzzingWatchedTask.value = null
-  asyncFuzzingActive.value = true
-  cancellingFuzzingTask.value = false
-  fuzzingCancelRequested.value = false
   asyncFuzzingTask.value = { taskId: null, progress: 0, statusKey: 'app.taskInitializing' }
+  isFuzzing.value = true
+  setRunPanelView('fuzzing', 'run')
+  fuzzingWatchedTask.value = null
+  fuzzingCancelRequested.value = false
   let request: FuzzingRequest | undefined
   let submittedTaskId: number | null = null
   let submittedTaskInitiator: RunInitiator = 'USER'
@@ -13277,7 +13202,7 @@ const runFuzzing = async (): Promise<boolean> => {
     } else if (submittedTaskId && isFuzzTaskRecoveryPendingError(error)) {
       fuzzingError.value = null
       fuzzingSettingsNotice.value = { key: 'app.fuzzResultRecoveryPending' }
-      if (!showFuzzingPanel.value) {
+      if (!fuzzingPanelTracksRun.value) {
         notifyInfo(fuzzingSettingsNoticeMessage.value)
       }
     } else if (submittedTaskId && isFuzzCompletedResultUnavailableError(error)) {
@@ -13289,7 +13214,7 @@ const runFuzzing = async (): Promise<boolean> => {
         initiator: submittedTaskInitiator,
         createdAt: new Date().toISOString()
       })
-      if (!showFuzzingPanel.value) {
+      if (!fuzzingPanelTracksRun.value) {
         notifyError(fuzzingErrorMessage.value!)
       }
     } else {
@@ -13306,15 +13231,15 @@ const runFuzzing = async (): Promise<boolean> => {
         fuzzingError.value = makeRunFailure(boardRefreshed
           ? 'app.fuzzPaperDomainStale'
           : 'app.fuzzPaperDomainStaleBoardRefreshFailed', error)
-        if (boardRefreshed && showFuzzingPanel.value && validPaperPathLength()) {
+        if (boardRefreshed && fuzzingPanelTracksRun.value && validPaperPathLength()) {
           schedulePaperDomainPreview()
-        } else if (!showFuzzingPanel.value) {
+        } else if (!fuzzingPanelTracksRun.value) {
           notifyBlocked(fuzzingErrorMessage.value!)
         }
       } else {
         fuzzingError.value = makeRunFailure('app.fuzzSearchFailed', error)
       }
-      if (submittedTaskId && !showFuzzingPanel.value) {
+      if (submittedTaskId && !fuzzingPanelTracksRun.value) {
         markFuzzNotificationUnread({
           taskId: submittedTaskId,
           kind: 'FAILED',
@@ -13324,16 +13249,15 @@ const runFuzzing = async (): Promise<boolean> => {
         notifyError(fuzzingErrorMessage.value!)
       } else if (submittedTaskId) {
         untrackFuzzTask(submittedTaskId)
-      } else if (!showFuzzingPanel.value && !stalePaperDomain) {
+      } else if (!fuzzingPanelTracksRun.value && !stalePaperDomain) {
         notifyError(fuzzingErrorMessage.value!)
       }
     }
     return false
   } finally {
     if (ownsRun()) {
+      setRunPanelView('fuzzing', 'settings')
       isFuzzing.value = false
-      asyncFuzzingActive.value = false
-      cancellingFuzzingTask.value = false
       fuzzingCancelRequested.value = false
       fuzzingWatchedTask.value = null
       await loadTaskInbox({ showLoading: false })
@@ -13368,9 +13292,9 @@ const handleSimulate = async (simConfig: {
   }
   const ownsRun = captureBoardRunOwner()
   isSimulating.value = true
+  setRunPanelView('simulation', 'run')
   asyncSimulationActive.value = normalizedSimConfig.isAsync
   simulationCancelRequested.value = false
-  cancellingSimulationTask.value = false
   if (normalizedSimConfig.isAsync) {
     asyncSimulationTask.value = { taskId: null, progress: 0, statusKey: 'app.taskInitializing' }
   }
@@ -13447,35 +13371,7 @@ const handleSimulate = async (simConfig: {
       simulationRuns.value = [summary, ...simulationRuns.value.filter(item => item.id !== summary.id)]
     }
 
-    // 直接打开时间轴动画，不显示结果对话框
-    // The visible replay owns the trajectory and frozen scene, regardless of how the new run was executed.
-    if (traceAnimationState.value.visible || simulationAnimationState.value.visible) {
-      notifySimulationOutcome(result, result.historyPersistence.status === 'SAVED')
-      notifyAutomaticPlaybackDeferredForReplay(result, simulationSubmissionSceneChanges)
-      return true
-    }
-    if (normalizedSimConfig.isAsync) {
-      if (!showSimulationPanel.value || isLiveBoardEditorVisible.value) {
-        adoptSimulationRunResult(result, simulationSubmissionSceneChanges)
-        notifySimulationOutcome(result, true)
-        if (isLiveBoardEditorVisible.value) notifyAutomaticPlaybackDeferred()
-        return true
-      }
-
-      adoptSimulationRunResult(result, simulationSubmissionSceneChanges)
-      showSimulationPanel.value = false
-      openSimulationAnimationFromSavedStates()
-      return true
-    }
-
-    // Adopting the run also selects its states before playback opens.
-    adoptSimulationRunResult(result, simulationSubmissionSceneChanges)
-
-    // 关闭模拟配置面板
-    showSimulationPanel.value = false
-
-    // 打开模拟时间轴动画
-    openSimulationAnimationFromSavedStates()
+    deliverSimulationRunResult(result, simulationSubmissionSceneChanges)
     return true
 
   } catch (error: any) {
@@ -13488,14 +13384,14 @@ const handleSimulate = async (simConfig: {
       if (!simulationCancelRequested.value) notifyInfo(t('app.simulationCancelled'))
     } else {
       console.error('Simulation failed:', error)
-      presentRunFailure('simulation', 'app.simulationFailed', error, !normalizedSimConfig.isAsync || showSimulationPanel.value)
+      presentRunFailure('simulation', 'app.simulationFailed', error, simulationPanelTracksRun.value)
     }
     return false
   } finally {
     if (ownsRun()) {
+      setRunPanelView('simulation', 'settings')
       isSimulating.value = false
       asyncSimulationActive.value = false
-      cancellingSimulationTask.value = false
       simulationCancelRequested.value = false
     }
   }
@@ -13598,37 +13494,7 @@ const pollAsyncVerification = async (taskId: number): Promise<void> => {
       throwIfPollingAborted(expectedPollingEpoch)
       const result = buildVerificationResultFromTask(task, traces)
       upsertVerificationTaskSummary({ ...task, progress: 100 })
-      /*
-       * A replay on screen outranks presenting a new verdict, and here that is not merely a matter of
-       * stacking: opening a counterexample calls `closeResultDialog`, so `verificationResult` is null for
-       * the whole time the bar animates. Re-assigning it on arrival therefore made the `aria-modal` result
-       * dialog spring up over the trace the user was watching, taking the focus trap and the scroll lock
-       * from a non-modal bar that kept running underneath.
-       *
-       * Reachable the same way as the simulation and exploration cases: playback admission does not
-       * consider `isVerifying`, so watching a task from the inbox and then replaying something from history
-       * is ordinary use. The verdict is not lost — it is announced as a toast (the branch a closed panel
-       * already takes) and saved to run history by the `loadVerificationRuns` below.
-       */
-      // Conditioned on presentation, not on playback alone: a background run whose panel is closed was
-      // never going to open a dialog, so telling that user "the dialog did not open because of the replay"
-      // would name a cause the client knows is false.
-      const wouldPresent = showVerificationPanel.value
-      const deferForPlayback = wouldPresent && isModelPlaybackActive.value
-      if (wouldPresent && !deferForPlayback) {
-        adoptVerificationRunResult(result, submissionSceneChanges)
-        notifyVerificationOutcome(verificationResult.value, { presenting: true })
-        showVerificationPanel.value = false
-      } else {
-        notifyVerificationOutcome(result)
-        // The panel must still close, or a deferred run leaves the progress panel up behind the replay as
-        // though it were still working. And say why nothing opened: the outcome toast above does not
-        // explain the absence of the dialog the user was waiting for.
-        if (deferForPlayback) {
-          showVerificationPanel.value = false
-          notifyInfo(t('app.verificationResultDeferredForPlayback'))
-        }
-      }
+      deliverVerificationRunResult(result, submissionSceneChanges)
       await loadVerificationRuns()
       return
     } else if (task.status === 'FAILED') {
@@ -13803,14 +13669,9 @@ const dismissResultDialog = () => {
 }
 
 const reopenVerificationSettingsFromResult = () => {
-  if (isModelPlaybackActive.value || isAnyRecommendationRunning()) {
-    openVerificationFromActionDock()
-    return
-  }
+  if (!canOpenTaskSettings('verification')) return
   dismissResultDialog()
-  // The dock toggles visibility; this action must always open settings after leaving the old run.
-  showVerificationPanel.value = false
-  openVerificationFromActionDock()
+  openRunPanel('verification', 'settings')
 }
 const {
   setDialogRef: setVerificationResultDialogRef,
@@ -13860,6 +13721,8 @@ const staleDeepLink = ref(false)
 
 /** The target currently reflected on screen, so the watcher can skip redundant loads. */
 let appliedDeepLinkTarget: BoardRunTarget | null = null
+// Only a History selection can be cancelled by closing or changing the list.
+let pendingHistoryRunTarget: BoardRunTarget | null = null
 const deepLinkLoadRequests = createLatestBoardRequestGuard()
 type DeepLinkLoadContext = { requestEpoch: number }
 const isCurrentDeepLinkLoad = (context: DeepLinkLoadContext | undefined): boolean =>
@@ -13873,8 +13736,8 @@ const isCurrentDeepLinkLoad = (context: DeepLinkLoadContext | undefined): boolea
  * depends on when the watcher happens to flush.
  */
 const navigateToRunTarget = async (target: BoardRunTarget | null, mode: 'push' | 'replace') => {
-  if (isSameBoardRunTarget(target, deepLinkTarget.value)) return
   appliedDeepLinkTarget = target
+  if (isSameBoardRunTarget(target, deepLinkTarget.value)) return
   const query = applyBoardRunTarget(route.query, target)
   await (mode === 'push' ? router.push({ query }) : router.replace({ query }))
 }
@@ -13883,10 +13746,23 @@ const navigateToRunTarget = async (target: BoardRunTarget | null, mode: 'push' |
  * Opening a run is a `push` so Back closes it; clearing or correcting one is a `replace` so
  * dismissing a surface does not leave a dead history entry the user must step over.
  */
-const openRunTarget = async (target: BoardRunTarget) => {
+const openRunTarget = async (target: BoardRunTarget, fromHistory = false) => {
+  pendingHistoryRunTarget = fromHistory ? target : null
+  historyDetailRequests.invalidate()
   staleDeepLink.value = false
-  await navigateToRunTarget(target, 'push')
-  await applyDeepLinkTarget(target)
+  try {
+    await navigateToRunTarget(target, 'push')
+    if (boardLifecycleDisposed || appliedDeepLinkTarget !== target
+      || !isSameBoardRunTarget(deepLinkTarget.value, target)) return
+    if (fromHistory && pendingHistoryRunTarget !== target) {
+      // History can be closed before the navigation commits its address.
+      clearRunDeepLink()
+      return
+    }
+    await applyDeepLinkTarget(target)
+  } finally {
+    if (pendingHistoryRunTarget === target) pendingHistoryRunTarget = null
+  }
 }
 
 const clearRunTarget = () => navigateToRunTarget(null, 'replace')
@@ -13919,6 +13795,7 @@ const closePlaybackForNavigation = () => {
  * responses, so this only decides *what* to open and reports an unusable link once.
  */
 const applyDeepLinkTarget = async (target: BoardRunTarget | null) => {
+  if (pendingHistoryRunTarget !== target) pendingHistoryRunTarget = null
   const deepLinkLoad: DeepLinkLoadContext = { requestEpoch: deepLinkLoadRequests.begin() }
   appliedDeepLinkTarget = target
   closePlaybackForNavigation()
@@ -13971,6 +13848,7 @@ const syncBoardToDeepLink = async () => {
   // link to a run we cannot load warrants the banner.
   if (hasUnusableBoardRunParams(route.query)) {
     deepLinkLoadRequests.invalidate()
+    pendingHistoryRunTarget = null
     appliedDeepLinkTarget = null
     closePlaybackForNavigation()
     closeResultSurfaces()
@@ -14008,40 +13886,22 @@ const reportUnusableDeepLink = (deepLinkLoad?: DeepLinkLoadContext) => {
 const dismissStaleDeepLink = () => { staleDeepLink.value = false }
 
 /**
- * Run-artifact entry points navigate and apply the URL target through one loader, so a
- * history click, result-dialog replay, refresh, and pasted link cannot diverge.
- *
- * A verification trace is addressed by its own run, which the panel knows from the row it
- * was clicked on. `runIdForOpenTrace` resolves it from already-loaded state so opening a
- * trace never needs a separate lookup.
+ * A History row carries its own run ID, including when opening a trace or finding.
  */
-const runIdForOpenTrace = (traceId: number): number | null => {
-  const openRunId = verificationResult.value?.historyPersistence?.runId
-  if (openRunId && verificationResult.value?.traces?.some(trace => trace.id === traceId)) {
-    return openRunId
-  }
-  for (const run of verificationRuns.value) {
-    if (run.counterexamples?.some(trace => trace.id === traceId)) return run.id
-  }
-  return null
-}
-
 const openVerificationRunFromHistory = (runId: number) =>
-  openRunTarget({ kind: 'verification', runId })
+  openRunTarget({ kind: 'verification', runId }, true)
 
-const openVerificationTraceFromHistory = (traceId: number) => {
-  const runId = runIdForOpenTrace(traceId)
-  // Without an owning run the trace is not addressable; fall back to the direct load rather
-  // than writing a URL that cannot be reopened.
-  if (runId === null) return selectAndPlayVerificationTrace(traceId)
-  return openRunTarget({ kind: 'verification', runId, traceId })
-}
+const openVerificationTraceFromHistory = (traceId: number, runId: number) =>
+  openRunTarget({ kind: 'verification', runId, traceId }, true)
 
 const openSimulationRunFromHistory = (runId: number) =>
-  openRunTarget({ kind: 'simulation', runId })
+  openRunTarget({ kind: 'simulation', runId }, true)
 
 const openFuzzingRunFromHistory = (runId: number) =>
-  openRunTarget({ kind: 'exploration', runId })
+  openRunTarget({ kind: 'exploration', runId }, true)
+
+const openFuzzingFindingFromHistory = (findingId: number, runId: number) =>
+  openRunTarget({ kind: 'exploration', runId, findingId }, true)
 
 const openFuzzingFinding = (findingId: number, runId: number) =>
   openRunTarget({ kind: 'exploration', runId, findingId })
@@ -16021,7 +15881,7 @@ const attackSelectionSummary = (
           <HintTooltip :content="simulationTooltipContent">
             <button
               type="button"
-              @click="openSimulationFromActionDock"
+              @click="togglePanel('simulation')"
               data-testid="open-simulation-panel"
               :disabled="traceAnimationState.visible || simulationAnimationState.visible || isAnimationLocked || isAnyRecommendationRunning()"
               :aria-label="isSimulating ? t('app.simulationRunning') : t('app.openSimulationSettings')"
@@ -16040,7 +15900,7 @@ const attackSelectionSummary = (
           <HintTooltip :content="fuzzingTooltipContent">
             <button
               type="button"
-              @click="openFuzzingFromActionDock"
+              @click="togglePanel('fuzzing')"
               data-testid="open-fuzzing-panel"
               :disabled="isSceneReplacementInProgress || traceAnimationState.visible || simulationAnimationState.visible || isAnimationLocked || isAnyRecommendationRunning()"
               :aria-label="isSceneReplacementInProgress
@@ -16067,7 +15927,7 @@ const attackSelectionSummary = (
             <button
               ref="verificationActionButtonRef"
               type="button"
-              @click="openVerificationFromActionDock"
+              @click="togglePanel('verification')"
               data-testid="open-verification-panel"
               :disabled="traceAnimationState.visible || simulationAnimationState.visible || isAnimationLocked || isAnyRecommendationRunning()"
               :aria-label="isVerifying ? t('app.verifying') : t('app.openVerificationSettings')"
@@ -16167,7 +16027,7 @@ const attackSelectionSummary = (
         @download-simulation-trace-smv="downloadSimulationTraceSmv"
         @open-fuzzing-run="openFuzzingRunFromHistory"
         @delete-fuzzing-run="deleteFuzzingRun"
-        @view-fuzzing-finding="openFuzzingFinding"
+        @view-fuzzing-finding="openFuzzingFindingFromHistory"
         @verify-fuzzing-finding="openFormalVerificationForFuzzFinding"
       />
     </KeepAlive>
@@ -16252,7 +16112,7 @@ const attackSelectionSummary = (
       :form="fuzzingForm"
       :specifications="specifications"
       :is-shared-variable="isSharedFuzzingVariable"
-      :running="isFuzzing"
+      :running="fuzzingPanelTracksRun && isFuzzing"
       :progress="asyncFuzzingTask.progress"
       :status="formatWatchedTaskStatus(asyncFuzzingTask.statusKey, cancellingFuzzingTask)"
       :task-id="asyncFuzzingTask.taskId"
@@ -16274,10 +16134,11 @@ const attackSelectionSummary = (
       :notice="fuzzingSettingsNoticeMessage"
       :preflight-blocked="fuzzingContentCommandUnsupported"
       :preflight-message="fuzzingContentCommandUnsupported ? t('app.fuzzContentCommandPreflightBlocked') : null"
-      :frozen-task="fuzzingWatchedTask"
+      :frozen-task="fuzzingPanelTracksRun ? fuzzingWatchedTask : null"
+      :should-restore-focus="floatingPanelAccessibility.shouldRestoreFocus"
       @submit="runFuzzing"
       @cancel="cancelAsyncFuzzing"
-      @close="showFuzzingPanel = false"
+      @close="closeFuzzingPanel"
       @refresh-paper-domain="refreshPaperDomainPreview"
       @refresh-workload="refreshFuzzingWorkloadPreview"
     />
@@ -16320,8 +16181,8 @@ const attackSelectionSummary = (
       </div>
       <!-- Verification Options -->
       <div class="board-run-panel__body iot-scroll-region p-3 space-y-3">
-        <BackgroundTaskSummary v-if="runningVerificationTask" kind="verification" :task="runningVerificationTask" />
-        <template v-if="!isVerifying || !asyncVerificationActive">
+        <BackgroundTaskSummary v-if="verificationPanelTracksRun && runningVerificationTask" kind="verification" :task="runningVerificationTask" />
+        <template v-if="!verificationPanelTracksRun || !asyncVerificationActive">
         <section class="text-xs leading-relaxed board-text-muted" aria-labelledby="verification-scope-title">
           <h4 id="verification-scope-title" class="board-section-title">{{ t('household.scopeTitle') }}</h4>
           <p class="mt-1">{{ t('household.verificationScope') }}</p>
@@ -16554,7 +16415,7 @@ const attackSelectionSummary = (
 
         </template>
         <!-- Async Progress (visible when async verification is running) -->
-        <div v-if="isVerifying && asyncVerificationActive" class="space-y-1">
+        <div v-if="verificationPanelTracksRun && asyncVerificationActive" class="space-y-1">
           <div class="flex items-center justify-between text-xs">
             <span class="board-text-success font-medium">{{ formatWatchedTaskStatus(asyncVerificationTask.statusKey, cancellingVerificationTask) }}</span>
             <div v-if="asyncVerificationTask.taskId" class="flex items-center gap-2">
@@ -16585,7 +16446,7 @@ const attackSelectionSummary = (
       <div class="board-run-panel__footer">
         <!-- Run Verification Button -->
         <button
-          @click="runVerification"
+          @click="handleVerify"
           data-testid="run-verification"
           :disabled="isVerifying || Boolean(verificationRunBlockedReason)"
           :aria-describedby="verificationRunBlockedDescriptionId"
@@ -16595,7 +16456,7 @@ const attackSelectionSummary = (
             <span class="material-symbols-outlined text-sm animate-spin">sync</span>
             {{ t('app.loading') }}
           </template>
-          <template v-else-if="isVerifying">
+          <template v-else-if="isVerifying && verificationPanelTracksRun">
             <span class="material-symbols-outlined text-sm animate-spin">sync</span>
             {{ t('app.verifying') }}
           </template>
@@ -16657,8 +16518,8 @@ const attackSelectionSummary = (
       </div>
       <!-- Simulation Content -->
       <div class="board-run-panel__body iot-scroll-region p-3 space-y-3">
-        <BackgroundTaskSummary v-if="runningSimulationTask" kind="simulation" :task="runningSimulationTask" />
-        <template v-if="!isSimulating || !asyncSimulationActive">
+        <BackgroundTaskSummary v-if="simulationPanelTracksRun && runningSimulationTask" kind="simulation" :task="runningSimulationTask" />
+        <template v-if="!simulationPanelTracksRun || !asyncSimulationActive">
         <p class="text-xs leading-relaxed board-text-muted">{{ t('household.simulationScope') }}</p>
         <!-- Steps -->
         <div class="board-card p-3 rounded-xl">

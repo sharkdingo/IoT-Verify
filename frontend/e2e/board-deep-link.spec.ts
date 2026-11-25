@@ -138,6 +138,57 @@ test.describe('board run deep links', () => {
     await expect(page.getByTestId('verification-result-dialog')).toBeVisible({ timeout: 60_000 })
   })
 
+  test('closing History cancels the pending saved result and removes only its link', async ({ page, request }) => {
+    const auth = await createAuthenticatedUser(request)
+    await openBoard(page, auth, '/#/board?review=retained')
+    const runId = await seedVerificationRun(page, request, auth)
+    const resultDialog = page.getByTestId('verification-result-dialog')
+    await page.getByTestId('close-verification-result').click()
+    await expect(resultDialog).toHaveCount(0)
+    await expect.poll(() => new URLSearchParams(boardQuery(page)).get('run')).toBeNull()
+
+    const history = page.getByTestId('trace-history-panel')
+    await page.getByTestId('open-history-panel').click()
+    await page.getByTestId('history-layer-results').click()
+    const openResult = page.getByTestId(`open-verification-run-${runId}`)
+    const detailPath = `/api/verify/runs/${runId}`
+    let releaseDetail!: () => void
+    const detailGate = new Promise<void>(resolve => { releaseDetail = resolve })
+    await page.route(url => url.pathname === detailPath, async route => {
+      await detailGate
+      await route.continue()
+    }, { times: 1 })
+    const detailRequested = page.waitForRequest(pending =>
+      pending.method() === 'GET' && new URL(pending.url()).pathname === detailPath)
+    const detailReturned = page.waitForResponse(response =>
+      response.request().method() === 'GET' && new URL(response.url()).pathname === detailPath)
+
+    try {
+      await Promise.all([openResult.click(), detailRequested])
+      await expect.poll(() => new URLSearchParams(boardQuery(page)).get('run')).toBe(`verification:${runId}`)
+      await page.getByTestId('close-history-panel').click()
+      await expect(history).toBeHidden()
+      await expect.poll(() => boardQuery(page)).toBe('review=retained')
+    } finally {
+      releaseDetail()
+      await detailReturned.catch(() => undefined)
+    }
+
+    const detail = await detailReturned
+    expect(detail.ok(), await detail.text()).toBe(true)
+    await expect(resultDialog).toHaveCount(0)
+    await page.reload()
+    await expect(page.getByTestId('scene-import')).toBeEnabled()
+    expect(boardQuery(page)).toBe('review=retained')
+    await expect(resultDialog).toHaveCount(0)
+
+    await page.getByTestId('open-history-panel').click()
+    await page.getByTestId('history-layer-results').click()
+    await openResult.click()
+    await expect(resultDialog).toBeVisible({ timeout: 60_000 })
+    expect(new URLSearchParams(boardQuery(page)).get('run')).toBe(`verification:${runId}`)
+  })
+
   test('restores a fresh asynchronous verdict and opens its own counterexample after refresh', async ({ page, request }) => {
     const auth = await createAuthenticatedUser(request)
     await openBoard(page, auth)

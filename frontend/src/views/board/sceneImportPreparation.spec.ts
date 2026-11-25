@@ -57,6 +57,30 @@ describe('scene import repair preview', () => {
     expect(independent.scene.devices[0]!.variables![0]!.value).toBe('garage')
   })
 
+  it('previews and serializes corrections for a state with whitespace between modes', () => {
+    const manifest = JSON.parse(readFileSync(join(process.cwd(), '..',
+      'backend/src/main/resources/deviceTemplate/Thermostat.json'), 'utf8'))
+    const scene = codec.normalizeSceneFile({
+      schema: 'iot-verify.board-scene', version: 6,
+      templates: [{ name: 'Thermostat', manifest }],
+      devices: [{ id: 'thermostat', label: 'Hall thermostat', templateName: 'Thermostat', state: 'auto; cool',
+        position: { x: 0, y: 0 }, width: 176, height: 128,
+        variables: [{ name: 'thermostatOperatingState', value: 'idle' }] }],
+      environmentVariables: [{ name: 'temperature', value: '20', trust: 'untrusted', privacy: 'public' }],
+      rules: [], specs: []
+    })
+
+    const plan = prepareSceneImport(scene, scene.templates)
+
+    expect(plan.variableCorrections).toEqual([{
+      device: 'Hall thermostat', variable: 'thermostatOperatingState', state: 'auto; cool', from: 'idle', to: 'cooling'
+    }])
+    expect(codec.serializeSceneFile(plan.scene).devices[0]).toMatchObject({
+      state: 'auto; cool', variables: [{ name: 'thermostatOperatingState', value: 'cooling' }]
+    })
+    expect(scene.devices[0]!.variables![0]!.value).toBe('idle')
+  })
+
   it.each([{ full: false, suffix: 2 }, { full: true, suffix: 2 }, { full: false, suffix: 99 }])(
     'reuses an existing copy after earlier suffixes are freed ($full, $suffix)', ({ full, suffix }) => {
     const scene = household()

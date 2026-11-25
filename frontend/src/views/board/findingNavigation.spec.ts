@@ -79,7 +79,8 @@ const fixture = async () => {
   const ports: Record<string, any> = {
     router, get route() { return router.currentRoute.value },
     deepLinkTarget: computed(() => parseBoardRunTarget(router.currentRoute.value.query)),
-    appliedDeepLinkTarget: { kind: 'exploration', runId: 10 }, staleDeepLink: ref(false),
+    appliedDeepLinkTarget: { kind: 'exploration', runId: 10 }, pendingHistoryRunTarget: null,
+    staleDeepLink: ref(false),
     deepLinkLoadRequests: createLatestBoardRequestGuard(), historyDetailRequests,
     applyBoardRunTarget, hasUnusableBoardRunParams, isSameBoardRunTarget, isBoardDataReady: ref(true),
     isOpeningAccount: ref(false), boardLifecycleDisposed: false, boardMutationAdmissionEpoch: 0,
@@ -94,7 +95,7 @@ const fixture = async () => {
   }
   for (const name of ['isCurrentDeepLinkLoad', 'navigateToRunTarget', 'openRunTarget', 'applyDeepLinkTarget',
     'loadDeepLinkTarget', 'syncBoardToDeepLink', 'reportUnusableDeepLink', 'selectAndPlayFuzzingFinding',
-    'openFuzzingFinding', 'openAccount']) {
+    'openFuzzingFinding', 'openFuzzingFindingFromHistory', 'openAccount']) {
     ports[name] = bind(name, ports)
   }
   cleanup.push(watch(() => router.currentRoute.value.query, () => {

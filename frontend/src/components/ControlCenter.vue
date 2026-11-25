@@ -61,7 +61,7 @@ import {
 import boardApi, {
   BOARD_RESPONSE_INCOMPLETE_CODE,
   parseDeviceTemplateDeletionPreview,
-  type BoardSemanticSnapshot,
+  type BoardWorkspaceSnapshot,
   type DefaultTemplateResetResult,
   type DefaultTemplateRuntimeChange,
   type DeviceTemplateDeletionResult,
@@ -198,7 +198,7 @@ const emit = defineEmits<{
     nodes: DeviceNode[]
     environmentVariables: ModelEnvironmentVariable[]
   }]
-  'replace-board-snapshot': [snapshot: BoardSemanticSnapshot]
+  'replace-board-snapshot': [snapshot: BoardWorkspaceSnapshot]
   'edit-history-cleared': []
   'authoritative-state-unavailable': [keys: Array<'nodes' | 'templates' | 'environment'>]
   'update:collapsed': [value: boolean]

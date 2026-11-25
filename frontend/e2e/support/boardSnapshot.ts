@@ -13,3 +13,10 @@ export function expectSameBoardSnapshot(actual: BoardSnapshot, expected: BoardSn
   })
   expect(orderedInventory(actual)).toEqual(orderedInventory(expected))
 }
+
+/** A scene restored by undo has the same collections with a different journal head. */
+export function expectSameBoardScene(actual: BoardSnapshot, expected: BoardSnapshot) {
+  const { editHistory: _actualHistory, ...actualScene } = actual
+  const { editHistory: _expectedHistory, ...expectedScene } = expected
+  expectSameBoardSnapshot(actualScene, expectedScene)
+}

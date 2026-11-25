@@ -267,14 +267,13 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
         try {
             LocalDateTime recoveryTime = databaseNow();
             String message = "The verification worker stopped before the task completed";
-            int recovered = taskRepository.failExpiredActiveTasks(
-                    VerificationTaskPo.TaskStatus.FAILED,
-                    recoveryTime,
-                    VerificationOutcome.INCONCLUSIVE,
-                    message,
-                    serializeCheckLogs(List.of(message)),
-                    ACTIVE_STATUSES,
-                    recoveryTime);
+            String checkLogs = serializeCheckLogs(List.of(message));
+            int recovered = TaskLeaseRenewal.failExpiredTasks(
+                    transactionTemplate,
+                    taskRepository.findExpiredActiveTaskIds(ACTIVE_STATUSES, recoveryTime),
+                    taskRepository::findByIdForUpdate,
+                    taskId -> taskRepository.failExpiredTask(taskId, VerificationTaskPo.TaskStatus.FAILED,
+                            recoveryTime, VerificationOutcome.INCONCLUSIVE, message, checkLogs, ACTIVE_STATUSES, recoveryTime));
             if (recovered > 0) {
                 log.warn("Recovered {} expired verification task lease(s)", recovered);
             }
@@ -395,7 +394,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                     input.deviceSmvMap());
             smvFile = genResult.smvFile();
             appendGenerationWarnings(checkLogs, genResult);
-            if (taskId != null && (isTaskCancelled(taskId) || Thread.currentThread().isInterrupted())) {
+            if (isExecutionStopped(taskId)) {
                 return null;
             }
             if (smvFile == null || !smvFile.exists()) {
@@ -417,7 +416,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
             checkLogs.add("Executing NuSMV verification...");
             NusmvResult result = nusmvExecutor.execute(smvFile);
 
-            if (taskId != null && (isTaskCancelled(taskId) || Thread.currentThread().isInterrupted())) {
+            if (isExecutionStopped(taskId)) {
                 return null;
             }
             if (!result.isSuccess()) {
@@ -443,7 +442,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                     genResult.emittedSpecs(), genResult.generationIssues(),
                     genResult.disabledRuleCount(), genResult.skippedSpecCount(), smvModelContent);
             if (taskId != null) {
-                if (isTaskCancelled(taskId) || Thread.currentThread().isInterrupted()) {
+                if (isExecutionStopped(taskId)) {
                     return finalResult;
                 }
                 boolean completed = completeTaskAndSaveTraces(task, finalResult.getTraces(), userId, taskId,
@@ -452,7 +451,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                         finalResult.getSpecResults(), finalResult.getCheckLogs(), finalResult.getNusmvOutput(),
                         finalResult.getGenerationIssues(), finalResult.getDisabledRuleCount(),
                         finalResult.getSkippedSpecCount(), finalResult.getSmvModelContent());
-                if (!completed && !isCompletionCancelled(taskId)) {
+                if (!completed && !isExecutionStopped(taskId)) {
                     failTask(task, "RESULT_PERSISTENCE_FAILED: Verification finished, but its result could not be saved.");
                 }
             }
@@ -463,7 +462,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
             log.error("Verification error", e);
             checkLogs.add("Error: " + e.getMessage());
             finalResult = buildErrorResult("", checkLogs);
-            if (task != null && !isTaskCancelled(taskId)) {
+            if (task != null && !isExecutionStopped(taskId)) {
                 failTask(task, "Verification failed: " + e.getMessage());
             }
             return finalResult;
@@ -474,7 +473,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
             checkLogs.add("Error: " + e.getMessage());
             finalResult = buildErrorResult("", checkLogs);
             if (task != null) {
-                if (!isTaskCancelled(taskId)) failTask(task, "Verification failed: " + e.getMessage());
+                if (!isExecutionStopped(taskId)) failTask(task, "Verification failed: " + e.getMessage());
                 return finalResult;
             }
             throw e;
@@ -483,7 +482,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
             checkLogs.add("Error: " + e.getMessage());
             finalResult = buildErrorResult("", checkLogs);
             if (task != null) {
-                if (!isTaskCancelled(taskId)) failTask(task, "Verification failed: " + e.getMessage());
+                if (!isExecutionStopped(taskId)) failTask(task, "Verification failed: " + e.getMessage());
                 return finalResult;
             }
             throw new InternalServerException("Verification failed: " + e.getMessage());
@@ -910,7 +909,16 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
             throw new IllegalStateException("Duplicate local verification task execution " + requiredTaskId);
         }
         try {
+            if (taskRepository.findProgressByIdAndUserId(requiredTaskId, userId)
+                    .filter(task -> task.getStatus() == VerificationTaskPo.TaskStatus.PENDING).isEmpty()
+                    || execution.futureTask.isCancelled()) {
+                execution.requestStop();
+                return;
+            }
             verificationTaskExecutor.execute(execution.futureTask);
+            if (execution.futureTask.isCancelled()) {
+                purgeCancelledVerificationTasks();
+            }
         } catch (RuntimeException e) {
             execution.requestStop();
             throw e;
@@ -944,15 +952,9 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
 
         VerificationTaskPo task = null;
         try {
-            // Both of these must be inside the try: `updateTaskProgress` writes the in-memory map
-            // before its database write, so a database failure here would otherwise leave this
-            // thread registered as running the task. The pooled thread then picks up a different
-            // task, and a later cancel of *this* task interrupts that unrelated work.
-            registerRunningTask(taskId, Thread.currentThread());
             updateTaskProgress(taskId, 0, TaskProgressStage.STARTING);
 
-            // Check in-memory cancellation marker (fast path for same-instance cancellation).
-            if (isTaskCancelled(taskId)) {
+            if (isExecutionStopped(taskId)) {
                 return;
             }
 
@@ -995,20 +997,14 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
             doVerify(userId, input, task);
 
         } catch (Exception e) {
-            if (isTaskCancelled(taskId)) {
-                // Exceptions caused by cancellation are handled in finally.
-                log.info("Async verification cancelled for task: {}", taskId);
+            if (isExecutionStopped(taskId)) {
+                log.info("Async verification worker stopped for task: {}", taskId);
             } else {
                 String msg = "Verification failed: " + e.getMessage();
                 log.error("Async verification failed for task: {}", taskId, e);
                 failTask(task, msg);
             }
         } finally {
-            // Unified cancellation handling.
-            if (removeCancelledMark(taskId)) {
-                if (task != null) handleCancellation(task);
-            }
-            removeRunningTask(taskId);
             removeTaskProgress(taskId);
             try {
                 taskRepository.releaseOwnedActiveLease(
@@ -1238,6 +1234,9 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
     }
 
     private long deleteRunInternal(Long userId, Long runId, Long expectedTraceCount) {
+        // Account deletion holds the exclusive user lock before deleting traces and runs.
+        userRepository.findByIdForShare(userId)
+                .orElseThrow(() -> new ResourceNotFoundException("VerificationRun", runId));
         taskRepository.findCompletedRunForUpdate(
                         runId, userId, VerificationTaskPo.TaskStatus.COMPLETED)
                 .orElseThrow(() -> new ResourceNotFoundException("VerificationRun", runId));
@@ -1876,7 +1875,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
             log.info("User {} no longer exists, skipping verification task completion/persistence", userId);
             return false;
         }
-        if (isCompletionCancelled(taskId)) {
+        if (isExecutionStopped(taskId)) {
             log.info("Verification task {} was cancelled before completion persistence", taskId);
             return false;
         }
@@ -1891,7 +1890,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                     status.setRollbackOnly();
                     return false;
                 }
-                if (isCompletionCancelled(taskId)) {
+                if (isExecutionStopped(taskId)) {
                     log.info("Verification task {} was cancelled before completion", taskId);
                     status.setRollbackOnly();
                     return false;
@@ -1909,7 +1908,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                 status.setRollbackOnly();
                 return false;
             }
-            if (isCompletionCancelled(taskId)) {
+            if (isExecutionStopped(taskId)) {
                 log.info("Verification task {} was cancelled before trace persistence", taskId);
                 status.setRollbackOnly();
                 return false;
@@ -1917,7 +1916,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
             taskRepository.findByIdForUpdate(taskId);
             appendTracePersistenceLog(checkLogs, traces);
             saveTracesWithoutTransaction(traces, userId, taskId);
-            if (isCompletionCancelled(taskId)) {
+            if (isExecutionStopped(taskId)) {
                 log.info("Verification task {} was cancelled after trace persistence but before completion; rolling back traces", taskId);
                 status.setRollbackOnly();
                 return false;
@@ -1931,8 +1930,8 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
         }));
     }
 
-    private boolean isCompletionCancelled(Long taskId) {
-        return taskId != null && (isTaskCancelled(taskId) || Thread.currentThread().isInterrupted());
+    private boolean isExecutionStopped(Long taskId) {
+        return taskId != null && (isLocalStopRequested(taskId) || Thread.currentThread().isInterrupted());
     }
 
     private void appendTracePersistenceLog(List<String> checkLogs, List<TraceDto> traces) {
@@ -2065,9 +2064,15 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
     }
 
     @Override
-    protected LocalExecutionStopResult stopAdditionalLocalExecution(Long taskId) {
+    protected LocalExecutionStopResult stopLocalExecution(Long taskId) {
         LocalVerificationExecution execution = localExecutions.get(taskId);
         return execution == null ? LocalExecutionStopResult.NONE : execution.requestStop();
+    }
+
+    @Override
+    protected boolean isLocalStopRequested(Long taskId) {
+        LocalVerificationExecution execution = localExecutions.get(taskId);
+        return execution != null && execution.futureTask.isCancelled();
     }
 
     private enum LocalExecutionState {
@@ -2100,7 +2105,6 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
             try {
                 runVerificationTask(userId, taskId, input);
             } finally {
-                removeCancelledMark(taskId);
                 state.set(LocalExecutionState.FINISHED);
                 localExecutions.remove(taskId, this);
             }

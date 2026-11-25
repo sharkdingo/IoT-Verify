@@ -35,6 +35,7 @@ import cn.edu.nju.Iot_Verify.po.UserPo;
 import cn.edu.nju.Iot_Verify.repository.SimulationTaskRepository;
 import cn.edu.nju.Iot_Verify.repository.SimulationTraceRepository;
 import cn.edu.nju.Iot_Verify.repository.UserRepository;
+import cn.edu.nju.Iot_Verify.repository.projection.SimulationTaskProgressProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.SimulationTraceSummaryProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.SimulationTaskSummaryProjection;
 import cn.edu.nju.Iot_Verify.service.ChatExecutionLeaseGuard;
@@ -62,7 +63,6 @@ import org.springframework.transaction.support.SimpleTransactionStatus;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.File;
-import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
@@ -75,9 +75,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
 import java.util.concurrent.Future;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicReference;
@@ -94,7 +94,7 @@ import static org.mockito.Mockito.*;
 class SimulationServiceImplTest {
     @Test
     void progressUsesOnlyOwnedScalarsAndPreservesTerminalFallbacks() {
-        var progress = mock(cn.edu.nju.Iot_Verify.repository.projection.SimulationTaskProgressProjection.class);
+        var progress = mock(SimulationTaskProgressProjection.class);
         when(progress.getProgress()).thenReturn(null);
         when(simulationTaskRepository.findProgressByIdAndUserId(7L, 1L)).thenReturn(Optional.of(progress));
         for (var status : SimulationTaskPo.TaskStatus.values()) {
@@ -104,6 +104,7 @@ class SimulationServiceImplTest {
         }
         when(progress.getProgress()).thenReturn(23);
         assertEquals(23, service.getTaskProgress(1L, 7L));
+        when(simulationTaskRepository.findProgressByIdAndUserId(7L, 2L)).thenReturn(Optional.empty());
         assertThrows(cn.edu.nju.Iot_Verify.exception.ResourceNotFoundException.class,
                 () -> service.getTaskProgress(2L, 7L));
         verify(simulationTaskRepository, never()).findByIdAndUserId(any(), any());
@@ -126,8 +127,11 @@ class SimulationServiceImplTest {
     private SimpleTransactionStatus lastTransactionStatus;
 
     private static class DirectThreadPoolTaskExecutor extends ThreadPoolTaskExecutor {
+        private Runnable beforeExecution = () -> {};
+
         @Override
         public void execute(Runnable task) {
+            beforeExecution.run();
             task.run();
         }
     }
@@ -160,7 +164,7 @@ class SimulationServiceImplTest {
     }
 
     private SimulationServiceImpl service;
-    private ThreadPoolTaskExecutor simulationTaskExecutor;
+    private DirectThreadPoolTaskExecutor simulationTaskExecutor;
     private ThreadPoolTaskExecutor syncSimulationExecutor;
     private Method doSimulate;
     private long nextSimulationTraceId;
@@ -203,6 +207,10 @@ class SimulationServiceImplTest {
                 .thenAnswer(invocation -> LocalDateTime.now());
         lenient().when(simulationTaskRepository.findByIdForUpdate(anyLong())).thenAnswer(invocation -> Optional.of(
                 SimulationTaskPo.builder().id(invocation.getArgument(0)).build()));
+        var queuedProgress = mock(SimulationTaskProgressProjection.class);
+        lenient().when(queuedProgress.getStatus()).thenReturn(SimulationTaskPo.TaskStatus.PENDING);
+        lenient().when(simulationTaskRepository.findProgressByIdAndUserId(anyLong(), anyLong()))
+                .thenReturn(Optional.of(queuedProgress));
         lenient().when(simulationTaskRepository.updateProgressIfActive(anyLong(), anyInt(), any(), anyString(), any(LocalDateTime.class)))
                 .thenReturn(1);
         lenient().when(userRepository.findByIdForUpdate(anyLong())).thenReturn(Optional.of(new UserPo()));
@@ -320,13 +328,6 @@ class SimulationServiceImplTest {
         File jsonFile = new File(smvFile.getParentFile(), "request.json");
         assertTrue(jsonFile.exists());
         return new ObjectMapper().readTree(jsonFile);
-    }
-
-    @SuppressWarnings("unchecked")
-    private Set<Long> cancelledTaskIds() throws Exception {
-        Field f = AbstractAsyncTaskService.class.getDeclaredField("cancelledTasks");
-        f.setAccessible(true);
-        return (Set<Long>) f.get(service);
     }
 
     private SimulationRequestDto simulationRequest(List<DeviceVerificationDto> devices,
@@ -542,11 +543,12 @@ class SimulationServiceImplTest {
 
     @Test
     void simulateAsync_cancelledBeforeRun_skipsGeneration() throws Exception {
-        cancelledTaskIds().add(10L);
+        simulationTaskExecutor.beforeExecution = () -> assertTrue(service.requestLocalExecutionStop(10L));
 
         service.simulateAsync(1L, 10L, simRequest(singleDevice(), List.of(), 10, false, 0, false));
 
-        verify(smvGenerator, never()).generate(any(), any(), any(), any(), any(), anyBoolean(), any());
+        verify(simulationTaskRepository, never()).startTaskIfStillPending(anyLong(), any(), any(), anyInt(),
+                anyString(), any(), anyString(), any(), any());
     }
 
     @Test
@@ -761,6 +763,32 @@ class SimulationServiceImplTest {
                 anyLong(), any(), any(LocalDateTime.class), anyInt(), anyString(), any(),
                 anyString(), any(LocalDateTime.class), any(LocalDateTime.class));
         verify(smvGenerator, never()).generate(any(), any(), any(), any(), any(), anyBoolean(), any());
+    }
+
+    @Test
+    void submitSimulation_purgesFutureCancelledWhileDispatchWasEnqueuing() {
+        ThreadPoolTaskExecutor executor = mock(ThreadPoolTaskExecutor.class);
+        SimulationServiceImpl queuedService = serviceWithSimulationExecutor(executor);
+        when(simulationTaskRepository.save(any(SimulationTaskPo.class))).thenReturn(
+                SimulationTaskPo.builder().id(1000L).build());
+        ThreadPoolExecutor pool = new ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS, new LinkedBlockingQueue<>());
+        when(executor.getThreadPoolExecutor()).thenReturn(pool);
+        doAnswer(invocation -> {
+            Runnable work = invocation.getArgument(0);
+            assertTrue(queuedService.requestLocalExecutionStop(1000L));
+            pool.getQueue().add(work);
+            return null;
+        }).when(executor).execute(any(Runnable.class));
+
+        try {
+            Long taskId = queuedService.submitSimulation(
+                    1L, simRequest(singleDevice(), List.of(), 10, false, 0, false));
+
+            assertEquals(1000L, taskId);
+            assertTrue(pool.getQueue().isEmpty(), "a cancelled Future must not keep occupying the bounded queue");
+        } finally {
+            pool.shutdownNow();
+        }
     }
 
     @Test
@@ -1426,18 +1454,24 @@ class SimulationServiceImplTest {
     @Test
     void deleteSimulation_found_deletes() {
         SimulationTracePo po = SimulationTracePo.builder().id(5L).userId(1L).build();
+        when(userRepository.findByIdForShare(1L)).thenReturn(Optional.of(new UserPo()));
         when(simulationTraceRepository.findByIdAndUserId(5L, 1L))
                 .thenReturn(Optional.of(po));
 
         service.deleteSimulation(1L, 5L);
 
-        verify(chatExecutionLeaseGuard).requireCurrentExecutionLease();
-        verify(simulationTaskRepository).deleteByUserIdAndSimulationTraceId(1L, 5L);
-        verify(simulationTraceRepository).delete(Objects.requireNonNull(po));
+        InOrder deletion = inOrder(userRepository, chatExecutionLeaseGuard,
+                simulationTraceRepository, simulationTaskRepository);
+        deletion.verify(userRepository).findByIdForShare(1L);
+        deletion.verify(chatExecutionLeaseGuard).requireCurrentExecutionLease();
+        deletion.verify(simulationTraceRepository).findByIdAndUserId(5L, 1L);
+        deletion.verify(simulationTaskRepository).deleteByUserIdAndSimulationTraceId(1L, 5L);
+        deletion.verify(simulationTraceRepository).delete(po);
     }
 
     @Test
     void deleteSimulation_notFound_throwsResourceNotFound() {
+        when(userRepository.findByIdForShare(1L)).thenReturn(Optional.of(new UserPo()));
         when(simulationTraceRepository.findByIdAndUserId(99L, 1L))
                 .thenReturn(Optional.empty());
 
@@ -1445,29 +1479,31 @@ class SimulationServiceImplTest {
                 () -> service.deleteSimulation(1L, 99L));
     }
 
+    @Test
+    void deleteSimulation_ownerGone_doesNotAccessRunRows() {
+        when(userRepository.findByIdForShare(1L)).thenReturn(Optional.empty());
+
+        assertThrows(ResourceNotFoundException.class, () -> service.deleteSimulation(1L, 99L));
+
+        verifyNoInteractions(simulationTraceRepository, simulationTaskRepository);
+    }
+
     // ==================== terminal-state progress tests ====================
 
     @Test
-    void maintainTaskLeases_recoversExpiredTasksWithoutScanningAndSavingAllActiveRows() {
-        when(simulationTaskRepository.failExpiredActiveTasks(
-                eq(SimulationTaskPo.TaskStatus.FAILED),
-                any(LocalDateTime.class),
-                anyString(),
-                anyString(),
-                eq(List.of(SimulationTaskPo.TaskStatus.PENDING, SimulationTaskPo.TaskStatus.RUNNING)),
-                any(LocalDateTime.class)))
-                .thenReturn(2);
+    void maintainTaskLeases_locksExpiryCandidateBeforeConditionalFailure() {
+        var activeStatuses = List.of(SimulationTaskPo.TaskStatus.PENDING, SimulationTaskPo.TaskStatus.RUNNING);
+        when(simulationTaskRepository.findExpiredActiveTaskIds(eq(activeStatuses), any(LocalDateTime.class)))
+                .thenReturn(List.of(60L));
+        when(simulationTaskRepository.findByIdForUpdate(60L)).thenReturn(Optional.of(new SimulationTaskPo()));
 
         service.maintainTaskLeases();
 
-        verify(simulationTaskRepository).failExpiredActiveTasks(
-                eq(SimulationTaskPo.TaskStatus.FAILED),
-                any(LocalDateTime.class),
-                anyString(),
-                anyString(),
-                eq(List.of(SimulationTaskPo.TaskStatus.PENDING, SimulationTaskPo.TaskStatus.RUNNING)),
-                any(LocalDateTime.class));
-        verify(simulationTaskRepository, never()).save(any(SimulationTaskPo.class));
+        InOrder recovery = inOrder(simulationTaskRepository);
+        recovery.verify(simulationTaskRepository).findExpiredActiveTaskIds(eq(activeStatuses), any(LocalDateTime.class));
+        recovery.verify(simulationTaskRepository).findByIdForUpdate(60L);
+        recovery.verify(simulationTaskRepository).failExpiredTask(eq(60L), eq(SimulationTaskPo.TaskStatus.FAILED),
+                any(LocalDateTime.class), anyString(), anyString(), eq(activeStatuses), any(LocalDateTime.class));
     }
 
     @Test

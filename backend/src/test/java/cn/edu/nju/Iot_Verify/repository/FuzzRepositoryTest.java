@@ -87,7 +87,10 @@ class FuzzRepositoryTest {
                         .leaseExpiresAt(activeUntil)
                         .build());
 
-        assertEquals(1, verificationTaskRepository.failExpiredActiveTasks(
+        assertEquals(List.of(expiredVerification.getId()),
+                verificationTaskRepository.findExpiredActiveTaskIds(verificationActive, now));
+        assertEquals(1, verificationTaskRepository.failExpiredTask(
+                expiredVerification.getId(),
                 VerificationTaskPo.TaskStatus.FAILED,
                 now,
                 VerificationOutcome.INCONCLUSIVE,
@@ -135,7 +138,10 @@ class FuzzRepositoryTest {
                         .leaseExpiresAt(activeUntil)
                         .build());
 
-        assertEquals(1, simulationTaskRepository.failExpiredActiveTasks(
+        assertEquals(List.of(expiredSimulation.getId()),
+                simulationTaskRepository.findExpiredActiveTaskIds(simulationActive, now));
+        assertEquals(1, simulationTaskRepository.failExpiredTask(
+                expiredSimulation.getId(),
                 SimulationTaskPo.TaskStatus.FAILED,
                 now,
                 "expired",
@@ -387,18 +393,24 @@ class FuzzRepositoryTest {
     }
 
     @Test
-    void leaseRecoveryOnlyFailsExpiredTasks() {
+    void leaseRecoveryFailsOnlyTheTargetedExpiredTask() {
         LocalDateTime now = LocalDateTime.now();
         FuzzTaskPo owned = taskRepository.save(taskForLease("worker-a", now.plusMinutes(1)));
         FuzzTaskPo otherLive = taskRepository.save(taskForLease("worker-b", now.plusMinutes(1)));
         FuzzTaskPo expired = taskRepository.save(taskForLease("worker-dead", now.minusSeconds(1)));
+        FuzzTaskPo missingLease = taskRepository.save(taskForLease("worker-missing", null));
+        List<FuzzTaskPo.TaskStatus> activeStatuses = List.of(
+                FuzzTaskPo.TaskStatus.PENDING, FuzzTaskPo.TaskStatus.RUNNING);
 
-        assertEquals(1, taskRepository.failExpiredActiveTasks(
+        assertEquals(List.of(expired.getId(), missingLease.getId()),
+                taskRepository.findExpiredActiveTaskIds(activeStatuses, now));
+        assertEquals(1, taskRepository.failExpiredTask(
+                expired.getId(),
                 FuzzTaskPo.TaskStatus.FAILED,
                 now,
                 "Worker lease expired",
                 "[]",
-                List.of(FuzzTaskPo.TaskStatus.PENDING, FuzzTaskPo.TaskStatus.RUNNING),
+                activeStatuses,
                 now));
 
         assertEquals(FuzzTaskPo.TaskStatus.PENDING,
@@ -407,6 +419,8 @@ class FuzzRepositoryTest {
                 taskRepository.findById(otherLive.getId()).orElseThrow().getStatus());
         assertEquals(FuzzTaskPo.TaskStatus.FAILED,
                 taskRepository.findById(expired.getId()).orElseThrow().getStatus());
+        assertEquals(List.of(missingLease.getId()),
+                taskRepository.findExpiredActiveTaskIds(activeStatuses, now));
     }
 
     /**
@@ -438,12 +452,16 @@ class FuzzRepositoryTest {
         LocalDateTime now = LocalDateTime.now().truncatedTo(ChronoUnit.SECONDS);
 
         FuzzTaskPo fuzz = taskRepository.save(taskForLease("worker-boundary", now));
-        assertEquals(1, taskRepository.failExpiredActiveTasks(
+        List<FuzzTaskPo.TaskStatus> fuzzActive = List.of(
+                FuzzTaskPo.TaskStatus.PENDING, FuzzTaskPo.TaskStatus.RUNNING);
+        assertEquals(List.of(fuzz.getId()), taskRepository.findExpiredActiveTaskIds(fuzzActive, now));
+        assertEquals(1, taskRepository.failExpiredTask(
+                fuzz.getId(),
                 FuzzTaskPo.TaskStatus.FAILED,
                 now,
                 "Worker lease expired",
                 "[]",
-                List.of(FuzzTaskPo.TaskStatus.PENDING, FuzzTaskPo.TaskStatus.RUNNING),
+                fuzzActive,
                 now));
         assertEquals(FuzzTaskPo.TaskStatus.FAILED,
                 taskRepository.findById(fuzz.getId()).orElseThrow().getStatus());
@@ -457,13 +475,18 @@ class FuzzRepositoryTest {
                         .workerId("worker-boundary")
                         .leaseExpiresAt(now)
                         .build());
-        assertEquals(1, verificationTaskRepository.failExpiredActiveTasks(
+        List<VerificationTaskPo.TaskStatus> verificationActive = List.of(
+                VerificationTaskPo.TaskStatus.PENDING, VerificationTaskPo.TaskStatus.RUNNING);
+        assertEquals(List.of(verification.getId()),
+                verificationTaskRepository.findExpiredActiveTaskIds(verificationActive, now));
+        assertEquals(1, verificationTaskRepository.failExpiredTask(
+                verification.getId(),
                 VerificationTaskPo.TaskStatus.FAILED,
                 now,
                 VerificationOutcome.INCONCLUSIVE,
                 "expired",
                 "[]",
-                List.of(VerificationTaskPo.TaskStatus.PENDING, VerificationTaskPo.TaskStatus.RUNNING),
+                verificationActive,
                 now));
         assertEquals(VerificationTaskPo.TaskStatus.FAILED,
                 verificationTaskRepository.findById(verification.getId()).orElseThrow().getStatus());
@@ -478,12 +501,17 @@ class FuzzRepositoryTest {
                         .workerId("worker-boundary")
                         .leaseExpiresAt(now)
                         .build());
-        assertEquals(1, simulationTaskRepository.failExpiredActiveTasks(
+        List<SimulationTaskPo.TaskStatus> simulationActive = List.of(
+                SimulationTaskPo.TaskStatus.PENDING, SimulationTaskPo.TaskStatus.RUNNING);
+        assertEquals(List.of(simulation.getId()),
+                simulationTaskRepository.findExpiredActiveTaskIds(simulationActive, now));
+        assertEquals(1, simulationTaskRepository.failExpiredTask(
+                simulation.getId(),
                 SimulationTaskPo.TaskStatus.FAILED,
                 now,
                 "expired",
                 "[]",
-                List.of(SimulationTaskPo.TaskStatus.PENDING, SimulationTaskPo.TaskStatus.RUNNING),
+                simulationActive,
                 now));
         assertEquals(SimulationTaskPo.TaskStatus.FAILED,
                 simulationTaskRepository.findById(simulation.getId()).orElseThrow().getStatus());

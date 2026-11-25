@@ -48,4 +48,5 @@ public class FixApplyResultDto {
 
     /** Post-commit server-journal availability. */
     private boolean canRedo;
+    private String editHistoryRevision;
 }

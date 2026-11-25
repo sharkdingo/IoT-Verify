@@ -88,6 +88,7 @@ test('a deletion preview is single-flight and closes when another tab deletes th
   await openWorkspace(observer, auth)
 
   let previewRequestCount = 0
+  let snapshotRequestCount = 0
   let releaseObserverPreview!: () => void
   const observerPreviewRelease = new Promise<void>(resolve => { releaseObserverPreview = resolve })
   await observer.route('**/api/board/nodes/deletion-preview?*', async route => {
@@ -95,10 +96,10 @@ test('a deletion preview is single-flight and closes when another tab deletes th
     await route.continue()
   })
   observer.on('request', request => {
-    if (request.method() === 'GET'
-      && new URL(request.url()).pathname.endsWith('/deletion-preview')) {
-      previewRequestCount += 1
-    }
+    if (request.method() !== 'GET') return
+    const pathname = new URL(request.url()).pathname
+    if (pathname.endsWith('/deletion-preview')) previewRequestCount += 1
+    if (pathname === '/api/board/snapshot') snapshotRequestCount += 1
   })
 
   try {
@@ -124,6 +125,7 @@ test('a deletion preview is single-flight and closes when another tab deletes th
       name: 'Delete Device',
       exact: true
     })).toBeEnabled()
+    expect(snapshotRequestCount).toBe(0)
 
     await writer.locator('.device-node').filter({ hasText: label }).click()
     const writerDetails = writer.getByTestId('device-dialog')
@@ -150,6 +152,9 @@ test('a deletion preview is single-flight and closes when another tab deletes th
       button.click()
     })
     await expect.poll(() => deleteRequestCount).toBe(1)
+    await expect(writer.getByText(`Deleted “${label}”`)).toBeVisible()
+    expect(await writer.getByText('This device was deleted elsewhere. Related panels were closed.',
+      { exact: true }).count()).toBe(0)
 
     await expect(observerConfirmation).toHaveCount(0, { timeout: 30_000 })
     await expect(observerDetails).toHaveCount(0)

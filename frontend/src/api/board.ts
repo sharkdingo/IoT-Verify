@@ -14,7 +14,7 @@ import type {
 } from '@/types/recommendation'
 import type { DeviceNode } from '../types/node'
 import type { Specification } from '../types/spec'
-import type { BoardUndoAvailability, BoardUndoResult } from '../types/boardEdit'
+import { isBoardEditHistoryRevision, type BoardUndoAvailability, type BoardUndoResult } from '../types/boardEdit'
 import {
     BOARD_EDIT_ENTITY_TYPES,
     BOARD_EDIT_OPERATIONS,
@@ -223,12 +223,13 @@ const requireValueBasedRuleSource = (source: any, sourceType: RuleSourceItemType
     }
 }
 
-export interface BoardSemanticSnapshot {
+export interface BoardWorkspaceSnapshot {
     nodes: DeviceNode[]
     environmentVariables: ModelEnvironmentVariable[]
     rules: RuleForm[]
     specifications: Specification[]
     deviceTemplates: DeviceTemplate[]
+    editHistory: BoardUndoAvailability
 }
 
 /** Authoritative board state after a confirmed full-scene replacement (import or clear). */
@@ -359,16 +360,11 @@ export interface CollectionMutationResult<T> {
     /** Undo availability after this reversible mutation, as reported by the server journal. */
     canUndo: boolean;
     canRedo: boolean;
+    editHistoryRevision?: string;
 }
 
 type CommittedDeviceMutationResult = DeviceMutationResult & {
     operation: 'created';
-    canUndo: true;
-    canRedo: false;
-}
-
-type CommittedDeviceDeletionResult = DeviceDeletionResult & {
-    operation: 'deleted';
     canUndo: true;
     canRedo: false;
 }
@@ -442,6 +438,7 @@ export interface EnvironmentMutationResult {
     currentCount: number;
     canUndo?: boolean;
     canRedo?: boolean;
+    editHistoryRevision?: string;
 }
 
 export interface DeviceMutationResult {
@@ -456,6 +453,7 @@ export interface DeviceMutationResult {
     currentCount: number;
     canUndo?: boolean;
     canRedo?: boolean;
+    editHistoryRevision?: string;
 }
 
 export interface DeviceLayout {
@@ -491,6 +489,7 @@ export interface DeviceUpdateResult {
     currentCount: number;
     canUndo?: boolean;
     canRedo?: boolean;
+    editHistoryRevision?: string;
 }
 
 export interface DeviceDeletionResult {
@@ -499,13 +498,8 @@ export interface DeviceDeletionResult {
     deletedDevice: DeviceNode;
     removedRules: RuleForm[];
     removedSpecifications: Specification[];
-    currentNodes: DeviceNode[];
-    environmentVariables: ModelEnvironmentVariable[];
     environmentChanges: EnvironmentVariableChange[];
-    currentRules: RuleForm[];
-    currentSpecifications: Specification[];
-    canUndo?: boolean;
-    canRedo?: boolean;
+    snapshot: BoardWorkspaceSnapshot;
 }
 
 export interface BoardReplacementPreview {
@@ -518,7 +512,7 @@ export interface BoardReplacementPreview {
     templates: import('@/utils/templateUsage').TemplateUsage[];
 }
 
-export interface BoardEditHistoryClearPreview extends BoardUndoAvailability {
+export interface BoardEditHistoryClearPreview extends Pick<BoardUndoAvailability, 'canUndo' | 'canRedo'> {
     impactToken: string;
     entryCount: number;
 }
@@ -805,13 +799,6 @@ const validateDeviceMutationResult = (
         throw new BoardResponseContractError(context, 'currentSpecifications contains duplicate ids')
     }
     requireCurrentCount(result, currentNodes, context)
-    if ((expectedOperation === 'created' || expectedOperation === 'renamed')
-        && (typeof result.canUndo !== 'boolean' || typeof result.canRedo !== 'boolean')) {
-        throw new BoardResponseContractError(
-            context,
-            'committed device mutations must report boolean canUndo and canRedo values'
-        )
-    }
     if ((result.canUndo !== undefined && result.canUndo !== null && typeof result.canUndo !== 'boolean')
         || (result.canRedo !== undefined && result.canRedo !== null && typeof result.canRedo !== 'boolean')) {
         throw new BoardResponseContractError(context, 'canUndo and canRedo must be booleans when present')
@@ -822,6 +809,9 @@ const validateDeviceMutationResult = (
             context,
             'a committed device mutation must be undoable and must clear redo history'
         )
+    }
+    if (expectedOperation === 'created' || expectedOperation === 'renamed') {
+        requireBoardEditAvailability(result, context)
     }
 
     if (!Number.isSafeInteger(result.updatedSpecificationCount)
@@ -989,8 +979,9 @@ const validateDeviceUpdateResult = (
                 'a committed device update must be undoable and must clear redo history'
             )
         }
+        requireBoardEditAvailability(result, context)
     } else if ((result.canUndo !== undefined && result.canUndo !== null)
-        || (result.canRedo !== undefined && result.canRedo !== null)) {
+        || (result.canRedo !== undefined && result.canRedo !== null) || result.editHistoryRevision != null) {
         throw new BoardResponseContractError(
             context,
             'an unchanged device update must not report new undo availability'
@@ -1150,8 +1141,9 @@ const validateEnvironmentMutationResult = (
                 'a committed Environment Pool update must be undoable and must clear redo history'
             )
         }
+        requireBoardEditAvailability(result, context)
     } else if ((result.canUndo !== undefined && result.canUndo !== null)
-        || (result.canRedo !== undefined && result.canRedo !== null)) {
+        || (result.canRedo !== undefined && result.canRedo !== null) || result.editHistoryRevision != null) {
         throw new BoardResponseContractError(
             context,
             'an unchanged Environment Pool update must not report new undo availability'
@@ -1334,13 +1326,13 @@ const validateEnvironmentUpdateRequests = (
     })
 }
 
-const validateDeviceDeletionResult = (
+const parseDeviceDeletionResult = (
     value: unknown,
     expectedOperation: DeviceDeletionResult['operation'],
     expectedNodeId: string,
     context: string,
     expectedImpactToken?: string
-): Record<string, any> => {
+): DeviceDeletionResult => {
     const result = requireResponseRecord(value, context)
     requireOperation(result, expectedOperation, context)
     if (typeof result.impactToken !== 'string' || !result.impactToken.trim()) {
@@ -1433,34 +1425,29 @@ const validateDeviceDeletionResult = (
     if (new Set(environmentChanges.map(change => change.name)).size !== environmentChanges.length) {
         throw new BoardResponseContractError(context, 'environmentChanges contains duplicate names')
     }
-    if (expectedOperation === 'deleted'
-        && (typeof result.canUndo !== 'boolean' || typeof result.canRedo !== 'boolean')) {
-        throw new BoardResponseContractError(
-            context,
-            'device deletion must report boolean canUndo and canRedo values'
-        )
-    }
-    if ((result.canUndo !== undefined && result.canUndo !== null && typeof result.canUndo !== 'boolean')
-        || (result.canRedo !== undefined && result.canRedo !== null && typeof result.canRedo !== 'boolean')) {
-        throw new BoardResponseContractError(context, 'canUndo and canRedo must be booleans when present')
-    }
-    if (expectedOperation === 'deleted' && (!result.canUndo || result.canRedo)) {
+    const editHistory = requireBoardEditAvailability(result, context)
+    if (expectedOperation === 'deleted' && (!editHistory.canUndo || editHistory.canRedo)) {
         throw new BoardResponseContractError(
             context,
             'a committed device deletion must be undoable and must clear redo history'
         )
     }
     return {
-        ...result,
+        operation: expectedOperation,
+        impactToken: result.impactToken,
         deletedDevice,
-        currentNodes,
-        removedRules,
-        currentRules,
+        removedRules: removedRules.map(fromRuleDto),
         removedSpecifications,
-        currentSpecifications,
-        environmentVariables,
-        environmentChanges
-    } as DeviceDeletionResult & { removedRules: RuleDto[]; currentRules: RuleDto[] }
+        environmentChanges,
+        snapshot: {
+            nodes: currentNodes,
+            environmentVariables,
+            rules: currentRules.map(fromRuleDto),
+            specifications: currentSpecifications,
+            deviceTemplates: parseBoardTemplateCatalog(result.deviceTemplates, `${context}.deviceTemplates`),
+            editHistory
+        }
+    }
 }
 
 const validateCollectionMutationResult = <T>(
@@ -1484,6 +1471,11 @@ const validateCollectionMutationResult = <T>(
             context,
             'a committed collection mutation must be undoable and must clear redo history'
         )
+    }
+    if (expectedOperation !== 'unchanged') {
+        requireBoardEditAvailability(result, context)
+    } else if (result.editHistoryRevision != null) {
+        throw new BoardResponseContractError(context, 'an unchanged edit must not attest a history revision')
     }
     if (!result.affectedItem || typeof result.affectedItem !== 'object' || Array.isArray(result.affectedItem)) {
         throw new BoardResponseContractError(context, 'affectedItem is required')
@@ -1541,17 +1533,24 @@ const validateCollectionEditResult = <T>(
  * All four semantic collections are authoritative post-operation state, so they get the same
  * validation as a normal read: malformed or contradictory data must not enter board state.
  */
+const requireBoardEditAvailability = (value: unknown, context: string): BoardUndoAvailability => {
+    const raw = requireResponseRecord(value, context)
+    if (typeof raw.canUndo !== 'boolean' || typeof raw.canRedo !== 'boolean'
+        || !isBoardEditHistoryRevision(raw.editHistoryRevision)) {
+        throw new BoardResponseContractError(context, 'Invalid Board edit history availability or revision')
+    }
+    return { canUndo: raw.canUndo, canRedo: raw.canRedo, editHistoryRevision: raw.editHistoryRevision }
+}
+
 const parseBoardUndoResult = (
     value: unknown,
     expectedKind: 'availability' | 'undo' | 'redo' | 'clear'
 ): BoardUndoResult => {
     const context = 'Board edit undo'
     const raw = requireResponseRecord(value, context)
-    if (typeof raw.applied !== 'boolean'
-        || typeof raw.canUndo !== 'boolean'
-        || typeof raw.canRedo !== 'boolean') {
-        throw new BoardResponseContractError(
-            context, 'applied, canUndo and canRedo must be booleans')
+    const availability = requireBoardEditAvailability(raw, context)
+    if (typeof raw.applied !== 'boolean') {
+        throw new BoardResponseContractError(context, 'applied must be a boolean')
     }
     const nodes = requireResponseArray<DeviceNode>(raw, context, 'nodes')
         .map((node, index) => validateBoardNodeResult(node, `${context}.nodes[${index}]`))
@@ -1630,17 +1629,9 @@ const parseBoardUndoResult = (
                 `an applied ${expectedKind} must use ${expectedReason} and include entity metadata`
             )
         }
-        const validOperation = raw.entityType === 'RULE' || raw.entityType === 'SPECIFICATION'
-            ? raw.originalOperation === 'CREATE' || raw.originalOperation === 'DELETE'
-            : raw.entityType === 'RULE_ORDER'
-                || raw.entityType === 'RULE_SET'
-                || raw.entityType === 'ENVIRONMENT'
-                ? raw.originalOperation === 'UPDATE'
-                : raw.entityType === 'DEVICE'
-                    && (raw.originalOperation === 'CREATE'
-                        || raw.originalOperation === 'UPDATE'
-                        || raw.originalOperation === 'DELETE')
-        if (!validOperation) {
+        const updateOnly = raw.entityType === 'RULE_ORDER' || raw.entityType === 'RULE_SET'
+            || raw.entityType === 'ENVIRONMENT'
+        if (updateOnly && raw.originalOperation !== 'UPDATE') {
             throw new BoardResponseContractError(
                 context,
                 'entityType and originalOperation do not describe a supported reversible edit'
@@ -1674,8 +1665,7 @@ const parseBoardUndoResult = (
         environmentVariables,
         rules: rules.map(fromRuleDto),
         specs,
-        canUndo: raw.canUndo,
-        canRedo: raw.canRedo
+        ...availability
     }
 }
 
@@ -2319,12 +2309,21 @@ const validateFixApplyResult = (
             'an applied automatic fix must be undoable and must clear redo history'
         )
     }
+    requireBoardEditAvailability(result, context)
     return { ...result, rules } as Omit<FixApplyResult, 'rules'> & { rules: RuleDto[] }
+}
+
+const parseBoardTemplateCatalog = (value: unknown, context: string): DeviceTemplate[] => {
+    const templates = requireResponseArray<DeviceTemplate>(value, context)
+        .map((template, index) => validateDeviceTemplateResult(template, `${context}[${index}]`))
+    requireUniqueIdentities(templates, template => template.name.trim().toLowerCase(), context, 'template names')
+    requireUniqueIdentities(templates, template => Number(template.id), context, 'template ids')
+    return templates
 }
 
 export default {
     // ==== 节点 ====
-    getSnapshot: async (): Promise<BoardSemanticSnapshot> => {
+    getSnapshot: async (): Promise<BoardWorkspaceSnapshot> => {
         const context = 'Board semantic snapshot'
         const snapshot = requireResponseRecord(
             unpack<unknown>(await api.get('/board/snapshot')),
@@ -2343,28 +2342,17 @@ export default {
             `${context}.environmentVariables`
         ).map((variable, index) =>
             validateEnvironmentVariable(variable, `${context}.environmentVariables[${index}]`))
-        const deviceTemplates = requireResponseArray<DeviceTemplate>(
-            snapshot.deviceTemplates,
-            `${context}.deviceTemplates`
-        ).map((template, index) =>
-            validateDeviceTemplateResult(template, `${context}.deviceTemplates[${index}]`))
         requireUniqueIdentities(rawNodes, node => node.id, context, 'nodes')
         requireUniqueIdentities(environmentVariables, variable => variable.name, context, 'environmentVariables')
         requireUniqueIdentities(rawRules, rule => Number(rule.id), context, 'rules')
         requireUniqueIdentities(rawSpecifications, specification => specification.id, context, 'specifications')
-        requireUniqueIdentities(
-            deviceTemplates,
-            template => template.name.trim().toLowerCase(),
-            context,
-            'deviceTemplates'
-        )
-        requireUniqueIdentities(deviceTemplates, template => Number(template.id), context, 'deviceTemplates')
         return {
             nodes: rawNodes,
             environmentVariables,
             rules: rawRules.map(fromRuleDto),
             specifications: rawSpecifications,
-            deviceTemplates
+            deviceTemplates: parseBoardTemplateCatalog(snapshot.deviceTemplates, `${context}.deviceTemplates`),
+            editHistory: requireBoardEditAvailability(snapshot.editHistory, `${context}.editHistory`)
         }
     },
     getModelFingerprints: async (): Promise<BoardModelFingerprints> => {
@@ -2440,27 +2428,18 @@ export default {
         );
         return validateDeviceRenameResult(result, nodeId, label, expectedLabel)
     },
-    previewNodeDeletion: async (nodeId: string): Promise<DeviceDeletionResult> => {
-        const result = validateDeviceDeletionResult(
+    previewNodeDeletion: async (nodeId: string): Promise<DeviceDeletionResult> =>
+        parseDeviceDeletionResult(
             unpack<unknown>(await api.get('/board/nodes/deletion-preview', { params: { nodeId } })),
             'preview',
             nodeId,
             'Device deletion preview'
-        ) as Omit<DeviceDeletionResult, 'removedRules' | 'currentRules'> & {
-            removedRules: RuleDto[];
-            currentRules: RuleDto[];
-        };
-        return {
-            ...result,
-            removedRules: result.removedRules.map(fromRuleDto),
-            currentRules: result.currentRules.map(fromRuleDto)
-        };
-    },
+        ),
     deleteNode: async (
         nodeId: string,
         impactToken: string
-    ): Promise<CommittedDeviceDeletionResult> => {
-        const result = validateDeviceDeletionResult(
+    ): Promise<DeviceDeletionResult> =>
+        parseDeviceDeletionResult(
             unpack<unknown>(await api.post('/board/nodes/delete', {
                 impactToken
             }, { params: { nodeId } })),
@@ -2468,16 +2447,7 @@ export default {
             nodeId,
             'Device deletion',
             impactToken
-        ) as Omit<DeviceDeletionResult, 'removedRules' | 'currentRules'> & {
-            removedRules: RuleDto[];
-            currentRules: RuleDto[];
-        };
-        return {
-            ...result,
-            removedRules: result.removedRules.map(fromRuleDto),
-            currentRules: result.currentRules.map(fromRuleDto)
-        } as CommittedDeviceDeletionResult;
-    },
+        ),
 
     // ==== 环境变量池 ====
     getEnvironment: async (): Promise<ModelEnvironmentVariable[]> => {
@@ -2594,7 +2564,7 @@ export default {
     reorderRules: async (
         expectedRuleIds: string[],
         ruleIds: string[]
-    ): Promise<{ rules: RuleForm[]; canUndo: true; canRedo: false }> => {
+    ): Promise<{ rules: RuleForm[]; canUndo: true; canRedo: false; editHistoryRevision: string }> => {
         const toPersistedIds = (ids: string[], field: string) => ids.map(ruleId => {
             const numericId = Number(ruleId)
             if (!Number.isSafeInteger(numericId) || numericId <= 0) {
@@ -2636,7 +2606,8 @@ export default {
         return {
             rules: result.map(fromRuleDto),
             canUndo: envelope.canUndo,
-            canRedo: envelope.canRedo
+            canRedo: envelope.canRedo,
+            editHistoryRevision: requireBoardEditAvailability(envelope, 'Rule reorder').editHistoryRevision
         }
     },
     removeRule: async (rule: RuleForm): Promise<CollectionMutationResult<RuleForm>> => {
@@ -2679,12 +2650,12 @@ export default {
     getBoardEditAvailability: async (): Promise<BoardUndoAvailability> => {
         const result = parseBoardUndoResult(
             unpack<unknown>(await api.get('/board/edits/availability')), 'availability')
-        return { canUndo: result.canUndo, canRedo: result.canRedo }
+        return { canUndo: result.canUndo, canRedo: result.canRedo, editHistoryRevision: result.editHistoryRevision }
     },
 
-    applyBoardEditUndo: async (direction: 'undo' | 'redo'): Promise<BoardUndoResult> =>
+    applyBoardEditUndo: async (direction: 'undo' | 'redo', expectedEditHistoryRevision: string): Promise<BoardUndoResult> =>
         parseBoardUndoResult(
-            unpack<unknown>(await api.post(`/board/edits/${direction}`)), direction),
+            unpack<unknown>(await api.post(`/board/edits/${direction}`, { expectedEditHistoryRevision })), direction),
 
     previewBoardEditHistoryClear: async (): Promise<BoardEditHistoryClearPreview> =>
         validateBoardEditHistoryClearPreview(
@@ -2693,7 +2664,7 @@ export default {
     clearBoardEditHistory: async (impactToken: string): Promise<BoardUndoAvailability> => {
         const result = parseBoardUndoResult(
             unpack<unknown>(await api.post('/board/edits/clear', { impactToken })), 'clear')
-        return { canUndo: result.canUndo, canRedo: result.canRedo }
+        return { canUndo: result.canUndo, canRedo: result.canRedo, editHistoryRevision: result.editHistoryRevision }
     },
 
     /** Returns the authoritative current-board impact that the user must confirm. */

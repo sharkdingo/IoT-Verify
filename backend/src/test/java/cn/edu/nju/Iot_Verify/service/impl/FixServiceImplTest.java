@@ -70,6 +70,8 @@ import static org.mockito.Mockito.*;
 @ExtendWith(MockitoExtension.class)
 class FixServiceImplTest {
 
+    private static final String RULES_EDIT_HISTORY_REVISION = "8:3:0";
+
     @Mock private TraceRepository traceRepository;
     @Mock private VerificationTaskRepository verificationTaskRepository;
     @Mock private VerificationTraceContextProjection runContext;
@@ -193,7 +195,7 @@ class FixServiceImplTest {
             java.util.function.Function<BoardSemanticSnapshotDto, List<RuleDto>> mutator = inv.getArgument(1);
             List<RuleDto> saved = mutator.apply(storageSnapshot(currentRules));
             return CollectionMutationResultDto.of("updated", null, saved)
-                    .withUndoAvailability(true, false);
+                    .withUndoAvailability(true, false, RULES_EDIT_HISTORY_REVISION);
         });
     }
 
@@ -914,7 +916,7 @@ class FixServiceImplTest {
                 List<RuleDto> saved = mutator.apply(storageSnapshot(
                         new java.util.ArrayList<>(List.of(boardRuleMatchingSnapshot()))));
                 return CollectionMutationResultDto.of("updated", null, saved)
-                        .withUndoAvailability(true, false);
+                        .withUndoAvailability(true, false, RULES_EDIT_HISTORY_REVISION);
             } finally {
                 insideUpdateRules.set(false);
             }
@@ -924,6 +926,7 @@ class FixServiceImplTest {
 
         assertTrue(result.isApplied());
         assertEquals("40", result.getRules().get(0).getConditions().get(0).getValue());
+        assertEquals(RULES_EDIT_HISTORY_REVISION, result.getEditHistoryRevision());
     }
 
     @Test

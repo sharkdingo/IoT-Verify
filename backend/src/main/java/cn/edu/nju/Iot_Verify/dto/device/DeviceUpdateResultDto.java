@@ -27,4 +27,5 @@ public class DeviceUpdateResultDto {
     private Boolean canUndo;
     /** Present only when an actual update was committed and journalled. */
     private Boolean canRedo;
+    private String editHistoryRevision;
 }

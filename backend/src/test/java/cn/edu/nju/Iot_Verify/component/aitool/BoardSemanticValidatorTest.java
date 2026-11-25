@@ -8,7 +8,9 @@ import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
 import org.junit.jupiter.api.Test;
 
+import java.util.Collections;
 import java.util.List;
+import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -41,6 +43,80 @@ class BoardSemanticValidatorTest {
                 ), null);
 
         assertNull(issue);
+    }
+
+    @Test
+    void acceptsSpecificationForACombinationNotListedAsAWorkingState() {
+        var recommendationContext = twoModeContext();
+        var authoringContext = BoardSemanticValidator.context(
+                List.of(recommendationContext.nodesById().get("device-1")),
+                List.of(recommendationContext.templatesByName().get("heater")));
+
+        assertNull(BoardSemanticValidator.validateSpecConditionGroup(authoringContext, List.of(
+                specCondition("mode", "HeatMode", "=", "heat"),
+                specCondition("mode", "MachineState", "=", "idle")), "a"));
+    }
+
+    @Test
+    void rejectsContradictionEvenWhenUnrelatedModesMakeTheFullProductLarge() {
+        var context = context();
+        var template = context.templatesByName().get("heater");
+        var manifest = template.getManifest();
+        var modes = IntStream.rangeClosed(1, 13).mapToObj(i -> "Mode" + i).toList();
+        var allLow = String.join(";", Collections.nCopies(modes.size(), "lo"));
+        var allHigh = String.join(";", Collections.nCopies(modes.size(), "hi"));
+        manifest.setModes(modes);
+        manifest.setWorkingStates(List.of(state(allLow), state(allHigh)));
+        manifest.setInitState(allLow);
+        manifest.setApis(List.of());
+        var node = context.nodesById().get("device-1");
+        node.setState(allLow);
+        var authoring = BoardSemanticValidator.context(List.of(node), List.of(template));
+
+        var issue = BoardSemanticValidator.validateSpecConditionGroup(authoring, List.of(
+                specCondition("mode", "Mode1", "=", "lo"),
+                specCondition("mode", "Mode1", "=", "hi")), "a");
+
+        assertNotNull(issue);
+        assertEquals("CONTRADICTORY_CONDITION_GROUP", issue.reasonCode());
+    }
+
+    @Test
+    void recommendationKeepsModeValueReachedByPartialApiWrite() {
+        var context = twoModeContext();
+
+        assertNull(BoardSemanticValidator.validateSpecConditionGroup(context, List.of(
+                specCondition("mode", "HeatMode", "=", "heat")), "a"));
+    }
+
+    @Test
+    void recommendationCanUseComposedStateAsAnotherCommandsStartState() {
+        var context = twoModeContext();
+        var manifest = context.templatesByName().get("heater").getManifest();
+        manifest.setApis(List.of(manifest.getApis().get(0),
+                DeviceTemplateDto.DeviceManifest.API.builder()
+                        .name("run").signal(false).startState("heat;idle").endState(";run").build()));
+        var command = RuleDto.Command.builder().deviceName("device-1").action("run").build();
+
+        assertNull(BoardSemanticValidator.validateRuleConditionGroup(context, List.of(
+                ruleCondition("mode", "MachineState", "=", "idle")), command));
+    }
+
+    @Test
+    void recommendationAllowsSimultaneousAutonomousWritesToDifferentModes() {
+        var context = twoModeContext();
+        var manifest = context.templatesByName().get("heater").getManifest();
+        manifest.setApis(List.of());
+        var trigger = DeviceTemplateDto.DeviceManifest.Trigger.builder()
+                .attribute("temperature").relation("=").value("0").build();
+        manifest.setTransitions(List.of(
+                DeviceTemplateDto.DeviceManifest.Transition.builder()
+                        .name("warm").startState("eco;idle").endState("heat;").trigger(trigger).build(),
+                DeviceTemplateDto.DeviceManifest.Transition.builder()
+                        .name("run").startState("eco;idle").endState(";run").trigger(trigger).build()));
+
+        assertNull(BoardSemanticValidator.validateSpecConditionGroup(context, List.of(
+                specCondition("state", "state", "=", "heat;run")), "a"));
     }
 
     @Test
@@ -362,6 +438,16 @@ class BoardSemanticValidatorTest {
         template.setName("Heater");
         template.setManifest(manifest);
         return BoardSemanticValidator.recommendationContext(List.of(node), List.of(template), List.of());
+    }
+
+    private static BoardSemanticValidator.BoardContext twoModeContext() {
+        var context = context();
+        var manifest = context.templatesByName().get("heater").getManifest();
+        manifest.setInitState("eco;idle");
+        manifest.setWorkingStates(List.of(state("eco;idle"), state("heat;run")));
+        manifest.setApis(List.of(DeviceTemplateDto.DeviceManifest.API.builder()
+                .name("warm").signal(false).startState("eco;_").endState("heat;").build()));
+        return context;
     }
 
     private static DeviceTemplateDto.DeviceManifest.WorkingState state(String name) {

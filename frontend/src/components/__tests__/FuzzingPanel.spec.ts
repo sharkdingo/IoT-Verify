@@ -99,6 +99,31 @@ const specification: Specification = { name: 'Safety requirement',
 }
 
 describe('FuzzingPanel', () => {
+  it('leaves focus with the active draft when the Board declines focus restoration', async () => {
+    const opener = document.createElement('button')
+    const draft = document.createElement('input')
+    document.body.append(opener, draft)
+    opener.focus()
+    const wrapper = mount(FuzzingPanel, {
+      attachTo: document.body, global: { plugins: [appI18n] },
+      props: {
+        form: { explorationMode: 'BOARD_SNAPSHOT', targetSelectionMode: 'ALL', targetSpecIds: [],
+          maxIterations: 2, pathLength: 2, populationSize: 1, seed: null },
+        specifications: [specification], running: true, progress: 50, status: 'Exploring', taskId: 7,
+        cancelling: false, shouldRestoreFocus: () => false
+      }
+    })
+    try {
+      await wrapper.vm.$nextTick()
+      draft.focus()
+      wrapper.unmount()
+      expect(document.activeElement).toBe(draft)
+    } finally {
+      opener.remove()
+      draft.remove()
+    }
+  })
+
   it('explains stale targets once and selects only explorable targets', async () => {
     const locale = 'en'
     const translations = createI18n({ legacy: false, locale, messages: {

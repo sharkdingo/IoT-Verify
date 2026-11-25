@@ -26,4 +26,5 @@ public class EnvironmentMutationResultDto {
     private Boolean canUndo;
     /** Present only when an actual Environment Pool update was committed and journalled. */
     private Boolean canRedo;
+    private String editHistoryRevision;
 }

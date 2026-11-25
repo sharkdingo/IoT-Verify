@@ -4,7 +4,6 @@ import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvRelationUtils;
 import cn.edu.nju.Iot_Verify.component.template.DeviceManifestModes;
 import cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics;
 
-import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvDataFactory;
 import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
@@ -41,7 +40,6 @@ import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantic
  * to fail later during simulation or verification.</p>
  */
 public final class BoardSemanticValidator {
-
 
     private BoardSemanticValidator() {
     }
@@ -212,57 +210,41 @@ public final class BoardSemanticValidator {
         DeviceTemplateDto template = templateForDevice(context, command.getDeviceName());
         DeviceTemplateDto.DeviceManifest.API api = template == null
                 ? null : findApi(template.getManifest(), command.getAction());
-        if (api == null || !hasText(api.getStartState()) || "_".equals(api.getStartState().trim())) {
+        if (api == null) {
             return null;
         }
 
-        List<RuleDto.Condition> targetStateConditions = safeConditions.stream()
+        String targetId = command.getDeviceName().trim();
+        var analysis = new DeviceModeStateAnalysis(template.getManifest());
+        var start = analysis.commandStart(api.getStartState());
+        if (start.isEmpty()) {
+            return null;
+        }
+        List<DeviceModeStateAnalysis.Condition> targetStateConditions = new ArrayList<>();
+        targetStateConditions.add(start.get());
+        safeConditions.stream()
                 .filter(condition -> condition != null
-                        && command.getDeviceName().trim().equals(trimToNull(condition.getDeviceName()))
+                        && targetId.equals(trimToNull(condition.getDeviceName()))
                         && isStateOrMode(condition.getTargetType()))
-                .toList();
-        List<StateTuple> legalStates = legalStateTuples(template.getManifest());
-        boolean hasCompatibleState = legalStates.stream()
-                .filter(tuple -> stateCandidateMatches(template.getManifest(), tuple, api.getStartState()))
-                .anyMatch(tuple -> targetStateConditions.stream().allMatch(condition ->
-                        stateOrModeConditionMatches(
-                                template.getManifest(),
-                                tuple,
-                                condition.getTargetType(),
-                                condition.getAttribute(),
-                                condition.getRelation(),
-                                condition.getValue())));
-        if (!hasCompatibleState) {
-            return new GroupValidationIssue(
+                .map(condition -> analysis.condition(normalize(condition.getTargetType()),
+                        condition.getAttribute(), condition.getRelation(), condition.getValue()))
+                .forEach(targetStateConditions::add);
+        return switch (analysis.assess(targetStateConditions, context.nodesById().get(targetId).getState(),
+                context.enforceReachability())) {
+            case CONTRADICTORY -> new GroupValidationIssue(
                     "COMMAND_PRESTATE_INCOMPATIBLE",
                     "The rule conditions on device '" + command.getDeviceName()
                             + "' cannot hold in the start state required by action '"
                             + command.getAction() + "' (" + api.getStartState() + ")."
             );
-        }
-        if (context.enforceReachability()) {
-            List<StateTuple> reachableStates = reachableStateTuples(
-                    context, command.getDeviceName(), template.getManifest(), legalStates);
-            boolean hasReachableCompatibleState = reachableStates.stream()
-                    .filter(tuple -> stateCandidateMatches(template.getManifest(), tuple, api.getStartState()))
-                    .anyMatch(tuple -> targetStateConditions.stream().allMatch(condition ->
-                            stateOrModeConditionMatches(
-                                    template.getManifest(),
-                                    tuple,
-                                    condition.getTargetType(),
-                                    condition.getAttribute(),
-                                    condition.getRelation(),
-                                    condition.getValue())));
-            if (!hasReachableCompatibleState) {
-                return new GroupValidationIssue(
-                        "COMMAND_PRESTATE_UNREACHABLE",
-                        "Action '" + command.getAction() + "' on device '" + command.getDeviceName()
-                                + "' requires start state '" + api.getStartState()
-                                + "', which is unreachable from the current device state."
-                );
-            }
-        }
-        return null;
+            case UNREACHABLE -> new GroupValidationIssue(
+                    "COMMAND_PRESTATE_UNREACHABLE",
+                    "The rule conditions and action '" + command.getAction() + "' start state '"
+                            + api.getStartState() + "' cannot hold together from the current state of device '"
+                            + command.getDeviceName() + "'."
+            );
+            case POSSIBLE, INCONCLUSIVE -> null;
+        };
     }
 
     public static String validateSpecCondition(BoardContext context, SpecConditionDto condition, String side, int index) {
@@ -431,36 +413,27 @@ public final class BoardSemanticValidator {
             if (template == null || template.getManifest() == null) {
                 continue;
             }
-            List<StateTuple> legalStates = legalStateTuples(template.getManifest());
-            boolean satisfiable = legalStates.stream()
-                    .anyMatch(tuple -> entry.getValue().stream().allMatch(condition ->
-                            stateOrModeConditionMatches(
-                                    template.getManifest(), tuple,
-                                    targetTypeGetter.apply(condition), keyGetter.apply(condition),
-                                    relationGetter.apply(condition), valueGetter.apply(condition))));
-            if (!satisfiable) {
-                return new GroupValidationIssue(
+            var analysis = new DeviceModeStateAnalysis(template.getManifest());
+            var checks = entry.getValue().stream()
+                    .map(condition -> analysis.condition(
+                            normalize(targetTypeGetter.apply(condition)), keyGetter.apply(condition),
+                            relationGetter.apply(condition), valueGetter.apply(condition)))
+                    .toList();
+            var issue = switch (analysis.assess(checks, context.nodesById().get(entry.getKey()).getState(),
+                    context.enforceReachability())) {
+                case CONTRADICTORY -> new GroupValidationIssue(
                         "CONTRADICTORY_CONDITION_GROUP",
                         "State and mode conditions on device '" + entry.getKey()
-                                + "' have no common legal working state."
+                                + "' have no common combination of declared mode values."
                 );
-            }
-            if (context != null && context.enforceReachability()) {
-                List<StateTuple> reachableStates = reachableStateTuples(
-                        context, entry.getKey(), template.getManifest(), legalStates);
-                if (reachableStates.size() < legalStates.size()
-                        && reachableStates.stream().noneMatch(tuple -> entry.getValue().stream().allMatch(condition ->
-                        stateOrModeConditionMatches(
-                                template.getManifest(), tuple,
-                                targetTypeGetter.apply(condition), keyGetter.apply(condition),
-                                relationGetter.apply(condition), valueGetter.apply(condition))))) {
-                    return new GroupValidationIssue(
-                            "UNREACHABLE_CONDITION_GROUP",
-                            "State and mode conditions on device '" + entry.getKey()
-                                    + "' are legal but unreachable from its current state under the declared APIs and transitions."
-                    );
-                }
-            }
+                case UNREACHABLE -> new GroupValidationIssue(
+                        "UNREACHABLE_CONDITION_GROUP",
+                        "State and mode conditions on device '" + entry.getKey()
+                                + "' cannot hold together from its current state under the declared APIs and transitions."
+                );
+                case POSSIBLE, INCONCLUSIVE -> null;
+            };
+            if (issue != null) return issue;
         }
         return null;
     }
@@ -681,177 +654,6 @@ public final class BoardSemanticValidator {
         return "state".equals(normalized) || "mode".equals(normalized);
     }
 
-    private static boolean stateOrModeConditionMatches(DeviceTemplateDto.DeviceManifest manifest,
-                                                       StateTuple tuple,
-                                                       String rawTargetType,
-                                                       String rawKey,
-                                                       String rawRelation,
-                                                       String rawValue) {
-        String targetType = normalize(rawTargetType);
-        String relation = SmvRelationUtils.normalizeRelation(rawRelation);
-        if ("mode".equals(targetType)) {
-            String mode = resolveModeName(manifest, rawKey);
-            String currentValue = mode == null ? null : tuple.valuesByMode().get(mode);
-            if (currentValue == null) {
-                return false;
-            }
-            Set<String> values = new HashSet<>();
-            for (String value : splitValues(rawValue, relation)) {
-                values.add(DeviceSmvDataFactory.cleanStateName(value));
-            }
-            boolean contains = values.contains(currentValue);
-            return switch (relation == null ? "" : relation) {
-                case "=", "in" -> contains;
-                case "!=", "not in" -> !contains;
-                default -> false;
-            };
-        }
-        if (!"state".equals(targetType)) {
-            return true;
-        }
-        List<String> candidates = ("in".equals(relation) || "not in".equals(relation))
-                ? SmvRelationUtils.splitStateRuleValues(rawValue, modeNames(manifest).size())
-                : List.of(rawValue == null ? "" : rawValue.trim());
-        boolean anyMatch = candidates.stream().anyMatch(candidate -> stateCandidateMatches(manifest, tuple, candidate));
-        return switch (relation == null ? "" : relation) {
-            case "=", "in" -> anyMatch;
-            case "!=", "not in" -> !anyMatch;
-            default -> false;
-        };
-    }
-
-    private static boolean stateCandidateMatches(DeviceTemplateDto.DeviceManifest manifest,
-                                                 StateTuple tuple,
-                                                 String candidate) {
-        Map<String, List<String>> authored = DeviceManifestModes.authoredModeStates(manifest);
-        var pattern = ManifestConditionSemantics.resolveStatePattern(candidate, modeNames(manifest),
-                (mode, state) -> authored.getOrDefault(mode, List.of()).contains(state)
-                        ? DeviceSmvDataFactory.cleanStateName(state) : null);
-        return !pattern.isEmpty() && tuple.valuesByMode().entrySet().containsAll(pattern.entrySet());
-    }
-
-    private static List<StateTuple> legalStateTuples(DeviceTemplateDto.DeviceManifest manifest) {
-        List<String> modes = modeNames(manifest);
-        List<StateTuple> result = new ArrayList<>();
-        if (manifest == null || manifest.getWorkingStates() == null || modes.isEmpty()) {
-            return result;
-        }
-        for (DeviceTemplateDto.DeviceManifest.WorkingState state : manifest.getWorkingStates()) {
-            if (state == null || !hasText(state.getName())) {
-                continue;
-            }
-            String[] parts = modes.size() == 1
-                    ? new String[]{state.getName()}
-                    : state.getName().split(";", -1);
-            if (parts.length != modes.size()) {
-                continue;
-            }
-            Map<String, String> valuesByMode = new LinkedHashMap<>();
-            boolean valid = true;
-            for (int i = 0; i < modes.size(); i++) {
-                String value = DeviceSmvDataFactory.cleanStateName(parts[i]);
-                if (!hasText(value) || "_".equals(value)) {
-                    valid = false;
-                    break;
-                }
-                valuesByMode.put(modes.get(i), value);
-            }
-            if (valid) {
-                result.add(new StateTuple(valuesByMode));
-            }
-        }
-        return result;
-    }
-
-    private static List<StateTuple> reachableStateTuples(BoardContext context,
-                                                         String deviceId,
-                                                         DeviceTemplateDto.DeviceManifest manifest,
-                                                         List<StateTuple> legalStates) {
-        if (legalStates == null || legalStates.isEmpty()) {
-            return List.of();
-        }
-        DeviceNodeDto node = context == null ? null : context.nodesById().get(trimToNull(deviceId));
-        List<StateTuple> initial = matchingStateTuples(
-                manifest,
-                legalStates,
-                node != null && hasText(node.getState()) ? node.getState() : manifest.getInitState());
-        if (initial.isEmpty() && node != null && hasText(node.getState()) && hasText(manifest.getInitState())) {
-            initial = matchingStateTuples(manifest, legalStates, manifest.getInitState());
-        }
-        if (initial.isEmpty()) {
-            return legalStates;
-        }
-
-        Set<StateTuple> reachable = new LinkedHashSet<>(initial);
-        boolean changed;
-        do {
-            changed = false;
-            List<StateTuple> snapshot = List.copyOf(reachable);
-            for (StateTuple source : snapshot) {
-                for (DeviceTemplateDto.DeviceManifest.API api : safeList(manifest.getApis())) {
-                    if (api == null || !hasText(api.getEndState())
-                            || !matchesStatePattern(manifest, source, api.getStartState())) {
-                        continue;
-                    }
-                    changed |= reachable.addAll(applyStateTarget(
-                            manifest, legalStates, source, api.getEndState()));
-                }
-                for (DeviceTemplateDto.DeviceManifest.Transition transition : safeList(manifest.getTransitions())) {
-                    if (transition == null || !hasText(transition.getEndState())
-                            || !matchesStatePattern(manifest, source, transition.getStartState())) {
-                        continue;
-                    }
-                    // Trigger feasibility is deliberately over-approximated: reject only states
-                    // that remain unreachable even if every declared transition may fire.
-                    changed |= reachable.addAll(applyStateTarget(
-                            manifest, legalStates, source, transition.getEndState()));
-                }
-            }
-        } while (changed && reachable.size() < legalStates.size());
-        return List.copyOf(reachable);
-    }
-
-    private static List<StateTuple> matchingStateTuples(DeviceTemplateDto.DeviceManifest manifest,
-                                                        List<StateTuple> legalStates,
-                                                        String statePattern) {
-        if (!hasText(statePattern) || "_".equals(statePattern.trim())) {
-            return List.of();
-        }
-        return legalStates.stream()
-                .filter(tuple -> stateCandidateMatches(manifest, tuple, statePattern))
-                .toList();
-    }
-
-    private static boolean matchesStatePattern(DeviceTemplateDto.DeviceManifest manifest,
-                                               StateTuple source,
-                                               String statePattern) {
-        return !hasText(statePattern) || "_".equals(statePattern.trim())
-                || stateCandidateMatches(manifest, source, statePattern);
-    }
-
-    private static List<StateTuple> applyStateTarget(DeviceTemplateDto.DeviceManifest manifest,
-                                                     List<StateTuple> legalStates,
-                                                     StateTuple source,
-                                                     String endState) {
-        List<String> modes = modeNames(manifest);
-        if (modes.isEmpty() || !hasText(endState)) return List.of();
-        String[] parts = endState.split(";", -1);
-        if (parts.length > modes.size()) return List.of();
-        Map<String, String> target = new LinkedHashMap<>(source.valuesByMode());
-        boolean changed = false;
-        for (int i = 0; i < parts.length; i++) {
-            if (DeviceSmvDataFactory.isWildcardStateSegment(parts[i])) continue;
-            String value = DeviceSmvDataFactory.cleanStateName(parts[i]);
-            if (!hasText(value)) return List.of();
-            target.put(modes.get(i), value);
-            changed = true;
-        }
-        if (!changed) return List.of();
-        return legalStates.stream()
-                .filter(tuple -> tuple.valuesByMode().equals(target))
-                .toList();
-    }
-
     /**
      * Returns a finite over-approximation only when the variable is provably closed.
      * A null result means that natural change or missing runtime data keeps the full
@@ -995,9 +797,6 @@ public final class BoardSemanticValidator {
 
     private static <T> List<T> safeList(List<T> values) {
         return values == null ? List.of() : values;
-    }
-
-    private record StateTuple(Map<String, String> valuesByMode) {
     }
 
     private static DeviceTemplateDto templateForDevice(BoardContext context, String deviceId) {

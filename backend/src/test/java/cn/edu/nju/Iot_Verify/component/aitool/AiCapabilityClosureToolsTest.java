@@ -186,7 +186,7 @@ class AiCapabilityClosureToolsTest {
     void manageBoardHistory_returnsExactAppliedEditAndAvailability() throws Exception {
         when(boardStorageService.undoLastEdit(7L)).thenReturn(new BoardUndoResultDto(
                 true, "RULE", "CREATE", "UNDO_CREATE", List.of(), List.of(),
-                List.of(), List.of(), false, true));
+                List.of(), List.of(), false, true, "1:0:1"));
 
         JsonNode result = objectMapper.readTree(
                 new ManageBoardHistoryTool(boardStorageService, destructiveActionGuard, objectMapper)
@@ -240,7 +240,7 @@ class AiCapabilityClosureToolsTest {
         when(boardStorageService.clearBoardEditHistory(7L, "domain-history-token"))
                 .thenReturn(new BoardUndoResultDto(
                         false, null, null, "HISTORY_CLEARED", List.of(), List.of(),
-                        List.of(), List.of(), false, false));
+                        List.of(), List.of(), false, false, "0:0:0"));
 
         JsonNode cleared = objectMapper.readTree(tool.execute(
                 "{\"action\":\"clear\",\"confirmed\":true,"

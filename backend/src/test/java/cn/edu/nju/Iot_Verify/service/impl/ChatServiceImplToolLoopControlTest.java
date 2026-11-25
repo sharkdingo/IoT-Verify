@@ -2420,26 +2420,28 @@ class ChatServiceImplToolLoopControlTest {
     }
 
     @Test
-    void requestLocalUserExecutionStop_whenRequestIsQueued_preventsChatWorkFromStarting() {
-        ChatSessionPo session = new ChatSessionPo();
-        session.setId("s1");
-        session.setUserId(1L);
+    void requestLocalUserExecutionStop_afterAccountDeletion_stopsQueuedChatWithoutDatabaseCleanup() throws Exception {
         SseEmitter emitter = mock(SseEmitter.class);
 
         String executionId = service.beginStreamRequest(1L, "s1", "turn-1", "hello");
+        when(userRepository.findByIdForUpdate(1L)).thenReturn(Optional.empty());
         transactionPropagations.clear();
+
         service.requestLocalUserExecutionStop(1L);
+
+        assertTrue(transactionPropagations.isEmpty());
+        verify(sessionRepo, never()).findByUserIdForUpdate(1L);
+        verify(destructiveActionGuard, never()).clearUser(1L);
+        verify(scenarioDraftStore, never()).clearUser(1L);
+        verify(taskContinuationStore, never()).clearUser(1L);
+
         service.processStreamChat(1L, "s1", executionId, "turn-1", "hello", emitter);
 
         verify(emitter).complete();
-        verify(messageRepo).saveAndFlush(org.mockito.ArgumentMatchers.argThat(
-                message -> message != null && "user".equals(message.getRole())));
-        verify(messageRepo).saveAndFlush(org.mockito.ArgumentMatchers.argThat(
-                message -> message != null
-                        && message.getExecutionStatus() == ChatExecutionStatus.DISCONNECTED));
+        verify(emitter, never()).send(any(SseEmitter.SseEventBuilder.class));
+        verify(messageRepo, never()).saveAndFlush(org.mockito.ArgumentMatchers.argThat(
+                message -> message != null && "assistant".equals(message.getRole())));
         verifyNoInteractions(llmChatService, aiToolManager);
-        verify(destructiveActionGuard).clearUser(1L);
-        assertTrue(transactionPropagations.contains(TransactionDefinition.PROPAGATION_REQUIRES_NEW));
         service.endStreamRequest(1L, "s1", executionId);
     }
 

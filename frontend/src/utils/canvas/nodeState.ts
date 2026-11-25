@@ -1,11 +1,14 @@
 import type { DeviceManifest } from '@/types/device'
+import { isConcreteDeviceState, trimAuthoredDeviceState } from '@/utils/stateConditionDomain'
 
 type StateManifest = Pick<DeviceManifest, 'Modes' | 'InitState' | 'WorkingStates'>
+
+const stateText = (value: unknown): string => trimAuthoredDeviceState(String(value ?? ''))
 
 const normalizedWorkingStates = (manifest?: StateManifest | null): string[] =>
   Array.isArray(manifest?.WorkingStates)
     ? manifest.WorkingStates
-        .map(state => String(state?.Name || '').trim())
+        .map(state => stateText(state?.Name))
         .filter(Boolean)
     : []
 
@@ -20,12 +23,12 @@ export const resolveEffectiveNodeState = (
   manifest?: StateManifest | null,
   fallback = ''
 ): string => {
-  const configured = String(configuredState ?? '').trim()
-  const initial = String(manifest?.InitState ?? '').trim()
+  const configured = stateText(configuredState)
+  const initial = stateText(manifest?.InitState)
   const legalStates = normalizedWorkingStates(manifest)
 
   if (!hasModeledStateMachine(manifest)) return configured || initial || fallback
-  if (configured && legalStates.includes(configured)) return configured
+  if (isConcreteDeviceState(manifest, configured)) return configured
   if (initial && legalStates.includes(initial)) return initial
   return legalStates[0] || fallback
 }

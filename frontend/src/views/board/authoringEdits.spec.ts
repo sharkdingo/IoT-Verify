@@ -9,6 +9,14 @@ const start = source.indexOf('const saveBoardItemEdit =')
 const end = source.indexOf('const editRuleFromInspector =', start)
 const body = start < 0 || end < 0 ? '' : source.slice(start, end)
 
+const bindDeletion = (name: string, next: string, ports: Record<string, unknown>) => {
+  const start = source.indexOf(`const ${name} =`)
+  const body = source.slice(start, source.indexOf(`const ${next} =`, start))
+  return new Function('ports', `with (ports) { ${transpileModule(body, {
+    compilerOptions: { target: ScriptTarget.ES2022 }
+  }).outputText}; return ${name} }`)(ports)
+}
+
 const setup = (enqueue?: (work: () => Promise<unknown>) => Promise<unknown>) => {
   const ownership = { active: true, token: 'owner' }
   const dependencies = {
@@ -38,6 +46,82 @@ const setup = (enqueue?: (work: () => Promise<unknown>) => Promise<unknown>) => 
 }
 
 describe('Board edit ownership and reconciliation', () => {
+  it('identifies the locally removed device when adopting a confirmed deletion snapshot', async () => {
+    const snapshot = { nodes: [] }
+    const ports = {
+      ensureBoardDataReady: () => true,
+      enqueueBoardMutation: (work: () => Promise<unknown>) => work(),
+      bundledBoardEnvironmentNames: { value: [] },
+      boardApi: { deleteNode: vi.fn().mockResolvedValue({ snapshot, environmentChanges: [] }) },
+      adoptBoardSnapshot: vi.fn(), reportEnvironmentChanges: vi.fn()
+    }
+    const remove = bindDeletion('forceDeleteNode', 'deleteCurrentNodeWithConfirm', ports)
+
+    expect(await remove('removed-here', 'reviewed-token')).toEqual({ responseConfirmed: true })
+    expect(ports.adoptBoardSnapshot).toHaveBeenCalledExactlyOnceWith(snapshot, 'removed-here')
+  })
+
+  it('refreshes the full scene and its template catalog after a stale deletion confirmation', async () => {
+    const node = { id: 'retained', label: 'Original device', template: 'original-template' }
+    const otherNode = { id: 'added', label: 'New device', template: 'added-template' }
+    const board = { nodes: [node], templates: ['original-template'] }
+    const ports = {
+      ensureBoardDataReady: () => true,
+      enqueueBoardMutation: (work: () => Promise<unknown>) => work(),
+      bundledBoardEnvironmentNames: { value: [] },
+      boardApi: { deleteNode: vi.fn().mockRejectedValue({ response: { status: 409 } }) },
+      extractApiErrorMessage: () => 'Conflict', t: (key: string) => key, notifyBlocked: vi.fn(),
+      console: { error: vi.fn() },
+      refreshDevices: () => { board.nodes = [{ ...node, label: 'Changed elsewhere' }, otherNode] },
+      refreshEnvironmentVariables: vi.fn(), refreshRules: vi.fn(), refreshSpecifications: vi.fn(),
+      reloadUndoAvailability: vi.fn(), refreshSceneForReconciliation: vi.fn(async () => {
+        board.nodes = [{ ...node, label: 'Changed elsewhere' }, otherNode]
+        board.templates = ['original-template', 'added-template']
+        return true
+      })
+    }
+    const remove = bindDeletion('forceDeleteNode', 'deleteCurrentNodeWithConfirm', ports)
+
+    expect(await remove(node.id, 'expired-token')).toMatchObject({ responseConfirmed: false })
+    expect(board.nodes.map(device => device.label)).toEqual(['Changed elsewhere', 'New device'])
+    expect(board.templates).toEqual(['original-template', 'added-template'])
+  })
+
+  it('uses the deletion preview and Board snapshot from the same response', async () => {
+    const node = { id: 'retained', label: 'Preview target', templateName: 'original-template' }
+    const added = { id: 'added', label: 'New device', templateName: 'added-template' }
+    const nodes = { value: [node] }
+    const templates = { value: ['original-template'] }
+    const snapshot = { nodes: [node, added], deviceTemplates: ['original-template', 'added-template'] }
+    const dialog: Record<string, unknown> = {}
+    const ports = {
+      nodes, dialogVisible: { value: false }, deleteConfirmDialogData: dialog,
+      deletePreviewLoading: { value: false }, deleteConfirmSubmitting: { value: false },
+      deleteConfirmDialogVisible: { value: false }, deleteConfirmReviewSnapshotKey: { value: null },
+      deletePreviewRequestEpoch: 0, deletePreviewNodeId: null, deleteDialogReturnFocusNodeId: null,
+      deleteConfirmSourceDeviceDialogNodeId: null,
+      ensurePlaybackClosedForMutation: () => true, ensureBoardDataReady: () => true,
+      resolveCurrentBoardNode: (devices: typeof nodes.value, id: string) => devices.find(item => item.id === id),
+      enqueueBoardMutation: (work: () => Promise<unknown>) => work(),
+      boardApi: { previewNodeDeletion: vi.fn().mockResolvedValue({ deletedDevice: node, impactToken: 'reviewed',
+        removedRules: [], removedSpecifications: [], environmentChanges: [], snapshot }) },
+      refreshSceneForReconciliation: vi.fn().mockResolvedValue(true),
+      adoptBoardSnapshot: vi.fn((value: typeof snapshot) => {
+        nodes.value = value.nodes
+        templates.value = value.deviceTemplates
+      }),
+      currentDeletionReviewSnapshotKey: () => 'key'
+    }
+
+    await bindDeletion('deleteCurrentNodeWithConfirm', 'handleDialogDelete', ports)(node.id)
+
+    expect(dialog.impactToken).toBe('reviewed')
+    expect(nodes.value).toEqual([node, added])
+    expect(templates.value).toContain(added.templateName)
+    expect(ports.adoptBoardSnapshot).toHaveBeenCalledExactlyOnceWith(snapshot)
+    expect(ports.refreshSceneForReconciliation).not.toHaveBeenCalled()
+  })
+
   it.each(['rule', 'spec'] as const)('routes a %s edit to its targeted update and reconciles the returned snapshot', async kind => {
     const state = setup()
     const api = kind === 'rule' ? state.dependencies.boardApi.updateRule : state.dependencies.boardApi.updateSpec

@@ -115,13 +115,9 @@ the registered AI tools are mapped in
   Completion/failure transactions lock the task row before sampling their terminal time
   and persisting linked evidence. Cancellation remains user-authoritative. Do not replace
   these transitions with read-then-write, a pre-lock JVM timestamp, or global startup cleanup.
-  **A worker's own registration must be crash-safe.** `registerRunningTask` /
-  `updateTaskProgress` belong inside the `try` whose `finally` removes them, and
-  `handleCancellation` must not propagate: it runs ahead of that cleanup and touches the database.
-  A leaked `runningTasks` entry means a pooled thread stays registered against a finished task, so
-  a later cancel interrupts whatever unrelated task that thread moved on to. The database row
-  stays authoritative either way: the user's own cancel settles it, or the expired-lease sweep does —
-  and that sweep writes FAILED, not CANCELLED, so the residual case shows a cancelled run as failed.
+  **Cancel the task's Future after the transaction commits.** The worker must keep running if the
+  cancellation rolls back. Use the task's Future as the local stop signal because another task can
+  reuse its thread. `updateTaskProgress` belongs inside the `try` whose `finally` clears local progress.
 - **Semantic identity counts conditions; duplicate detection does not.** `exactlyMatches` on both
   `RuleSemanticSignature` and `SpecificationSemanticSignature` compares condition *multisets*:
   order carries no meaning in a conjunction, but cardinality does, and these predicates also gate

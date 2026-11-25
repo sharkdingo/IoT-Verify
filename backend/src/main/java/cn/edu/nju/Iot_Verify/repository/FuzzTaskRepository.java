@@ -146,31 +146,27 @@ public interface FuzzTaskRepository extends JpaRepository<FuzzTaskPo, Long>, Dat
                                 @Param("expiredAt") LocalDateTime expiredAt,
                                 @Param("activeStatuses") List<FuzzTaskPo.TaskStatus> activeStatuses);
 
+    @Query("SELECT t.id FROM FuzzTaskPo t WHERE t.status IN (:activeStatuses) "
+         + "AND (t.leaseExpiresAt IS NULL OR t.leaseExpiresAt <= :expiredBefore) "
+         + "ORDER BY t.id")
+    List<Long> findExpiredActiveTaskIds(@Param("activeStatuses") List<FuzzTaskPo.TaskStatus> activeStatuses,
+                                        @Param("expiredBefore") LocalDateTime expiredBefore);
+
+    // Call with the task row locked by ID. Preserve the progress reached before expiry.
     @Transactional
     @Modifying(clearAutomatically = true)
-    // Progress is deliberately left untouched: this sweep fails a task whose lease expired, so the
-    // work did not finish. Overwriting it with 100 published a completed-work claim for an abandoned
-    // run to every consumer of the task DTO — the REST clients and the AI tools. A real exploration
-    // task was observed reporting `status: FAILED, progress: 100`. The last heartbeat's value is the
-    // honest answer, and `status` is what says it ended. Only completeTaskIfRunning writes 100.
-    // `<=`, matching the verification and simulation sweeps and the renewal guards below. Those guards all
-    // require `leaseExpiresAt > :currentTime` to renew or commit, so a lease sitting exactly at the sampled
-    // instant is already dead by every other predicate in this file — a strict `<` here was the one place
-    // that called it live, leaving a row no worker could advance unreclaimed until the next maintenance tick.
-    // Both sides carry microsecond precision (`CURRENT_TIMESTAMP(6)` against Hibernate's `datetime(6)`), so
-    // equality is a rare coincidence rather than a routine one; this is a consistency fix among thirteen
-    // predicates that disagreed on one boundary, not a frequently-hit bug.
     @Query("UPDATE FuzzTaskPo t SET t.status = :failed, t.progressStage = NULL, t.completedAt = :completedAt, "
          + "t.errorMessage = :errorMessage, t.checkLogsJson = :checkLogsJson, "
          + "t.workerId = NULL, t.leaseExpiresAt = NULL "
-         + "WHERE t.status IN (:activeStatuses) "
+         + "WHERE t.id = :taskId AND t.status IN (:activeStatuses) "
          + "AND (t.leaseExpiresAt IS NULL OR t.leaseExpiresAt <= :expiredBefore)")
-    int failExpiredActiveTasks(@Param("failed") FuzzTaskPo.TaskStatus failed,
-                               @Param("completedAt") LocalDateTime completedAt,
-                               @Param("errorMessage") String errorMessage,
-                               @Param("checkLogsJson") String checkLogsJson,
-                               @Param("activeStatuses") List<FuzzTaskPo.TaskStatus> activeStatuses,
-                               @Param("expiredBefore") LocalDateTime expiredBefore);
+    int failExpiredTask(@Param("taskId") Long taskId,
+                        @Param("failed") FuzzTaskPo.TaskStatus failed,
+                        @Param("completedAt") LocalDateTime completedAt,
+                        @Param("errorMessage") String errorMessage,
+                        @Param("checkLogsJson") String checkLogsJson,
+                        @Param("activeStatuses") List<FuzzTaskPo.TaskStatus> activeStatuses,
+                        @Param("expiredBefore") LocalDateTime expiredBefore);
 
     @Transactional
     @Modifying(clearAutomatically = true)
@@ -222,9 +218,7 @@ public interface FuzzTaskRepository extends JpaRepository<FuzzTaskPo, Long>, Dat
 
     @Transactional
     @Modifying(clearAutomatically = true)
-    // Progress is preserved for the same reason as failExpiredActiveTasks above: the user stopped
-    // this run partway, so overwriting progress with 100 claims work that was never done. Observed
-    // live — a task cancelled at 30% was published as 100%.
+    // Preserve the progress reached before cancellation.
     @Query("UPDATE FuzzTaskPo t SET t.status = :cancelled, t.progressStage = NULL, t.completedAt = :completedAt, "
          + "t.workerId = NULL, t.leaseExpiresAt = NULL "
          + "WHERE t.id = :taskId AND t.status IN (:activeStatuses)")

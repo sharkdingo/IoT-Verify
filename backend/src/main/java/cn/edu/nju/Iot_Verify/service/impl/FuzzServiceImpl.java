@@ -60,6 +60,7 @@ import cn.edu.nju.Iot_Verify.repository.projection.FuzzFindingSummaryProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.FuzzTaskProgressProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.FuzzTaskSummaryProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.FuzzSpecificationPresentationProjection;
+import cn.edu.nju.Iot_Verify.service.ChatExecutionLeaseGuard;
 import cn.edu.nju.Iot_Verify.service.FuzzService;
 import cn.edu.nju.Iot_Verify.util.JsonUtils;
 import cn.edu.nju.Iot_Verify.util.RunInitiatorResolver;
@@ -153,6 +154,7 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
     private final FuzzMapper fuzzMapper;
     private final ThreadPoolTaskExecutor fuzzTaskExecutor;
     private final TransactionTemplate transactionTemplate;
+    private final ChatExecutionLeaseGuard chatExecutionLeaseGuard;
     private final int maxActiveTasksPerUser;
     private final int maxStoredTasksPerUser;
     private final Semaphore globalTaskCapacity;
@@ -179,6 +181,7 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
                            FuzzAdmissionConfig fuzzAdmissionConfig,
                            ThreadPoolConfig threadPoolConfig,
                            TransactionTemplate transactionTemplate,
+                           ChatExecutionLeaseGuard chatExecutionLeaseGuard,
                            ObjectMapper objectMapper) {
         super(objectMapper, "Counterexample search task");
         this.taskRepository = taskRepository;
@@ -191,6 +194,7 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
         this.fuzzMapper = fuzzMapper;
         this.fuzzTaskExecutor = fuzzTaskExecutor;
         this.transactionTemplate = transactionTemplate;
+        this.chatExecutionLeaseGuard = chatExecutionLeaseGuard;
         this.maxActiveTasksPerUser = fuzzAdmissionConfig.getMaxActiveTasksPerUser();
         this.maxStoredTasksPerUser = fuzzAdmissionConfig.getMaxStoredTasksPerUser();
         this.globalTaskCapacity = new Semaphore(
@@ -253,14 +257,14 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
         }
         try {
             LocalDateTime recoveryTime = databaseNow();
-            int recovered = taskRepository.failExpiredActiveTasks(
-                    FuzzTaskPo.TaskStatus.FAILED,
-                    recoveryTime,
-                    "The counterexample search stopped before the task completed",
-                    serializeCheckLogs(List.of(
-                            "Counterexample search task lease expired before completion")),
-                    ACTIVE_STATUSES,
-                    recoveryTime);
+            String checkLogs = serializeCheckLogs(List.of("Counterexample search task lease expired before completion"));
+            int recovered = TaskLeaseRenewal.failExpiredTasks(
+                    transactionTemplate,
+                    taskRepository.findExpiredActiveTaskIds(ACTIVE_STATUSES, recoveryTime),
+                    taskRepository::findByIdForUpdate,
+                    taskId -> taskRepository.failExpiredTask(taskId, FuzzTaskPo.TaskStatus.FAILED,
+                            recoveryTime, "The counterexample search stopped before the task completed",
+                            checkLogs, ACTIVE_STATUSES, recoveryTime));
             if (recovered > 0) {
                 log.warn("Recovered {} expired fuzz task lease(s)", recovered);
             }
@@ -398,6 +402,7 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
                             ModelRunSnapshotDto modelSnapshot) {
         return transactionTemplate.execute(status -> {
             requireActiveUserForPersistence(userId);
+            chatExecutionLeaseGuard.requireCurrentExecutionLease();
             long storedTaskCount = taskRepository.countByUserId(userId);
             if (storedTaskCount >= maxStoredTasksPerUser) {
                 throw new FuzzTaskStorageQuotaExceededException(
@@ -484,9 +489,8 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
     private void runTask(Long userId, Long taskId) {
         FuzzTaskPo task = null;
         try {
-            registerRunningTask(taskId, Thread.currentThread());
             updateTaskProgress(taskId, 0, TaskProgressStage.STARTING);
-            if (isTaskCancelled(taskId)) return;
+            if (isExecutionStopped(taskId)) return;
 
             TaskLeaseRenewal.LeaseUpdateResult start = TaskLeaseRenewal.updateWithConfirmation(
                     transactionTemplate,
@@ -540,7 +544,6 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
 
             if (cancelled.getAsBoolean() || result != null
                     && result.outcome() == FuzzEngineOutcome.CANCELLED) {
-                atomicCancelTask(taskId, currentTaskTime());
                 return;
             }
 
@@ -559,23 +562,19 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
             updateTaskProgress(taskId, 95, TaskProgressStage.PERSISTING_RESULT);
             boolean completed = completeTaskAndFindings(
                     task, userId, result, outcome, eligibility, limitations, findings);
-            if (!completed && !isCancelledOrTerminal(taskId)) {
+            if (!completed && !isStoppedOrTerminal(taskId)) {
                 failTask(task,
                         "Counterexample search completed, but its result could not be saved");
             }
         } catch (Exception e) {
-            if (isTaskCancelled(taskId) || Thread.currentThread().isInterrupted()) {
-                log.info("Fuzz task {} cancelled while the engine was stopping", taskId);
+            if (isExecutionStopped(taskId)) {
+                log.info("Fuzz worker stopped for task {}", taskId);
             } else {
                 log.error("Fuzz task {} failed", taskId, e);
                 String message = "Counterexample search failed: " + publicTaskFailureMessage(e);
                 markTaskFailedSafely(taskId, task, message);
             }
         } finally {
-            if (removeCancelledMark(taskId) && task != null) {
-                handleCancellation(task);
-            }
-            removeRunningTask(taskId);
             removeTaskProgress(taskId);
             try {
                 taskRepository.releaseOwnedActiveLease(
@@ -603,7 +602,7 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
     }
 
     private void reportEngineProgress(Long taskId, int percent, String message) {
-        if (isTaskCancelled(taskId) || Thread.currentThread().isInterrupted()) return;
+        if (isExecutionStopped(taskId)) return;
         try {
             int bounded = Math.min(90, Math.max(1, percent));
             updateTaskProgress(taskId, bounded, TaskProgressStage.EXPLORING_CANDIDATES);
@@ -630,8 +629,7 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
         AtomicBoolean databaseCancellation = new AtomicBoolean(false);
         AtomicLong nextDatabasePoll = new AtomicLong(0L);
         return () -> {
-            if (isTaskCancelled(taskId) || Thread.currentThread().isInterrupted()
-                    || databaseCancellation.get()) {
+            if (isExecutionStopped(taskId) || databaseCancellation.get()) {
                 return true;
             }
             long now = System.nanoTime();
@@ -659,7 +657,7 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
         String limitationsJson = JsonUtils.toJson(limitations);
         requireBoundedRunMetadata(eligibilityJson, limitationsJson);
         return Boolean.TRUE.equals(transactionTemplate.execute(status -> {
-            if (isTaskCancelled(task.getId()) || Thread.currentThread().isInterrupted()) {
+            if (isExecutionStopped(task.getId())) {
                 status.setRollbackOnly();
                 return false;
             }
@@ -672,7 +670,7 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
             LocalDateTime evidenceCreatedAt = databaseNow();
             findings.forEach(finding -> finding.setCreatedAt(evidenceCreatedAt));
             findingRepository.saveAllAndFlush(findings);
-            if (isTaskCancelled(task.getId()) || Thread.currentThread().isInterrupted()) {
+            if (isExecutionStopped(task.getId())) {
                 status.setRollbackOnly();
                 return false;
             }
@@ -1442,6 +1440,7 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
     @Override
     @Transactional
     public TaskCancellationResultDto cancelTask(Long userId, Long taskId) {
+        chatExecutionLeaseGuard.requireCurrentExecutionLeaseAndLock();
         return super.cancelTask(userId, taskId);
     }
 
@@ -1562,6 +1561,9 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
     }
 
     private long deleteRunInternal(Long userId, Long runId, Long expectedFindingCount) {
+        // Account deletion holds the exclusive user lock before deleting findings and runs.
+        userRepository.findByIdForShare(userId)
+                .orElseThrow(() -> new ResourceNotFoundException("Counterexample search run", runId));
         taskRepository.findCompletedRunForUpdate(
                         runId, userId, FuzzTaskPo.TaskStatus.COMPLETED)
                 .orElseThrow(() -> new ResourceNotFoundException(
@@ -1700,8 +1702,12 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
         });
     }
 
-    private boolean isCancelledOrTerminal(Long taskId) {
-        if (isTaskCancelled(taskId) || Thread.currentThread().isInterrupted()) return true;
+    private boolean isExecutionStopped(Long taskId) {
+        return isLocalStopRequested(taskId) || Thread.currentThread().isInterrupted();
+    }
+
+    private boolean isStoppedOrTerminal(Long taskId) {
+        if (isExecutionStopped(taskId)) return true;
         return taskRepository.findById(taskId)
                 .map(FuzzTaskPo::isTerminalStatus)
                 .orElse(true);
@@ -1793,11 +1799,17 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
     }
 
     @Override
-    protected LocalExecutionStopResult stopAdditionalLocalExecution(Long taskId) {
+    protected LocalExecutionStopResult stopLocalExecution(Long taskId) {
         LocalFuzzExecution execution = localExecutions.get(taskId);
         return execution == null
                 ? LocalExecutionStopResult.NONE
                 : execution.requestStop();
+    }
+
+    @Override
+    protected boolean isLocalStopRequested(Long taskId) {
+        LocalFuzzExecution execution = localExecutions.get(taskId);
+        return execution != null && execution.futureTask.isCancelled();
     }
 
     private record NormalizedRequest(List<String> targetSpecIds,
@@ -1842,7 +1854,6 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
             try {
                 runTask(userId, taskId);
             } finally {
-                removeCancelledMark(taskId);
                 state.set(LocalExecutionState.FINISHED);
                 releaseAndForget();
             }

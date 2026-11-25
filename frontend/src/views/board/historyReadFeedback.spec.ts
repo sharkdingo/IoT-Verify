@@ -9,6 +9,7 @@ import { createPagedRequestCoordinator } from '@/utils/pagedRequestCoordinator'
 import { errorDetails, localizedErrorMessage } from '@/utils/userMessage'
 import FailureDetails from '@/components/FailureDetails.vue'
 import type { BoardLayoutDto } from '@/types/canvas'
+import { applyBoardRunTarget, isSameBoardRunTarget, parseBoardRunTarget } from './runDeepLink'
 
 const board = readFileSync(join(process.cwd(), 'src/views/Board.vue'), 'utf8')
 const start = board.indexOf('<script setup')
@@ -87,6 +88,7 @@ const layoutSaveState = () => {
 }
 const state = () => {
   const ports: Record<string, any> = {
+    computed,
     boardLifecycleDisposed: false,
     verificationHistoryRequests: createPagedRequestCoordinator(),
     simulationHistoryRequests: createPagedRequestCoordinator(),
@@ -104,14 +106,16 @@ const state = () => {
     historyResultsLoadingEpoch: 0, loadingResultHistory: ref(false),
     fuzzingRunsPage: ref(0), fuzzingRunsHasMore: ref(false), FUZZ_RUN_HISTORY_PAGE_SIZE: 20,
     fuzzingHistoryAppendPromise: null, loadingMoreFuzzingRuns: ref(false),
-    showHistoryPanel: ref(true), activeHistoryLayer: ref('results'), activeHistoryResultFilter: ref('all'),
+    activeWorkflowPanel: ref({ kind: 'history' }), activeHistoryLayer: ref('results'),
+    activeHistoryResultFilter: ref('all'),
     locale: ref('zh-CN'), t: (key: string, params?: Record<string, unknown>) => i18n.global.t(key, params || {}),
     localizedErrorMessage, errorDetails,
     extractApiErrorMessage: (error: unknown, fallback: string) => localizedErrorMessage(error, fallback, 'zh-CN'),
     notifyError: vi.fn(), loadTaskInbox: vi.fn().mockResolvedValue(true),
-    reconcileOpenRunAgainstHistory: vi.fn(), historyPanelIntentEpoch: 0,
+    reconcileOpenRunAgainstHistory: vi.fn(), historyPanelIntentEpoch: 0, pendingHistoryRunTarget: null,
     historyDetailRequests: { invalidate: vi.fn() }, isModelPlaybackActive: ref(false),
-    isAnyRecommendationRunning: () => false, closeOtherWorkflowSurfaces: vi.fn(), notifyBlocked: vi.fn(),
+    isAnyRecommendationRunning: () => false, isSceneReplacementInProgress: ref(false),
+    closeResultSurfaces: vi.fn(), notifyBlocked: vi.fn(),
     unreadFuzzNotifications: ref([{ kind: 'COMPLETED', runId: 7, taskId: 7 }]), persistFuzzNotificationState: vi.fn(),
     currentAuthUserId: ref(1), boardAuthScopeEpoch: 0,
     isCurrentBoardAuthScope: (epoch: number) => epoch === ports.boardAuthScopeEpoch,
@@ -123,7 +127,9 @@ const state = () => {
   for (const name of ['isHistoryResultErrorVisible', 'loadVerificationRuns', 'loadSimulationRuns',
     'executeFuzzingRunsRequest', 'loadFuzzingRuns', 'loadMoreFuzzingRuns', 'loadHistoryResults', 'refreshRunHistory',
     'refreshHistoryLayer', 'isCurrentHistoryPanelIntent', 'clearVisibleFuzzResultNotifications',
-    'toggleHistoryPanel', 'loadBoardLayout', 'loadBoardAuthScope']) {
+    'showHistoryPanel', 'clearFuzzNotifications', 'setHistoryLayer', 'retireHistoryPanelIntent',
+    'closeWorkflowPanel', 'closeHistoryPanel', 'canOpenWorkflowPanel',
+    'closeOtherWorkflowSurfaces', 'openHistoryPanel', 'loadBoardLayout', 'loadBoardAuthScope']) {
     if (name === 'isHistoryResultErrorVisible' && !setup.includes(`const ${name} =`)) continue
     ports[name] = bind(name, ports)
   }
@@ -136,6 +142,86 @@ describe('Board authoritative read feedback', () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined)
   })
   afterEach(() => vi.restoreAllMocks())
+
+  it('closes the open Results history when its dock button is pressed during an active run', async () => {
+    const ports = state()
+    Object.assign(ports, {
+      isVerifying: ref(true), isSimulating: ref(false), isFuzzing: ref(false),
+      unreadFuzzNotificationCount: ref(0), unreadFailedFuzzCount: ref(0)
+    })
+    bind('openHistoryFromActionDock', ports)()
+    await flushPromises()
+
+    expect(ports.showHistoryPanel.value).toBe(false)
+    expect(ports.activeHistoryLayer.value).toBe('results')
+    expect(ports.loadTaskInbox).not.toHaveBeenCalled()
+    expect(ports.isVerifying.value).toBe(true)
+  })
+
+  it('clears a History selection dismissed before its route commits', async () => {
+    const ports = state()
+    const navigation = deferred()
+    const route = reactive({ query: { review: 'retained' } })
+    Object.assign(ports, {
+      route, deepLinkTarget: computed(() => parseBoardRunTarget(route.query)),
+      appliedDeepLinkTarget: null, staleDeepLink: ref(false), boardLifecycleDisposed: false,
+      applyBoardRunTarget, isSameBoardRunTarget, applyDeepLinkTarget: vi.fn(),
+      router: {
+        push: async ({ query }: { query: typeof route.query }) => { await navigation.promise; route.query = query },
+        replace: ({ query }: { query: typeof route.query }) => { route.query = query }
+      }
+    })
+    ports.navigateToRunTarget = bind('navigateToRunTarget', ports)
+    ports.clearRunDeepLink = () => ports.navigateToRunTarget(null, 'replace')
+    const opening = bind('openRunTarget', ports)({ kind: 'verification', runId: 7 }, true)
+    ports.closeHistoryPanel()
+    navigation.resolve(undefined)
+    await opening
+
+    expect(ports.showHistoryPanel.value).toBe(false)
+    expect(route.query).toEqual({ review: 'retained' })
+    expect(ports.applyDeepLinkTarget).not.toHaveBeenCalled()
+  })
+
+  it('keeps a newer URL load when closing the History list', () => {
+    const ports = state()
+    const newer = { kind: 'verification', runId: 8 }
+    const details = createPagedRequestCoordinator()
+    const request = details.beginReplace()
+    Object.assign(ports, {
+      pendingHistoryRunTarget: { kind: 'verification', runId: 7 },
+      appliedDeepLinkTarget: newer, deepLinkTarget: ref(newer),
+      historyDetailRequests: details, clearRunDeepLink: vi.fn(), isSameBoardRunTarget
+    })
+
+    ports.closeHistoryPanel()
+
+    expect(ports.showHistoryPanel.value).toBe(false)
+    expect(details.isCurrent(request)).toBe(true)
+    expect(ports.clearRunDeepLink).not.toHaveBeenCalled()
+  })
+
+  it.each(['history', 'fuzzing'] as const)('closes the %s panel on logo reset while task tracking continues', panel => {
+    const ports = state()
+    Object.assign(ports, {
+      traceAnimationState: ref({ visible: false }), simulationAnimationState: ref({ visible: false }),
+      route: { query: { run: 'verification:7', trace: '8', device: 'kitchen' } },
+      router: { replace: vi.fn() }, applyBoardRunTarget,
+      isSimulating: ref(true), asyncSimulationActive: ref(true), asyncSimulationTask: ref({ taskId: 12 }),
+      trackedFuzzTaskIds: ref([7])
+    })
+    ports.closePlaybackForNavigation = bind('closePlaybackForNavigation', ports)
+    ports.activeWorkflowPanel.value = panel === 'history' ? { kind: 'history' } : { kind: 'fuzzing', view: 'run' }
+
+    bind('resetWorkspace', ports)()
+
+    expect(ports.activeWorkflowPanel.value).toBeNull()
+    expect(ports.router.replace).toHaveBeenCalledExactlyOnceWith({ query: { device: 'kitchen' } })
+    expect(ports.isSimulating.value).toBe(true)
+    expect(ports.asyncSimulationActive.value).toBe(true)
+    expect(ports.asyncSimulationTask.value.taskId).toBe(12)
+    expect(ports.trackedFuzzTaskIds.value).toEqual([7])
+  })
 
   it.each(['results', 'tasks'] as const)('refreshes the %s layer with one awaited fingerprint read', async layer => {
     const ports = state()
@@ -444,7 +530,7 @@ describe('Board authoritative read feedback', () => {
   it.each(['hidden', 'tasks', 'other-filter'] as const)(
     'retains a needed notification outside a visible source owner: %s', async mode => {
       const ports = state()
-      if (mode === 'hidden') ports.showHistoryPanel.value = false
+      if (mode === 'hidden') ports.closeHistoryPanel()
       if (mode === 'tasks') ports.activeHistoryLayer.value = 'tasks'
       if (mode === 'other-filter') ports.activeHistoryResultFilter.value = 'verification'
       ports.fuzzingApi.getRuns.mockRejectedValue(failure())
@@ -460,7 +546,7 @@ describe('Board authoritative read feedback', () => {
     ports.fuzzingApi.getRuns.mockReturnValueOnce(page.promise)
     const loading = ports.loadMoreFuzzingRuns()
     expect(ports.fuzzingApi.getRuns).toHaveBeenCalledWith(1, ports.FUZZ_RUN_HISTORY_PAGE_SIZE)
-    if (closed) ports.showHistoryPanel.value = false
+    if (closed) ports.closeHistoryPanel()
     page.reject(failure())
     await loading
     expect(ports.fuzzingRuns.value).toEqual([{ id: 7 }])
@@ -475,7 +561,7 @@ describe('Board authoritative read feedback', () => {
     ports.boardApi.getVerificationRuns.mockRejectedValue(failure())
     expect(await ports.loadHistoryResults()).toBe(false)
     expect(ports.notifyError).not.toHaveBeenCalled()
-    ports.showHistoryPanel.value = false
+    ports.closeHistoryPanel()
     expect(await ports.loadHistoryResults()).toBe(false)
     expect(ports.notifyError).not.toHaveBeenCalled()
   })
@@ -483,7 +569,7 @@ describe('Board authoritative read feedback', () => {
   it('a single-source refresh cannot turn a superseded aggregate into a hidden failure notice', async () => {
     const ports = state()
     const older = deferred()
-    ports.showHistoryPanel.value = false
+    ports.closeHistoryPanel()
     ports.fuzzingApi.getRuns.mockReturnValueOnce(older.promise).mockResolvedValueOnce([])
     const pending = ports.loadHistoryResults()
     expect(await ports.loadFuzzingRuns()).toBe(true)
@@ -517,8 +603,8 @@ describe('Board authoritative read feedback', () => {
         : kind === 'simulation' ? ports.simulationApi.getUserSimulations : ports.fuzzingApi.getRuns
       const older = deferred()
       get.mockReturnValueOnce(older.promise).mockRejectedValueOnce(failure('Latest history read failed'))
-      ports.showHistoryPanel.value = false
-      const opening = ports.toggleHistoryPanel('results')
+      ports.closeHistoryPanel()
+      const opening = ports.openHistoryPanel('results')
       expect(await ports.refreshRunHistory()).toBe(false)
       older.resolve([{ id: 99 }])
       await opening
@@ -598,12 +684,32 @@ describe('Board authoritative read feedback', () => {
 
   it('acknowledges the current successful visible lists and reconciles current history', async () => {
     const ports = state()
-    ports.showHistoryPanel.value = false
-    await ports.toggleHistoryPanel('results')
+    ports.closeHistoryPanel()
+    await ports.openHistoryPanel('results')
     expect(ports.unreadFuzzNotifications.value).toEqual([])
     expect(ports.persistFuzzNotificationState).toHaveBeenCalledOnce()
     expect(await ports.refreshRunHistory()).toBe(true)
     expect(ports.reconcileOpenRunAgainstHistory).toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    { layer: 'results', filter: 'fuzzing', retry: 'refreshHistoryResults', retained: 'FAILED' },
+    { layer: 'results', filter: 'simulation', retry: 'refreshHistoryResults', retained: 'ALL' },
+    { layer: 'tasks', filter: 'fuzzing', retry: 'refreshHistoryTasks', retained: 'COMPLETED' }
+  ] as const)('acknowledges only visible unread items after retrying $layer with $filter filter', async ({ layer, filter, retry, retained }) => {
+    const ports = state()
+    const unread = [{ kind: 'COMPLETED', runId: 7, taskId: 7 }, { kind: 'FAILED', taskId: 8 }]
+    ports.unreadFuzzNotifications.value = unread
+    ports.activeHistoryResultFilter.value = filter
+    if (layer === 'results') ports.fuzzingApi.getRuns.mockRejectedValueOnce(failure())
+    else ports.loadTaskInbox.mockResolvedValueOnce(false)
+
+    await ports.setHistoryLayer(layer)
+    expect(ports.unreadFuzzNotifications.value).toEqual(unread)
+    await bind(retry, ports)()
+
+    expect(ports.unreadFuzzNotifications.value).toEqual(unread.filter(item => retained === 'ALL' || item.kind === retained))
+    expect(ports.persistFuzzNotificationState).toHaveBeenCalledTimes(retained === 'ALL' ? 0 : 1)
   })
 
   it('retains one snapshot read cause beside Retry until a successful retry replaces the snapshot', async () => {
@@ -615,7 +721,7 @@ describe('Board authoritative read feedback', () => {
       deviceTemplates: ref([{ id: 1 }]), nodes: ref([{ id: 'known-device' }]),
       environmentVariables: ref([]), rules: ref([{ id: 5 }]), specifications: ref([{ id: 6 }]),
       replaceNodesFromServer: (nodes: unknown) => { ports.nodes.value = nodes },
-      reconcileDanglingBoardFocus: vi.fn(), syncRuleDerivedEdges: vi.fn(), loadBoardUndoAvailability: vi.fn()
+      reconcileDanglingBoardFocus: vi.fn(), syncRuleDerivedEdges: vi.fn(), syncBoardUndoAvailability: vi.fn()
     })
     ports.adoptBoardSnapshot = bind('adoptBoardSnapshot', ports)
     ports.boardApi.getSnapshot = vi.fn().mockRejectedValue(failure('Snapshot service unavailable'))
@@ -647,7 +753,8 @@ describe('Board authoritative read feedback', () => {
       expect(await load()).toBe(false)
       await wrapper.vm.$nextTick()
       ports.boardApi.getSnapshot.mockResolvedValue({ deviceTemplates: [], nodes: [{ id: 'new-device' }],
-        environmentVariables: [], rules: [], specifications: [] })
+        environmentVariables: [], rules: [], specifications: [],
+        editHistory: { canUndo: false, canRedo: false, editHistoryRevision: '0:0:0' } })
       await alert.get('button').trigger('click')
       await vi.waitFor(() => expect(ports.boardSnapshotError.value).toBeNull())
       await wrapper.vm.$nextTick()

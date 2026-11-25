@@ -22,11 +22,20 @@ test('all five targeted commands preserve special identities, other objects, and
   const device = (id: string, label: string) => ({
     id, templateName: 'Light', label, position: { x: 200, y: 200 }, width: 176, height: 128, ...runtime
   })
-  const snapshot = () => request.get(`${apiBaseURL}/api/board/snapshot`, { headers }).then(unwrap)
+  const snapshot = async () => {
+    const { editHistory: _editHistory, ...scene } = await unwrap(await request.get(`${apiBaseURL}/api/board/snapshot`, { headers }))
+    return scene
+  }
   const availability = () => request.get(`${apiBaseURL}/api/board/edits/availability`, { headers }).then(unwrap)
+  const applyHistory = async (direction: 'undo' | 'redo', revision?: string) =>
+    request.post(`${apiBaseURL}/api/board/edits/${direction}`, {
+      headers, data: { expectedEditHistoryRevision: revision ?? (await availability()).editHistoryRevision }
+    })
   const undo = async (expected: unknown) => {
-    expect((await unwrap(await request.post(`${apiBaseURL}/api/board/edits/undo`, { headers }))).applied).toBe(true)
+    const receipt = await unwrap(await applyHistory('undo'))
+    expect(receipt.applied).toBe(true)
     expect(await snapshot()).toEqual(expected)
+    return receipt
   }
   await unwrap(await request.post(`${apiBaseURL}/api/board/nodes`, {
     headers, data: { devices: [device('guard', 'Untouched guard')], environmentVariablePatches: [] }
@@ -60,10 +69,14 @@ test('all five targeted commands preserve special identities, other objects, and
       expect(afterRuleCreate.rules.find((item: any) => item.id === rule.id)).toEqual(rule)
       if (index === 0) {
         expect(ruleMutation.canRedo).toBe(false)
-        await undo(beforeRuleCreate)
-        const recreated = await unwrap(await request.post(`${apiBaseURL}/api/board/edits/redo`, { headers }))
+        const undone = await undo(beforeRuleCreate)
+        const recreated = await unwrap(await applyHistory('redo', undone.editHistoryRevision))
         expect(recreated.applied).toBe(true)
         expect(recreated.rules.find((item: any) => item.id === rule.id)).toEqual(rule)
+        const staleRedo = await applyHistory('redo', undone.editHistoryRevision)
+        expect(staleRedo.status(), await staleRedo.text()).toBe(409)
+        expect((await staleRedo.json()).data.reasonCode).toBe('BOARD_EDIT_HISTORY_CHANGED')
+        expect((await availability()).editHistoryRevision).toBe(recreated.editHistoryRevision)
         expect(await snapshot()).toEqual(afterRuleCreate)
       }
       const specMutation = await unwrap(await request.post(`${apiBaseURL}/api/board/specs`, {
@@ -127,8 +140,8 @@ test('all five targeted commands preserve special identities, other objects, and
       }))
       expect(deleted.deletedDevice).toEqual(target)
       expect(await snapshot()).toEqual(guard)
-      await undo(before)
-      expect((await unwrap(await request.post(`${apiBaseURL}/api/board/edits/redo`, { headers }))).applied).toBe(true)
+      const undone = await undo(before)
+      expect((await unwrap(await applyHistory('redo', undone.editHistoryRevision))).applied).toBe(true)
       expect(await snapshot()).toEqual(guard)
     })
   }

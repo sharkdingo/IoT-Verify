@@ -16,9 +16,8 @@ import java.util.List;
  * lists so the client replaces its local collections outright rather than trying to invert the
  * edit itself, plus the remaining availability so the UI never has to infer it from a local stack.
  *
- * <p>{@code applied} is false when there was nothing left to undo or redo. That is a normal
- * outcome — pressing the shortcut once more than there is history is not an error — and it makes
- * a repeated request idempotent.
+ * <p>{@code applied} is false when the reviewed history has no entry in the requested direction.
+ * Requests for a superseded history are rejected before any entry can be selected.
  */
 @Data
 @NoArgsConstructor
@@ -43,4 +42,5 @@ public class BoardUndoResultDto {
 
     private boolean canUndo;
     private boolean canRedo;
+    private String editHistoryRevision;
 }

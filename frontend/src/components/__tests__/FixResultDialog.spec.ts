@@ -398,6 +398,8 @@ const alternativesChecked = (wrapper: VueWrapper) =>
   wrapper.findAll('[data-testid="fix-alternative"] input[type="radio"]')
     .map(radio => (radio.element as HTMLInputElement).checked)
 
+const appliedFixHistory = { canUndo: true, canRedo: false, editHistoryRevision: '10:2:0' } as const
+
 const parameterApplied = (suggestion: FixResult['suggestions'][number]) => ({
   applied: true,
   strategy: 'parameter',
@@ -406,6 +408,7 @@ const parameterApplied = (suggestion: FixResult['suggestions'][number]) => ({
   previousRuleCount: 1,
   currentRuleCount: 1,
   message: 'Changed one threshold.',
+  ...appliedFixHistory,
   rules: []
 })
 
@@ -1359,6 +1362,7 @@ describe('FixResultDialog strategy workflow', () => {
       previousRuleCount: 3,
       currentRuleCount: strategy === 'remove' ? 1 : 3,
       message: 'Applied coordinated suggestion.',
+      ...appliedFixHistory,
       rules: []
     })
     const wrapper = mountDialog()
@@ -1962,6 +1966,7 @@ describe('FixResultDialog strategy workflow', () => {
       previousRuleCount: 1,
       currentRuleCount: 1,
       message: 'Added one guard.',
+      ...appliedFixHistory,
       rules: [{
         id: '21',
         name: 'When it is cold, heat the room',
@@ -2005,6 +2010,7 @@ describe('FixResultDialog strategy workflow', () => {
       previousRuleCount: 1,
       currentRuleCount: 1,
       message: 'Changed one threshold.',
+      ...appliedFixHistory,
       rules: [{
         id: '31',
         name: 'Adjust the gas threshold',
@@ -2117,6 +2123,7 @@ describe('FixResultDialog strategy workflow', () => {
       previousRuleCount: 1,
       currentRuleCount: 0,
       message: 'Removed one rule.',
+      ...appliedFixHistory,
       rules: []
     })
     const wrapper = mountDialog()
@@ -2321,7 +2328,7 @@ describe('FixResultDialog strategy workflow', () => {
       en: actualI18n.global.getLocaleMessage('en'), 'zh-CN': actualI18n.global.getLocaleMessage('zh-CN')
     } })
     const result = parameterResult()
-    const pendingApply = deferred<ReturnType<typeof parameterApplied> & { canUndo: boolean; canRedo: boolean }>()
+    const pendingApply = deferred<ReturnType<typeof parameterApplied>>()
     boardApi.fixTrace.mockResolvedValueOnce(result)
     boardApi.applyFix.mockRejectedValueOnce({ response: { status: 503, data: {
       message: 'Current template comparison is unavailable.', data: { reasonCode: 'FIX_APPLY_PREFLIGHT_UNAVAILABLE' }
@@ -2347,7 +2354,7 @@ describe('FixResultDialog strategy workflow', () => {
     expect(apply.attributes('aria-label')).toBe(translations.global.t('app.applying'))
     expect(apply.attributes('disabled')).toBeDefined()
     expect(wrapper.get('[data-testid="fix-strategy-condition"]').attributes('disabled')).toBeDefined()
-    pendingApply.resolve({ ...parameterApplied(result.suggestions[0]!), canUndo: true, canRedo: false })
+    pendingApply.resolve(parameterApplied(result.suggestions[0]!))
     await flush()
     expect(boardApi.fixTrace).toHaveBeenCalledOnce()
     expect(boardApi.applyFix.mock.calls[1]).toEqual(boardApi.applyFix.mock.calls[0])

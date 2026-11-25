@@ -124,15 +124,16 @@ single owner of the "session gone → login" location.
   item with no validated candidate behind it).
 - **Undo reverses a persisted board edit — nothing else.** It is not cancel, stop, delete-result,
   dialog close, or browser Back; each of those has its own control. The server journal is the
-  authority: `useBoardUndo` keeps no snapshot stack, applies the authoritative collections the
-  response carries, and reads availability from `/board/edits/availability`. Never intercept
+  authority. `useBoardUndo` applies the authoritative collections the response carries and follows
+  the [Board edit-history revision contract](../docs/api/board.md#boardundoresultdto). Never intercept
   `Ctrl+Z` in an input, textarea, `contenteditable`, or during an IME composition
   (`boardUndoShortcut.ts` owns that scoping). Reversible: device create/update/rename/delete, direct
   Environment Pool edits, rule/spec create/update/delete, rule reorder, and automatic-fix apply. Device
   deletion is one compound entry containing its cascades and Environment Pool state; automatic fix
   is one ordered rule-set entry. Confirmed scene replace/clear, template deletion, and default-template
   reset are history boundaries because they can remove or replace manifest semantics used by snapshots.
-  Show the server-reported history count before confirmation and re-read availability afterward.
+  Show the server-reported history count before confirmation and clear the local history revision
+  after the server confirms the boundary.
   Clearing an unusable journal is separately confirmed and
   carries the exact `/board/edits/clear-preview` token; stale confirmation must preserve history.
   A non-`409` undo/redo failure is an unconfirmed mutation outcome, not proof that the board stayed
@@ -155,18 +156,16 @@ single owner of the "session gone → login" location.
   `semanticChanged: false` only for a confirmed unchanged model (including a requirement rename); it still reconciles state and
   availability without making a current verdict stale. Authoritative partial/full refreshes are not
   mutations, but they must reuse `reconcileBoardFocus` so removed items cannot remain selected.
-- **A path that changes the undo journal must re-read it.** Scene replace/clear calls
-  `notifyUndoJournalCleared()`; reversible mutations carry availability or reload it, and a wholesale
-  semantic reload (`refreshBoardSnapshot`) re-reads availability explicitly at the end. A board
-  invalidation does
-  **not** cover the publishing tab — `BroadcastChannel` never delivers to the context that posted,
-  and `publishBoardInvalidation` only calls `postMessage` — so the origin tab depends on that
-  explicit re-read, not on its own broadcast. The assistant relies on it, so an assistant-created
-  device or rule is as undoable as a user-created one (`views/board/assistantRefresh.ts` owns the target
-  table; verified against the real model in `e2e/live-ai-no-mock.spec.ts`). The assistant cannot
+- **The originating tab reconciles its own edit history.** `publishBoardInvalidation` sends
+  updates to other browser contexts. The originating tab adopts its mutation receipt or complete
+  Board snapshot, including the edit history. `useBoardUndo` uses standalone availability reads
+  for drift detection and invalidates reads that predate an authoritative adoption. Follow the
+  [visible Board recovery rules](../docs/guides/frontend-ui-conventions.md#3-undo-and-what-it-is-not).
+  An assistant-created device or rule is as undoable as a user-created one
+  (`views/board/assistantRefresh.ts` owns the target table; `e2e/live-ai-no-mock.spec.ts` covers it).
+  The assistant cannot
   delete in one turn — destructive tool actions need a confirmation token, so do not write features
-  assuming otherwise. Availability reads run outside the mutation queue: every mutation response
-  carrying availability must invalidate older reads, and only the latest concurrent read may land.
+  assuming otherwise.
 - **Every modal is composed from `styles/dialog.css`; nothing builds a dialog shell locally.** One overlay,
   one card, three sizes, four tones. Tone goes on the card and the header's icon tile reads it — do not also
   paint the confirm button in the tone (`--danger` excepted), or the primary action changes colour between

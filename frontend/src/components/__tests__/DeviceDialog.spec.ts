@@ -1612,6 +1612,48 @@ describe('DeviceDialog template authority', () => {
     wrapper.unmount()
   })
 
+  it.each([
+    ['auto; cool', true],
+    ['on;cool', false]
+  ] as const)('preserves the saved multi-mode state %s while editing another field', async (state, stateDerived) => {
+    const manifest: DeviceManifest = {
+      Name: 'Thermostat', Modes: ['FanMode', 'Mode'], InitState: 'auto;auto', APIs: [],
+      WorkingStates: [
+        { Name: 'auto;auto', Trust: 'trusted', Privacy: 'public', Dynamics: [{ VariableName: 'operating', Value: 'idle' }] },
+        { Name: 'auto;cool', Trust: 'untrusted', Privacy: 'private', Dynamics: [{ VariableName: 'operating', Value: 'cooling' }] },
+        { Name: 'on;auto', Trust: 'trusted', Privacy: 'public', Dynamics: [{ VariableName: 'operating', Value: 'idle' }] }
+      ],
+      InternalVariables: [
+        { Name: 'operating', IsInside: true, Values: ['cooling', 'idle'], Trust: 'trusted', Privacy: 'public', FalsifiableWhenCompromised: false },
+        { Name: 'setpoint', IsInside: true, LowerBound: 0, UpperBound: 100, Trust: 'trusted', Privacy: 'public', FalsifiableWhenCompromised: false }
+      ]
+    }
+    const wrapper = mountWithManifest(manifest, manifest.Name, state)
+    try {
+      await wrapper.setProps({ visible: false })
+      await wrapper.setProps({ visible: true })
+      await flushPromises()
+
+      expect(document.querySelector<HTMLSelectElement>('[data-testid="device-runtime-state"]')?.value).toBe(state)
+      if (stateDerived) {
+        expect(document.querySelector('[data-testid="device-runtime-variable-derived-operating"]')?.textContent).toContain('cooling')
+      } else {
+        expect(document.querySelector<HTMLSelectElement>('[data-testid="device-runtime-variable-operating"]')?.value).toBe('cooling')
+      }
+
+      const input = document.querySelector<HTMLInputElement>('[data-testid="device-runtime-variable-setpoint"]')!
+      input.value = '24'
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushPromises()
+      document.querySelector<HTMLButtonElement>('[data-testid="device-runtime-save"]')!.click()
+      expect(wrapper.emitted('save-runtime')?.[0]?.[1]).toMatchObject({
+        state, variables: [{ name: 'operating', value: 'cooling' }, { name: 'setpoint', value: '24' }]
+      })
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   /**
    * A node stored before this rule existed still carries the contradiction, and it must not be displayed as
    * truth: without re-deriving on open, the read-only field showed `garage` under the label "set by the

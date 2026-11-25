@@ -34,6 +34,10 @@ blocking and explain what the user needs to correct before retrying.
 For incomplete or malformed files, the primary recovery is to re-export the source scene
 or request a complete file from its sender; field paths remain available as technical details.
 
+The canvas and runtime editor display each device's saved mode configuration. Editing
+another field preserves a valid saved state and its authored spelling. A saved mode
+combination without a matching working-state declaration leaves its local values editable.
+
 ## 1. What belongs in the URL
 
 The board's URL answers exactly one question: **which artifact is the user looking at?**
@@ -89,13 +93,16 @@ link stays meaningful for anyone with access to that run.
 
 - **One authority per value.** The URL owns `run`/`trace`/`finding`. History openers navigate
   and load the addressed artifact; refresh and browser navigation use the same loaders.
+  Closing the list or changing its selection discards its pending detail and clears only that run
+  address. These actions leave a load started by an incoming URL in progress.
   A verification completion adopts its received verdict, staleness evidence and confirmed saved
   run address together, without refetching that verdict. Earlier history reads are invalidated.
   Opening a saved simulation trajectory also adopts its confirmed run address, including when a
   newly completed task opens playback. Local-only simulation playback clears an unrelated address.
-  Synchronous and asynchronous completion use the same adoption path; a background completion
-  or one arriving during replay does not change the selected artifact. An unconfirmed save keeps
-  a local result and clears any unrelated result address rather than pretending it can be restored.
+  Synchronous and asynchronous completion use the same presentation policy. Closing a run panel
+  leaves its work in the background. A completion during a replay or open modal also preserves the
+  user's current surface. A selected history read owns presentation until it settles. An unconfirmed
+  save keeps a local result and clears any unrelated result address when opened.
   Completion callbacks recheck their Board/polling ownership after history refreshes as well as
   result reads. Leaving the Board during either wait must not open a replay, change the new page's
   URL, or present a failure from the retired view.
@@ -256,8 +263,8 @@ user must act**.
   dismiss control. The stack is a toast anchor and lets pointer events through except on its buttons.
   A retry changes the persistent state itself, without a second toast for the same result. Geometry
   and keyboard recovery are covered by a focused narrow-viewport `ui-contracts.spec.ts` journey.
-- **A result without a confirmed save cannot be deferred only to persisted history.** If a synchronous run
-  completes during another replay, the current replay keeps its run and frozen scene. A confirmed
+- **A result without a confirmed save needs a local owner.** If a run completes during a replay or an open
+  modal, the current replay keeps its frozen scene and an open editor keeps its draft and focus. A confirmed
   saved result remains in history. An unsaved or unconfirmed save remains in a persistent result
   notification with explicit Open and Discard local result actions; ordinary toast cleanup does
   not discard it. The notification owns the result until opened, discarded, or the owning Board
@@ -265,11 +272,10 @@ user must act**.
   simulation result through the normal playback path, or presents the verification verdict with
   its original traces and logs. Freshness compares the current scene with the original submission,
   including changes while the notification was open. Discard removes the local copy; an unknown
-  save outcome remains unknown. No run completion automatically replaces an already visible replay.
+  save outcome remains unknown.
 - **Run failures follow the same ownership rule.** An idle result surface owns its error
-  without a duplicate toast. During another replay, a persistent notice retains the failure
-  and its diagnostics until explicitly viewed or discarded. Viewing rechecks account and
-  playback admission; it does not invent a saved run or replace an active replay.
+  without a duplicate toast. During a replay or open modal, a persistent notice retains the failure
+  and its diagnostics until explicitly viewed or discarded. Viewing rechecks account, modal and replay admission.
 - Same semantic ⇒ same component, wording shape, icon, button order, focus behaviour.
 - Error text keeps what helps the user act; **no stack traces, no internal identifiers.**
   Field paths and declared causes stay with correction feedback; logs, status codes
@@ -407,20 +413,18 @@ ends up destroying work.
   hand-assemble the follow-ups. That scattering is exactly what let reorder skip undo availability
   and let undo skip the canvas edges, each masked by a later refresh that happened to repair it.
   Reaching the right state "because some later refresh runs" is correct by accident. A server-
-  confirmed semantic no-op still reconciles its authoritative collection and availability but does
-  not stale a valid verdict. Partial and full refreshes reuse the same focus reconciliation rule, so
+  confirmed semantic no-op still reconciles its authoritative collection. It preserves the observed
+  edit history and the current verdict. Partial and full refreshes reuse the same focus reconciliation rule, so
   an item removed by another tab or by a response-lost mutation cannot remain selected.
+- **Device deletion adopts one snapshot.** The preview pairs the reviewed impact with the current Board.
+  The confirmation receipt pairs the committed result with the updated Board. An expired confirmation
+  closes and asks for a new review after a successful refresh.
 - **Whoever changes the journal must re-read it.** The journal is the authority for what is
-  reversible, so a path that changes it without carrying availability in its own response has to
-  re-read it. Two mechanisms cover this: scene replace/clear calls
-  `notifyUndoJournalCleared()`, while reversible mutations either carry availability in their
-  response or explicitly reload it; any wholesale semantic reload
-  (`refreshBoardSnapshot`) re-reads availability explicitly at the end. Note that a board
-  invalidation does **not** cover the publishing tab: `BroadcastChannel` does not deliver a message
-  to the context that posted it, and `publishBoardInvalidation` only calls `postMessage` — other
-  tabs reload, the origin tab relies on its own explicit re-read. The assistant relies on that
-  explicit path: its device/rule/spec tools use the same journal-recording service methods the UI
-  does, so an assistant-created device or rule is exactly as reversible as a user-created one.
+  reversible. Scene replacement and clear explicitly mark it empty. Applied reversible edits carry the current history with their
+  receipt, and a full Board refresh adopts history from its snapshot. The origin tab applies its
+  receipt or refreshes explicitly because `BroadcastChannel` delivers invalidations to other
+  tabs. The assistant's device, rule and specification tools use the same journal as the Board UI,
+  so their edits are also reversible.
   Verified end-to-end
   against the real model in `e2e/live-ai-no-mock.spec.ts`.
 - **Clearing unusable history is explicit.** After an undo/redo conflict, the UI may offer to clear
@@ -433,11 +437,11 @@ ends up destroying work.
   two-step confirmation token (`AiDestructiveActionGuard`), so a single turn can create a rule but
   not remove one. Do not write tests or features that assume otherwise. Confirmation buttons expose
   their localized text as the accessible name; decorative check/close icons are hidden from it.
-- **Availability is a query.** `GET /board/edits/availability` returns the two booleans and empty
-  node, Environment Pool, rule, and specification collections; it must never be treated as an
-  authoritative board update. Because this read runs outside the mutation queue, an authoritative
-  mutation response invalidates every read already in flight, and only the latest-started concurrent
-  read may update the affordance.
+- **Undo and redo follow the visible Board.** A standalone availability read can detect that
+  history changed. Adopt the newer history only with a complete Board refresh. If a request is
+  rejected because history changed, refresh and let the user review before retrying. The offer to
+  clear history is reserved for an entry that cannot be applied to the current scene.
+  See [the Board API contract](../api/board.md#boardundoresultdto).
 
 ## 4. Dialogs are one surface with three sizes and four tones
 
@@ -609,7 +613,9 @@ Local progress for verification, simulation, and exploration retains translation
 them when rendered. A language change must update the current phase, cancellation state, and task
 indicator without waiting for another response. Each run type accepts one submission while any
 pending Board edit is being saved. Closing the panel for a watched background task leaves its
-result in Run History, without reopening the panel or starting playback. Exploration target recovery
+result in Run History, without reopening the panel or starting playback. Valid exploration previews
+remain available to submission across panel switches while the Board finishes saving. A progress view
+with a frozen exploration snapshot pauses previews of the editable draft. Exploration target recovery
 names only the eligible specifications it selects; a target-selection error stays beside those
 targets instead of repeating below the form or expanding unrelated advanced settings.
 
@@ -1641,15 +1647,29 @@ An unconfirmed cancellation restores the latest known phase without replacing a 
 A rejected cancellation with a confirmed terminal status displays that status immediately.
 The cancellation response only changes tracking for the task that received the request.
 Watching a task from history opens its owning progress panel. The compact task indicator is shown
-when workflow panels are closed, so it does not repeat their task controls. While an asynchronous
-verification or simulation is running, the panel shows its submission snapshot rather than the
-current settings draft. Simulation steps, compromise assumptions and sensitivity propagation come
-from the accepted task. A pending cancellation remains visible even when a poll updates the phase.
+when workflow panels are closed, so it does not repeat their task controls. Asynchronous verification
+and simulation progress panels show their submission snapshots. Simulation steps, compromise assumptions
+and sensitivity propagation come from the accepted task. A pending cancellation remains visible even
+when a poll updates the phase.
+An exploration-to-verification handoff opens a settings view with the selected evidence. If another
+verification is running, its progress stays in Task Status and its completion leaves the handoff open.
+Closing the settings view clears the handoff. Verification, simulation, exploration, and history
+share one foreground panel selection. The history dock button closes an open history panel from
+either tab. The Board logo returns to the canvas while tracked tasks keep running. Watching a task
+opens that task's progress view. If the same kind of task is already active, Watch for a different
+task and actions to retry or reuse settings explain the conflict and keep the current view.
+After a successful Retry, history acknowledges unread exploration updates for the visible layer and
+result filter.
 Exploration keeps tracking the task until the server reports a terminal outcome, including
 completion while the cancellation request is outstanding.
-Cancellation confirmations use the visible task status in the inbox or progress panel; the canvas
-receives one toast when those panels are closed. Polling the same local cancellation adds no second
-toast. Cancellation observed from another session still receives a notification.
+Cancellation confirmations use the matching task status in the inbox or progress panel. If that
+task is out of view, the confirmation names its ID. Polling the same local cancellation adds no
+second toast. Cancellation observed from another session still receives a notification. If local
+tracking ends while a task is still active on the server, the compact list falls back to its inbox row.
+The inbox and progress view show the same pending cancellation and prevent a second request for that task.
+An unconfirmed cancellation keeps its retry guidance. Blocking diagnostics require the matching
+progress view both when cancellation starts and when its response arrives, with any current replay,
+modal, or pending history result taking precedence.
 A late cancellation response that confirms completion adds no notice over the matching visible
 verification result or simulation trajectory. Results belonging to another task do not suppress it.
 Simulation completion opens its trajectory without an additional completion toast over the timeline.

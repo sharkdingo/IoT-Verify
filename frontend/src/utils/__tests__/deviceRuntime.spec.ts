@@ -221,6 +221,20 @@ describe('device runtime authority helpers', () => {
     expect(invalidPrivacy).toContain('app.deviceImportInvalidPrivacy')
   })
 
+  it('validates each mode of a configured state before device setup or import', () => {
+    const template: DeviceTemplate = { ...thermostatTemplate, manifest: {
+      ...thermostatTemplate.manifest, Modes: ['FanMode', 'Mode'], InitState: 'off;auto',
+      WorkingStates: [
+        { Name: 'off;auto', Trust: 'trusted', Privacy: 'public' },
+        { Name: 'on;cool', Trust: 'untrusted', Privacy: 'private' }
+      ]
+    } }
+    expect(validateDeviceRuntimeConfig(template, { state: 'on; cool' }, t)).toBe('')
+    expect(validateDeviceRuntimeConfig(template, { state: 'off;cool' }, t)).toBe('')
+    expect(validateDeviceRuntimeConfig(template, { state: 'on;Cool' }, t)).toContain('app.deviceImportInvalidState')
+    expect(validateDeviceRuntimeConfig(template, { state: 'on;_' }, t)).toContain('app.deviceImportInvalidState')
+  })
+
   it.each(['1.5', '1e1', '1.0'])('rejects non-integer text %s before a runtime write', value => {
     expect(validateDeviceRuntimeConfig(thermostatTemplate, {
       variables: [{ name: 'temperature', value }]
@@ -398,6 +412,18 @@ describe('device runtime authority helpers', () => {
     expect(draft.variables.location, 'the draft offered a state and value that contradict').toBe('away')
     // The old rule, still correct where the starting state declares nothing for the variable.
     expect(getTemplateVariableDefaultValue(carTemplate.manifest.InternalVariables![0])).toBe('garage')
+  })
+
+  it('materializes omitted local values from the imported state and its own fallbacks', () => {
+    const partial: DeviceTemplate = { ...carTemplate, manifest: { ...carTemplate.manifest, WorkingStates: [
+      { ...carTemplate.manifest.WorkingStates![0], Dynamics: [] }, carTemplate.manifest.WorkingStates![1]
+    ] } }
+    const imported = { state: 'garage' }
+    const effective = { ...imported, variables: [{ name: 'location', value: 'garage' }] }
+    const options = { variableScope: 'local' } as const
+
+    expect(materializeDeviceRuntimeConfig(carTemplate, imported, options)).toEqual(effective)
+    expect(materializeDeviceRuntimeConfig(partial, imported, options)).toEqual(effective)
   })
 
   /**

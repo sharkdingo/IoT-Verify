@@ -2,6 +2,7 @@ package cn.edu.nju.Iot_Verify.service.board;
 
 import cn.edu.nju.Iot_Verify.dto.board.BoardUndoResultDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
+import cn.edu.nju.Iot_Verify.exception.ConflictException;
 import cn.edu.nju.Iot_Verify.po.DeviceNodePo;
 import cn.edu.nju.Iot_Verify.po.BoardEnvironmentVariablePo;
 import cn.edu.nju.Iot_Verify.po.DeviceTemplatePo;
@@ -168,7 +169,14 @@ class BoardEditUndoMySqlIntegrationTest {
     void deviceCascadeUndoAndRedoKeepTheOriginalRuleSnapshot() {
         Long ruleId = service.addRule(userId, newRule("r1")).getAffectedItem().getId();
         RuleDto original = persistedRuleWithHistoricTime(ruleId);
-        service.deleteNodeCascade(userId, "light-1", service.previewNodeDeletion(userId, "light-1").getImpactToken());
+        var before = service.getBoardSnapshot(userId);
+        var preview = service.previewNodeDeletion(userId, "light-1");
+        assertEquals(before.scene().deviceTemplates(), preview.getDeviceTemplates());
+        assertEquals(before.editHistory().editHistoryRevision(), preview.getEditHistoryRevision());
+        var deletion = service.deleteNodeCascade(userId, "light-1", preview.getImpactToken());
+        var after = service.getBoardSnapshot(userId);
+        assertEquals(after.scene().deviceTemplates(), deletion.getDeviceTemplates());
+        assertEquals(after.editHistory().editHistoryRevision(), deletion.getEditHistoryRevision());
         assertTrue(service.getRules(userId).isEmpty());
 
         assertEquals(List.of(original), service.undoLastEdit(userId).getRules());
@@ -282,5 +290,32 @@ class BoardEditUndoMySqlIntegrationTest {
         assertEquals(0, journalRepo.countByUserIdAndUndoneTrue(userId));
     }
 
+    @Test
+    void clearingAndReusingTheFirstSequenceCannotRetargetAnEarlierUndo() {
+        var firstEdit = service.addRule(userId, newRule("original"));
+        var earlierBoard = service.getBoardSnapshot(userId);
+        String staleRevision = earlierBoard.editHistory().editHistoryRevision();
+        assertEquals(firstEdit.getEditHistoryRevision(), staleRevision);
+
+        var clearPreview = service.previewBoardEditHistoryClear(userId);
+        service.clearBoardEditHistory(userId, clearPreview.getImpactToken());
+        var nextEdit = service.addRule(userId, newRule("after clear", "off", "on"));
+        var currentBoard = service.getBoardSnapshot(userId);
+        assertEquals(nextEdit.getEditHistoryRevision(), currentBoard.editHistory().editHistoryRevision());
+        assertTrue(currentBoard.editHistory().canUndo());
+
+        var conflict = assertThrows(ConflictException.class,
+                () -> service.applyBoardEdit(userId, true, staleRevision));
+        assertEquals("BOARD_EDIT_HISTORY_CHANGED", conflict.getReasonCode());
+        assertEquals(currentBoard.scene().rules(), service.getRules(userId));
+        assertEquals(currentBoard.editHistory(), service.getBoardSnapshot(userId).editHistory());
+
+        var undone = service.applyBoardEdit(userId, true, currentBoard.editHistory().editHistoryRevision());
+        assertTrue(undone.isApplied());
+        assertEquals(List.of(firstEdit.getAffectedItem()), undone.getRules());
+        assertTrue(undone.isCanRedo());
+        assertEquals(undone.getEditHistoryRevision(),
+                service.getBoardSnapshot(userId).editHistory().editHistoryRevision());
+    }
 
 }

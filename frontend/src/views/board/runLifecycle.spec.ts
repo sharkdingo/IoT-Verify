@@ -1,12 +1,17 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import ts from 'typescript'
-import { computed, nextTick, reactive, ref } from 'vue'
-import { flushPromises } from '@vue/test-utils'
+import { computed, effectScope, h, nextTick, reactive, ref, watch } from 'vue'
+import { flushPromises, mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 import type { BoardModelFingerprints, ModelRunSnapshot } from '@/types/modelSemantics'
 import { compareModelSnapshot } from '@/utils/modelComparison'
+import { hasValidFuzzingBudget, isFuzzingPreviewCurrent } from '@/utils/fuzzingConfig'
 import { errorDetails, technicalErrorLines } from '@/utils/userMessage'
+import { openModalDepth, registerModalSurface } from '@/composables/useBodyScrollLock'
+import { useModalAccessibility } from '@/composables/useModalAccessibility'
+import { createPagedRequestCoordinator } from '@/utils/pagedRequestCoordinator'
+import { chooseRunPresentation, foregroundRunBlock, type BoardWorkflowPanel } from './runPresentation'
 import { countResponseTriggerWarnings, getVerificationOutcome } from './verificationResult'
 
 const board = readFileSync(join(process.cwd(), 'src/views/Board.vue'), 'utf8')
@@ -26,12 +31,41 @@ const bind = (name: string, ports: Record<string, unknown>) => {
   return new Function('ports', `with (ports) { ${javascript}; return ${name} }`)(ports)
 }
 
+const bindWorkflowPanel = (ports: Record<string, any>) => {
+  ports.computed ??= computed
+  ports.activeWorkflowPanel ??= ref<BoardWorkflowPanel | null>(null)
+  ports.historyPanelIntentEpoch ??= 0
+  ports.pendingHistoryRunTarget ??= null
+  ports.historyDetailRequests ??= createPagedRequestCoordinator()
+  for (const name of ['showVerificationPanel', 'showSimulationPanel', 'showFuzzingPanel', 'showHistoryPanel', 'tracksRun',
+    'verificationPanelTracksRun', 'simulationPanelTracksRun', 'fuzzingPanelTracksRun', 'retireHistoryPanelIntent',
+    'openRunPanel', 'setRunPanelView', 'closeWorkflowPanel']) ports[name] = bind(name, ports)
+}
+
+const bindCancellation = (suffix: string, ports: Record<string, any>) => {
+  ports.computed ??= computed
+  ports.pendingTaskActionKeys = ref(new Set<string>())
+  for (const name of ['taskActionKey', 'withTaskActionLock', `watched${suffix}TaskIds`, 'watchedTaskId',
+    'isWatchedTaskCancellationPending', `cancelling${suffix}Task`, 'cancelTaskFromProgress', `cancelWatched${suffix}`]) {
+    ports[name] = bind(name, ports)
+  }
+  return bind(`cancelAsync${suffix}`, ports)
+}
+
 const bindRun = (name: string, ports: Record<string, any>) => {
   ports.boardAuthScopeEpoch ??= 0
   ports.currentAuthUserId ??= ref(1)
   ports.isCurrentBoardAuthScope ??= (epoch: number) => epoch === ports.boardAuthScopeEpoch && !ports.boardLifecycleDisposed
   ports.captureBoardRunOwner = bind('captureBoardRunOwner', ports)
-  ports.deliverCompletedFuzzingRun = bind('deliverCompletedFuzzingRun', ports)
+  ports.openModalDepth ??= ref(0)
+  ports.isModelPlaybackActive ??= computed(() => !!(ports.traceAnimationState?.value.visible
+    || ports.simulationAnimationState?.value.visible))
+  Object.assign(ports, { chooseRunPresentation, foregroundRunBlock })
+  ports.historyDetailRequests ??= createPagedRequestCoordinator()
+  ports.historyDetailRequests.hasPendingReplace ??= () => false
+  bindWorkflowPanel(ports)
+  for (const name of ['automaticRunPresentationBlock', 'automaticRunPresentation', 'completeRunPresentation',
+    'deliverCompletedFuzzingRun', 'deliverSimulationRunResult', 'deliverVerificationRunResult']) ports[name] = bind(name, ports)
   return bind(name, ports)
 }
 
@@ -58,31 +92,102 @@ describe('side-panel opening focus', () => {
       expect(ports.boardPanels[kind].collapsed).toBe(false)
     } finally { panel.remove() }
   })
+
+  it('keeps focus in an active editor when a completed workflow panel closes', async () => {
+    const open = ref(false)
+    const ports = { isModelPlaybackActive: ref(false), openModalDepth, foregroundRunBlock }
+    const options = bind('floatingPanelAccessibility', {
+      automaticRunPresentationBlock: bind('automaticRunPresentationBlock', ports)
+    })
+    const wrapper = mount({
+      setup() {
+        const panel = useModalAccessibility(open, () => { open.value = false }, undefined, options)
+        return () => h('div', [
+          h('button', { id: 'workflow-opener' }, 'Open run'),
+          open.value ? h('section', { ref: panel.setDialogRef, tabindex: -1 }, 'Progress') : null,
+          h('input', { id: 'active-draft' })
+        ])
+      }
+    }, { attachTo: document.body })
+    const opener = wrapper.get<HTMLButtonElement>('#workflow-opener').element
+    const draft = wrapper.get<HTMLInputElement>('#active-draft').element
+    opener.focus()
+    open.value = true
+    await flushPromises()
+    const release = registerModalSurface()
+    try {
+      draft.focus()
+      open.value = false
+      await flushPromises()
+      expect(document.activeElement).toBe(draft)
+    } finally {
+      release()
+      wrapper.unmount()
+    }
+  })
 })
 
 describe('tracking an existing background task', () => {
   it.each([
-    { closePanel: true, playback: false }, { closePanel: false, playback: true }
-  ])('keeps a watched exploration in the inbox after close=$closePanel or replay=$playback', async ({ closePanel, playback }) => {
+    { suffix: 'Verification', running: 'isVerifying', activeId: 7, requestedId: 8, isAsync: true },
+    { suffix: 'Verification', running: 'isVerifying', activeId: 7, requestedId: 7, isAsync: false },
+    { suffix: 'Simulation', running: 'isSimulating', activeId: 7, requestedId: 7, isAsync: false },
+    { suffix: 'Fuzzing', running: 'isFuzzing', activeId: 7, requestedId: 8, isAsync: true }
+  ])('keeps Task Status open when $suffix cannot attach to task $requestedId (async=$isAsync)',
+    async ({ suffix, running, activeId, requestedId, isAsync }) => {
+      const ports: Record<string, any> = {
+        [running]: ref(true), ...(suffix === 'Fuzzing' ? {} : { [`async${suffix}Active`]: ref(isAsync) }),
+        [`async${suffix}Task`]: ref({ taskId: activeId }),
+        activeWorkflowPanel: ref<BoardWorkflowPanel>({ kind: 'history' }),
+        notifyInfo: vi.fn(), t: (key: string) => key
+      }
+      await bindRun(`watch${suffix}Task`, ports)(requestedId)
+      expect(ports.showHistoryPanel.value).toBe(true)
+      expect(ports[`show${suffix}Panel`].value).toBe(false)
+      expect(ports.notifyInfo).toHaveBeenCalledExactlyOnceWith('app.taskWatchAlreadyActive')
+    })
+
+  it('reattaches Task Status to the already watched asynchronous observation without polling twice', async () => {
+    const ports: Record<string, any> = {
+      isSimulating: ref(true), asyncSimulationActive: ref(true), asyncSimulationTask: ref({ taskId: 7 }),
+      activeWorkflowPanel: ref<BoardWorkflowPanel>({ kind: 'history' }), pollAsyncSimulation: vi.fn(), notifyInfo: vi.fn()
+    }
+    await bindRun('watchSimulationTask', ports)(7)
+    expect(ports.showSimulationPanel.value).toBe(true)
+    expect(ports.asyncSimulationTask.value.taskId).toBe(7)
+    expect(ports.showHistoryPanel.value).toBe(false)
+    expect(ports.pollAsyncSimulation).not.toHaveBeenCalled()
+    expect(ports.notifyInfo).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { closePanel: true, playback: false, modal: false }, { closePanel: false, playback: true, modal: false },
+    { closePanel: false, playback: false, modal: true }
+  ])('keeps a watched exploration in the inbox after close=$closePanel, replay=$playback, modal=$modal', async ({ closePanel, playback, modal }) => {
     const pending = deferred()
     const ports = {
       isFuzzing: ref(false), fuzzingTasks: ref([]), fuzzingWatchedTask: ref(null), fuzzingSettingsNotice: ref(null),
-      asyncFuzzingActive: ref(false), fuzzingCancelRequested: ref(false), cancellingFuzzingTask: ref(false),
+      fuzzingCancelRequested: ref(false), cancellingFuzzingTask: ref(false),
       fuzzingError: ref(null), paperDomainStaleRecoveryActive: ref(false), asyncFuzzingTask: ref(null),
       normalizeTaskProgress: () => 0, taskProgressStatusKey: () => 'app.taskInitializing',
       trackFuzzTask: vi.fn(), untrackFuzzTask: vi.fn(), closeHistoryPanel: vi.fn(),
-      showFuzzingPanel: ref(false), pollAsyncFuzzing: () => pending.promise, isModelPlaybackActive: ref(playback),
+      pollAsyncFuzzing: () => pending.promise, isModelPlaybackActive: ref(playback),
+      openModalDepth: ref(0),
       refreshCurrentBoardModelFingerprints: vi.fn(), presentFuzzingRun: vi.fn(), boardLifecycleDisposed: false,
       loadTaskInbox: vi.fn(), markFuzzNotificationUnread: vi.fn(() => true), fuzzingCompletionMessage: () => 'finished',
       notifyInfo: vi.fn(), notifyBlocked: vi.fn(), t: (key: string) => key
     }
     const watching = bindRun('watchFuzzingTask', ports)(17)
-    if (closePanel) ports.showFuzzingPanel.value = false
+    if (closePanel) bind('closeWorkflowPanel', ports)('fuzzing')
+    if (modal) ports.openModalDepth.value = 1
     pending.resolve({ id: 17, initiator: 'USER', outcome: 'BUDGET_EXHAUSTED' })
     await watching
     expect(ports.presentFuzzingRun).not.toHaveBeenCalled()
     expect(ports.markFuzzNotificationUnread).toHaveBeenCalledWith(expect.objectContaining({ runId: 17, kind: 'COMPLETED' }))
-    expect(ports.notifyInfo.mock.calls).toEqual(playback ? [['finished'], ['app.fuzzResultDeferredForPlayback']] : [['finished']])
+    const expected = [['finished']]
+    if (playback) expected.push(['app.fuzzResultDeferredForPlayback'])
+    if (modal) expected.push(['app.fuzzResultDeferredForModal'])
+    expect(ports.notifyInfo.mock.calls).toEqual(expected)
   })
 
   it('drops completed exploration detail after its board is disposed', async () => {
@@ -120,13 +225,14 @@ describe('tracking an existing background task', () => {
           .mockResolvedValueOnce({ id: 17, status: 'COMPLETED', runId: 17 }),
         cancelTask: vi.fn(() => cancellation.promise)
       },
-      asyncFuzzingTask: ref({ taskId: 17 }), fuzzingCancelRequested: ref(false), cancellingFuzzingTask: ref(false),
+      isFuzzing: ref(true), asyncFuzzingTask: ref({ taskId: 17 }), fuzzingCancelRequested: ref(false),
+      fuzzingPanelTracksRun: ref(false),
       normalizeTaskProgress: () => 0, taskProgressStatusKey: vi.fn(), upsertFuzzingTaskSummary: vi.fn(),
       loadFuzzRunSingleFlight: vi.fn().mockResolvedValue(result), clearFuzzRunRecoveryState: vi.fn(),
       summarizeFuzzingRun: (run: unknown) => run, upsertFuzzingRunSummary: vi.fn(), notifyTaskCancellationResult: vi.fn()
     }
     const polling = bind('pollAsyncFuzzing', ports)(17).catch((error: unknown) => error)
-    const cancelling = bind('cancelAsyncFuzzing', ports)()
+    const cancelling = bindCancellation('Fuzzing', ports)()
     status.resolve({ id: 17, status: 'RUNNING' })
     await flushPromises()
     expect(ports.waitForNextPoll).toHaveBeenCalledOnce()
@@ -147,18 +253,19 @@ describe('tracking an existing background task', () => {
     const current = deferred()
     const task = ref({ taskId: 17 })
     const requested = ref(false)
-    const cancelling = ref(false)
-    const ports = {
+    const ports: Record<string, any> = {
       boardLifecycleDisposed: false, [`async${taskType}Task`]: task,
-      [`${kind}CancelRequested`]: requested, [`cancelling${taskType}Task`]: cancelling,
+      [`${kind}CancelRequested`]: requested, [`async${taskType}Active`]: ref(true),
+      isVerifying: ref(kind === 'verification'), isSimulating: ref(kind === 'simulation'), isFuzzing: ref(kind === 'fuzzing'),
       [apiName]: { cancelTask: vi.fn().mockReturnValueOnce(previous.promise).mockReturnValueOnce(current.promise) },
       notifyTaskCancellationResult: vi.fn(), taskProgressStatusKey: vi.fn()
     }
-    const cancel = bind(`cancelAsync${taskType}`, ports)
+    bindWorkflowPanel(ports)
+    const cancel = bindCancellation(taskType, ports)
+    const cancelling = ports[`cancelling${taskType}Task`]
     const oldRequest = cancel()
     // The first task finished and released its slot before the acknowledgement reached the browser.
     task.value = { taskId: 18 }
-    cancelling.value = false
     requested.value = false
     const currentRequest = cancel()
     previous.resolve({ taskId: 17, cancellationAccepted: false, cancellationOutcome: 'ALREADY_COMPLETED', taskStatus: 'COMPLETED' })
@@ -222,7 +329,7 @@ describe('tracking an existing background task', () => {
     ['verification', 'Verification', 'boardApi'],
     ['simulation', 'Simulation', 'simulationApi'],
     ['fuzzing', 'Fuzzing', 'fuzzingApi']
-  ])('opens %s progress and reports a confirmed local cancellation once', async (_kind, suffix, api) => {
+  ])('opens %s progress and reports a confirmed local cancellation once', async (kind, suffix, api) => {
     let rejectPoll!: (error: Error) => void
     const ports: Record<string, any> = {
       boardLifecycleDisposed: false, semanticSceneChangeCount: 0,
@@ -234,27 +341,25 @@ describe('tracking an existing background task', () => {
       isPollingAbortedError: () => false, isAsyncTaskCancelledError: () => true,
       fuzzingWatchedTask: ref(null), fuzzingSettingsNotice: ref(null), paperDomainStaleRecoveryActive: ref(false),
       trackFuzzTask: vi.fn(), untrackFuzzTask: vi.fn(),
-      [api]: { cancelTask: vi.fn().mockResolvedValue({ cancellationAccepted: true,
+      [api]: { cancelTask: vi.fn().mockResolvedValue({ taskId: 7, cancellationAccepted: true,
         cancellationOutcome: 'ACCEPTED', taskStatus: 'CANCELLED', executionMayStillBeStopping: false }) },
       [`pollAsync${suffix}`]: vi.fn(() => new Promise((_resolve, reject) => { rejectPoll = reject }))
     }
     for (const taskKind of ['verification', 'simulation', 'fuzzing']) {
       const title = taskKind[0]!.toUpperCase() + taskKind.slice(1)
       ports[`is${taskKind === 'verification' ? 'Verifying' : taskKind === 'simulation' ? 'Simulating' : 'Fuzzing'}`] = ref(false)
-      ports[`show${title}Panel`] = ref(false)
       ports[`${taskKind}Tasks`] = ref([])
       ports[`${taskKind}Error`] = ref(null)
-      ports[`async${title}Active`] = ref(false)
+      if (taskKind !== 'fuzzing') ports[`async${title}Active`] = ref(false)
       ports[`async${title}Task`] = ref({ taskId: null })
-      ports[`cancelling${title}Task`] = ref(false)
       ports[`${taskKind}CancelRequested`] = ref(false)
     }
     ports.notifyTaskCancellationResult = bind('notifyTaskCancellationResult', ports)
     const watching = bindRun(`watch${suffix}Task`, ports)(7)
     try {
       expect(ports[`show${suffix}Panel`].value).toBe(true)
-      ports[`show${suffix}Panel`].value = false
-      await bind(`cancelAsync${suffix}`, ports)()
+      ports.closeWorkflowPanel(kind)
+      await bindCancellation(suffix, ports)()
       expect(ports.notifyInfo).toHaveBeenCalledOnce()
     } finally {
       rejectPoll(new Error('Task cancelled'))
@@ -264,31 +369,40 @@ describe('tracking an existing background task', () => {
     expect(ports.loadTaskInbox).toHaveBeenCalledOnce()
   })
 
-  it.each(['verification', 'simulation', 'fuzzing'])('uses visible %s status instead of a duplicate cancellation toast', kind => {
-    const ports: Record<string, any> = { t: (key: string) => key,
-      notifyInfo: vi.fn(), notifyBlocked: vi.fn(), showHistoryPanel: ref(true), activeHistoryLayer: ref('tasks'),
-      showVerificationPanel: ref(false), showSimulationPanel: ref(false), showFuzzingPanel: ref(false) }
+  it.each(['verification', 'simulation', 'fuzzing'] as const)('uses visible %s status instead of a duplicate cancellation toast', kind => {
+    const ports: Record<string, any> = { t: (key: string, params?: { task: string }) => params ? `${key} ${params.task}` : key,
+      notifyInfo: vi.fn(), notifyBlocked: vi.fn(), activeHistoryLayer: ref('tasks'),
+      activeWorkflowPanel: ref<BoardWorkflowPanel | null>({ kind: 'history' }),
+      [`${kind}Tasks`]: ref([{ id: 7, status: 'CANCELLED' }]),
+      [`watched${kind[0]!.toUpperCase()}${kind.slice(1)}TaskIds`]: ref([7]) }
+    bindWorkflowPanel(ports)
+    ports.watchedTaskId = bind('watchedTaskId', ports)
     const notify = bind('notifyTaskCancellationResult', ports)
-    const result = { cancellationOutcome: 'ACCEPTED', executionMayStillBeStopping: true }
+    const result = { taskId: 7, cancellationOutcome: 'ACCEPTED', executionMayStillBeStopping: true }
     notify(kind, result)
     expect(ports.notifyInfo).not.toHaveBeenCalled()
-    ports.showHistoryPanel.value = false
-    ports[`show${kind[0]!.toUpperCase() + kind.slice(1)}Panel`].value = true
+    notify(kind, { ...result, taskId: 8 })
+    expect(ports.notifyInfo).toHaveBeenCalledExactlyOnceWith(expect.stringContaining(' #8'))
+    ports.notifyInfo.mockClear()
+    ports.openRunPanel(kind, 'run')
     notify(kind, result)
     expect(ports.notifyInfo).not.toHaveBeenCalled()
-    ports[`show${kind[0]!.toUpperCase() + kind.slice(1)}Panel`].value = false
+    notify(kind, { ...result, taskId: 8, cancellationOutcome: 'ALREADY_CANCELLED' })
+    expect(ports.notifyInfo).toHaveBeenCalledExactlyOnceWith(expect.stringContaining(' #8'))
+    ports.notifyInfo.mockClear()
+    ports.closeWorkflowPanel(kind)
     notify(kind, result)
     expect(ports.notifyInfo).toHaveBeenCalledOnce()
   })
 
   it.each(['verification', 'simulation'])('avoids a late cancellation notice over the matching %s result', kind => {
     const ports = { t: (key: string) => key, notifyInfo: vi.fn(), notifyBlocked: vi.fn(),
-      showHistoryPanel: ref(false), activeHistoryLayer: ref('tasks'),
-      showVerificationPanel: ref(false), showSimulationPanel: ref(false), showFuzzingPanel: ref(false),
+      activeHistoryLayer: ref('tasks'),
       showResultDialog: ref(true), verificationResult: ref({ historyPersistence: { status: 'SAVED', runId: 7 } }),
       simulationAnimationState: ref({ visible: true }),
       lastSimulationResult: ref({ historyPersistence: { status: 'SAVED', runId: 17 } }),
       simulationTasks: ref([{ id: 7, simulationTraceId: 17 }]) }
+    bindWorkflowPanel(ports)
     const notify = bind('notifyTaskCancellationResult', ports)
     notify(kind, { taskId: 7, cancellationOutcome: 'ALREADY_COMPLETED' })
     expect(ports.notifyBlocked).not.toHaveBeenCalled()
@@ -310,7 +424,8 @@ describe('run navigation leaves playback', () => {
       simulationAnimationState: ref({ visible: kind === 'simulation' }),
       highlightedTrace: ref({ states: [{}] }), activeFuzzingFinding: ref({ id: 1 }),
       stopTraceAnimation: vi.fn(), deactivatePlaybackScene: vi.fn(), resetPlaybackTerminal: vi.fn(),
-      clearRunDeepLink: vi.fn(), closeResultSurfaces: vi.fn(), loadDeepLinkTarget: vi.fn()
+      clearRunDeepLink: vi.fn(), closeResultSurfaces: vi.fn(), loadDeepLinkTarget: vi.fn(),
+      pendingHistoryRunTarget: null
     }
     for (const name of ['closeTraceAnimation', 'closeSimulationTimeline', 'closePlaybackForNavigation', 'applyDeepLinkTarget']) {
       if (name === 'closePlaybackForNavigation' && !setup.includes(`const ${name} =`)) continue
@@ -329,40 +444,60 @@ describe('run navigation leaves playback', () => {
 })
 
 describe('reopening verification settings from a stale result', () => {
-  it.each([false, true])('opens settings when their previous visibility was %s', alreadyOpen => {
-    const showVerificationPanel = ref(alreadyOpen)
-    const dismissResultDialog = vi.fn()
-    const openVerificationFromActionDock = vi.fn(() => {
-      expect(showVerificationPanel.value).toBe(false)
-      showVerificationPanel.value = true
-    })
-    bind('reopenVerificationSettingsFromResult', {
-      isModelPlaybackActive: ref(false), isAnyRecommendationRunning: () => false,
-      showVerificationPanel, dismissResultDialog, openVerificationFromActionDock
-    })()
-    expect(dismissResultDialog).toHaveBeenCalledOnce()
-    expect(openVerificationFromActionDock).toHaveBeenCalledOnce()
-    expect(dismissResultDialog.mock.invocationCallOrder[0])
-      .toBeLessThan(openVerificationFromActionDock.mock.invocationCallOrder[0]!)
-    expect(showVerificationPanel.value).toBe(true)
-  })
-
-  it.each(['playback', 'recommendation'])('keeps the result visible when %s blocks the existing opener', blocker => {
-    const dismissResultDialog = vi.fn()
-    const showVerificationPanel = ref(true)
-    const openVerificationFromActionDock = vi.fn()
-    bind('reopenVerificationSettingsFromResult', {
+  const settings = { kind: 'verification', view: 'settings', handoff: null } as const
+  const setupSettings = (selected: BoardWorkflowPanel | null, blocker?: 'playback' | 'recommendation' | 'verification') => {
+    const ports: Record<string, any> = {
       isModelPlaybackActive: ref(blocker === 'playback'),
       isAnyRecommendationRunning: () => blocker === 'recommendation',
-      showVerificationPanel, dismissResultDialog, openVerificationFromActionDock
-    })()
-    expect(openVerificationFromActionDock).toHaveBeenCalledOnce()
-    expect(dismissResultDialog).not.toHaveBeenCalled()
-    expect(showVerificationPanel.value).toBe(true)
+      isSceneReplacementInProgress: ref(false), isVerifying: ref(blocker === 'verification'),
+      isFuzzing: ref(false), isSimulating: ref(false), activeWorkflowPanel: ref(selected),
+      notifyBlocked: vi.fn(), notifyInfo: vi.fn(), t: (key: string) => key, dismissResultDialog: vi.fn()
+    }
+    bindWorkflowPanel(ports)
+    for (const name of ['canOpenWorkflowPanel', 'isRunKindActive', 'canOpenTaskSettings']) ports[name] = bind(name, ports)
+    return ports
+  }
+
+  it.each([false, true])('opens settings when their previous visibility was %s', alreadyOpen => {
+    const ports = setupSettings(alreadyOpen ? settings : null)
+    bind('reopenVerificationSettingsFromResult', ports)()
+    expect(ports.dismissResultDialog).toHaveBeenCalledOnce()
+    expect(ports.activeWorkflowPanel.value).toEqual(settings)
+  })
+
+  it.each(['playback', 'recommendation', 'verification'] as const)('keeps the result visible when %s blocks settings', blocker => {
+    const ports = setupSettings(null, blocker)
+    const reason = { playback: 'app.playbackReadOnlyCloseFirst', recommendation: 'app.recommendationGenerationInProgress',
+      verification: 'app.taskSettingsBlockedByActiveRun' }[blocker]
+    bind('reopenVerificationSettingsFromResult', ports)()
+    expect(ports.dismissResultDialog).not.toHaveBeenCalled()
+    expect(ports.activeWorkflowPanel.value).toBeNull()
+    expect(blocker === 'verification' ? ports.notifyInfo : ports.notifyBlocked).toHaveBeenCalledExactlyOnceWith(reason)
   })
 })
 
 describe('exploration finding handoff', () => {
+  it('drops the handoff when History closes its panel and an unrelated verdict task is watched', async () => {
+    const ports: Record<string, any> = {
+      activeWorkflowPanel: ref<BoardWorkflowPanel | null>({ kind: 'verification', view: 'settings',
+        handoff: { runId: 24, specificationId: 'old-target' } }),
+      closeResultSurfaces: vi.fn(), closeHistoryPanel: vi.fn(), pollAsyncVerification: vi.fn(),
+      verificationTasks: ref([]), verificationError: ref(null), isVerifying: ref(false),
+      asyncVerificationActive: ref(false), verificationCancelRequested: ref(false),
+      cancellingVerificationTask: ref(false), asyncVerificationTask: ref(null),
+      normalizeTaskProgress: () => 0, taskProgressStatusKey: () => 'app.taskInitializing', loadTaskInbox: vi.fn()
+    }
+
+    const watchVerification = bindRun('watchVerificationTask', ports)
+    bind('closeOtherWorkflowSurfaces', ports)()
+    expect(ports.showVerificationPanel.value).toBe(false)
+    expect(ports.activeWorkflowPanel.value).toBeNull()
+    await watchVerification(17)
+    expect(ports.showVerificationPanel.value).toBe(true)
+    expect(ports.activeWorkflowPanel.value?.handoff).toBeNull()
+    expect(ports.pollAsyncVerification).toHaveBeenCalledExactlyOnceWith(17)
+  })
+
   it('keeps the historical target while the current Board comparison and target presence change', () => {
     const original = 'a'.repeat(64)
     const modelSnapshot: ModelRunSnapshot = {
@@ -378,14 +513,14 @@ describe('exploration finding handoff', () => {
     const boardDataLoadState = reactive({ specs: 'ready' })
     const ports: Record<string, any> = {
       computed, ref, compareModelSnapshot, currentBoardModelFingerprints,
-      fuzzingResult, fuzzingRuns: ref([]), fuzzVerificationHandoffSource: ref(null),
+      fuzzingResult, fuzzingRuns: ref([]), activeWorkflowPanel: ref({ kind: 'fuzzing', view: 'settings' }),
       specifications: ref([{ id: 'spec-a', name: 'Current name' }]),
       boardDataLoadState, allBoardDataKeys: ['specs'],
       isBoardDataReady: computed(() => boardDataLoadState.specs === 'ready'),
       loadingCurrentBoardModelFingerprints: ref(false),
-      closeHistoryPanel: vi.fn(), dismissFuzzingResult: () => { fuzzingResult.value = null },
-      showSimulationPanel: ref(false), showFuzzingPanel: ref(true), showVerificationPanel: ref(false)
+      closeHistoryPanel: vi.fn(), dismissFuzzingResult: () => { fuzzingResult.value = null }
     }
+    bindWorkflowPanel(ports)
     for (const name of ['fuzzVerificationHandoff', 'fuzzVerificationHandoffNoticeKey',
       'availableFuzzRunForFinding', 'showVerificationPanelForHandoff']) {
       ports[name] = bind(name, ports)
@@ -427,7 +562,9 @@ describe('run failures during playback', () => {
   const context = (playback: boolean) => {
     const owner = { current: true }
     const ports: Record<string, any> = {
-      isModelPlaybackActive: ref(playback), verificationError: ref<string | null>(null),
+      isModelPlaybackActive: ref(playback), openModalDepth: ref(0), verificationError: ref<string | null>(null),
+      chooseRunPresentation, foregroundRunBlock,
+      historyDetailRequests: createPagedRequestCoordinator(),
       simulationError: ref<any>(null), technicalErrorLines, computed,
       isCompletedTaskResultUnavailableError: () => false, isFuzzCompletedResultUnavailableError: () => false,
       RUN_RESPONSE_INCOMPLETE_CODE: 'RUN_RESPONSE_INCOMPLETE', FUZZ_RESPONSE_INCOMPLETE_CODE: 'FUZZ_RESPONSE_INCOMPLETE',
@@ -441,6 +578,8 @@ describe('run failures during playback', () => {
     }
     ports.notifyAvailableResult.mockImplementation((options: { onClose: () => void }) => vi.fn(options.onClose))
     ports.makeRunFailure = bind('makeRunFailure', ports)
+    ports.automaticRunPresentationBlock = bind('automaticRunPresentationBlock', ports)
+    ports.automaticRunPresentation = bind('automaticRunPresentation', ports)
     ports.formatRunFailure = bind('formatRunFailure', ports)
     ports.runFailureTitle = bind('runFailureTitle', ports)
     ports.runFailureDiagnostics = bind('runFailureDiagnostics', ports)
@@ -534,7 +673,7 @@ describe('run failures during playback', () => {
     const ports = {
       isVerifying: flag(), isSimulating: flag(),
       asyncVerificationTask: { value: { taskId: null } }, asyncSimulationTask: { value: { taskId: null } },
-      showVerificationPanel: flag(), showSimulationPanel: flag(), notifyInfo: vi.fn(),
+      notifyInfo: vi.fn(),
       verificationTasks: { value: [] }, simulationTasks: { value: [] },
       asyncVerificationActive: flag(), asyncSimulationActive: flag(),
       verificationCancelRequested: flag(), simulationCancelRequested: flag(),
@@ -548,7 +687,7 @@ describe('run failures during playback', () => {
       semanticSceneChangeCount: 0, boardLifecycleDisposed: false, loadTaskInbox: vi.fn().mockResolvedValue(true)
     }
     const watching = bindRun(kind === 'verification' ? 'watchVerificationTask' : 'watchSimulationTask', ports)(7)
-    if (!playback) ports.showVerificationPanel.value = false
+    if (!playback) bind('closeWorkflowPanel', ports)('verification')
     pending.resolve(Promise.reject(new Error('run failed')))
     await watching
     expect(failure.verificationError.value).toBeNull()
@@ -626,9 +765,10 @@ describe('exploration launch', () => {
       fuzzingForm: { explorationMode: 'PAPER_COMPATIBLE', targetSelectionMode: 'ALL',
         maxIterations: 2, populationSize: 1, pathLength: 2, seed: 42 },
       paperDomainPreview: ref({ modelFingerprint: 'a'.repeat(64) }), isValidFuzzPaperDomainFingerprint: () => true,
-      fuzzingWatchedTask: ref(null), asyncFuzzingActive: ref(false), cancellingFuzzingTask: ref(false),
+      fuzzingWatchedTask: ref(null), cancellingFuzzingTask: ref(false),
       fuzzingCancelRequested: ref(false), fuzzingError: ref<string | null>(null), fuzzingSettingsNotice: ref(null),
-      asyncFuzzingTask: ref({}), showFuzzingPanel: ref(visible), fuzzingFailureDetails: ref({}),
+      asyncFuzzingTask: ref({}), activeWorkflowPanel: ref<BoardWorkflowPanel | null>(visible ? { kind: 'fuzzing', view: 'settings' } : null),
+      fuzzingFailureDetails: ref({}),
       paperDomainStaleRecoveryActive: ref(false),
       fuzzingApi: { startAsync: vi.fn().mockRejectedValue({ response: { status: 422, data: {
         message: 'Paper domain changed', data: { errors: { paperDomainFingerprint: 'Refresh the domain preview' } }
@@ -663,6 +803,99 @@ describe('exploration launch', () => {
     boardEdit.resolve()
     await Promise.all([first, duplicate])
     expect(ports.fuzzingApi.startAsync).toHaveBeenCalledOnce()
+  })
+
+  const watchPreviews = (ports: Record<string, any>) => {
+    const modelFingerprint = 'a'.repeat(64)
+    Object.assign(ports, {
+      watch, hasValidFuzzingBudget, isFuzzingPreviewCurrent,
+      paperDomainSemanticKey: ref('unchanged-board'), fuzzingWorkloadSemanticKey: ref('current-budget'),
+      fuzzingPreviewPrerequisitesReady: ref(true), paperDomainPreview: ref({ pathLength: 2, modelFingerprint }),
+      paperDomainPreviewSemanticKey: ref('unchanged-board'), paperDomainPreviewEpoch: 0, paperDomainPreviewTimer: null,
+      paperDomainPreviewLoading: ref(false), paperDomainPreviewError: ref(null),
+      fuzzingWorkloadPreview: ref({ maxIterations: 2, populationSize: 1, pathLength: 2 }),
+      fuzzingWorkloadPreviewSemanticKey: ref('current-budget'), fuzzingWorkloadPreviewEpoch: 0,
+      fuzzingWorkloadPreviewTimer: null, fuzzingWorkloadPreviewLoading: ref(false), fuzzingWorkloadPreviewError: ref(null),
+      scheduleFuzzingWorkloadPreview: vi.fn(),
+      trackFuzzTask: vi.fn(), upsertFuzzingTaskSummary: vi.fn(), normalizeTaskProgress: () => 0,
+      taskProgressStatusKey: () => 'app.taskInitializing', pollAsyncFuzzing: vi.fn().mockResolvedValue({ id: 17 }),
+      deliverCompletedFuzzingRun: vi.fn()
+    })
+    for (const name of ['fuzzingPreviewsInUse', 'invalidatePaperDomainPreview', 'invalidateFuzzingWorkloadPreview',
+      'paperDomainReady', 'fuzzingWorkloadReady', 'paperDomainConfigurationError']) ports[name] = bind(name, ports)
+    ports.effectiveFuzzingConfigurationError = ports.paperDomainConfigurationError
+    const previewWatchers = source.statements.filter(statement => ts.isExpressionStatement(statement)
+      && ts.isCallExpression(statement.expression) && statement.expression.expression.getText(source) === 'watch'
+      && /paperDomainSemanticKey|fuzzingWorkloadSemanticKey|schedulePaperDomainPreview|scheduleFuzzingWorkloadPreview/
+        .test(statement.getText(source)))
+    const scope = effectScope()
+    scope.run(() => new Function('ports', `with (ports) { ${ts.transpileModule(
+      previewWatchers.map(statement => statement.getText(source)).join('\n'),
+      { compilerOptions: { target: ts.ScriptTarget.ES2022 } }
+    ).outputText} }`)(ports))
+    return { scope, modelFingerprint }
+  }
+
+  it('submits the approved exploration after opening History while a layout save settles', async () => {
+    const { ports, run } = context(true, false)
+    const boardSave = deferred()
+    const { scope, modelFingerprint } = watchPreviews(ports)
+    ports.waitForPendingBoardMutations.mockReturnValue(boardSave.promise)
+    ports.fuzzingApi.startAsync.mockResolvedValue({ id: 17, initiator: 'USER' })
+
+    try {
+      expect(ports.fuzzingWorkloadReady.value).toBe(true)
+      expect(ports.paperDomainReady.value).toBe(true)
+      const completion = run()
+      await flushPromises()
+      expect(ports.waitForPendingBoardMutations).toHaveBeenCalledOnce()
+      expect(ports.fuzzingApi.startAsync).not.toHaveBeenCalled()
+      ports.activeWorkflowPanel.value = { kind: 'history' }
+      boardSave.resolve()
+      expect(await completion).toBe(true)
+      expect(ports.fuzzingApi.startAsync).toHaveBeenCalledExactlyOnceWith({
+        explorationMode: 'PAPER_COMPATIBLE', maxIterations: 2, populationSize: 1, pathLength: 2,
+        seed: 42, paperDomainFingerprint: modelFingerprint
+      })
+      expect(ports.activeWorkflowPanel.value).toEqual({ kind: 'history' })
+    } finally {
+      scope.stop()
+    }
+  })
+
+  it.each([true, false])('only reads draft previews while watching when the frozen summary is absent (summary=%s)', async hasSummary => {
+    const { ports } = context(false, false)
+    const { scope, modelFingerprint } = watchPreviews(ports)
+    const pending = deferred()
+    const aborted = new Error('Stop watching')
+    Object.assign(ports, {
+      fuzzingTasks: ref(hasSummary ? [{ id: 17 }] : []),
+      pollAsyncFuzzing: () => pending.promise, isPollingAbortedError: (error: unknown) => error === aborted
+    })
+    const previewPaperDomain = vi.fn().mockResolvedValue({ pathLength: 2, modelFingerprint })
+    const previewWorkload = vi.fn().mockResolvedValue({ maxIterations: 2, populationSize: 1, pathLength: 2 })
+    Object.assign(ports.fuzzingApi, { previewPaperDomain, previewWorkload })
+    for (const name of ['refreshPaperDomainPreview', 'refreshFuzzingWorkloadPreview',
+      'schedulePaperDomainPreview', 'scheduleFuzzingWorkloadPreview']) ports[name] = bind(name, ports)
+
+    vi.useFakeTimers()
+    try {
+      const tracking = bindRun('watchFuzzingTask', ports)(17)
+      expect(ports.activeWorkflowPanel.value).toEqual({ kind: 'fuzzing', view: 'run' })
+      await vi.advanceTimersByTimeAsync(250)
+      expect.soft(previewPaperDomain).toHaveBeenCalledTimes(hasSummary ? 0 : 1)
+      expect.soft(previewWorkload).toHaveBeenCalledTimes(hasSummary ? 0 : 1)
+
+      pending.resolve(Promise.reject(aborted))
+      await tracking
+      expect(ports.activeWorkflowPanel.value).toEqual({ kind: 'fuzzing', view: 'settings' })
+      await vi.advanceTimersByTimeAsync(250)
+      expect(previewPaperDomain).toHaveBeenCalledOnce()
+      expect(previewWorkload).toHaveBeenCalledOnce()
+    } finally {
+      scope.stop()
+      vi.useRealTimers()
+    }
   })
 
   it('leaves the new account untouched when an old exploration launch is accepted', async () => {
@@ -816,11 +1049,10 @@ describe('simulation completion during another replay', () => {
       simulationHistoryRequests: { invalidate: vi.fn() }, simulationRuns: ref([]),
       loadSimulationRuns: vi.fn().mockResolvedValue(undefined),
       traceAnimationState: ref({ visible: false }), simulationAnimationState: ref({ visible: false }),
-      isLiveBoardEditorVisible: flag(), showSimulationPanel: ref(true),
+      openModalDepth: ref(0), activeWorkflowPanel: ref<BoardWorkflowPanel | null>({ kind: 'simulation', view: isAsync ? 'run' : 'settings' }),
       lastSimulationResult, frozenScene, unsavedRunNotifications: new Set<() => void>(),
       adoptSimulationRunResult: vi.fn(), openSimulationAnimationFromSavedStates: vi.fn(),
-      notifySimulationOutcome: vi.fn(), notifyAutomaticPlaybackDeferred: vi.fn(),
-      notifyAutomaticPlaybackDeferredForReplay: vi.fn(), notifyAvailableResult: vi.fn(),
+      notifySimulationOutcome: vi.fn(), notifyAutomaticPlaybackDeferred: vi.fn(), notifyAvailableResult: vi.fn(),
       ensureHistoricalPlaybackUiAdmission: vi.fn((): boolean =>
         !ports.traceAnimationState.value.visible && !ports.simulationAnimationState.value.visible),
       closeOtherWorkflowSurfaces: vi.fn(), notifyInfo: vi.fn(), notifyBlocked: vi.fn(), notifyError: vi.fn(),
@@ -834,8 +1066,7 @@ describe('simulation completion during another replay', () => {
       frozenScene.value = lastSimulationResult.value.playbackScene
     })
     ports.notifyAvailableResult.mockImplementation((options: { onClose: () => void }) => vi.fn(() => options.onClose()))
-    ports.notifyAutomaticPlaybackDeferredForReplay.mockImplementation(
-      bind('notifyAutomaticPlaybackDeferredForReplay', ports))
+    ports.notifyAutomaticPlaybackDeferred.mockImplementation(bind('notifyAutomaticPlaybackDeferred', ports))
     const run = bindRun('handleSimulate', ports)
     const start = () => run({ steps: 1, isAsync, saveToHistory: status !== 'NOT_REQUESTED' })
     return { previous, result, ports, owner, pending, start,
@@ -846,8 +1077,10 @@ describe('simulation completion during another replay', () => {
     const state = context('SAVED', isAsync)
     const completion = state.start()
     await vi.waitFor(() => expect(state.ports.simulationApi[isAsync ? 'simulateAsync' : 'simulateAndSave']).toHaveBeenCalledOnce())
+    state.ports.semanticSceneChangeCount += 1
     state.pending.resolve(state.result)
     expect(await completion).toBe(true)
+    expect(state.ports.simulationResultStale.value).toBe(true)
     expect(state.ports.openSimulationAnimationFromSavedStates).toHaveBeenCalledOnce()
     expect(state.ports.notifySimulationOutcome).not.toHaveBeenCalled()
   })
@@ -867,19 +1100,58 @@ describe('simulation completion during another replay', () => {
     expect(state.ports.simulationApi.simulateAsync).toHaveBeenCalledOnce()
   })
 
-  it('keeps a watched simulation in history after its progress panel is closed', async () => {
+  it.each(['closed', 'replay', 'progress'] as const)('delivers a watched simulation from %s presentation', async surface => {
     const state = context('SAVED', true)
     const ports = Object.assign(state.ports, {
       simulationTasks: ref([]), closeHistoryPanel: vi.fn(), loadTaskInbox: vi.fn(), boardLifecycleDisposed: false,
       summarizeSimulationResult: () => ({ id: 17 })
     })
     const watching = bindRun('watchSimulationTask', ports)(17)
-    bind('closeSimulationPanel', ports)()
+    if (surface === 'closed') bind('closeWorkflowPanel', ports)('simulation')
+    if (surface === 'replay') ports.simulationAnimationState.value.visible = true
+    ports.semanticSceneChangeCount += 1
     state.pending.resolve(state.result)
     await watching
     expect(ports.simulationRuns.value).toEqual([{ id: 17 }])
+    if (surface === 'progress') {
+      expect(ports.openSimulationAnimationFromSavedStates).toHaveBeenCalledOnce()
+      expect(ports.simulationResultStale.value).toBe(true)
+      expect(ports.notifySimulationOutcome).not.toHaveBeenCalled()
+      return
+    }
     expect(ports.openSimulationAnimationFromSavedStates).not.toHaveBeenCalled()
     expect(ports.notifySimulationOutcome).toHaveBeenCalledWith(state.result, true)
+    if (surface === 'replay') expect(ports.notifyInfo).toHaveBeenCalledWith('app.simulationPlaybackDeferredForReplay')
+  })
+
+  it('keeps an unsaved trajectory accessible when a modal prevents automatic playback', async () => {
+    const state = context('NOT_REQUESTED')
+    const completion = state.start()
+    await vi.waitFor(() => expect(state.ports.simulationApi.simulate).toHaveBeenCalledOnce())
+    state.ports.openModalDepth.value = 1
+    state.pending.resolve(state.result)
+    expect(await completion).toBe(true)
+    expect(state.ports.adoptSimulationRunResult).not.toHaveBeenCalled()
+    expect(state.ports.openSimulationAnimationFromSavedStates).not.toHaveBeenCalled()
+    expect(state.ports.notifyAvailableResult).toHaveBeenCalledOnce()
+    const open = state.ports.notifyAvailableResult.mock.calls[0][0].onAction
+    expect(open()).toBe(false)
+    state.ports.openModalDepth.value = 0
+    expect(open()).toBe(true)
+    expect(state.ports.openSimulationAnimationFromSavedStates).toHaveBeenCalledOnce()
+    expect(state.ports.lastSimulationResult.value).toEqual(state.result)
+  })
+
+  it('keeps a local synchronous trajectory available after the user closes its progress panel', async () => {
+    const state = context('NOT_REQUESTED')
+    const completion = state.start()
+    await vi.waitFor(() => expect(state.ports.simulationApi.simulate).toHaveBeenCalledOnce())
+    bind('closeWorkflowPanel', state.ports)('simulation')
+    state.pending.resolve(state.result)
+    expect(await completion).toBe(true)
+    expect(state.ports.adoptSimulationRunResult).not.toHaveBeenCalled()
+    expect(state.ports.openSimulationAnimationFromSavedStates).not.toHaveBeenCalled()
+    expect(state.ports.notifyAvailableResult).toHaveBeenCalledOnce()
   })
 
   it.each(['SAVED', 'NOT_REQUESTED', 'OUTCOME_UNKNOWN'])(
@@ -1049,11 +1321,12 @@ describe('verification completion', () => {
       asyncVerificationTask: ref({ progress: 0, statusKey: 'app.taskInitializing' }),
       normalizeTaskProgress: () => 100, taskProgressStatusKey: () => 'app.taskInitializing', upsertVerificationTaskSummary: vi.fn(),
       loadCompletedTaskResult: (read: () => Promise<unknown>) => read(),
-      buildVerificationResultFromTask: () => result, showVerificationPanel: ref(true),
+      buildVerificationResultFromTask: () => result,
+      activeWorkflowPanel: ref<BoardWorkflowPanel | null>({ kind: 'verification', view: isAsync ? 'run' : 'settings', handoff: null }),
       historyDetailRequests: { invalidate: vi.fn() }, deepLinkLoadRequests: { invalidate: vi.fn() },
       staleDeepLink: ref(true), navigateToRunTarget: vi.fn().mockResolvedValue(undefined), clearRunDeepLink: vi.fn(),
       adoptVerificationRunResult: vi.fn(), refreshCurrentBoardModelFingerprints: vi.fn(),
-      isModelPlaybackActive: flag(), notifyVerificationOutcome: vi.fn(),
+      isModelPlaybackActive: flag(), openModalDepth: ref(0), notifyVerificationOutcome: vi.fn(),
       unsavedRunNotifications: new Set<() => void>(), notifyAvailableResult: vi.fn(),
       ensureHistoricalPlaybackUiAdmission: vi.fn(() => !ports.isModelPlaybackActive.value),
       closeOtherWorkflowSurfaces: vi.fn(),
@@ -1066,9 +1339,10 @@ describe('verification completion', () => {
     }
     ports.adoptVerificationRunResult.mockImplementation(bind('adoptVerificationRunResult', ports))
     ports.notifyAvailableResult.mockImplementation((options: { onClose: () => void }) => vi.fn(() => options.onClose()))
+    const verify = bindRun('handleVerify', ports)
     return { ports, pending, owner, result, start: isAsync
       ? () => bind('pollAsyncVerification', ports)(17)
-      : bindRun('handleVerify', ports) }
+      : verify }
   }
 
   it.each([false, true])('makes a saved completion addressable without refetching it (async=%s)', async isAsync => {
@@ -1091,7 +1365,7 @@ describe('verification completion', () => {
 
   it('keeps a background asynchronous completion from changing the selected run', async () => {
     const state = context('SAVED', true)
-    state.ports.showVerificationPanel.value = false
+    bind('closeWorkflowPanel', state.ports)('verification')
     state.ports.isModelPlaybackActive.value = true
     const completion = bind('pollAsyncVerification', state.ports)(17)
     state.pending.resolve(state.result)
@@ -1127,16 +1401,84 @@ describe('verification completion', () => {
     const state = context('SAVED', true)
     const ports = Object.assign(state.ports, {
       verificationTasks: ref([]), closeHistoryPanel: vi.fn(), loadTaskInbox: vi.fn(),
-      fuzzVerificationHandoffSource: ref(null), boardLifecycleDisposed: false,
+      boardLifecycleDisposed: false,
       pollAsyncVerification: bind('pollAsyncVerification', state.ports)
     })
     const watching = bindRun('watchVerificationTask', ports)(17)
-    bind('closeVerificationPanel', ports)()
+    bind('closeWorkflowPanel', ports)('verification')
     state.pending.resolve(state.result)
     await watching
     expect(ports.adoptVerificationRunResult).not.toHaveBeenCalled()
     expect(ports.navigateToRunTarget).not.toHaveBeenCalled()
     expect(ports.notifyVerificationOutcome).toHaveBeenCalledWith(state.result)
+    expect(ports.loadVerificationRuns).toHaveBeenCalledOnce()
+  })
+
+  it('keeps a synchronous verdict in history after the user closes its progress panel', async () => {
+    const state = context('SAVED')
+    const completion = state.start()
+    await vi.waitFor(() => expect(state.ports.boardApi.verify).toHaveBeenCalledOnce())
+    bind('closeWorkflowPanel', state.ports)('verification')
+    state.pending.resolve(state.result)
+    await completion
+    expect(state.ports.adoptVerificationRunResult).not.toHaveBeenCalled()
+    expect(state.ports.navigateToRunTarget).not.toHaveBeenCalled()
+    expect(state.ports.notifyVerificationOutcome).toHaveBeenCalledWith(state.result)
+    expect(state.ports.loadVerificationRuns).toHaveBeenCalledOnce()
+  })
+
+  it('preserves the selected historical verdict while a newer task finishes during its read', async () => {
+    const state = context('SAVED', true)
+    const historical = { ...state.result, historyPersistence: { status: 'SAVED', runId: 9 } }
+    const read = deferred()
+    const historyDetailRequests = createPagedRequestCoordinator()
+    const ports = Object.assign(state.ports, {
+      appliedDeepLinkTarget: null, boardLifecycleDisposed: false, historyDetailRequests,
+      deepLinkLoadRequests: { begin: () => 1, invalidate: vi.fn() },
+      closePlaybackForNavigation: vi.fn(), closeHistoryPanel: vi.fn(),
+      closeResultSurfaces: () => historyDetailRequests.invalidate(), isCurrentDeepLinkLoad: () => true,
+      buildVerificationResultFromRun: () => historical, shouldLoadVerificationEvidence: () => false
+    })
+    const getVerificationRun = vi.fn(() => read.promise)
+    Object.assign(ports.boardApi, { getVerificationRun })
+    Object.assign(ports, {
+      openVerificationRun: bind('openVerificationRun', ports),
+      loadDeepLinkTarget: bind('loadDeepLinkTarget', ports)
+    })
+
+    const completion = state.start()
+    const target = { kind: 'verification', runId: 9 }
+    const navigation = bind('applyDeepLinkTarget', ports)(target)
+    expect(getVerificationRun).toHaveBeenCalledExactlyOnceWith(9)
+    state.pending.resolve(state.result)
+    await completion
+    expect(ports.adoptVerificationRunResult).not.toHaveBeenCalled()
+    expect(ports.navigateToRunTarget).not.toHaveBeenCalled()
+    expect(ports.notifyVerificationOutcome).toHaveBeenCalledWith(state.result)
+    read.resolve(historical)
+    await navigation
+    expect(ports.appliedDeepLinkTarget).toEqual(target)
+    expect(ports.verificationResult.value).toBe(historical)
+  })
+
+  it('keeps a new exploration handoff open when the unrelated watched verdict completes', async () => {
+    const state = context('SAVED', true)
+    const explorationRun = { id: 24 }
+    const ports = Object.assign(state.ports, {
+      verificationTasks: ref([]), closeHistoryPanel: vi.fn(), loadTaskInbox: vi.fn(),
+      boardLifecycleDisposed: false,
+      pollAsyncVerification: bind('pollAsyncVerification', state.ports),
+      fuzzingResult: ref(explorationRun), dismissFuzzingResult: vi.fn()
+    })
+    Object.assign(ports, { showVerificationPanelForHandoff: bind('showVerificationPanelForHandoff', ports) })
+    const watching = bindRun('watchVerificationTask', ports)(17)
+    await vi.waitFor(() => expect(ports.boardApi.getTask).toHaveBeenCalledOnce())
+    bind('openFormalVerificationForCurrentBoard', ports)()
+    expect(bind('tracksRun', ports)('verification')).toBe(false)
+    state.pending.resolve(state.result)
+    await watching
+    expect(ports.adoptVerificationRunResult).not.toHaveBeenCalled()
+    expect(ports.activeWorkflowPanel.value).toMatchObject({ kind: 'verification', view: 'settings', handoff: { runId: 24 } })
     expect(ports.loadVerificationRuns).toHaveBeenCalledOnce()
   })
 
@@ -1150,6 +1492,19 @@ describe('verification completion', () => {
     expect(state.ports.navigateToRunTarget).not.toHaveBeenCalled()
     expect(state.ports.clearRunDeepLink).not.toHaveBeenCalled()
     expect(state.ports.notifyInfo).toHaveBeenCalledWith('app.verificationResultDeferredForPlayback')
+  })
+
+  it.each([false, true])('leaves an active draft in front when a verdict arrives (async=%s)', async isAsync => {
+    const state = context('SAVED', isAsync)
+    const completion = state.start()
+    await vi.waitFor(() => expect(isAsync ? state.ports.boardApi.getTask : state.ports.boardApi.verify).toHaveBeenCalledOnce())
+    state.ports.openModalDepth.value = 1
+    state.pending.resolve(state.result)
+    await completion
+    expect(state.ports.adoptVerificationRunResult).not.toHaveBeenCalled()
+    expect(state.ports.navigateToRunTarget).not.toHaveBeenCalled()
+    expect(state.ports.notifyInfo).toHaveBeenCalledWith('app.verificationResultDeferredForModal')
+    expect(state.ports.loadVerificationRuns).toHaveBeenCalledOnce()
   })
 
   it.each(['FAILED', 'OUTCOME_UNKNOWN'])(

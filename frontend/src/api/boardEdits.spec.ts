@@ -11,17 +11,33 @@ const spec: Specification = { name: 'Safety requirement', id: 'spec-7', template
 beforeEach(() => vi.clearAllMocks())
 
 describe('targeted authoring updates', () => {
+  it('rejects an unchanged rule update that claims a fresh history revision', async () => {
+    vi.mocked(http.put).mockResolvedValue({ data: { data: {
+      operation: 'unchanged', affectedItem: ruleWire, currentItems: [ruleWire], currentCount: 1,
+      canUndo: true, canRedo: false, editHistoryRevision: '10:2:0'
+    } } })
+
+    await expect(boardApi.updateRule(rule, rule)).rejects.toMatchObject({
+      code: BOARD_RESPONSE_INCOMPLETE_CODE,
+      message: expect.stringContaining('unchanged edit must not attest a history revision')
+    })
+  })
+
   for (const kind of ['rule', 'spec'] as const) {
     const expected = kind === 'rule' ? rule : spec
     const affected = kind === 'rule' ? ruleWire : spec
     const update = () => kind === 'rule' ? boardApi.updateRule(rule, { ...rule, name: 'Edited' }) : boardApi.updateSpec(spec, { ...spec, templateId: '3' })
     const returned = () => kind === 'rule' ? { ...ruleWire, ruleString: 'Edited' } : { ...spec, templateId: '3', formula: '', devices: [] }
-    const envelope = (overrides: Record<string, unknown> = {}) => ({ data: { data: { operation: 'updated', affectedItem: returned(), currentItems: [returned()], currentCount: 1, canUndo: true, canRedo: false, ...overrides } } })
+    const envelope = (overrides: Record<string, unknown> = {}) => ({ data: { data: {
+      operation: 'updated', affectedItem: returned(), currentItems: [returned()], currentCount: 1,
+      canUndo: true, canRedo: false, editHistoryRevision: '10:2:0', ...overrides
+    } } })
 
     it(`${kind}: sends the original baseline and desired edit with the same identity`, async () => {
       vi.mocked(http.put).mockResolvedValue(envelope())
       const result = await update()
       expect(result.affectedItem.id).toBe(expected.id)
+      expect(result.editHistoryRevision).toBe('10:2:0')
       const [url, body] = vi.mocked(http.put).mock.calls[0]
       expect(url).toBe(kind === 'rule' ? '/board/rules/7' : '/board/specs/spec-7')
       expect(body).toMatchObject({ expected: { id: affected.id }, desired: { id: affected.id } })
@@ -41,7 +57,10 @@ describe('targeted authoring updates', () => {
     })
 
     it(`${kind}: preserves unchanged undo/redo availability`, async () => {
-      vi.mocked(http.put).mockResolvedValue(envelope({ operation: 'unchanged', canUndo: false, canRedo: true }))
+      const { editHistoryRevision: _revision, ...unchanged } = envelope({
+        operation: 'unchanged', canUndo: false, canRedo: true
+      }).data.data
+      vi.mocked(http.put).mockResolvedValue({ data: { data: unchanged } })
       await expect(update()).resolves.toMatchObject({ operation: 'unchanged', canUndo: false, canRedo: true })
     })
 

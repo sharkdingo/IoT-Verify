@@ -161,8 +161,12 @@ public class BoardEditJournal {
     /** Complete journal revision used by the clear-history preview/confirmation fence. */
     public BoardEditHistoryState historyState(Long userId) {
         List<BoardEditJournalPo> entries = journalRepo.findByUserIdOrderBySequenceAsc(userId);
-        long undoCount = entries.stream().filter(entry -> !entry.isUndone()).count();
-        long redoCount = entries.size() - undoCount;
+        BoardUndoAvailability availability = new BoardUndoAvailability(
+                entries.stream().map(BoardEditJournalPo::getId).max(Long::compareTo).orElse(null),
+                entries.stream().filter(entry -> !entry.isUndone()).reduce((older, newer) -> newer)
+                        .map(BoardEditJournalPo::getSequence).orElse(null),
+                entries.stream().filter(BoardEditJournalPo::isUndone).findFirst()
+                        .map(BoardEditJournalPo::getSequence).orElse(null));
         List<HistoryTokenEntry> tokenEntries = entries.stream()
                 .map(entry -> new HistoryTokenEntry(
                         entry.getId(),
@@ -182,7 +186,7 @@ public class BoardEditJournal {
                     MessageDigest.getInstance("SHA-256").digest(canonical));
             return new BoardEditHistoryState(
                     entries.size(),
-                    new BoardUndoAvailability(undoCount > 0, redoCount > 0),
+                    availability,
                     impactToken);
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 is unavailable", e);

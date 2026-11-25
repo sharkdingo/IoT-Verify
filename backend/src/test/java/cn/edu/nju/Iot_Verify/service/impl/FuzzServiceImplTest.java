@@ -52,6 +52,7 @@ import cn.edu.nju.Iot_Verify.exception.ValidationException;
 import cn.edu.nju.Iot_Verify.po.FuzzFindingPo;
 import cn.edu.nju.Iot_Verify.po.FuzzTaskPo;
 import cn.edu.nju.Iot_Verify.po.UserPo;
+import cn.edu.nju.Iot_Verify.repository.ChatSessionRepository;
 import cn.edu.nju.Iot_Verify.repository.FuzzFindingRepository;
 import cn.edu.nju.Iot_Verify.repository.FuzzTaskRepository;
 import cn.edu.nju.Iot_Verify.repository.projection.FuzzTaskProgressProjection;
@@ -59,6 +60,8 @@ import cn.edu.nju.Iot_Verify.repository.UserRepository;
 import cn.edu.nju.Iot_Verify.repository.projection.CompletedRunDeletionProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.FuzzFindingSummaryProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.FuzzTaskSummaryProjection;
+import cn.edu.nju.Iot_Verify.security.UserContextHolder;
+import cn.edu.nju.Iot_Verify.service.ChatExecutionLeaseGuard;
 import cn.edu.nju.Iot_Verify.util.JsonUtils;
 import cn.edu.nju.Iot_Verify.util.mapper.BoardDataConverter;
 import cn.edu.nju.Iot_Verify.util.mapper.BoardDataConverter.ModelInputSnapshot;
@@ -79,6 +82,7 @@ import org.springframework.core.task.TaskRejectedException;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.transaction.TransactionStatus;
 import org.springframework.transaction.support.TransactionCallback;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.LocalDateTime;
@@ -126,6 +130,7 @@ class FuzzServiceImplTest {
     @Mock private FuzzTaskRepository taskRepository;
     @Mock private FuzzFindingRepository findingRepository;
     @Mock private UserRepository userRepository;
+    @Mock private ChatSessionRepository chatSessionRepository;
     @Mock private BoardDataConverter boardDataConverter;
     @Mock private FuzzEngine fuzzEngine;
     @Mock private FuzzPaperDomainPreviewer fuzzPaperDomainPreviewer;
@@ -164,7 +169,65 @@ class FuzzServiceImplTest {
                 admissionConfig,
                 threadPoolConfig,
                 transactionTemplate,
+                 new ChatExecutionLeaseGuard(chatSessionRepository),
                 new ObjectMapper());
+    }
+
+    @Test
+    void submitRejectsAssistantWithLostExecutionLeaseBeforeSaving() {
+        when(boardDataConverter.getModelInputSnapshot(7L))
+                .thenReturn(snapshot(List.of(specification("spec-1"))));
+        when(userRepository.findByIdForUpdate(7L))
+                .thenReturn(Optional.of(UserPo.builder().id(7L).build()));
+        runTransactionsInline();
+        org.mockito.Mockito.lenient().when(taskRepository.save(any(FuzzTaskPo.class)))
+                .thenAnswer(invocation -> {
+                    FuzzTaskPo task = invocation.getArgument(0);
+                    task.setId(41L);
+                    return task;
+                });
+
+        setAssistantExecutionContext();
+        TransactionSynchronizationManager.setActualTransactionActive(true);
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            assertThrows(ConflictException.class, () -> service.submit(7L, validRequest()));
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+            TransactionSynchronizationManager.setActualTransactionActive(false);
+            UserContextHolder.clear();
+        }
+
+        InOrder leaseOrder = inOrder(userRepository, chatSessionRepository);
+        leaseOrder.verify(userRepository).findByIdForUpdate(7L);
+        leaseOrder.verify(chatSessionRepository).findExecutionLeaseByIdAndUserId("session", 7L);
+        verify(taskRepository, never()).save(any(FuzzTaskPo.class));
+        verifyNoInteractions(fuzzTaskExecutor);
+    }
+
+    @Test
+    void cancelRejectsAssistantWithLostExecutionLeaseBeforeLockingTask() {
+        org.mockito.Mockito.lenient().when(taskRepository.findByIdAndUserIdForUpdate(41L, 7L))
+                .thenReturn(Optional.of(FuzzTaskPo.builder().id(41L).userId(7L)
+                        .status(FuzzTaskPo.TaskStatus.RUNNING).build()));
+        org.mockito.Mockito.lenient().when(taskRepository.cancelTaskIfStillActive(
+                eq(41L), eq(FuzzTaskPo.TaskStatus.CANCELLED), any(), anyList())).thenReturn(1);
+
+        setAssistantExecutionContext();
+        try {
+            assertThrows(ConflictException.class, () -> service.cancelTask(7L, 41L));
+        } finally {
+            UserContextHolder.clear();
+        }
+
+        verify(chatSessionRepository).findByIdAndUserIdForUpdate("session", 7L);
+        verify(taskRepository, never()).findByIdAndUserIdForUpdate(41L, 7L);
+    }
+
+    private void setAssistantExecutionContext() {
+        UserContextHolder.setUserId(7L);
+        UserContextHolder.setChatSessionId("session");
+        UserContextHolder.setChatExecutionId("execution");
     }
 
     @Test
@@ -845,7 +908,14 @@ class FuzzServiceImplTest {
         }).when(fuzzTaskExecutor).execute(any(Runnable.class));
 
         assertEquals(41L, service.submit(7L, validRequest()));
-        Thread workerThread = new Thread(submittedWorker.get(), "fuzz-cancel-test");
+        AtomicInteger interruptRequests = new AtomicInteger();
+        Thread workerThread = new Thread(submittedWorker.get(), "fuzz-cancel-test") {
+            @Override
+            public void interrupt() {
+                interruptRequests.incrementAndGet();
+                super.interrupt();
+            }
+        };
         workerThread.start();
         try {
             assertTrue(engineStarted.await(2, TimeUnit.SECONDS));
@@ -853,6 +923,8 @@ class FuzzServiceImplTest {
             TaskCancellationResultDto cancellation = service.cancelTask(7L, 41L);
 
             assertTrue(cancellation.isExecutionMayStillBeStopping());
+            assertEquals(1, interruptRequests.get(),
+                    "Only the task's Future may interrupt its pooled worker");
             assertThrows(ServiceUnavailableException.class,
                     () -> service.submit(7L, validRequest()));
         } finally {
@@ -1380,6 +1452,7 @@ class FuzzServiceImplTest {
                 .status(FuzzTaskPo.TaskStatus.COMPLETED)
                 .eligibilityJson("not valid json")
                 .build();
+        when(userRepository.findByIdForShare(7L)).thenReturn(Optional.of(new UserPo()));
         when(taskRepository.findCompletedRunForUpdate(91L, 7L, FuzzTaskPo.TaskStatus.COMPLETED))
                 .thenReturn(Optional.of(run));
         when(findingRepository.countByUserIdAndFuzzTaskId(7L, 91L)).thenReturn(4L);
@@ -1390,7 +1463,11 @@ class FuzzServiceImplTest {
         long deletedCount = service.deleteRun(7L, 91L, 4L);
 
         assertEquals(4L, deletedCount);
-        verify(taskRepository).deleteCompletedRun(91L, 7L, FuzzTaskPo.TaskStatus.COMPLETED);
+        InOrder deletion = inOrder(userRepository, taskRepository, findingRepository);
+        deletion.verify(userRepository).findByIdForShare(7L);
+        deletion.verify(taskRepository).findCompletedRunForUpdate(91L, 7L, FuzzTaskPo.TaskStatus.COMPLETED);
+        deletion.verify(findingRepository).deleteByUserIdAndFuzzTaskId(7L, 91L);
+        deletion.verify(taskRepository).deleteCompletedRun(91L, 7L, FuzzTaskPo.TaskStatus.COMPLETED);
         verify(findingRepository, never())
                 .findByUserIdAndFuzzTaskId(anyLong(), anyLong());
         verifyNoInteractions(fuzzMapper);
@@ -1400,6 +1477,7 @@ class FuzzServiceImplTest {
     void confirmedRunDeletionRejectsFindingCountChangedAfterPreview() {
         FuzzTaskPo run = FuzzTaskPo.builder()
                 .id(91L).userId(7L).status(FuzzTaskPo.TaskStatus.COMPLETED).build();
+        when(userRepository.findByIdForShare(7L)).thenReturn(Optional.of(new UserPo()));
         when(taskRepository.findCompletedRunForUpdate(91L, 7L, FuzzTaskPo.TaskStatus.COMPLETED))
                 .thenReturn(Optional.of(run));
         when(findingRepository.countByUserIdAndFuzzTaskId(7L, 91L)).thenReturn(4L);
@@ -1416,6 +1494,7 @@ class FuzzServiceImplTest {
     void confirmedRunDeletionRejectsConcurrentFindingChangeDuringDelete() {
         FuzzTaskPo run = FuzzTaskPo.builder()
                 .id(91L).userId(7L).status(FuzzTaskPo.TaskStatus.COMPLETED).build();
+        when(userRepository.findByIdForShare(7L)).thenReturn(Optional.of(new UserPo()));
         when(taskRepository.findCompletedRunForUpdate(91L, 7L, FuzzTaskPo.TaskStatus.COMPLETED))
                 .thenReturn(Optional.of(run));
         when(findingRepository.countByUserIdAndFuzzTaskId(7L, 91L)).thenReturn(4L);
@@ -1424,6 +1503,15 @@ class FuzzServiceImplTest {
         assertThrows(ConflictException.class, () -> service.deleteRun(7L, 91L, 4L));
 
         verify(taskRepository, never()).deleteCompletedRun(anyLong(), anyLong(), any());
+    }
+
+    @Test
+    void runDeletionReturnsNotFoundWithoutAccessingRunRowsWhenOwnerIsGone() {
+        when(userRepository.findByIdForShare(7L)).thenReturn(Optional.empty());
+
+        assertThrows(ResourceNotFoundException.class, () -> service.deleteRun(7L, 91L));
+
+        verifyNoInteractions(taskRepository, findingRepository);
     }
 
     @Test
@@ -1797,6 +1885,41 @@ class FuzzServiceImplTest {
         ((ObjectNode) wrongSnapshotTypeRoot.path("snapshot")).put("devices", "not-an-array");
         assertThrows(IllegalStateException.class,
                 () -> FuzzModelInputSnapshotCodec.decode(wrongSnapshotTypeRoot.toString()));
+    }
+
+    @Test
+    void workerStopReleasesLeaseWithoutPersistingUserCancellation() {
+        Runnable worker = captureSubmittedWorker();
+        ArgumentCaptor<FuzzTaskPo> admitted = ArgumentCaptor.forClass(FuzzTaskPo.class);
+        verify(taskRepository).save(admitted.capture());
+        FuzzTaskPo task = admitted.getValue();
+        when(taskRepository.updateProgressIfActive(eq(41L), anyInt(), any(TaskProgressStage.class),
+                anyString(), any(LocalDateTime.class))).thenReturn(1);
+        when(taskRepository.startTaskIfStillPending(
+                eq(41L), eq(FuzzTaskPo.TaskStatus.RUNNING), any(), anyString(), any(), any(),
+                anyString(), eq(FuzzTaskPo.TaskStatus.PENDING))).thenAnswer(invocation -> {
+                    task.setStatus(FuzzTaskPo.TaskStatus.RUNNING);
+                    return 1;
+                });
+        when(taskRepository.findById(41L)).thenReturn(Optional.of(task));
+        org.mockito.Mockito.lenient().when(taskRepository.findStatusById(41L))
+                .thenReturn(Optional.of(FuzzTaskPo.TaskStatus.RUNNING));
+        AtomicReference<Boolean> stopDetectedAfterInterrupt = new AtomicReference<>();
+        when(fuzzEngine.run(any(FuzzEngineInput.class), any(FuzzProgressListener.class),
+                any(BooleanSupplier.class), any(BooleanSupplier.class))).thenAnswer(invocation -> {
+                    service.requestLocalExecutionStop(41L);
+                    Thread.interrupted();
+                    BooleanSupplier stopRequested = invocation.getArgument(2);
+                    stopDetectedAfterInterrupt.set(stopRequested.getAsBoolean());
+                    return new FuzzEngineResult(FuzzEngineOutcome.CANCELLED, 17, 0, 0, 0,
+                            List.of(), List.of(), List.of());
+                });
+
+        worker.run();
+
+        verify(taskRepository, never()).cancelTaskIfStillActive(anyLong(), any(), any(), anyList());
+        assertEquals(Boolean.TRUE, stopDetectedAfterInterrupt.get());
+        verify(taskRepository).releaseOwnedActiveLease(eq(41L), anyString(), any(), any());
     }
 
     @Test

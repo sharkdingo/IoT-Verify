@@ -255,7 +255,8 @@ test('a synchronous simulation preserves the history replay and keeps an unsaved
       gate.release()
       const notice = page.locator('.iot-result-notification')
       if (isSaved) {
-        await expect(page.getByText(/another trajectory is being replayed/)).toBeVisible()
+        // Opening Run History exits the active observation surface before starting the replay.
+        await expect(page.getByText(`Observation saved: ${result.states.length} states`, { exact: true })).toBeVisible()
         await expect(notice).toHaveCount(0)
       } else {
         await expect(notice).toContainText('Observation result available')

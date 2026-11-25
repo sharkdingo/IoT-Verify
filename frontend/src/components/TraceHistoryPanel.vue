@@ -99,7 +99,7 @@ const emit = defineEmits<{
   (e: 'open-verification-run', id: number): void
   (e: 'delete-verification-run', run: VerificationRunSummary): void
   (e: 'download-verification-run-smv', id: number): void
-  (e: 'view-verification-trace', id: number): void
+  (e: 'view-verification-trace', id: number, runId: number): void
   (e: 'fix-verification-trace', trace: TraceSummary): void
   (e: 'view-simulation-run', id: number): void
   (e: 'delete-simulation-run', run: SimulationTraceSummary): void
@@ -735,7 +735,7 @@ const resultDate = (item: ResultItem) => formatDate(resultTimestamp(item))
                       class="board-text-warning">{{ comparisonDetail('SEMANTICS_CHANGED') }}</p>
                     <div class="history-evidence-actions">
                       <button type="button" :data-testid="`view-verification-trace-${trace.id}`" class="board-action-secondary"
-                        :disabled="actionLocked || !trace.dataAvailable" @click="emit('view-verification-trace', trace.id)">{{ t('app.replay') }}</button>
+                        :disabled="actionLocked || !trace.dataAvailable" @click="emit('view-verification-trace', trace.id, item.run.id)">{{ t('app.replay') }}</button>
                       <button type="button" :data-testid="`fix-verification-trace-${trace.id}`" class="history-text-action board-text-muted hover:board-text-strong"
                         :disabled="actionLocked || !trace.dataAvailable || rejectedVerificationRepairTraceIds?.has(trace.id)
                           || comparisonFor(item.run.modelSnapshot, 'verification') !== 'UNCHANGED'"

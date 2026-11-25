@@ -1,5 +1,6 @@
 import type { DeviceTemplate, InternalVariable, WorkingState } from '@/types/device'
 import type { DeviceNode } from '@/types/node'
+import { isConcreteDeviceState, splitAuthoredDeviceState } from './stateConditionDomain'
 
 export const TRUST_OPTIONS = ['trusted', 'untrusted'] as const
 export const PRIVACY_OPTIONS = ['public', 'private'] as const
@@ -69,6 +70,17 @@ export const getTemplateWorkingStates = (template?: DeviceTemplate | null): Work
     ? template.manifest.WorkingStates.filter(state => normalizeRuntimeValue(state?.Name))
     : []
 
+const workingStateKey = (name: string | null | undefined) => splitAuthoredDeviceState(String(name ?? '')).join(';')
+
+export const findTemplateWorkingState = (
+  template: DeviceTemplate | null | undefined,
+  stateName: string | null | undefined
+) => {
+  const key = workingStateKey(stateName)
+  const states = template?.manifest?.WorkingStates
+  return key && Array.isArray(states) ? states.find(state => workingStateKey(state?.Name) === key) : undefined
+}
+
 const getTemplateInternalVariables = (template?: DeviceTemplate | null): InternalVariable[] =>
   Array.isArray(template?.manifest?.InternalVariables)
     ? template.manifest.InternalVariables.filter(variable => normalizeRuntimeValue(variable?.Name))
@@ -99,16 +111,14 @@ export const findTemplateStateTrust = (
   template: DeviceTemplate | null | undefined,
   stateName: string
 ) => {
-  const state = getTemplateWorkingStates(template).find(item => item.Name === stateName)
-  return state?.Trust || ''
+  return findTemplateWorkingState(template, stateName)?.Trust || ''
 }
 
 export const findTemplateStatePrivacy = (
   template: DeviceTemplate | null | undefined,
   stateName: string
 ) => {
-  const state = getTemplateWorkingStates(template).find(item => item.Name === stateName)
-  return state?.Privacy || ''
+  return findTemplateWorkingState(template, stateName)?.Privacy || ''
 }
 
 export const templateVariableHasEnumValues = (variable: InternalVariable) =>
@@ -227,13 +237,11 @@ export const stateDeclaredVariableValue = (
   stateName: string | null | undefined,
   variableName: string
 ): string | null => {
-  const wanted = String(stateName ?? '').trim()
-  if (!wanted || !variableName) return null
+  if (!variableName) return null
   if ((template?.manifest?.Transitions || []).some(transition =>
     (transition?.Assignments || []).some(assignment => assignment.Attribute === variableName))) return null
   // The complete tuple names one state: matching a single segment of `heating;ready` would pick a sibling.
-  const state = (template?.manifest?.WorkingStates || [])
-    .find(candidate => String(candidate?.Name ?? '').trim() === wanted)
+  const state = findTemplateWorkingState(template, stateName)
   const dynamic = (state?.Dynamics || []).find(entry => entry?.VariableName === variableName)
   const value = dynamic?.Value
   return value !== undefined && value !== null && String(value).trim() !== '' ? String(value).trim() : null
@@ -258,10 +266,10 @@ export const getTemplateVariableDefaultValue = (
 
 export const resetDeviceRuntimeDraft = (
   draft: DeviceRuntimeDraft,
-  template?: DeviceTemplate | null
+  template?: DeviceTemplate | null,
+  configuredState?: string
 ) => {
-  const states = getTemplateWorkingStates(template)
-  draft.state = template?.manifest?.InitState || states[0]?.Name || ''
+  draft.state = configuredState ?? (template?.manifest?.InitState || getTemplateWorkingStates(template)[0]?.Name || '')
   draft.currentStateTrust = ''
   draft.currentStatePrivacy = ''
   draft.variables = {}
@@ -333,9 +341,8 @@ export const materializeDeviceRuntimeConfig = (
   options: BuildDeviceRuntimeConfigOptions = {}
 ): DeviceRuntimeConfig | undefined => {
   const draft = createDeviceRuntimeDraft()
-  resetDeviceRuntimeDraft(draft, template)
+  resetDeviceRuntimeDraft(draft, template, runtime?.state === undefined ? undefined : normalizeRuntimeValue(runtime.state))
 
-  if (runtime?.state !== undefined) draft.state = normalizeRuntimeValue(runtime.state)
   if (runtime?.currentStateTrust !== undefined) {
     draft.currentStateTrust = normalizeRuntimeValue(runtime.currentStateTrust).toLowerCase()
   }
@@ -371,11 +378,10 @@ export const validateDeviceRuntimeConfig = (
 ) => {
   if (!runtime) return ''
 
-  const states = getTemplateWorkingStates(template).map(state => state.Name)
   const hasModes = Array.isArray(template.manifest?.Modes)
     && template.manifest.Modes.length > 0
-    && states.length > 0
-  if (runtime.state && hasModes && states.length > 0 && !states.includes(runtime.state)) {
+    && getTemplateWorkingStates(template).length > 0
+  if (runtime.state && hasModes && !isConcreteDeviceState(template.manifest, runtime.state)) {
     return t('app.deviceImportInvalidState', { state: runtime.state })
   }
   if (runtime.state && !hasModes && runtime.state.toLowerCase() !== 'working') {

@@ -1,15 +1,15 @@
 import type { DeviceManifest } from '@/types/device'
 
-type Manifest = DeviceManifest | null | undefined
+type Manifest = Pick<DeviceManifest, 'Modes' | 'WorkingStates'> | null | undefined
 
 const declaredStates = (manifest: Manifest): string[] =>
   (manifest?.WorkingStates || []).map(state => state.Name?.trim()).filter(Boolean)
 
-const stateAxes = (manifest: Manifest, trim = (state: string) => state.trim()): Set<string>[] => {
+const stateAxes = (manifest: Manifest, split = (state: string) => state.split(';').map(part => part.trim())): Set<string>[] => {
   const modes = manifest?.Modes || []
   const axes = modes.map(() => new Set<string>())
   for (const state of manifest?.WorkingStates || []) {
-    const parts = (state.Name ?? '').split(';').map(trim)
+    const parts = split(state.Name ?? '')
     if (parts.length !== modes.length) continue
     parts.forEach((part, index) => {
       if (part && part !== '_') axes[index]?.add(part)
@@ -27,9 +27,12 @@ export const getModeStateValues = (manifest: Manifest, mode: string): string[] =
 export const trimAuthoredDeviceState = (value: string): string =>
   value.replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, '')
 
+export const splitAuthoredDeviceState = (value: string): string[] =>
+  value.split(';').map(trimAuthoredDeviceState)
+
 export const isConcreteDeviceState = (manifest: Manifest, value: string): boolean => {
-  const axes = stateAxes(manifest, trimAuthoredDeviceState)
-  const parts = value.split(';').map(trimAuthoredDeviceState)
+  const axes = stateAxes(manifest, splitAuthoredDeviceState)
+  const parts = splitAuthoredDeviceState(value)
   return parts.length === axes.length && parts.every((part, index) => axes[index].has(part))
 }
 

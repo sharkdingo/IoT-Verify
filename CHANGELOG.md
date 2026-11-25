@@ -15,10 +15,55 @@ history into a technical spec. The spec content itself now lives under
 
 ## [Unreleased]
 
+### 2026-11-26
+
+#### Fixed
+
+- Verification, simulation, and exploration notify the local worker only after cancellation commits.
+  A rollback leaves work running, and a worker that loses its lease cannot record a user cancellation.
+- Verification and simulation reclaim queue slots when cancellation races with dispatch. Account
+  deletion stops local assistant execution after commit without repeating database cleanup.
+- Task progress is published locally after its database write succeeds. A failed write leaves the
+  previous confirmed progress visible.
+- Assistant exploration submission and cancellation now honor the chat execution lease. Assistant
+  cancellation rechecks expiration at commit even when it already holds the chat row lock.
+
 ### 2026-11-25
 
 #### Fixed
 
+- Scene import previews state-derived value corrections for multi-mode states with whitespace
+  around individual segments. Device editing preserves valid saved state spellings and combinations,
+  and device-list import derives omitted values from the selected starting state.
+- Assistant authoring accepts device states composed by partial mode writes. Recommendation
+  reachability keeps candidates when the bounded analysis cannot rule them out. Conditions on a
+  few modes can still be checked for contradictions on a device with many modes.
+- Undo and redo act on the edit history the user saw. A change from another tab refreshes the
+  Board before the user can retry the action. Undoing or redoing an in-place rule or specification
+  edit reports the applied result.
+- Device deletion returns the impact, current scene, template library and edit history from one
+  transaction. Stale confirmation recovery refreshes the complete Board. A confirmed local delete
+  reports its own result, while other tabs still report the external removal.
+- Analysis results arriving in the background preserve the active editor or replay and its
+  focus. Closing a run panel keeps its late result in history or an available-result notification.
+  A tracked verification completing in the background leaves a newer exploration handoff open
+  and lets a requested historical result finish loading.
+- Verification, simulation, exploration, and history share one foreground panel selection. Run
+  History closes from the dock even while tasks are active. Returning to the Board canvas leaves
+  those tasks running. Unavailable Watch, Retry, and Reuse actions keep the current history or
+  result in view, and delayed cancellation errors from a previous panel give a nonblocking notice.
+  Exploration can finish submitting after a panel switch while a layout save is pending.
+- Retrying the visible Run History list acknowledges the updates it successfully loads. Task
+  cancellation feedback identifies the matching task, and tasks still running on the server remain
+  accessible after local tracking ends.
+- Closing or changing Run History cancels its pending result selection and removes that selection's
+  address. Cancel actions share their pending state across the task list and progress view. Viewing
+  an accepted exploration with frozen settings no longer requests previews for the current draft.
+- Expired verification, simulation, and exploration leases are checked and failed by task ID,
+  avoiding a deadlock with concurrent cancellation or worker updates. Local cancellation stops
+  the specific task's Future so it cannot interrupt another job on the same pooled thread.
+- History deletion and account deletion coordinate on the user row so their task and evidence
+  deletions cannot deadlock each other.
 - Equivalent API event comparisons supply the same guard to automatic condition repair.
 - Fault localization and repair require the verified run's saved Environment Pool and reject
   missing or incomplete evidence. Model generation and repair use the pool as the single source

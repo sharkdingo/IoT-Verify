@@ -10,6 +10,8 @@ import cn.edu.nju.Iot_Verify.util.ModelFingerprint;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.LocalDateTime;
 import java.util.*;
@@ -20,9 +22,9 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * <p>提取 VerificationServiceImpl 与 SimulationServiceImpl 中完全相同的：
  * <ul>
- *   <li>3 个并发容器（runningTasks / taskProgress / cancelledTasks）+ 语义操作方法</li>
+ *   <li>本地进度管理</li>
  *   <li>serializeCheckLogs / readCheckLogs / writeCheckLogs / truncateOutput</li>
- *   <li>updateTaskProgress / resolveTaskProgress / cancelTask / handleCancellation</li>
+ *   <li>updateTaskProgress / resolveTaskProgress / cancelTask</li>
  * </ul>
  *
  * <p>子类通过实现 Repository 委托钩子来适配具体实体类型。
@@ -46,9 +48,7 @@ public abstract class AbstractAsyncTaskService<T extends TaskView>
 
     // ── 并发容器（private，通过语义操作方法暴露）──────────────────────
 
-    private final ConcurrentHashMap<Long, Thread> runningTasks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Long, TaskProgressState> taskProgress = new ConcurrentHashMap<>();
-    private final Set<Long> cancelledTasks = ConcurrentHashMap.newKeySet();
 
     protected AbstractAsyncTaskService(ObjectMapper objectMapper,
                                        String taskResourceType) {
@@ -63,26 +63,6 @@ public abstract class AbstractAsyncTaskService<T extends TaskView>
     private final String taskResourceType;
 
     // ── 容器语义操作方法（protected，子类异步编排使用）──────────────────
-
-    protected void registerRunningTask(Long taskId, Thread thread) {
-        runningTasks.put(taskId, thread);
-    }
-
-    protected boolean isTaskCancelled(Long taskId) {
-        return cancelledTasks.contains(taskId);
-    }
-
-    /**
-     * 从取消标记集合中移除任务。
-     * @return true 如果任务确实在已取消集合中（即需要执行取消收尾）
-     */
-    protected boolean removeCancelledMark(Long taskId) {
-        return cancelledTasks.remove(taskId);
-    }
-
-    protected void removeRunningTask(Long taskId) {
-        runningTasks.remove(taskId);
-    }
 
     protected void removeTaskProgress(Long taskId) {
         taskProgress.remove(taskId);
@@ -108,22 +88,11 @@ public abstract class AbstractAsyncTaskService<T extends TaskView>
         return stopLocalExecution(taskId).requested;
     }
 
-    private LocalExecutionStopResult stopLocalExecution(Long taskId) {
-        LocalExecutionStopResult additionalStop = Objects.requireNonNull(
-                stopAdditionalLocalExecution(taskId),
-                "stopAdditionalLocalExecution must not return null");
-        Thread taskThread = runningTasks.get(taskId);
-        if (taskThread != null && taskThread.isAlive()) {
-            taskThread.interrupt();
-            return LocalExecutionStopResult.STOP_REQUESTED;
-        }
-        return additionalStop;
-    }
+    /** Cancels the task's own Future, which fences interruption from pooled worker reuse. */
+    protected abstract LocalExecutionStopResult stopLocalExecution(Long taskId);
 
-    /** Lets a domain service stop work that is accepted locally but has no runner thread yet. */
-    protected LocalExecutionStopResult stopAdditionalLocalExecution(Long taskId) {
-        return LocalExecutionStopResult.NONE;
-    }
+    /** The task's Future retains a stop request even if the worker cleared its interrupt flag. */
+    protected abstract boolean isLocalStopRequested(Long taskId);
 
     // ── 直接搬入的具体方法（无领域差异）─────────────────────────────
 
@@ -226,21 +195,14 @@ public abstract class AbstractAsyncTaskService<T extends TaskView>
         TaskProgressStage requiredStage = Objects.requireNonNull(stage, "stage must not be null");
         int clamped = Math.min(100, Math.max(0, progress));
         TaskProgressState next = new TaskProgressState(clamped, requiredStage);
-        TaskProgressState previous = taskProgress.put(requiredTaskId, next);
-        if (!Objects.equals(previous, next)) {
-            int updated = atomicUpdateProgress(requiredTaskId, clamped, requiredStage);
-            if (updated == 0) {
-                if (previous == null) {
-                    taskProgress.remove(requiredTaskId, next);
-                } else {
-                    taskProgress.replace(requiredTaskId, next, previous);
-                }
-                requestLocalExecutionStop(requiredTaskId);
-                log.info("{} {} lost its active worker lease while updating progress", taskResourceType,
-                        requiredTaskId);
-                return;
-            }
+        if (next.equals(taskProgress.get(requiredTaskId))) return;
+        if (atomicUpdateProgress(requiredTaskId, clamped, requiredStage) == 0) {
+            requestLocalExecutionStop(requiredTaskId);
+            log.info("{} {} lost its active worker lease while updating progress", taskResourceType, requiredTaskId);
+            return;
         }
+        // The worker publishes progress only once its fenced database write has committed.
+        taskProgress.put(requiredTaskId, next);
         log.debug("{} {} progress: {}% - {}", taskResourceType, requiredTaskId, progress, requiredStage);
     }
 
@@ -264,63 +226,52 @@ public abstract class AbstractAsyncTaskService<T extends TaskView>
         return 0;
     }
 
-    /**
-     * 取消任务。
-     *
-     * <p><b>语义保真</b>：先归属校验 → 原子 DB cancel → 返回实际取消结果和终态。
-     *
-     * <p>逻辑来源：VerificationServiceImpl:L504-529, SimulationServiceImpl:L298-321
-     */
     protected TaskCancellationResultDto cancelTask(Long userId, Long taskId) {
         // A locking read sees the committed row under MySQL REPEATABLE_READ. A snapshot read
         // could keep reporting RUNNING after a worker or another instance committed cancellation.
-        T task = findTaskByIdAndUserIdForUpdate(taskId, userId)
+        findTaskByIdAndUserIdForUpdate(taskId, userId)
                 .orElseThrow(() -> new ResourceNotFoundException(taskResourceType, taskId));
-        boolean markerWasPresent = cancelledTasks.contains(taskId);
-        cancelledTasks.add(taskId);
-        try {
-            int updated = atomicCancelTask(taskId, currentTaskTime());
-            if (updated == 0) {
-                T currentTask = findTaskByIdAndUserIdForUpdate(taskId, userId)
-                        .orElseThrow(() -> new ResourceNotFoundException(taskResourceType, taskId));
-                String currentStatus = currentTask.getTaskStatusName();
-                boolean alreadyCancelled = currentTask.isCancelledStatus();
-                LocalExecutionStopResult localStop = alreadyCancelled
-                        ? stopLocalExecution(taskId)
-                        : LocalExecutionStopResult.NONE;
-                if (!markerWasPresent
-                        && localStop != LocalExecutionStopResult.STOP_REQUESTED) {
-                    cancelledTasks.remove(taskId);
-                }
-                return TaskCancellationResultDto.builder()
-                        .taskId(taskId)
-                        .cancellationAccepted(false)
-                        .cancellationOutcome(cancellationOutcomeFor(currentStatus))
-                        .taskStatus(currentStatus)
-                        .executionMayStillBeStopping(localStop.mayStillBeStopping)
-                        .build();
-            }
-
-            LocalExecutionStopResult localStop = stopLocalExecution(taskId);
-            boolean runningExecutionMayStillBeStopping =
-                    localStop != LocalExecutionStopResult.STOPPED_BEFORE_START;
-            if (!markerWasPresent
-                    && localStop != LocalExecutionStopResult.STOP_REQUESTED) {
-                cancelledTasks.remove(taskId);
-            }
-            return TaskCancellationResultDto.builder()
-                    .taskId(taskId)
-                    .cancellationAccepted(true)
-                    .cancellationOutcome(TaskCancellationOutcome.ACCEPTED)
-                    .taskStatus("CANCELLED")
-                    .executionMayStillBeStopping(runningExecutionMayStillBeStopping)
-                    .build();
-        } catch (RuntimeException e) {
-            if (!markerWasPresent) {
-                cancelledTasks.remove(taskId);
-            }
-            throw e;
+        boolean accepted = atomicCancelTask(taskId, currentTaskTime()) > 0;
+        String status = accepted ? "CANCELLED" : findTaskByIdAndUserIdForUpdate(taskId, userId)
+                .orElseThrow(() -> new ResourceNotFoundException(taskResourceType, taskId))
+                .getTaskStatusName();
+        TaskCancellationOutcome outcome = accepted ? TaskCancellationOutcome.ACCEPTED : cancellationOutcomeFor(status);
+        boolean stop = accepted || outcome == TaskCancellationOutcome.ALREADY_CANCELLED;
+        TaskCancellationResultDto receipt = TaskCancellationResultDto.builder()
+                .taskId(taskId)
+                .cancellationAccepted(accepted)
+                .cancellationOutcome(outcome)
+                .taskStatus(status)
+                .executionMayStillBeStopping(stop)
+                .build();
+        if (stop) {
+            stopAfterCommit(receipt);
         }
+        return receipt;
+    }
+
+    private void stopAfterCommit(TaskCancellationResultDto receipt) {
+        if (!TransactionSynchronizationManager.isActualTransactionActive()) {
+            stopCommittedExecution(receipt);
+            return;
+        }
+        // The transactional entry point returns the receipt after completion. If local stopping
+        // fails, Spring logs the callback error and the committed receipt remains conservative.
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCompletion(int status) {
+                if (status == STATUS_COMMITTED) {
+                    stopCommittedExecution(receipt);
+                }
+            }
+        });
+    }
+
+    private void stopCommittedExecution(TaskCancellationResultDto receipt) {
+        LocalExecutionStopResult localStop = stopLocalExecution(receipt.getTaskId());
+        receipt.setExecutionMayStillBeStopping(receipt.isCancellationAccepted()
+                ? localStop != LocalExecutionStopResult.STOPPED_BEFORE_START
+                : localStop.mayStillBeStopping);
     }
 
     private static TaskCancellationOutcome cancellationOutcomeFor(String status) {
@@ -330,36 +281,6 @@ public abstract class AbstractAsyncTaskService<T extends TaskView>
             case "FAILED" -> TaskCancellationOutcome.ALREADY_FAILED;
             default -> TaskCancellationOutcome.NO_LONGER_CANCELLABLE;
         };
-    }
-
-    /**
-     * Records the cancellation of a task whose worker has stopped.
-     *
-     * <p>Called from every worker's {@code finally} block, ahead of the worker-state cleanup, so it
-     * must not propagate: {@link #currentTaskTime()} and the cancel update both touch the database.
-     * A failure here used to skip {@code removeRunningTask} / {@code removeTaskProgress}, leaving
-     * this thread registered against the finished task — a later cancel would then interrupt
-     * whatever unrelated task the pooled thread had moved on to.
-     *
-     * <p>Swallowing is safe only because the database row remains authoritative: the user's cancel
-     * already committed the CANCELLED status, or the lease expires and the recovery sweep resolves
-     * the row. Nothing here reports success to a caller.
-     */
-    protected void handleCancellation(T task) {
-        log.info("Handling cancellation for {}: {}", taskResourceType, task.getId());
-        try {
-            int updated = atomicCancelTask(task.getId(), currentTaskTime());
-            if (updated == 0) {
-                log.info("{} {} already finished (COMPLETED/FAILED), skipping cancel", taskResourceType, task.getId());
-            }
-        } catch (Exception e) {
-            // The row is left for the user's own cancel to settle, or failing that the expired-lease
-            // sweep — which writes FAILED, not CANCELLED. So in this residual case the user can see a
-            // run they cancelled reported as failed. That is honest about an unknown outcome; what it
-            // must never do is propagate and skip the removeRunningTask cleanup in the caller.
-            log.warn("Failed to record cancellation for {} {}; leaving the row to the recovery sweep",
-                    taskResourceType, task.getId(), e);
-        }
     }
 
     // ── 子类实现的 Repository 委托钩子 ───────────────────────────────

@@ -687,32 +687,25 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
     @Override
     public void requestUserExecutionStop(Long userId) {
         if (userId == null) return;
-        markUserExecutionsStopped(userId, true);
+        markUserExecutionsStopped(userId);
         stopLocalUserExecutions(userId, true);
     }
 
     @Override
     public void requestLocalUserExecutionStop(Long userId) {
         if (userId == null) return;
-        try {
-            markUserExecutionsStopped(userId, false);
-        } catch (RuntimeException e) {
-            log.warn("Could not mark chat sessions stopped for deleted user {}", userId, e);
-        }
+        // Account deletion has already committed removal of the sessions and their persisted state.
         stopLocalUserExecutions(userId, false);
-        runUserCleanupStep("destructive-action confirmations", () -> destructiveActionGuard.clearUser(userId));
-        runUserCleanupStep("scenario drafts", () -> scenarioDraftStore.clearUser(userId));
-        runUserCleanupStep("task continuations", () -> taskContinuationStore.clearUser(userId));
     }
 
-    private void markUserExecutionsStopped(Long userId, boolean userInitiated) {
+    private void markUserExecutionsStopped(Long userId) {
         independentTransactionTemplate().executeWithoutResult(status -> {
             List<ChatSessionPo> sessions = sessionRepo.findByUserIdForUpdate(userId);
             LocalDateTime now = databaseNow();
             for (ChatSessionPo session : sessions) {
                 if (!hasActiveExecutionLease(session, now)) continue;
                 session.setExecutionStopRequested(true);
-                session.setExecutionUserStopRequested(userInitiated);
+                session.setExecutionUserStopRequested(true);
             }
             sessionRepo.saveAllAndFlush(sessions);
         });
@@ -731,14 +724,6 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                         "transaction manager is required"));
         independent.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
         return independent;
-    }
-
-    private void runUserCleanupStep(String resource, Runnable cleanup) {
-        try {
-            cleanup.run();
-        } catch (RuntimeException e) {
-            log.warn("Could not clear {} during account cleanup", resource, e);
-        }
     }
 
     private void stopActiveRequest(String sessionId, ActiveStreamRequest request, boolean userInitiated) {

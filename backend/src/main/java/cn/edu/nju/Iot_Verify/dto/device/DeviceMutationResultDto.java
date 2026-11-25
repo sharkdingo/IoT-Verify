@@ -37,4 +37,5 @@ public class DeviceMutationResultDto {
      */
     private Boolean canUndo;
     private Boolean canRedo;
+    private String editHistoryRevision;
 }

@@ -44,7 +44,11 @@ export const isBoardUndoReasonCode = (value: unknown): value is BoardUndoReasonC
 export interface BoardUndoAvailability {
   canUndo: boolean
   canRedo: boolean
+  editHistoryRevision: string
 }
+
+export const isBoardEditHistoryRevision = (value: unknown): value is string =>
+  typeof value === 'string' && /^[0-9]{1,19}:[0-9]{1,19}:[0-9]{1,19}$/.test(value)
 
 /**
  * Outcome of an undo or redo.

@@ -14,7 +14,6 @@ import org.springframework.aop.framework.ProxyFactory;
 import java.time.LocalDateTime;
 import java.util.Optional;
 
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -94,11 +93,11 @@ class AbstractAsyncTaskServiceCancelTest {
         private final TestTask task = new TestTask(7L, 1L);
         private int cancelUpdateResult = 1;
         private boolean cancelUpdateThrows;
-        private boolean setCancelledDuringAtomicCancel;
-        private boolean markerVisibleDuringAtomicCancel;
         private int progressWriteCount;
-        private LocalExecutionStopResult additionalStop = LocalExecutionStopResult.NONE;
-        private int additionalStopRequests;
+        private boolean progressWriteThrows;
+        private int progressVisibleDuringWrite;
+        private LocalExecutionStopResult localStop = LocalExecutionStopResult.NONE;
+        private int localStopRequests;
         private boolean rowLocked;
 
         TestAsyncTaskService() {
@@ -107,10 +106,6 @@ class AbstractAsyncTaskServiceCancelTest {
 
         private TaskCancellationResultDto cancel(Long userId, Long taskId) {
             return cancelTask(userId, taskId);
-        }
-
-        private boolean hasCancelMarker(Long taskId) {
-            return isTaskCancelled(taskId);
         }
 
         private void reportProgress(int progress) {
@@ -123,21 +118,6 @@ class AbstractAsyncTaskServiceCancelTest {
 
         private String retainedDiagnosticOutput(String output) {
             return truncateOutput(output);
-        }
-
-        /** Mirrors a worker's finally block: record the cancellation, then clean up worker state. */
-        private void runWorkerFinally() {
-            handleCancellation(task);
-            removeRunningTask(task.id);
-            removeTaskProgress(task.id);
-        }
-
-        private void registerWorker(Thread thread) {
-            registerRunningTask(task.id, thread);
-        }
-
-        private boolean cancelWouldStopAWorker() {
-            return requestLocalExecutionStop(task.id);
         }
 
         @Override
@@ -158,8 +138,7 @@ class AbstractAsyncTaskServiceCancelTest {
             if (cancelUpdateThrows) {
                 throw new IllegalStateException("simulated database failure");
             }
-            markerVisibleDuringAtomicCancel = isTaskCancelled(taskId);
-            if (setCancelledDuringAtomicCancel || cancelUpdateResult == 1) {
+            if (cancelUpdateResult == 1) {
                 task.cancelled = true;
                 task.terminal = true;
             }
@@ -169,19 +148,28 @@ class AbstractAsyncTaskServiceCancelTest {
         @Override
         protected int atomicUpdateProgress(Long taskId, int progress, TaskProgressStage stage) {
             progressWriteCount++;
+            progressVisibleDuringWrite = resolveTaskProgress(taskId, task.progress, false);
+            if (progressWriteThrows) {
+                throw new IllegalStateException("simulated progress write failure");
+            }
             task.progress = progress;
             return 1;
         }
 
         @Override
-        protected LocalExecutionStopResult stopAdditionalLocalExecution(Long taskId) {
-            additionalStopRequests++;
-            return additionalStop;
+        protected LocalExecutionStopResult stopLocalExecution(Long taskId) {
+            localStopRequests++;
+            return localStop;
+        }
+
+        @Override
+        protected boolean isLocalStopRequested(Long taskId) {
+            return localStopRequests > 0 && localStop != LocalExecutionStopResult.NONE;
         }
     }
 
     @Test
-    void cancelTask_marksInMemoryAndConservativelyReportsUnknownRemoteExecution() {
+    void cancelTask_conservativelyReportsUnknownRemoteExecution() {
         TestAsyncTaskService service = new TestAsyncTaskService();
 
         TaskCancellationResultDto result = service.cancel(1L, 7L);
@@ -190,39 +178,36 @@ class AbstractAsyncTaskServiceCancelTest {
         assertEquals(TaskCancellationOutcome.ACCEPTED, result.getCancellationOutcome());
         assertEquals("CANCELLED", result.getTaskStatus());
         assertTrue(result.isExecutionMayStillBeStopping());
-        assertTrue(service.markerVisibleDuringAtomicCancel);
         assertTrue(service.rowLocked, "cancellation must read the committed status under a row lock");
-        assertFalse(service.hasCancelMarker(7L), "marker should be cleared when no local worker owns the task");
     }
 
     @Test
     void cancelTask_stopsQueuedDomainExecutionWithoutReportingARunningWorker() {
         TestAsyncTaskService service = new TestAsyncTaskService();
-        service.additionalStop =
+        service.localStop =
                 AbstractAsyncTaskService.LocalExecutionStopResult.STOPPED_BEFORE_START;
 
         TaskCancellationResultDto result = service.cancel(1L, 7L);
 
         assertTrue(result.isCancellationAccepted());
         assertFalse(result.isExecutionMayStillBeStopping());
-        assertEquals(1, service.additionalStopRequests);
-        assertFalse(service.hasCancelMarker(7L));
+        assertEquals(1, service.localStopRequests);
     }
 
     @Test
     void requestLocalExecutionStop_delegatesToDomainQueuedExecutionHook() {
         TestAsyncTaskService service = new TestAsyncTaskService();
-        service.additionalStop =
+        service.localStop =
                 AbstractAsyncTaskService.LocalExecutionStopResult.STOPPED_BEFORE_START;
 
         assertTrue(service.requestLocalExecutionStop(7L));
-        assertEquals(1, service.additionalStopRequests);
+        assertEquals(1, service.localStopRequests);
     }
 
     @Test
     void requestLocalExecutionStop_worksThroughTheCglibProxyUsedByTransactionalServices() {
         TestAsyncTaskService service = new TestAsyncTaskService();
-        service.additionalStop =
+        service.localStop =
                 AbstractAsyncTaskService.LocalExecutionStopResult.STOPPED_BEFORE_START;
         ProxyFactory proxyFactory = new ProxyFactory(service);
         proxyFactory.setProxyTargetClass(true);
@@ -230,25 +215,25 @@ class AbstractAsyncTaskServiceCancelTest {
         AsyncTaskExecutionControl proxy = (AsyncTaskExecutionControl) proxyFactory.getProxy();
 
         assertTrue(proxy.requestLocalExecutionStop(7L));
-        assertEquals(1, service.additionalStopRequests);
+        assertEquals(1, service.localStopRequests);
     }
 
     @Test
-    void cancelTask_returnsTrueWhenWorkerAlreadyCancelledTask() {
+    void cancelTask_reportsAlreadyCancelledAndChecksForLocalExecution() {
         TestAsyncTaskService service = new TestAsyncTaskService();
         service.cancelUpdateResult = 0;
-        service.setCancelledDuringAtomicCancel = true;
+        service.task.cancelled = true;
 
         TaskCancellationResultDto result = service.cancel(1L, 7L);
 
         assertFalse(result.isCancellationAccepted());
         assertEquals(TaskCancellationOutcome.ALREADY_CANCELLED, result.getCancellationOutcome());
-        assertTrue(service.markerVisibleDuringAtomicCancel);
-        assertFalse(service.hasCancelMarker(7L), "terminal cancelled task should not leave a stale marker");
+        assertEquals(1, service.localStopRequests);
+        assertFalse(result.isExecutionMayStillBeStopping());
     }
 
     @Test
-    void cancelTask_returnsFalseAndClearsMarkerWhenTaskAlreadyCompleted() {
+    void cancelTask_leavesCompletedExecutionAlone() {
         TestAsyncTaskService service = new TestAsyncTaskService();
         service.cancelUpdateResult = 0;
         service.task.terminal = true;
@@ -257,8 +242,7 @@ class AbstractAsyncTaskServiceCancelTest {
 
         assertFalse(result.isCancellationAccepted());
         assertEquals(TaskCancellationOutcome.ALREADY_COMPLETED, result.getCancellationOutcome());
-        assertTrue(service.markerVisibleDuringAtomicCancel);
-        assertFalse(service.hasCancelMarker(7L), "completed task should not leave a stale cancel marker");
+        assertEquals(0, service.localStopRequests);
     }
 
     @Test
@@ -278,6 +262,23 @@ class AbstractAsyncTaskServiceCancelTest {
 
         assertEquals(2, service.progressWriteCount);
         assertEquals(13, service.task.progress);
+    }
+
+    @Test
+    void failedProgressWriteKeepsLastCommittedValueAndCanBeRetried() {
+        TestAsyncTaskService service = new TestAsyncTaskService();
+        service.reportProgress(12);
+        service.progressWriteThrows = true;
+
+        assertThrows(IllegalStateException.class, () -> service.reportProgress(13));
+        assertEquals(12, service.progressVisibleDuringWrite);
+        assertEquals(12, service.readProgress(null, false));
+
+        service.progressWriteThrows = false;
+        service.reportProgress(13);
+
+        assertEquals(13, service.task.progress);
+        assertEquals(13, service.readProgress(null, false));
     }
 
     @Test
@@ -302,19 +303,11 @@ class AbstractAsyncTaskServiceCancelTest {
     }
 
     @Test
-    void handleCancellation_databaseFailureStillLetsTheWorkerReleaseItsRegistration() {
+    void cancelTask_propagatesDatabaseFailureWithoutStoppingLocalExecution() {
         TestAsyncTaskService service = new TestAsyncTaskService();
-        Thread worker = Thread.currentThread();
-        service.registerWorker(worker);
-        service.reportProgress(10);
         service.cancelUpdateThrows = true;
 
-        // A worker's finally block records the cancellation before releasing its own registration.
-        // If recording throws, the cleanup must still run: otherwise this thread stays registered
-        // against a finished task, and a later cancel interrupts whatever the pooled thread picked
-        // up next.
-        assertDoesNotThrow(service::runWorkerFinally);
-        assertFalse(service.cancelWouldStopAWorker(),
-                "a finished task must not still resolve to a live worker thread");
+        assertThrows(IllegalStateException.class, () -> service.cancel(1L, 7L));
+        assertEquals(0, service.localStopRequests);
     }
 }

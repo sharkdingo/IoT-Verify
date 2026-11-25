@@ -65,9 +65,8 @@ normalized to hash URLs during app startup.
 The auth store initializes from browser storage before the first route guard. The guard
 checks locally visible JWT expiry; backend authentication remains authoritative for each
 request. A board mount starts the semantic snapshot, task inbox, and saved layout reads
-concurrently. Accepting a snapshot explicitly refreshes the model fingerprints and undo
-availability once; semantic-change watchers do not duplicate an already pending fingerprint
-read for that revision.
+concurrently. Accepting a snapshot adopts its edit history and refreshes model fingerprints once.
+Semantic-change watchers do not duplicate an already pending fingerprint read for that revision.
 
 Layout restoration waits for the semantic snapshot so a narrow viewport can fit its devices,
 but does not wait for the task inbox. Task recovery can therefore finish independently of

@@ -190,7 +190,9 @@ deletion returns `{ reasonCode, currentPreview }`, where `reasonCode` is
 compare-and-set returns `{ reasonCode: "DEVICE_RUNTIME_STALE", currentDevice }` and makes
 no write. A stale public Environment Pool compare-and-set returns
 `{ reasonCode: "ENVIRONMENT_VARIABLE_STALE", variableName, currentVariable }` and also
-makes no write (`currentVariable` is `null` when the item was removed). Clients use
+makes no write (`currentVariable` is `null` when the item was removed). Undo or redo with a stale
+history revision makes no write and returns `{ reasonCode: "BOARD_EDIT_HISTORY_CHANGED", field:
+"expectedEditHistoryRevision" }`. Clients use
 structured data to refresh the exact pending decision instead of parsing the English
 message.
 

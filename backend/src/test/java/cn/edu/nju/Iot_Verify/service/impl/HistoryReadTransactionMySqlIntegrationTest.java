@@ -116,7 +116,7 @@ class HistoryReadTransactionMySqlIntegrationTest {
         });
         var target = new FuzzServiceImpl(fuzzTasks, findings, null, null, null, null,
                 new ModelFingerprint(new ObjectMapper()), mapper, null, new FuzzAdmissionConfig(),
-                new ThreadPoolConfig(), transaction, new ObjectMapper());
+                new ThreadPoolConfig(), transaction, null, new ObjectMapper());
         try {
             FuzzService service = (FuzzService) transactionalProxy(target);
             assertCallerRollsBack(transaction,
@@ -234,7 +234,7 @@ class HistoryReadTransactionMySqlIntegrationTest {
         });
         var target = new FuzzServiceImpl(fuzzTasks, findings, null, null, null, null,
                 new ModelFingerprint(new ObjectMapper()), mapper, null, new FuzzAdmissionConfig(),
-                new ThreadPoolConfig(), transaction, new ObjectMapper());
+                new ThreadPoolConfig(), transaction, null, new ObjectMapper());
         try {
             FuzzService service = (FuzzService) transactionalProxy(target);
             assertCallerRollsBack(transaction,

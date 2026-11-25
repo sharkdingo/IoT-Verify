@@ -5,20 +5,38 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.BiFunction;
-import java.util.function.LongSupplier;
 import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.LongSupplier;
 import java.util.function.Supplier;
+import java.util.function.ToIntFunction;
 
-/** Samples lease clocks only after acquiring the async task's database row lock. */
+/** Coordinates async task lease transitions under the task's database row lock. */
 final class TaskLeaseRenewal {
 
     private static final Set<String> ACTIVE_STATUSES = Set.of("PENDING", "RUNNING");
 
     private TaskLeaseRenewal() {
+    }
+
+    static int failExpiredTasks(
+            TransactionTemplate transactionTemplate,
+            List<Long> candidateIds,
+            Function<Long, Optional<?>> lockTask,
+            ToIntFunction<Long> failIfExpired) {
+        int recovered = 0;
+        // Match the lock order of cancellation and worker writes. A locking status-index scan can
+        // hold a secondary entry while waiting for a task's primary row, even for a live lease.
+        for (Long taskId : candidateIds) {
+            recovered += transactionTemplate.execute(status ->
+                    lockTask.apply(taskId).isPresent() ? failIfExpired.applyAsInt(taskId) : 0);
+        }
+        return recovered;
     }
 
     static <T extends TaskView> boolean renew(

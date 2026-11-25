@@ -140,12 +140,20 @@ a terminal state cannot be overwritten by a late worker. Success and worker-fail
 require the current worker id plus an unexpired lease; cancellation remains authoritative
 without depending on worker ownership.
 
-Cancellation first obtains the owned task's row lock, then publishes its local stop marker and
-samples the terminal database time. Both cancellation status reads use locking current reads.
-Under MySQL `REPEATABLE_READ`, an ordinary snapshot read can retain `RUNNING` after another
-transaction commits `CANCELLED`, producing a false rejection in the response. The lock also
-serializes cancellation with worker terminal writes; stopping local execution does not wait for
-the worker to finish while the request holds that lock.
+Cancellation locks the owned task row before sampling the terminal database time. Both status
+reads use locking current reads because a MySQL `REPEATABLE_READ` snapshot can stay on `RUNNING`
+after another transaction commits `CANCELLED`. Only a committed cancellation or confirmed
+`ALREADY_CANCELLED` outcome signals the local task's Future. A rolled-back transaction leaves
+local execution running. The Future retains the stop signal if the interrupt flag is cleared.
+Worker shutdown never writes `CANCELLED`. An owned active lease left by a worker that stopped is
+released for expiry recovery, which records `FAILED` if the task was abandoned.
+Assistant submissions and cancellations also require their chat execution lease at commit across
+verification, simulation, and exploration. Cancellation locks the chat row before the task row
+to match account deletion. That lock preserves ownership but cannot prevent time-based lease expiry.
+
+Async dispatch rechecks the persisted `PENDING` state after registering the local Future.
+A cancellation before enqueue skips dispatch where possible. If a cancelled Future reaches the
+executor queue during that race, the submitter purges it after enqueue to reclaim the queue slot.
 
 Accepted async verification and simulation tasks receive a renewable instance lease
 before executor dispatch. Lease timestamps come from the database clock and cover both

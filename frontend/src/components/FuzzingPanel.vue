@@ -68,6 +68,7 @@ const props = withDefaults(defineProps<{
   preflightBlocked?: boolean
   preflightMessage?: string | null
   frozenTask?: FuzzingTaskSummary | null
+  shouldRestoreFocus?: () => boolean
 }>(), {
   isSharedVariable: () => false,
   workloadReady: true,
@@ -129,6 +130,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  if (props.shouldRestoreFocus?.() === false) return
   const fallback = document.querySelector<HTMLElement>('[data-testid="open-fuzzing-panel"]')
   const target = previouslyFocused?.isConnected ? previouslyFocused : fallback
   target?.focus()

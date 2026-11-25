@@ -46,10 +46,9 @@ public final class FuzzEngine {
     /**
      * Runs the bounded search, stopping early if {@code deadlineExceeded} reports the time budget is spent.
      *
-     * <p>A deadline is deliberately <em>not</em> routed through {@code cancelled}: the caller treats a
-     * cancellation signal as a user-initiated cancel and settles the task as {@code CANCELLED}, which would
-     * report a timeout as something the user did. A spent deadline instead ends the search the same way a
-     * spent iteration budget does — {@code BUDGET_EXHAUSTED}, already contracted as "not found within this
+     * <p>{@code cancelled} signals that the worker must stop. Only the service's user cancellation
+     * transaction can mark the persisted task {@code CANCELLED}. A spent deadline ends the search
+     * the same way a spent iteration budget does — {@code BUDGET_EXHAUSTED}, already contracted as "not found within this
      * bounded search" and never as safety — and adds {@link #TIME_BUDGET_EXHAUSTED_LIMITATION} so the reason
      * is disclosed rather than indistinguishable from an ordinary exhausted budget. Findings already located
      * are kept and still reported, because a candidate counterexample does not become less real when the

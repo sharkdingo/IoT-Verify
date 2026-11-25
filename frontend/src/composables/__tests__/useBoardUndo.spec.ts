@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { defineComponent, h } from 'vue'
-import { mount } from '@vue/test-utils'
+import { enableAutoUnmount, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const boardApi = vi.hoisted(() => ({
@@ -21,13 +21,18 @@ const result = (over: Partial<BoardUndoResult> = {}): BoardUndoResult => ({
   specs: [],
   canUndo: false,
   canRedo: true,
+  editHistoryRevision: '10:0:1',
   ...over
 })
+
+const visibleHistory = { canUndo: true, canRedo: true, editHistoryRevision: '10:1:2' }
+const emptyHistory = { canUndo: false, canRedo: false, editHistoryRevision: '0:0:0' }
 
 type Harness = ReturnType<typeof useBoardUndo>
 
 const mountUndo = (options: {
   isBlocked?: () => boolean
+  seedHistory?: boolean
   applyResult?: (r: BoardUndoResult) => void
   submit?: <T>(work: () => Promise<T>) => Promise<T>
   reconcile?: () => Promise<boolean>
@@ -50,12 +55,15 @@ const mountUndo = (options: {
       return () => h('div')
     }
   }), { attachTo: document.body })
+  if (options.seedHistory) api.syncAvailability(visibleHistory)
   return { wrapper, api: api! }
 }
 
 beforeEach(() => {
-  vi.clearAllMocks()
+  vi.resetAllMocks()
 })
+
+enableAutoUnmount(afterEach)
 
 afterEach(() => {
   document.body.innerHTML = ''
@@ -71,7 +79,7 @@ describe('availability', () => {
 
   it('mirrors the availability a reversible mutation reported', () => {
     const { api, wrapper } = mountUndo()
-    api.syncAvailability({ canUndo: true, canRedo: false })
+    api.syncAvailability({ ...visibleHistory, canRedo: false })
     expect(api.canUndo.value).toBe(true)
     expect(api.canRedo.value).toBe(false)
     wrapper.unmount()
@@ -79,7 +87,7 @@ describe('availability', () => {
 
   it('ignores a mutation that does not report availability', () => {
     const { api, wrapper } = mountUndo()
-    api.syncAvailability({ canUndo: true, canRedo: true })
+    api.syncAvailability(visibleHistory)
     // A non-reversible mutation omits both; that must not clear real history.
     api.syncAvailability({})
     expect(api.canUndo.value).toBe(true)
@@ -94,10 +102,10 @@ describe('availability', () => {
       resolveAvailability = resolve
     }))
 
-    const staleRead = api.loadAvailability()
-    api.syncAvailability({ canUndo: true, canRedo: false })
+    const staleRead = api.hasHistoryChanged()
+    api.syncAvailability({ ...visibleHistory, canRedo: false })
     resolveAvailability({ canUndo: false, canRedo: false })
-    await staleRead
+    expect(await staleRead).toBe(false)
 
     expect(api.canUndo.value).toBe(true)
     expect(api.canRedo.value).toBe(false)
@@ -112,14 +120,14 @@ describe('availability', () => {
       .mockImplementationOnce(() => new Promise(resolve => { resolveFirst = resolve }))
       .mockImplementationOnce(() => new Promise(resolve => { resolveSecond = resolve }))
 
-    const first = api.loadAvailability()
-    const second = api.loadAvailability()
+    const first = api.hasHistoryChanged()
+    const second = api.hasHistoryChanged()
     resolveSecond({ canUndo: true, canRedo: false })
-    await second
-    resolveFirst({ canUndo: false, canRedo: false })
-    await first
+    expect(await second).toBe(true)
+    resolveFirst(emptyHistory)
+    expect(await first).toBe(false)
 
-    expect(api.canUndo.value).toBe(true)
+    expect(api.canUndo.value).toBe(false)
     expect(api.canRedo.value).toBe(false)
     wrapper.unmount()
   })
@@ -129,7 +137,7 @@ describe('availability', () => {
       result({ applied: false, reasonCode: 'NOTHING_TO_APPLY', canUndo: false, canRedo: false }))
     const report = vi.fn()
     const { api, wrapper } = mountUndo({ report })
-    api.syncAvailability({ canUndo: true, canRedo: true })
+    api.syncAvailability(visibleHistory)
 
     await api.undo()
 
@@ -142,15 +150,33 @@ describe('availability', () => {
 })
 
 describe('applying', () => {
+  it('submits the history revision visible when the user requested undo', async () => {
+    let release!: () => void
+    const queued = new Promise<void>(resolve => { release = resolve })
+    const { api, wrapper } = mountUndo({ submit: async work => {
+      await queued
+      return work()
+    } })
+    const observed = { canUndo: true, canRedo: false, editHistoryRevision: '12:2:0' }
+    api.syncAvailability(observed)
+    boardApi.applyBoardEditUndo.mockResolvedValueOnce(result())
+    const pending = api.undo()
+    api.syncAvailability({ ...observed, editHistoryRevision: '13:3:0' })
+    release()
+    await pending
+    expect(boardApi.applyBoardEditUndo).toHaveBeenCalledWith('undo', observed.editHistoryRevision)
+    wrapper.unmount()
+  })
+
   it('hands the authoritative collections to the caller', async () => {
     const applied = result({ rules: [{ id: '4' } as any], canUndo: true })
     boardApi.applyBoardEditUndo.mockResolvedValue(applied)
     const applyResult = vi.fn()
-    const { api, wrapper } = mountUndo({ applyResult })
+    const { api, wrapper } = mountUndo({ applyResult, seedHistory: true })
 
     await api.undo()
 
-    expect(boardApi.applyBoardEditUndo).toHaveBeenCalledWith('undo')
+    expect(boardApi.applyBoardEditUndo).toHaveBeenCalledWith('undo', visibleHistory.editHistoryRevision)
     expect(applyResult).toHaveBeenCalledWith(applied)
     expect(api.canUndo.value).toBe(true)
     wrapper.unmount()
@@ -169,7 +195,7 @@ describe('applying', () => {
 
   it('reports a version conflict distinctly from a transport failure', async () => {
     const report = vi.fn()
-    const { api, wrapper } = mountUndo({ report })
+    const { api, wrapper } = mountUndo({ report, seedHistory: true })
 
     boardApi.applyBoardEditUndo.mockRejectedValueOnce({ response: { status: 409 } })
     await api.undo()
@@ -185,16 +211,20 @@ describe('applying', () => {
     // A conflict is a rejected write, but it also says the local board may be stale. The server
     // deliberately retains the entry, so availability remains true after reconciliation.
     const report = vi.fn()
-    const reconcile = vi.fn(async () => true)
-    const { api, wrapper } = mountUndo({ report, reconcile })
-    boardApi.getBoardEditAvailability.mockResolvedValue({ canUndo: true, canRedo: false })
+    let api!: Harness
+    const reconcile = vi.fn(async () => {
+      api.syncAvailability({ ...visibleHistory, editHistoryRevision: '11:2:0', canRedo: false })
+      return true
+    })
+    const { api: harness, wrapper } = mountUndo({ report, reconcile, seedHistory: true })
+    api = harness
 
     boardApi.applyBoardEditUndo.mockRejectedValueOnce({ response: { status: 409 } })
     await api.undo()
 
     expect(reconcile).toHaveBeenCalledTimes(1)
     expect(report).toHaveBeenCalledWith('conflict', 'undo', expect.anything(), true)
-    expect(boardApi.getBoardEditAvailability).toHaveBeenCalled()
+    expect(boardApi.getBoardEditAvailability).not.toHaveBeenCalled()
     expect(api.canUndo.value).toBe(true)
     wrapper.unmount()
   })
@@ -202,8 +232,7 @@ describe('applying', () => {
   it('reconciles an unconfirmed failure before reporting it', async () => {
     const report = vi.fn()
     const reconcile = vi.fn(async () => true)
-    const { api, wrapper } = mountUndo({ report, reconcile })
-    boardApi.getBoardEditAvailability.mockResolvedValue({ canUndo: false, canRedo: true })
+    const { api, wrapper } = mountUndo({ report, reconcile, seedHistory: true })
     const failure = new Error('response contract rejected')
     boardApi.applyBoardEditUndo.mockRejectedValue(failure)
 
@@ -218,40 +247,40 @@ describe('applying', () => {
   it('ignores an availability read that a later mutation has already superseded', async () => {
     // `loadAvailability` runs outside the mutation queue, so one started before an undo could
     // otherwise land after it and restore the pre-undo availability.
-    const { api, wrapper } = mountUndo({})
+    const { api, wrapper } = mountUndo({ seedHistory: true })
     let resolveAvailability!: (value: { canUndo: boolean, canRedo: boolean }) => void
     boardApi.getBoardEditAvailability.mockImplementationOnce(() => new Promise(resolve => {
       resolveAvailability = resolve
     }))
 
-    const pending = api.loadAvailability()
+    const pending = api.hasHistoryChanged()
     boardApi.applyBoardEditUndo.mockResolvedValueOnce(result({ canUndo: false, canRedo: true }))
     await api.undo()
     expect(api.canUndo.value).toBe(false)
 
     resolveAvailability({ canUndo: true, canRedo: false })
-    await pending
+    expect(await pending).toBe(false)
 
     expect(api.canUndo.value).toBe(false)
     wrapper.unmount()
   })
 
   it('invalidates availability reads started before an unconfirmed mutation', async () => {
-    const { api, wrapper } = mountUndo({ reconcile: async () => true })
+    const { api, wrapper } = mountUndo({ reconcile: async () => true, seedHistory: true })
     let resolveStale!: (value: { canUndo: boolean, canRedo: boolean }) => void
     boardApi.getBoardEditAvailability
       .mockImplementationOnce(() => new Promise(resolve => { resolveStale = resolve }))
       .mockResolvedValueOnce({ canUndo: false, canRedo: true })
 
-    const staleRead = api.loadAvailability()
+    const staleRead = api.hasHistoryChanged()
     boardApi.applyBoardEditUndo.mockRejectedValueOnce(new Error('response lost'))
     await api.undo()
     expect(api.canRedo.value).toBe(true)
 
     resolveStale({ canUndo: true, canRedo: false })
-    await staleRead
+    expect(await staleRead).toBe(false)
 
-    expect(api.canUndo.value).toBe(false)
+    expect(api.canUndo.value).toBe(true)
     expect(api.canRedo.value).toBe(true)
     wrapper.unmount()
   })
@@ -261,7 +290,7 @@ describe('applying', () => {
     boardApi.applyBoardEditUndo.mockImplementation(() => new Promise(resolve => {
       release = () => resolve(result())
     }))
-    const { api, wrapper } = mountUndo()
+    const { api, wrapper } = mountUndo({ seedHistory: true })
 
     const first = api.undo()
     await api.undo()
@@ -281,20 +310,28 @@ describe('keyboard scope', () => {
     return event
   }
 
+  it('does not request an undo for an empty visible history', () => {
+    const { wrapper } = mountUndo()
+    expect(press(document.body, { key: 'z', ctrlKey: true }).defaultPrevented).toBe(false)
+    expect(boardApi.applyBoardEditUndo).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
   it('applies the accelerators from an ordinary board surface', async () => {
     boardApi.applyBoardEditUndo.mockResolvedValue(result())
-    const { wrapper } = mountUndo()
+    const { api, wrapper } = mountUndo({ seedHistory: true })
     const surface = document.createElement('div')
     document.body.append(surface)
 
     const undoEvent = press(surface, { key: 'z', ctrlKey: true })
     expect(undoEvent.defaultPrevented).toBe(true)
     await vi.waitFor(() =>
-      expect(boardApi.applyBoardEditUndo).toHaveBeenCalledWith('undo'))
+      expect(boardApi.applyBoardEditUndo).toHaveBeenCalledWith('undo', visibleHistory.editHistoryRevision))
+    await vi.waitFor(() => expect(api.isApplying.value).toBe(false))
 
     press(surface, { key: 'z', ctrlKey: true, shiftKey: true })
     await vi.waitFor(() =>
-      expect(boardApi.applyBoardEditUndo).toHaveBeenCalledWith('redo'))
+      expect(boardApi.applyBoardEditUndo).toHaveBeenCalledWith('redo', result().editHistoryRevision))
     wrapper.unmount()
   })
 
@@ -311,27 +348,25 @@ describe('keyboard scope', () => {
     wrapper.unmount()
   })
 
-  it('reloads availability from the server, so a cleared journal disables the buttons', async () => {
-    const { api, wrapper } = mountUndo()
-    api.syncAvailability({ canUndo: true, canRedo: true })
+  it('recognizes changed history but adopts it only with the Board snapshot', async () => {
+    const { api, wrapper } = mountUndo({ seedHistory: true })
+    boardApi.getBoardEditAvailability.mockResolvedValue(emptyHistory)
+    expect(await api.hasHistoryChanged()).toBe(true)
     expect(api.canUndo.value).toBe(true)
 
-    // Confirmed scene replacement clears the journal server-side. A wholesale board reload must
-    // re-read it, or the button keeps offering an undo that no longer exists.
-    boardApi.getBoardEditAvailability.mockResolvedValue({ canUndo: false, canRedo: false })
-    await api.loadAvailability()
-
+    api.syncAvailability(emptyHistory)
     expect(api.canUndo.value).toBe(false)
     expect(api.canRedo.value).toBe(false)
+    expect(await api.hasHistoryChanged()).toBe(false)
     wrapper.unmount()
   })
 
   it('leaves the affordance untouched when availability cannot be read', async () => {
     const { api, wrapper } = mountUndo()
-    api.syncAvailability({ canUndo: true, canRedo: false })
+    api.syncAvailability({ ...visibleHistory, canRedo: false })
 
     boardApi.getBoardEditAvailability.mockRejectedValue(new Error('offline'))
-    await api.loadAvailability()
+    await api.hasHistoryChanged()
 
     // Failing to read must not invent availability in either direction.
     expect(api.canUndo.value).toBe(true)
@@ -339,7 +374,7 @@ describe('keyboard scope', () => {
   })
 
   it('stops listening once the board unmounts', () => {
-    const { wrapper } = mountUndo()
+    const { wrapper } = mountUndo({ seedHistory: true })
     wrapper.unmount()
 
     press(document.body, { key: 'z', ctrlKey: true })
@@ -363,7 +398,7 @@ describe('keyboard scope', () => {
     }
     boardApi.applyBoardEditUndo.mockResolvedValue(result())
 
-    const { api, wrapper } = mountUndo({ submit })
+    const { api, wrapper } = mountUndo({ submit, seedHistory: true })
     const pending = api.undo()
 
     // While the queue holds the slot, nothing may have reached the server.
@@ -373,7 +408,7 @@ describe('keyboard scope', () => {
     released!()
     await pending
 
-    expect(boardApi.applyBoardEditUndo).toHaveBeenCalledWith('undo')
+    expect(boardApi.applyBoardEditUndo).toHaveBeenCalledWith('undo', visibleHistory.editHistoryRevision)
     wrapper.unmount()
   })
 
@@ -384,7 +419,7 @@ describe('keyboard scope', () => {
     const onApplied = vi.fn()
     boardApi.applyBoardEditUndo.mockResolvedValue(result())
 
-    const { api, wrapper } = mountUndo({ onApplied })
+    const { api, wrapper } = mountUndo({ onApplied, seedHistory: true })
     await api.undo()
 
     expect(onApplied).toHaveBeenCalledTimes(1)
@@ -400,6 +435,7 @@ describe('keyboard scope', () => {
 
     const { api, wrapper } = mountUndo({
       report,
+      seedHistory: true,
       isIgnorableError: error => error === abandoned
     })
     await api.undo()
@@ -416,6 +452,7 @@ describe('keyboard scope', () => {
     const { api, wrapper } = mountUndo({
       report,
       reconcile,
+      seedHistory: true,
       isIgnorableError: () => false
     })
     await api.undo()

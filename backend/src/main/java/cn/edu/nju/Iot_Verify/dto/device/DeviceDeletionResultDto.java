@@ -35,12 +35,14 @@ public class DeviceDeletionResultDto {
     private List<RuleDto> currentRules = List.of();
     @Builder.Default
     private List<SpecificationDto> currentSpecifications = List.of();
+    @Builder.Default
+    private List<DeviceTemplateDto> deviceTemplates = List.of();
     /**
      * Whether the account now has a reversible edit / a redoable one.
      *
-     * Reported with the mutation so the client's undo affordance is driven by the server journal
-     * rather than a local guess. Null for mutations that do not participate in undo.
+     * Captured with the current Board collections in both previews and committed receipts.
      */
     private Boolean canUndo;
     private Boolean canRedo;
+    private String editHistoryRevision;
 }

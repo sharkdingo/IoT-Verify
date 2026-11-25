@@ -228,13 +228,16 @@ Scenario validation applies the same conjunction checks as the standalone tools.
 with mutually exclusive triggers, a rule whose target predicates conflict with the
 command API's `StartState`, or a specification with an unsatisfiable A/IF/THEN group is
 reported in `filteredItems` and omitted from the returned draft.
+Structural checks use the declared domains of the modes named by the conditions or
+command start state. A valid combination can be absent from `WorkingStates` because
+an API or transition can update only some modes.
 
 Recommendation validation also removes a condition group or command prestate only when
 the current runtime plus declared APIs, transitions, dynamics, and natural-change rates
-prove it unreachable. The analysis deliberately over-approximates triggers and open
-environment behavior, so uncertainty keeps a candidate instead of inventing a false
-negative. Concretely, value narrowing applies only to device-local (`IsInside=true`)
-variables, which the generated model holds constant when nothing writes them. Enum comparisons
+prove it unreachable. The analysis accounts for simultaneous writes to different modes
+and over-approximates triggers and open environment behavior. An inconclusive mode
+analysis keeps the candidate eligible. Value narrowing applies only to device-local
+(`IsInside=true`) variables, which the generated model holds constant when nothing writes them. Enum comparisons
 preserve the declared case in conjunction and reachability checks. Shared values use the
 [environment update rules](../architecture/shared-value-semantics.md#7-composition-and-what-happens-when-nothing-fires).
 The recommendation precheck keeps their full declared domains because the initial pool value alone

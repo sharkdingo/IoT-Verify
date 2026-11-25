@@ -1,6 +1,7 @@
 import path from 'node:path'
 import { type APIRequestContext } from '@playwright/test'
 import { apiBaseURL, createAuthenticatedUser, expect, test, type AuthUser } from './support/auth'
+import { expectSameBoardScene } from './support/boardSnapshot'
 import { dismissHintTooltips } from './support/tooltips'
 
 test.setTimeout(120_000)
@@ -81,8 +82,16 @@ test('revises a household requirement in place and restores it through undo and 
 
   await expect(page.getByTestId('board-undo')).toBeEnabled()
   await page.getByTestId('board-undo').click()
-  await expect.poll(() => readBoard(request, auth)).toEqual(before)
+  await expect(page.getByText('Reverted the requirement.', { exact: true })).toBeVisible()
+  const undone = await readBoard(request, auth)
+  expectSameBoardScene(undone, before)
+  expect(undone.editHistory).toMatchObject({ canUndo: false, canRedo: true })
+  expect(undone.editHistory.editHistoryRevision).not.toBe(before.editHistory.editHistoryRevision)
   await expect(page.getByTestId('board-redo')).toBeEnabled()
   await page.getByTestId('board-redo').click()
-  await expect.poll(() => readBoard(request, auth)).toEqual(after)
+  await expect(page.getByText('Redone: Updated the requirement.', { exact: true })).toBeVisible()
+  const redone = await readBoard(request, auth)
+  expectSameBoardScene(redone, after)
+  expect(redone.editHistory).toMatchObject({ canUndo: true, canRedo: false })
+  expect(redone.editHistory.editHistoryRevision).not.toBe(undone.editHistory.editHistoryRevision)
 })

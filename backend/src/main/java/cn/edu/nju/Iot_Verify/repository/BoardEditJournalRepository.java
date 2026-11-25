@@ -61,8 +61,8 @@ public interface BoardEditJournalRepository extends JpaRepository<BoardEditJourn
     long countByUserIdAndUndoneTrue(Long userId);
 
     @Query("SELECT new cn.edu.nju.Iot_Verify.service.board.BoardUndoAvailability("
-            + "COUNT(CASE WHEN e.undone = false THEN 1 END) > 0, "
-            + "COUNT(CASE WHEN e.undone = true THEN 1 END) > 0) "
+            + "MAX(e.id), MAX(CASE WHEN e.undone = false THEN e.sequence END), "
+            + "MIN(CASE WHEN e.undone = true THEN e.sequence END)) "
             + "FROM BoardEditJournalPo e WHERE e.userId = :userId")
     BoardUndoAvailability findAvailabilityByUserId(@Param("userId") Long userId);
 

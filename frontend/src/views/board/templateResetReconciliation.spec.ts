@@ -49,7 +49,7 @@ it('drops a concurrently removed device and its references together after reset 
     boardAuthScopeEpoch: 1, hydratedBoardAuthScopeEpoch: 0,
     allBoardDataKeys: ['nodes', 'rules', 'specs', 'templates', 'environment'],
     boardDataLoadState: {}, reconcileDanglingBoardFocus: vi.fn(),
-    refreshCurrentBoardModelFingerprints: vi.fn(), loadBoardUndoAvailability: vi.fn(),
+    refreshCurrentBoardModelFingerprints: vi.fn(), syncBoardUndoAvailability: vi.fn(),
     replaceNodesFromServer: (value: Array<{ id: string }>) => { board.nodes.value = value },
     syncRuleDerivedEdges: vi.fn(() => {
       expect(board.nodes.value).toEqual([])
@@ -58,7 +58,8 @@ it('drops a concurrently removed device and its references together after reset 
     })
   }
   bind('adoptBoardSnapshot', 'refreshBoardSnapshot', board)({
-    nodes: [], rules: [], specifications: [], deviceTemplates: [], environmentVariables: []
+    nodes: [], rules: [], specifications: [], deviceTemplates: [], environmentVariables: [],
+    editHistory: { canUndo: false, canRedo: false, editHistoryRevision: '0:0:0' }
   })
   expect(board.syncRuleDerivedEdges).toHaveBeenCalledOnce()
   expect(board.boardDataLoadState).toEqual({ nodes: 'ready', rules: 'ready', specs: 'ready', templates: 'ready', environment: 'ready' })

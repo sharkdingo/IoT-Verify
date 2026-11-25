@@ -232,13 +232,13 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
         try {
             LocalDateTime recoveryTime = databaseNow();
             String message = "The simulation worker stopped before the task completed";
-            int recovered = simulationTaskRepository.failExpiredActiveTasks(
-                    SimulationTaskPo.TaskStatus.FAILED,
-                    recoveryTime,
-                    message,
-                    serializeCheckLogs(List.of(message)),
-                    ACTIVE_STATUSES,
-                    recoveryTime);
+            String checkLogs = serializeCheckLogs(List.of(message));
+            int recovered = TaskLeaseRenewal.failExpiredTasks(
+                    transactionTemplate,
+                    simulationTaskRepository.findExpiredActiveTaskIds(ACTIVE_STATUSES, recoveryTime),
+                    simulationTaskRepository::findByIdForUpdate,
+                    taskId -> simulationTaskRepository.failExpiredTask(taskId, SimulationTaskPo.TaskStatus.FAILED,
+                            recoveryTime, message, checkLogs, ACTIVE_STATUSES, recoveryTime));
             if (recovered > 0) {
                 log.warn("Recovered {} expired simulation task lease(s)", recovered);
             }
@@ -549,7 +549,16 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
             throw new IllegalStateException("Duplicate local simulation task execution " + requiredTaskId);
         }
         try {
+            if (simulationTaskRepository.findProgressByIdAndUserId(requiredTaskId, userId)
+                    .filter(task -> task.getStatus() == SimulationTaskPo.TaskStatus.PENDING).isEmpty()
+                    || execution.futureTask.isCancelled()) {
+                execution.requestStop();
+                return;
+            }
             simulationTaskExecutor.execute(execution.futureTask);
+            if (execution.futureTask.isCancelled()) {
+                purgeCancelledSimulationTasks();
+            }
         } catch (RuntimeException e) {
             execution.requestStop();
             throw e;
@@ -600,15 +609,9 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
 
         SimulationTaskPo task = null;
         try {
-            // Both of these must be inside the try: `updateTaskProgress` writes the in-memory map
-            // before its database write, so a database failure here would otherwise leave this
-            // thread registered as running the task. The pooled thread then picks up a different
-            // task, and a later cancel of *this* task interrupts that unrelated work.
-            registerRunningTask(taskId, Thread.currentThread());
             updateTaskProgress(taskId, 0, TaskProgressStage.STARTING);
 
-            // Check in-memory cancellation marker (fast path for same-instance cancellation).
-            if (isTaskCancelled(taskId)) {
+            if (isExecutionStopped(taskId)) {
                 return;
             }
 
@@ -653,7 +656,7 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
                     input.enablePrivacy(), input.request(),
                     input.deviceSmvMap(), input.modelSnapshot(), SmvGenerator.TempModelContext.task(taskId));
 
-            if (isTaskCancelled(taskId) || Thread.currentThread().isInterrupted()) {
+            if (isExecutionStopped(taskId)) {
                 return;
             }
 
@@ -665,24 +668,20 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
             updateTaskProgress(taskId, 90, TaskProgressStage.PERSISTING_RESULT);
             boolean completed = completeTaskAndSaveTrace(task, userId, result, requestJson, templateSnapshotsJson,
                     result.getSmvModelContent());
-            if (!completed && !isCompletionCancelled(taskId)) {
+            if (!completed && !isExecutionStopped(taskId)) {
                 failTask(task,
                         "RESULT_PERSISTENCE_FAILED: Simulation finished, but its trajectory could not be saved.",
                         result.getLogs());
             }
 
         } catch (Exception e) {
-            if (isTaskCancelled(taskId)) {
-                log.info("Async simulation cancelled for task: {}", taskId);
+            if (isExecutionStopped(taskId)) {
+                log.info("Async simulation worker stopped for task: {}", taskId);
             } else {
                 log.error("Async simulation failed for task: {}", taskId, e);
                 failTask(task, "Simulation failed: " + e.getMessage(), List.of("Simulation failed: " + e.getMessage()));
             }
         } finally {
-            if (removeCancelledMark(taskId)) {
-                if (task != null) handleCancellation(task);
-            }
-            removeRunningTask(taskId);
             removeTaskProgress(taskId);
             try {
                 simulationTaskRepository.releaseOwnedActiveLease(
@@ -874,6 +873,9 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
     @Override
     @Transactional
     public void deleteSimulation(Long userId, Long id) {
+        // Account deletion holds the exclusive user lock before deleting tasks and traces.
+        userRepository.findByIdForShare(userId)
+                .orElseThrow(() -> new ResourceNotFoundException("SimulationTrace", id));
         requireChatExecutionLease();
         SimulationTracePo po = simulationTraceRepository.findByIdAndUserId(id, userId)
                 .orElseThrow(() -> new ResourceNotFoundException("SimulationTrace", id));
@@ -1156,7 +1158,7 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
             log.info("User {} no longer exists, skipping simulation task completion/persistence", userId);
             return false;
         }
-        if (isCompletionCancelled(task.getId())) {
+        if (isExecutionStopped(task.getId())) {
             log.info("Simulation task {} was cancelled before trace persistence", task.getId());
             return false;
         }
@@ -1169,7 +1171,7 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
                 status.setRollbackOnly();
                 return false;
             }
-            if (isCompletionCancelled(task.getId())) {
+            if (isExecutionStopped(task.getId())) {
                 log.info("Simulation task {} was cancelled before trace persistence", task.getId());
                 status.setRollbackOnly();
                 return false;
@@ -1178,7 +1180,7 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
             simulationTaskRepository.findByIdForUpdate(task.getId());
             SimulationTracePo savedTrace = persistSimulationTraceForActiveUser(
                     userId, result, requestJson, templateSnapshotsJson, task.getInitiator(), smvModelContent);
-            if (isCompletionCancelled(task.getId())) {
+            if (isExecutionStopped(task.getId())) {
                 log.info("Simulation task {} was cancelled after trace persistence but before completion; rolling back trace", task.getId());
                 status.setRollbackOnly();
                 return false;
@@ -1192,8 +1194,8 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
         }));
     }
 
-    private boolean isCompletionCancelled(Long taskId) {
-        return taskId != null && (isTaskCancelled(taskId) || Thread.currentThread().isInterrupted());
+    private boolean isExecutionStopped(Long taskId) {
+        return taskId != null && (isLocalStopRequested(taskId) || Thread.currentThread().isInterrupted());
     }
 
     private void requireActiveUserForPersistence(Long userId) {
@@ -1367,9 +1369,15 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
     }
 
     @Override
-    protected LocalExecutionStopResult stopAdditionalLocalExecution(Long taskId) {
+    protected LocalExecutionStopResult stopLocalExecution(Long taskId) {
         LocalSimulationExecution execution = localExecutions.get(taskId);
         return execution == null ? LocalExecutionStopResult.NONE : execution.requestStop();
+    }
+
+    @Override
+    protected boolean isLocalStopRequested(Long taskId) {
+        LocalSimulationExecution execution = localExecutions.get(taskId);
+        return execution != null && execution.futureTask.isCancelled();
     }
 
     private enum LocalExecutionState {
@@ -1402,7 +1410,6 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
             try {
                 runSimulationTask(userId, taskId, input);
             } finally {
-                removeCancelledMark(taskId);
                 state.set(LocalExecutionState.FINISHED);
                 localExecutions.remove(taskId, this);
             }

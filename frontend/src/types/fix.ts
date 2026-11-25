@@ -180,4 +180,5 @@ export interface FixApplyResult {
   rules: RuleForm[]
   canUndo: true
   canRedo: false
+  editHistoryRevision: string
 }

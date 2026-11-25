@@ -9,9 +9,10 @@ import cn.edu.nju.Iot_Verify.dto.RequestLimits;
 import cn.edu.nju.Iot_Verify.dto.board.BoardBatchDto;
 import cn.edu.nju.Iot_Verify.dto.board.BoardEditHistoryClearPreviewDto;
 import cn.edu.nju.Iot_Verify.dto.board.BoardEditHistoryClearRequestDto;
+import cn.edu.nju.Iot_Verify.dto.board.BoardEditRequestDto;
 import cn.edu.nju.Iot_Verify.dto.board.BoardReplacementPreviewDto;
 import cn.edu.nju.Iot_Verify.dto.board.BoardUndoResultDto;
-import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
+import cn.edu.nju.Iot_Verify.dto.board.BoardWorkspaceSnapshotDto;
 import cn.edu.nju.Iot_Verify.dto.board.BoardModelFingerprintsDto;
 import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
 import cn.edu.nju.Iot_Verify.dto.board.BoardLayoutDto;
@@ -103,8 +104,8 @@ public class BoardStorageController {
     private final InteractiveAiExecutionService interactiveAiExecutionService;
 
     @GetMapping("/snapshot")
-    public Result<BoardSemanticSnapshotDto> getSnapshot(@CurrentUser Long userId) {
-        return Result.success(boardService.getSemanticSnapshot(userId));
+    public Result<BoardWorkspaceSnapshotDto> getSnapshot(@CurrentUser Long userId) {
+        return Result.success(boardService.getBoardSnapshot(userId));
     }
 
     @GetMapping("/model-fingerprints")
@@ -281,14 +282,16 @@ public class BoardStorageController {
      * authority for what is reversible, so the client sends no local history.
      */
     @PostMapping("/edits/undo")
-    public Result<BoardUndoResultDto> undoLastEdit(@CurrentUser Long userId) {
-        return Result.success(boardService.undoLastEdit(userId));
+    public Result<BoardUndoResultDto> undoLastEdit(@CurrentUser Long userId,
+                                                  @Valid @RequestBody BoardEditRequestDto request) {
+        return Result.success(boardService.applyBoardEdit(userId, true, request.expectedEditHistoryRevision()));
     }
 
     /** Re-applies the oldest undone edit. */
     @PostMapping("/edits/redo")
-    public Result<BoardUndoResultDto> redoLastUndoneEdit(@CurrentUser Long userId) {
-        return Result.success(boardService.redoLastUndoneEdit(userId));
+    public Result<BoardUndoResultDto> redoLastUndoneEdit(@CurrentUser Long userId,
+                                                        @Valid @RequestBody BoardEditRequestDto request) {
+        return Result.success(boardService.applyBoardEdit(userId, false, request.expectedEditHistoryRevision()));
     }
 
     /** Exact edit-history impact the client must present for explicit confirmation. */

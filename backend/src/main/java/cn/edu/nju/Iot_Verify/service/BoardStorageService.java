@@ -7,6 +7,7 @@ import cn.edu.nju.Iot_Verify.dto.board.BoardLayoutDto;
 import cn.edu.nju.Iot_Verify.dto.board.BoardReplacementPreviewDto;
 import cn.edu.nju.Iot_Verify.dto.board.BoardUndoResultDto;
 import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
+import cn.edu.nju.Iot_Verify.dto.board.BoardWorkspaceSnapshotDto;
 import cn.edu.nju.Iot_Verify.dto.board.CollectionMutationResultDto;
 import cn.edu.nju.Iot_Verify.dto.board.EnvironmentMutationResultDto;
 import cn.edu.nju.Iot_Verify.dto.board.EnvironmentVariableUpdateRequestDto;
@@ -31,6 +32,9 @@ public interface BoardStorageService {
      * device-template manifests, under one user/database lock and one transaction.
      */
     BoardSemanticSnapshotDto getSemanticSnapshot(Long userId);
+
+    /** Captures undo/redo availability with the same Board snapshot served to the browser. */
+    BoardWorkspaceSnapshotDto getBoardSnapshot(Long userId);
 
     List<DeviceNodeDto> getNodes(Long userId);
     DeviceMutationResultDto addNodes(Long userId, List<DeviceNodeDto> nodes,
@@ -114,6 +118,9 @@ public interface BoardStorageService {
 
     /** Re-applies the oldest undone edit. Same conflict and idempotency rules as undo. */
     BoardUndoResultDto redoLastUndoneEdit(Long userId);
+
+    /** Applies the requested direction only if the observed edit history is still current. */
+    BoardUndoResultDto applyBoardEdit(Long userId, boolean undo, String expectedEditHistoryRevision);
 
     /** Returns the exact journal impact token and count for destructive confirmation. */
     BoardEditHistoryClearPreviewDto previewBoardEditHistoryClear(Long userId);

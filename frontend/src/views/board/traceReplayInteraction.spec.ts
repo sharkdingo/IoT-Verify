@@ -39,30 +39,19 @@ describe('result-dialog counterexample replay', () => {
       simulationAnimationState: { value: { visible: false } },
       isAnyRecommendationRunning: vi.fn(() => false),
       ensureLiveBoardEditorClosedForPlayback: vi.fn(() => true),
-      hasPersistedVerificationTrace, verificationRuns: { value: [] },
-      staleDeepLink: { value: true }, navigateToRunTarget: vi.fn(), applyDeepLinkTarget: vi.fn(),
+      hasPersistedVerificationTrace,
       resetPlaybackTerminal: vi.fn(), activeFuzzingFinding: { value: {} as unknown },
       savedTraces: { value: [] as unknown[] }, closeResultDialog: vi.fn(),
       openTraceAnimationAt: vi.fn(), notifyBlocked: vi.fn(), t: (key: string) => key,
-      selectAndPlayVerificationTrace: vi.fn(), runIdForOpenTrace: vi.fn(),
-      openRunTarget: vi.fn(), openVerificationTraceFromHistory: vi.fn()
+      openRunTarget: vi.fn()
     }
-    ports.runIdForOpenTrace.mockImplementation(bind('runIdForOpenTrace', ports))
-    ports.openRunTarget.mockImplementation(bind('openRunTarget', ports))
-    ports.openVerificationTraceFromHistory.mockImplementation(bind('openVerificationTraceFromHistory', ports))
     return { ports, traces, play: bind('selectAndPlayTrace', ports) }
   }
 
-  it('opens the selected saved trace through its own run address and shared loader', async () => {
+  it('opens the selected saved trace through its own run address', () => {
     const { ports, play } = context('SAVED')
     play(1)
-    expect(ports.openVerificationTraceFromHistory).toHaveBeenCalledExactlyOnceWith(57)
-    await ports.openVerificationTraceFromHistory.mock.results[0]!.value
-
-    const target = { kind: 'verification', runId: 19, traceId: 57 }
-    expect(ports.navigateToRunTarget).toHaveBeenCalledExactlyOnceWith(target, 'push')
-    expect(ports.applyDeepLinkTarget).toHaveBeenCalledExactlyOnceWith(target)
-    expect(ports.staleDeepLink.value).toBe(false)
+    expect(ports.openRunTarget).toHaveBeenCalledExactlyOnceWith({ kind: 'verification', runId: 19, traceId: 57 })
     expect(ports.openTraceAnimationAt).not.toHaveBeenCalled()
     expect(ports.savedTraces.value).toEqual([])
   })
@@ -71,9 +60,7 @@ describe('result-dialog counterexample replay', () => {
     'keeps %s evidence immediately playable without inventing a saved address', status => {
       const { ports, traces, play } = context(status)
       play(1)
-      expect(ports.openVerificationTraceFromHistory).not.toHaveBeenCalled()
-      expect(ports.navigateToRunTarget).not.toHaveBeenCalled()
-      expect(ports.applyDeepLinkTarget).not.toHaveBeenCalled()
+      expect(ports.openRunTarget).not.toHaveBeenCalled()
       expect(ports.savedTraces.value).toEqual(traces)
       expect(ports.savedTraces.value).not.toBe(traces)
       expect(ports.closeResultDialog).toHaveBeenCalledOnce()
@@ -87,8 +74,7 @@ describe('result-dialog counterexample replay', () => {
     const { ports, play } = context('SAVED')
     ports.ensureLiveBoardEditorClosedForPlayback.mockReturnValue(false)
     play(1)
-    expect(ports.openVerificationTraceFromHistory).not.toHaveBeenCalled()
-    expect(ports.navigateToRunTarget).not.toHaveBeenCalled()
+    expect(ports.openRunTarget).not.toHaveBeenCalled()
     expect(ports.closeResultDialog).not.toHaveBeenCalled()
     expect(ports.openTraceAnimationAt).not.toHaveBeenCalled()
   })

@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { computed, effectScope, nextTick, reactive, ref, watch } from 'vue'
-import { createSourceFile, isCallExpression, isExpressionStatement, transpileModule, ScriptTarget } from 'typescript'
+import { transpileModule, ScriptTarget } from 'typescript'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createLatestBoardRequestGuard, reconcileBoardNodeSnapshot } from '../Board.vue'
 import { compareModelSnapshot } from '@/utils/modelComparison'
@@ -16,23 +16,14 @@ const snapshotEnd = board.indexOf('let boardForegroundRefreshPromise', snapshotS
 if ([start, end, snapshotStart, snapshotEnd].some(index => index < 0)) {
   throw new Error('Board fingerprint or snapshot refresh state is missing')
 }
-const setupStart = board.indexOf('<script setup')
-const setup = board.slice(board.indexOf('>', setupStart) + 1, board.indexOf('</script>', setupStart))
-const source = createSourceFile('Board.ts', setup, ScriptTarget.Latest, true)
-// Include every availability watcher so duplicate callers run alongside the snapshot reader.
-const availabilityWatches = source.statements.filter(statement => isExpressionStatement(statement)
-  && isCallExpression(statement.expression) && statement.expression.expression.getText(source) === 'watch'
-  && statement.getText(source).includes('loadBoardUndoAvailability'))
-  .map(statement => statement.getText(source)).join('\n')
 const createState = new Function('ref', 'computed', 'watch', 'nodes', 'rules', 'specifications',
   'environmentVariables', 'deviceTemplates', 'createLatestBoardRequestGuard', 'boardApi',
   'boardLifecycleDisposed', 'boardAuthScopeEpoch', 'allBoardDataKeys', 'boardDataLoadState',
   'templatesLoading', 'isCurrentBoardAuthScope', 'replaceNodesFromServer', 'reconcileDanglingBoardFocus',
-  'syncRuleDerivedEdges', 'loadBoardUndoAvailability', 'hydratedBoardAuthScopeEpoch', 'boardSnapshotError', 'errorDetails',
+  'syncRuleDerivedEdges', 'syncBoardUndoAvailability', 'hydratedBoardAuthScopeEpoch', 'boardSnapshotError', 'errorDetails',
   'isBoardDataReady',
   transpileModule(`${board.slice(start, end)}
     ${board.slice(snapshotStart, snapshotEnd)}
-    ${availabilityWatches}
     return { scope: currentBoardModelFingerprints, loading: loadingCurrentBoardModelFingerprints,
       refresh: refreshCurrentBoardModelFingerprints, invalidate: invalidateCurrentBoardModelFingerprints,
       refreshSnapshot: refreshBoardSnapshot }`, {
@@ -49,16 +40,16 @@ const fingerprintState = () => {
   const getSnapshot = vi.fn()
   const dataKeys = ['templates', 'nodes', 'environment', 'rules', 'specs']
   const loadState = reactive(Object.fromEntries(dataKeys.map(key => [key, 'loading'])))
-  const loadBoardUndoAvailability = vi.fn().mockResolvedValue(undefined)
+  const syncBoardUndoAvailability = vi.fn()
   const scope = effectScope()
   scopes.push(scope)
   const state = scope.run(() => createState(ref, computed, watch, nodes, ref([]), ref([]),
     ref([]), ref([]), createLatestBoardRequestGuard, { getModelFingerprints, getSnapshot }, false,
     0, dataKeys, loadState, ref(false), (epoch: number) => epoch === 0,
     vi.fn((loaded: typeof nodes.value) => { nodes.value = loaded }), vi.fn(), vi.fn(),
-    loadBoardUndoAvailability, 0, ref(null), errorDetails,
+    syncBoardUndoAvailability, 0, ref(null), errorDetails,
     computed(() => dataKeys.every(key => loadState[key] === 'ready'))))!
-  return { ...state, nodes, getModelFingerprints, getSnapshot, loadState, loadBoardUndoAvailability }
+  return { ...state, nodes, getModelFingerprints, getSnapshot, loadState, syncBoardUndoAvailability }
 }
 
 const models = (hex: string) => ({ verification: hex.repeat(64), simulation: hex.repeat(64), modelSemanticsVersion: 1 })
@@ -86,16 +77,17 @@ const resultStalenessState = () => {
 }
 
 describe('Board current model fingerprints', () => {
-  it('reads fingerprints and undo availability once when a snapshot changes the semantic scene', async () => {
+  it('reads fingerprints once and adopts the edit history from the same snapshot', async () => {
     const state = fingerprintState()
+    const editHistory = { canUndo: true, canRedo: false, editHistoryRevision: '31:1:0' }
     state.getSnapshot.mockResolvedValueOnce({
       deviceTemplates: [], nodes: [{ ...state.nodes.value[0], state: 'on' }],
-      environmentVariables: [], rules: [], specifications: []
+      environmentVariables: [], rules: [], specifications: [], editHistory
     })
     expect(await state.refreshSnapshot()).toBe(true)
     await nextTick()
     expect(state.getModelFingerprints).toHaveBeenCalledOnce()
-    expect(state.loadBoardUndoAvailability).toHaveBeenCalledOnce()
+    expect(state.syncBoardUndoAvailability).toHaveBeenCalledExactlyOnceWith(editHistory)
     expect(state.scope.value).toEqual(models('a'))
   })
 

@@ -32,11 +32,11 @@ const setup = (kind: 'verification' | 'simulation', mode: string, locale: string
   const ports: Record<string, any> = {
     computed: Vue.computed, t: i18n.global.t, hasModeledAttackEffect: Vue.ref(true),
     boardRunBlockedReason: Vue.ref(''), boardAttackSurface: { points: [] },
-    isVerifying: false, isSimulating: false, synchronousSimulationRunning: Vue.ref(false),
+    isVerifying: Vue.ref(false), isSimulating: false, synchronousSimulationRunning: Vue.ref(false),
     synchronousVerificationRunning: Vue.ref(false), isBoardDataReady: true, failedBoardDataKeys: [],
     traceAnimationState: Vue.ref({ visible: false }), simulationAnimationState: Vue.ref({ visible: false }),
     formalRunIssueMessage: () => '', attackBudgetMax: 2, attackSurfacePointCount: 2, attackBudgetIsCapped: false,
-    setAttackMode: vi.fn(), toggleAttackPoint: vi.fn(), runVerification: vi.fn(), runSimulation: vi.fn(),
+    setAttackMode: vi.fn(), toggleAttackPoint: vi.fn(), handleVerify: vi.fn(), runSimulation: vi.fn(),
     [`${kind}Form`]: Vue.reactive({ isAttack: true, attackMode: mode, attackBudget: 0,
       selectedAttackPointKeys: [], isAsync: false }),
     [`${kind}ReadinessIssue`]: Vue.ref(null), [`${kind}AttackConfigurationError`]: Vue.ref(message)

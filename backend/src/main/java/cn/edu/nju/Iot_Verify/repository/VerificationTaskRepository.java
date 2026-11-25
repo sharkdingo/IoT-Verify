@@ -256,22 +256,28 @@ public interface VerificationTaskRepository extends JpaRepository<VerificationTa
                                 @Param("expiredAt") LocalDateTime expiredAt,
                                 @Param("activeStatuses") List<VerificationTaskPo.TaskStatus> activeStatuses);
 
+    @Query("SELECT t.id FROM VerificationTaskPo t WHERE t.status IN (:activeStatuses) "
+         + "AND (t.leaseExpiresAt IS NULL OR t.leaseExpiresAt <= :expiredBefore) "
+         + "ORDER BY t.id")
+    List<Long> findExpiredActiveTaskIds(@Param("activeStatuses") List<VerificationTaskPo.TaskStatus> activeStatuses,
+                                        @Param("expiredBefore") LocalDateTime expiredBefore);
+
+    // Call with the task row locked by ID. Preserve the progress reached before expiry.
     @Transactional
     @Modifying(clearAutomatically = true)
-    // Progress is deliberately not overwritten — see FuzzTaskRepository.failExpiredActiveTasks: an
-    // expired lease means the work was abandoned, so a forced 100 asserts completed work.
     @Query("UPDATE VerificationTaskPo t SET t.status = :failed, t.progressStage = NULL, t.completedAt = :completedAt, "
          + "t.outcome = :outcome, t.errorMessage = :errorMessage, "
          + "t.checkLogsJson = :checkLogsJson, t.workerId = NULL, t.leaseExpiresAt = NULL "
-         + "WHERE t.status IN (:activeStatuses) "
+         + "WHERE t.id = :taskId AND t.status IN (:activeStatuses) "
          + "AND (t.leaseExpiresAt IS NULL OR t.leaseExpiresAt <= :expiredBefore)")
-    int failExpiredActiveTasks(@Param("failed") VerificationTaskPo.TaskStatus failed,
-                               @Param("completedAt") LocalDateTime completedAt,
-                               @Param("outcome") VerificationOutcome outcome,
-                               @Param("errorMessage") String errorMessage,
-                               @Param("checkLogsJson") String checkLogsJson,
-                               @Param("activeStatuses") List<VerificationTaskPo.TaskStatus> activeStatuses,
-                               @Param("expiredBefore") LocalDateTime expiredBefore);
+    int failExpiredTask(@Param("taskId") Long taskId,
+                        @Param("failed") VerificationTaskPo.TaskStatus failed,
+                        @Param("completedAt") LocalDateTime completedAt,
+                        @Param("outcome") VerificationOutcome outcome,
+                        @Param("errorMessage") String errorMessage,
+                        @Param("checkLogsJson") String checkLogsJson,
+                        @Param("activeStatuses") List<VerificationTaskPo.TaskStatus> activeStatuses,
+                        @Param("expiredBefore") LocalDateTime expiredBefore);
 
     /**
      * Atomically cancel a task only if it is still PENDING or RUNNING.
