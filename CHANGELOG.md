@@ -27,6 +27,14 @@ history into a technical spec. The spec content itself now lives under
   previous confirmed progress visible.
 - Assistant exploration submission and cancellation now honor the chat execution lease. Assistant
   cancellation rechecks expiration at commit even when it already holds the chat row lock.
+- Assistant edits notify other tabs even if the sending tab cannot reload. Queued refreshes
+  belong to the account that received them. Task and history updates preserve an open task-memory excerpt.
+- A confirmed task cancellation updates progress and the task inbox without waiting for another
+  successful read. A late response cannot reverse the confirmed cancellation or raise a conflicting
+  error. Tasks dismissed elsewhere stop being tracked without showing a run failure.
+- Deleting saved evidence in another tab or through the assistant ends the affected replay even
+  when the history list is empty or paginated. Open or loading results remove deleted replay actions.
+  Other replays and unrelated URL parameters are preserved.
 
 ### 2026-11-25
 

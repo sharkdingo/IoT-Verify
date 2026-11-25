@@ -37,6 +37,57 @@ describe('App route lifecycle', () => {
     useChatStore().setReconciliationRequired(false)
   })
 
+  it('notifies other tabs of a received assistant edit even when this Board cannot reload', async () => {
+    let finishRefresh!: (value: boolean) => void
+    const refreshRules = vi.fn(() => new Promise<boolean>(resolve => { finishRefresh = resolve }))
+    const BoardRoute = defineComponent({
+      setup(_, { expose }) {
+        expose({ refreshRules })
+        return () => h('div', 'board')
+      }
+    })
+    const ChatViewStub = defineComponent({
+      props: ['executeCommand'],
+      emits: ['stream-command-received'],
+      setup: () => () => h('div', 'conversation')
+    })
+    const router = createRouter({ history: createMemoryHistory(), routes: [
+      { path: '/board', name: 'board', component: BoardRoute }
+    ] })
+    const auth = useAuth()
+    auth.login('alice-token', { userId: 1, phone: '13800138000', username: 'alice' })
+    await router.push('/board')
+    const wrapper = mount(App, { global: { plugins: [router, i18n], stubs: { ChatView: ChatViewStub } } })
+    const store = useChatStore()
+    try {
+      store.openChat()
+      await flushPromises()
+      const chat = wrapper.getComponent(ChatViewStub)
+      const command = { type: 'REFRESH_DATA', payload: { target: 'rule_list' } } satisfies StreamCommand
+      const execute = chat.props('executeCommand') as (command: StreamCommand, source: 'stream') => Promise<boolean>
+
+      chat.vm.$emit('stream-command-received', command, 2)
+      expect(boardInvalidation.publishBoardInvalidation).not.toHaveBeenCalled()
+      chat.vm.$emit('stream-command-received', command, 1)
+      expect(boardInvalidation.publishBoardInvalidation).toHaveBeenCalledExactlyOnceWith(1, 'chat-tool', 'board')
+      expect(refreshRules).not.toHaveBeenCalled()
+
+      const refresh = execute(command, 'stream')
+      finishRefresh(false)
+      await expect(refresh).resolves.toBe(false)
+      expect(boardInvalidation.publishBoardInvalidation).toHaveBeenCalledOnce()
+
+      chat.vm.$emit('stream-command-received', {
+        type: 'REFRESH_DATA', payload: { target: 'run_history', assistantAction: 'RUN_HISTORY_UPDATED' }
+      } satisfies StreamCommand, 1)
+      expect(boardInvalidation.publishBoardInvalidation).toHaveBeenLastCalledWith(1, 'chat-tool', 'run-history')
+    } finally {
+      wrapper.unmount()
+      store.closeChat()
+      auth.logout()
+    }
+  })
+
   it('keeps a failed assistant reachable and remounts it without clearing pending reconciliation', async () => {
     const store = useChatStore()
     const shouldThrow = ref(false)

@@ -112,7 +112,8 @@ const state = () => {
     localizedErrorMessage, errorDetails,
     extractApiErrorMessage: (error: unknown, fallback: string) => localizedErrorMessage(error, fallback, 'zh-CN'),
     notifyError: vi.fn(), loadTaskInbox: vi.fn().mockResolvedValue(true),
-    reconcileOpenRunAgainstHistory: vi.fn(), historyPanelIntentEpoch: 0, pendingHistoryRunTarget: null,
+    recheckAddressedHistory: vi.fn().mockResolvedValue(true),
+    historyPanelIntentEpoch: 0, pendingHistoryRunTarget: null,
     historyDetailRequests: { invalidate: vi.fn() }, isModelPlaybackActive: ref(false),
     isAnyRecommendationRunning: () => false, isSceneReplacementInProgress: ref(false),
     closeResultSurfaces: vi.fn(), notifyBlocked: vi.fn(),
@@ -597,7 +598,7 @@ describe('Board authoritative read feedback', () => {
     })
 
   it.each(['verification', 'simulation', 'fuzzing'] as const)(
-    'a superseded %s success cannot clear unread completion or reconcile old lists', async kind => {
+    'a superseded %s success cannot clear unread completion or replace the latest failure', async kind => {
       const ports = state()
       const get = kind === 'verification' ? ports.boardApi.getVerificationRuns
         : kind === 'simulation' ? ports.simulationApi.getUserSimulations : ports.fuzzingApi.getRuns
@@ -610,7 +611,6 @@ describe('Board authoritative read feedback', () => {
       await opening
       expect(ports.unreadFuzzNotifications.value).toHaveLength(1)
       expect(ports.persistFuzzNotificationState).not.toHaveBeenCalled()
-      expect(ports.reconcileOpenRunAgainstHistory).not.toHaveBeenCalled()
       expect(ports.historyResultErrors[kind]).not.toBeNull()
       expect(ports.notifyError).not.toHaveBeenCalled()
     })
@@ -633,15 +633,11 @@ describe('Board authoritative read feedback', () => {
       expect(ports.notifyError).not.toHaveBeenCalled()
     })
 
-  it('does not reconcile open result ownership after an older history refresh loses authority', async () => {
+  it('rechecks the addressed result even if an unrelated history list fails', async () => {
     const ports = state()
-    const older = deferred()
-    ports.fuzzingApi.getRuns.mockReturnValueOnce(older.promise).mockRejectedValueOnce(failure())
-    const pending = ports.refreshRunHistory()
+    ports.fuzzingApi.getRuns.mockRejectedValueOnce(failure())
     expect(await ports.refreshRunHistory()).toBe(false)
-    older.resolve([{ id: 99 }])
-    expect(await pending).toBe(false)
-    expect(ports.reconcileOpenRunAgainstHistory).not.toHaveBeenCalled()
+    expect(ports.recheckAddressedHistory).toHaveBeenCalledOnce()
   })
 
   it('does not acknowledge a finished source batch once a newer aggregate owns the history read', async () => {
@@ -689,7 +685,7 @@ describe('Board authoritative read feedback', () => {
     expect(ports.unreadFuzzNotifications.value).toEqual([])
     expect(ports.persistFuzzNotificationState).toHaveBeenCalledOnce()
     expect(await ports.refreshRunHistory()).toBe(true)
-    expect(ports.reconcileOpenRunAgainstHistory).toHaveBeenCalledOnce()
+    expect(ports.recheckAddressedHistory).toHaveBeenCalledOnce()
   })
 
   it.each([

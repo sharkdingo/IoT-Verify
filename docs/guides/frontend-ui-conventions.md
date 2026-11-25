@@ -128,17 +128,18 @@ link stays meaningful for anyone with access to that run.
   transition that preserves the URL; `dismiss*` clears the result target it owns while playback
   is absent. Dismissing an unrelated error must preserve the replay URL. Replay teardown must also clear the URL
   so the watcher cannot reopen deleted evidence.
-  Assistant and other-tab deletions arrive through a **successful** history reload.
-  `reconcileOpenRunAgainstHistory` dispatches all three run kinds; `deletedRunSurfaces.spec.ts`
-  checks that every declared reconciler is wired. A failed or empty reload is not deletion evidence.
-  Exploration also requires `hasMore=false`, because a run absent from a partial paginated list
-  may still exist. See [exploration history](../api/fuzzing.md).
-  Read verification/exploration run ids from the dialog or replay evidence (`verificationTaskId` /
-  `fuzzTaskId`), since opening replay clears the dialog ref. Use `activePlaybackKind` to choose
-  teardown and wording: evidence refs can survive while another surface is visible.
-  Simulation uses `lastSimulationResult`, which outlives its surfaces, so it additionally checks
-  visibility. Notices distinguish a closed result panel from ended playback, and candidate exploration
-  from formal verification.
+  On a history invalidation from another tab or the assistant, check the saved record addressed
+  by the open link independently of the history lists. For a verification replay this is the
+  counterexample itself, which can be deleted separately from its run. A confirmed 404 closes
+  that result or replay, preserves unrelated URL parameters, and leaves newer navigation alone.
+  If only a counterexample was deleted, an open verification result keeps the verdict and
+  removes the deleted counterexample from its replay actions. A pending result read reloads
+  the addressed evidence so it cannot open with the deleted action.
+  A foreground exploration result opened by task completion checks its own saved run ID
+  when there is no run address in the URL.
+  Preserve replay when the only signal is an empty or paginated list or a temporary read failure.
+  Notices distinguish a closed result from ended playback and candidate exploration from formal
+  verification.
 
 ## 2. Feedback semantics
 
@@ -1644,8 +1645,12 @@ Completed tasks with unreadable results direct users to reopen history rather th
 status polling means tracking stopped, not that execution timed out. Resuming a task clears its old
 failure, and resuming exploration also clears the previous settings or recovery notice.
 An unconfirmed cancellation restores the latest known phase without replacing a newer poll response.
-A rejected cancellation with a confirmed terminal status displays that status immediately.
-The cancellation response only changes tracking for the task that received the request.
+A confirmed cancellation updates the matching inbox row and watched progress immediately.
+Older active reads cannot overwrite that receipt, including when the user starts watching while
+the cancellation request is pending. A confirmed cancellation from polling also takes precedence
+over a late cancellation transport error. A status lookup that confirms the task is gone ends
+tracking with neutral feedback. A missing saved result for a known completed task still follows
+the result-unavailable path.
 Watching a task from history opens its owning progress panel. The compact task indicator is shown
 when workflow panels are closed, so it does not repeat their task controls. Asynchronous verification
 and simulation progress panels show their submission snapshots. Simulation steps, compromise assumptions

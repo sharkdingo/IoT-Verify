@@ -209,6 +209,49 @@ test.describe('board run deep links', () => {
     expect(boardQuery(page)).not.toContain('run=')
   })
 
+  test('deleting the last saved verification in another tab closes its replay', async ({ page, request }) => {
+    const auth = await createAuthenticatedUser(request)
+    await openBoard(page, auth)
+    const runId = await seedVerificationRun(page, request, auth)
+    await page.getByTestId('close-verification-result').click()
+    await page.getByTestId('open-history-panel').click()
+    await page.getByTestId('history-layer-results').click()
+    const deleteRun = page.getByTestId(`delete-verification-run-${runId}`)
+    await expect(deleteRun).toBeVisible()
+
+    const observer = await page.context().newPage()
+    try {
+      await openBoard(observer, auth, `/#/board?review=retained&run=verification:${runId}`)
+      await expect(observer.getByTestId('verification-result-dialog')).toBeVisible({ timeout: 30_000 })
+      await observer.getByTestId('verification-trace-replay').first().click()
+      const replay = observer.getByTestId('trace-timeline')
+      await expect(replay).toBeVisible()
+      await expect.poll(() => new URLSearchParams(boardQuery(observer)).get('trace')).toMatch(/^\d+$/)
+      expect(await observer.evaluate(() => document.visibilityState)).toBe('visible')
+
+      let snapshotReads = 0
+      observer.on('request', read => {
+        if (read.method() === 'GET' && new URL(read.url()).pathname === '/api/board/snapshot') {
+          snapshotReads += 1
+        }
+      })
+      await deleteRun.click()
+      const deleteResponse = page.waitForResponse(response =>
+        response.request().method() === 'DELETE'
+          && new URL(response.url()).pathname === `/api/verify/runs/${runId}`)
+      await page.getByRole('dialog', { name: 'Delete Verification Result' })
+        .getByRole('button', { name: 'Delete', exact: true }).click()
+      expect((await deleteResponse).ok()).toBe(true)
+      await expect(deleteRun).toHaveCount(0)
+
+      await expect(replay).toBeHidden({ timeout: 15_000 })
+      await expect.poll(() => boardQuery(observer)).toBe('review=retained')
+      expect(snapshotReads).toBe(0)
+    } finally {
+      await observer.close()
+    }
+  })
+
   test('degrades malformed deep links to the plain board without inventing a result', async ({ page, request }) => {
     const auth = await createAuthenticatedUser(request)
 

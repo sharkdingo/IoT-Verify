@@ -4,6 +4,7 @@ import type { InternalAxiosRequestConfig } from 'axios';
 import { useAuth } from '../stores/auth';
 import { redirectToLogin } from '../router/loginRedirect';
 import { publishBoardInvalidation } from '@/utils/boardInvalidation';
+import { validateTaskCancellationResult } from '@/utils/runResponse';
 
 const api = axios.create({
   // Default to a relative "/api" so dev goes through the Vite proxy and prod through
@@ -74,13 +75,37 @@ export const shouldPublishBoardInvalidation = (
   return (body as { data?: { applied?: boolean } })?.data?.applied !== false
 }
 
+const runInvalidationScope = (
+  config: { url?: string; method?: string },
+  body: unknown
+): 'run-history' | 'tasks' | undefined => {
+  const result = body as { code?: unknown; data?: unknown } | null | undefined
+  if (result?.code !== 200) return
+  const method = config.method?.toLowerCase()
+  const path = (config.url || '').split('?')[0]
+  if (method === 'delete' && result.data == null) {
+    if (/^\/?(?:verify\/(?:runs|traces)|simulate\/traces|fuzz\/runs)\/[1-9]\d*$/.test(path)) return 'run-history'
+    if (/^\/?(?:verify|simulate|fuzz)\/tasks\/[1-9]\d*$/.test(path)) return 'tasks'
+  }
+  if (method !== 'post') return
+  const cancellation = /^\/?(?:verify|simulate|fuzz)\/tasks\/([1-9]\d*)\/cancel$/.exec(path)
+  if (!cancellation) return
+  try {
+    const receipt = validateTaskCancellationResult(result.data, Number(cancellation[1]), 'Task cancellation')
+    if (receipt.cancellationAccepted) return 'tasks'
+  } catch {
+    // The endpoint caller reports an invalid receipt. It has no confirmed state change to broadcast.
+  }
+}
+
 api.interceptors.response.use(
   (response) => {
+    const userId = (response.config as BoardAwareRequestConfig).boardInvalidationUserId
     if (shouldPublishBoardInvalidation(response.config, response.data)) {
-      publishBoardInvalidation(
-        (response.config as BoardAwareRequestConfig).boardInvalidationUserId,
-        'http-mutation'
-      )
+      publishBoardInvalidation(userId, 'http-mutation')
+    } else {
+      const scope = runInvalidationScope(response.config, response.data)
+      if (scope) publishBoardInvalidation(userId, 'http-mutation', scope)
     }
     return response
   },

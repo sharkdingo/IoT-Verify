@@ -313,18 +313,22 @@ Non-exhaustive:
   response cannot overwrite a newer local action. This is frontend response ordering,
   not a claim that separate ordinary REST calls form one transaction; only one batch
   replacement request is atomic as a group.
-  Every successful axios mutation of Board semantics, including portable scene import
-  through `/board/scene`, and every completed assistant Board
-  refresh publishes a same-user `BroadcastChannel` invalidation. Receiving tabs enqueue one
-  coalesced full semantic snapshot refresh through that same mutation queue; an invalidation
-  received while hidden or while another refresh is running remains pending. Visibility and
-  focus refreshes remain as the compatibility/recovery path when `BroadcastChannel` is not
+  A successful REST mutation of Board semantics, including portable scene import
+  through `/board/scene`, publishes a same-user `BroadcastChannel` invalidation.
+  A streamed assistant change publishes on receipt, even when the sending tab cannot refresh.
+  Receiving tabs enqueue one coalesced semantic snapshot refresh through the same mutation queue.
+  An invalidation received while hidden or while another refresh is running remains pending.
+  Visibility and focus refreshes remain as the recovery path when `BroadcastChannel` is not
   available. This reconciles device, template, Environment Pool, rule, and specification
   changes made in another tab without overwriting the current tab's pending mutation;
   initial mount, manual retry, and invalidation reads all use the same coordinator. A delayed
   initial response must complete before the pending invalidation fetch begins, so it cannot
   arrive after and overwrite a newer cross-tab snapshot.
-  persisted canvas/panel layout remains a separate concern. Read-only POST operations,
+  History removals and task changes use the same channel. History invalidations refresh
+  saved results and the task inbox, while confirmed REST cancellations and dismissals
+  refresh the inbox alone. Each refresh leaves the Board snapshot and its editor state in place.
+  The assistant's task-memory excerpt reacts only to semantic Board invalidations.
+  Persisted canvas/panel layout remains a separate concern. Read-only POST operations,
   including rule/specification recommendations and rule duplicate/similarity validation,
   do not publish invalidations or make another tab reload an unchanged Board.
   The UI generates an opaque stable `DeviceNode.id` independently of the user-visible

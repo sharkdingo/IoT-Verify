@@ -69,7 +69,9 @@ const invalidate = () => {
 }
 watch(() => [props.busy, props.revision], invalidate)
 watch(() => props.userId, (userId, _previous, onCleanup) => {
-  onCleanup(subscribeBoardInvalidation(userId, invalidate))
+  onCleanup(subscribeBoardInvalidation(userId, message => {
+    if (message.scope === 'board') invalidate()
+  }))
 }, { immediate: true })
 onBeforeUnmount(() => { epoch++; sourceEpoch++; request?.abort() })
 </script>

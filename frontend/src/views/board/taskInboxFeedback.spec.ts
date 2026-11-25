@@ -4,7 +4,9 @@ import ts from 'typescript'
 import { computed, ref } from 'vue'
 import { describe, expect, it, vi } from 'vitest'
 import { createPagedRequestCoordinator } from '@/utils/pagedRequestCoordinator'
+import { activeTaskProgressStage } from '@/utils/runResponse'
 import { errorDetails, localizedErrorMessage, type ApiErrorDetails } from '@/utils/userMessage'
+import { classifyTrackedFuzzRunError } from './fuzzingRecovery'
 
 const board = readFileSync(join(process.cwd(), 'src/views/Board.vue'), 'utf8')
 const setupStart = board.indexOf('<script setup')
@@ -70,6 +72,102 @@ const openingContext = () => {
 }
 
 describe('task inbox read failures', () => {
+  it('keeps a confirmed cancellation despite a late inbox cancel error and still reports unknown failures', async () => {
+    const state = context()
+    const response = deferred()
+    const ports = Object.assign(state.ports, {
+      verificationTasks: ref([{ id: 1, status: 'RUNNING' }, { id: 11, status: 'RUNNING' }]),
+      pendingTaskActionKeys: ref(new Set<string>()), watchedTaskId: () => undefined,
+      showHistoryPanel: ref(false), loadTaskInbox: state.load,
+      asyncVerificationTask: ref({ taskId: null, statusKey: 'app.taskInitializing' }),
+      boardApi: { cancelTask: vi.fn().mockReturnValueOnce(response.promise)
+        .mockRejectedValueOnce(new Error('Unconfirmed cancellation')) }
+    })
+    for (const name of ['taskActionKey', 'withTaskActionLock', 'hasCancelledTaskRow',
+      'isWatchedTaskCancelled', 'isTaskCancellationKnown']) {
+      Object.assign(ports, { [name]: bind(name, ports) })
+    }
+    const cancel = bind('cancelVerificationTaskFromInbox', ports)
+    const cancelling = cancel(1)
+    ports.fetchVerificationTasks.mockResolvedValue({
+      tasks: [{ id: 1, status: 'CANCELLED' }, { id: 11, status: 'RUNNING' }], excludedIds: []
+    })
+    expect(await state.load()).toBe(true)
+
+    response.reject(new Error('Cancel response failed'))
+    await cancelling
+    expect(ports.notifyError).not.toHaveBeenCalled()
+    expect(ports.verificationTasks.value[0]?.status).toBe('CANCELLED')
+
+    await cancel(11)
+    expect(ports.notifyError).toHaveBeenCalledExactlyOnceWith('app.failedToCancelVerificationTask')
+    expect(ports.fetchVerificationTasks).toHaveBeenCalledTimes(3)
+  })
+
+  it('keeps a confirmed cancellation visible while an unrelated inbox read fails', async () => {
+    const state = context()
+    const refresh = deferred()
+    const receipt = deferred()
+    const watching = ref({ taskId: null as number | null, statusKey: 'app.taskStatusRunning' })
+    const ports = Object.assign(state.ports, {
+      verificationTasks: ref([{ id: 1, status: 'RUNNING', progress: 35, progressStage: 'GENERATING_MODEL' }]),
+      pendingTaskActionKeys: ref(new Set<string>()), watchedTaskId: () => watching.value.taskId ?? undefined,
+      asyncVerificationTask: watching, verificationCancelRequested: ref(false),
+      activeTaskProgressStage,
+      tracksRun: () => watching.value.taskId !== null, showHistoryPanel: ref(true), activeHistoryLayer: ref('tasks'),
+      notifyInfo: vi.fn(), loadTaskInbox: state.load, taskInboxBackgroundRefreshPromise: null,
+      boardApi: { cancelTask: vi.fn().mockReturnValue(receipt.promise) }
+    })
+    for (const name of ['taskActionKey', 'withTaskActionLock', 'invalidateTaskInboxRequests',
+      'upsertVerificationTaskSummary', 'taskProgressStatusKey', 'applyTaskCancellationReceipt',
+      'hasCancelledTaskRow', 'hasVisibleCancelledTaskRow', 'notifyTaskCancellationResult']) {
+      Object.assign(ports, { [name]: bind(name, ports) })
+    }
+    ports.fetchSimulationTasks.mockReturnValue(refresh.promise)
+    const cancelling = bind('cancelVerificationTaskFromInbox', ports)(1)
+    watching.value.taskId = 1
+    ports.showHistoryPanel.value = false
+    receipt.resolve({ taskId: 1, taskStatus: 'CANCELLED', cancellationOutcome: 'ACCEPTED',
+      cancellationAccepted: true, executionMayStillBeStopping: true })
+    await vi.waitFor(() => expect(ports.fetchSimulationTasks).toHaveBeenCalledOnce())
+    const whileRefreshing = ports.verificationTasks.value[0]
+    refresh.reject(new Error('Simulation inbox failed'))
+    await cancelling
+
+    expect(whileRefreshing).toEqual({ id: 1, status: 'CANCELLED', progress: 35, progressStage: undefined })
+    expect(watching.value.statusKey).toBe('app.taskStatusCancelled')
+    expect(ports.verificationCancelRequested.value).toBe(true)
+    expect(ports.verificationTasks.value[0]).toEqual(whileRefreshing)
+    expect(ports.taskInboxError.value?.cause).toBe('Simulation inbox failed')
+    expect(ports.notifyInfo).not.toHaveBeenCalled()
+  })
+
+  it.each(['task status', 'completed result'])('distinguishes a missing %s when reconciling tracked exploration', async missing => {
+    const absent = { response: { status: 404 } }
+    const ports = {
+      trackedFuzzTaskIds: ref([7]), classifyTrackedFuzzRunError, trackFuzzTask: vi.fn(),
+      untrackFuzzTask: vi.fn(), canAttemptFuzzRunRecovery: () => true,
+      fuzzingApi: { getTask: vi.fn().mockRejectedValue(absent) },
+      loadFuzzRunSingleFlight: vi.fn().mockRejectedValue(absent), isActiveTaskStatus: () => false,
+      upsertFuzzingRunSummary: vi.fn(), markFuzzNotificationUnread: vi.fn(), notifyError: vi.fn(),
+      t: (key: string) => key
+    }
+    const reconcile = bind('reconcileTrackedFuzzTasks', ports)
+    const tasks = missing === 'task status' ? [] : [{ id: 7, status: 'COMPLETED', runId: 7 }]
+    await reconcile(tasks, [], () => true)
+
+    if (missing === 'task status') {
+      expect(ports.untrackFuzzTask).toHaveBeenCalledExactlyOnceWith(7)
+      expect(ports.loadFuzzRunSingleFlight).not.toHaveBeenCalled()
+      expect(ports.upsertFuzzingRunSummary).not.toHaveBeenCalled()
+      expect(ports.markFuzzNotificationUnread).not.toHaveBeenCalled()
+      expect(ports.notifyError).not.toHaveBeenCalled()
+    } else {
+      expect(ports.upsertFuzzingRunSummary).toHaveBeenCalledWith(expect.objectContaining({ id: 7, dataAvailable: false }))
+      expect(ports.markFuzzNotificationUnread).toHaveBeenCalledWith(expect.objectContaining({ taskId: 7, kind: 'UNAVAILABLE' }))
+    }
+  })
+
   it.each(['failure', 'before-reconcile', 'during-reconcile'] as const)(
     'does not acknowledge unread failures after a superseded foreground read settles: %s', async phase => {
       const { ports, open, refreshInBackground } = openingContext()

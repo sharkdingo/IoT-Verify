@@ -1806,7 +1806,7 @@ const formatTaskProgressStage = (
 ): string => t(taskProgressStatusKey(stage, status))
 
 const formatWatchedTaskStatus = (statusKey: string, cancelling: boolean): string =>
-  t(cancelling ? 'app.taskCancelling' : statusKey)
+  t(cancelling && statusKey !== 'app.taskStatusCancelled' ? 'app.taskCancelling' : statusKey)
 
 const buildVerificationResultFromTask = (task: VerificationTask, traces: Trace[] = []): VerificationResult => {
   const completedTask = validateCompletedVerificationTask(task)
@@ -4614,7 +4614,15 @@ const refreshBoardOnForeground = () => {
 
 const boardInvalidationBinding = createScopedBoardInvalidationBinding(
   subscribeBoardInvalidation,
-  () => {
+  message => {
+    if (message.scope === 'run-history') {
+      void refreshRunHistory()
+      return
+    }
+    if (message.scope === 'tasks') {
+      void loadTaskInbox({ showLoading: false })
+      return
+    }
     // The pending write may already return the external edit in its snapshot, leaving
     // no later refresh delta. Stop the old cohort when the external change is announced.
     if (recommendationBatch.value?.running) invalidateRecommendationsForSceneChange({ notify: true })
@@ -9704,6 +9712,13 @@ const watchedTaskId = (kind: RunPanelKind): number | undefined => {
   return ids.value[0]
 }
 
+const isWatchedTaskCancelled = (kind: RunPanelKind, taskId: number | null): boolean => {
+  if (taskId === null) return false
+  const current = kind === 'verification' ? asyncVerificationTask.value
+    : kind === 'simulation' ? asyncSimulationTask.value : asyncFuzzingTask.value
+  return current.taskId === taskId && current.statusKey === 'app.taskStatusCancelled'
+}
+
 const isWatchedTaskCancellationPending = (kind: RunPanelKind): boolean => {
   const taskId = watchedTaskId(kind)
   return taskId !== undefined && pendingTaskActionKeys.value.has(taskActionKey('cancel', kind, taskId))
@@ -9852,6 +9867,44 @@ const upsertFuzzingTaskSummary = (task: Partial<FuzzingTaskSummary> & { id?: num
     : [next, ...fuzzingTasks.value]
 }
 
+const hasCancelledTaskRow = (kind: RunPanelKind, taskId: number): boolean => {
+  const tasks = kind === 'verification' ? verificationTasks.value
+    : kind === 'simulation' ? simulationTasks.value : fuzzingTasks.value
+  return tasks.some(row => row.id === taskId && row.status === 'CANCELLED')
+}
+
+const hasVisibleCancelledTaskRow = (kind: RunPanelKind, taskId: number): boolean =>
+  showHistoryPanel.value && activeHistoryLayer.value === 'tasks' && hasCancelledTaskRow(kind, taskId)
+
+const isTaskCancellationKnown = (kind: RunPanelKind, taskId: number): boolean =>
+  hasCancelledTaskRow(kind, taskId) || isWatchedTaskCancelled(kind, taskId)
+
+const notifyObservedTaskCancellation = (kind: RunPanelKind, taskId: number | null, confirmedLocally: boolean) => {
+  if (confirmedLocally || (taskId !== null && hasVisibleCancelledTaskRow(kind, taskId))) return
+  notifyInfo(t(kind === 'verification' ? 'app.verificationCancelled'
+    : kind === 'simulation' ? 'app.simulationCancelled' : 'app.fuzzSearchCancelled'))
+}
+
+const applyTaskCancellationReceipt = (kind: RunPanelKind, result: TaskCancellationResult) => {
+  const cancelled = result.taskStatus === 'CANCELLED'
+  if (watchedTaskId(kind) === result.taskId) {
+    const current = kind === 'verification' ? asyncVerificationTask.value
+      : kind === 'simulation' ? asyncSimulationTask.value : asyncFuzzingTask.value
+    const requested = kind === 'verification' ? verificationCancelRequested
+      : kind === 'simulation' ? simulationCancelRequested : fuzzingCancelRequested
+    current.statusKey = taskProgressStatusKey(undefined, result.taskStatus)
+    requested.value = cancelled
+  }
+  if (!cancelled) return
+  const tasks = kind === 'verification' ? verificationTasks.value
+    : kind === 'simulation' ? simulationTasks.value : fuzzingTasks.value
+  if (!tasks.some(task => task.id === result.taskId)) return
+  const update = { id: result.taskId, status: 'CANCELLED' as const, progressStage: undefined }
+  if (kind === 'verification') upsertVerificationTaskSummary(update)
+  else if (kind === 'simulation') upsertSimulationTaskSummary(update)
+  else upsertFuzzingTaskSummary(update)
+}
+
 type TaskInboxBatch<T> = {
   tasks: T[]
   excludedIds: number[]
@@ -9938,6 +9991,10 @@ const reconcileTrackedFuzzTasks = async (
       })
     } catch (error: any) {
       if (!isCurrent()) return
+      if (!resolvedTask && error?.response?.status === 404) {
+        untrackFuzzTask(taskId)
+        return
+      }
       if (classifyTrackedFuzzRunError(error) === 'RETRY') {
         scheduleFuzzRunRecovery(taskId)
         return
@@ -10183,20 +10240,9 @@ const loadHistoryResults = async (): Promise<boolean> => {
 const refreshRunHistory = async (): Promise<boolean> => {
   const results = await Promise.all([
     loadTaskInbox({ showLoading: false }),
-    loadHistoryResults()
+    loadHistoryResults(),
+    recheckAddressedHistory()
   ])
-  /*
-   * An authoritative history reload can reveal that the run on screen is gone, and the open surface has to
-   * follow. Two paths reach this without going through `deleteVerificationRun`:
-   *
-   *  - the assistant's `DeleteVerificationRunTool`, which emits `REFRESH_DATA run_history` — the list
-   *    reloaded and the dialog kept rendering the deleted run
-   *  - another tab deleting the run, whose invalidation lands here
-   *
-   * Reconciling *after* a successful load, and only then: a failed reload leaves the lists as they were,
-   * and treating that as "the run is gone" would close a surface over a transport error.
-   */
-  if (results.every(Boolean)) reconcileOpenRunAgainstHistory()
   return results.every(Boolean)
 }
 
@@ -10426,9 +10472,11 @@ const watchVerificationTask = async (taskId: number) => {
     await pollAsyncVerification(taskId)
   } catch (error: any) {
     if (ownsRun() && !isPollingAbortedError(error)) {
-      if (isAsyncTaskCancelledError(error)) {
+      if (error?.code === 'TASK_STATUS_GONE') {
+        notifyInfo(t('app.taskNoLongerAvailable'))
+      } else if (isAsyncTaskCancelledError(error)) {
         verificationError.value = null
-        if (!verificationCancelRequested.value) notifyInfo(t('app.verificationCancelled'))
+        notifyObservedTaskCancellation('verification', taskId, verificationCancelRequested.value)
       } else {
         presentRunFailure('verification', 'app.verificationFailed', error, verificationPanelTracksRun.value)
       }
@@ -10481,9 +10529,11 @@ const watchSimulationTask = async (taskId: number) => {
     deliverSimulationRunResult(result, watchSubmissionSceneChanges)
   } catch (error: any) {
     if (ownsRun() && !isPollingAbortedError(error)) {
-      if (isAsyncTaskCancelledError(error)) {
+      if (error?.code === 'TASK_STATUS_GONE') {
+        notifyInfo(t('app.taskNoLongerAvailable'))
+      } else if (isAsyncTaskCancelledError(error)) {
         simulationError.value = null
-        if (!simulationCancelRequested.value) notifyInfo(t('app.simulationCancelled'))
+        notifyObservedTaskCancellation('simulation', taskId, simulationCancelRequested.value)
       } else {
         presentRunFailure('simulation', 'app.simulationFailed', error, simulationPanelTracksRun.value)
       }
@@ -10595,10 +10645,12 @@ const watchFuzzingTask = async (taskId: number) => {
     if (ownsRun()) deliverCompletedFuzzingRun(taskId, run)
   } catch (error: any) {
     if (ownsRun() && !isPollingAbortedError(error)) {
-      if (isAsyncTaskCancelledError(error)) {
+      if (error?.code === 'TASK_STATUS_GONE') {
+        notifyInfo(t('app.taskNoLongerAvailable'))
+      } else if (isAsyncTaskCancelledError(error)) {
         untrackFuzzTask(taskId)
         fuzzingError.value = null
-        if (!fuzzingCancelRequested.value) notifyInfo(t('app.fuzzSearchCancelled'))
+        notifyObservedTaskCancellation('fuzzing', taskId, fuzzingCancelRequested.value)
       } else if (isFuzzTaskRecoveryPendingError(error)) {
         fuzzingError.value = null
         fuzzingSettingsNotice.value = { key: 'app.fuzzResultRecoveryPending' }
@@ -10648,10 +10700,11 @@ const cancelVerificationTaskFromInbox = (taskId: number) => withTaskActionLock(
       } else {
         const result = await boardApi.cancelTask(taskId)
         if (boardLifecycleDisposed) return
+        applyTaskCancellationReceipt('verification', result)
         notifyTaskCancellationResult('verification', result)
       }
     } catch (error) {
-      if (boardLifecycleDisposed) return
+      if (boardLifecycleDisposed || isTaskCancellationKnown('verification', taskId)) return
       console.error('Failed to cancel verification task from inbox:', error)
       notifyError(t('app.failedToCancelVerificationTask'))
     } finally {
@@ -10671,10 +10724,11 @@ const cancelSimulationTaskFromInbox = (taskId: number) => withTaskActionLock(
       } else {
         const result = await simulationApi.cancelTask(taskId)
         if (boardLifecycleDisposed) return
+        applyTaskCancellationReceipt('simulation', result)
         notifyTaskCancellationResult('simulation', result)
       }
     } catch (error) {
-      if (boardLifecycleDisposed) return
+      if (boardLifecycleDisposed || isTaskCancellationKnown('simulation', taskId)) return
       console.error('Failed to cancel simulation task from inbox:', error)
       notifyError(t('app.failedToCancelSimulationTask'))
     } finally {
@@ -10694,10 +10748,11 @@ const cancelFuzzingTaskFromInbox = (taskId: number) => withTaskActionLock(
       } else {
         const result = await fuzzingApi.cancelTask(taskId)
         if (boardLifecycleDisposed) return
+        applyTaskCancellationReceipt('fuzzing', result)
         notifyTaskCancellationResult('fuzzing', result)
       }
     } catch (error) {
-      if (boardLifecycleDisposed) return
+      if (boardLifecycleDisposed || isTaskCancellationKnown('fuzzing', taskId)) return
       console.error('Failed to cancel fuzzing task from inbox:', error)
       notifyError(t('app.failedToCancelFuzzingTask'))
     } finally {
@@ -10983,11 +11038,6 @@ const deleteSimulationRun = async (run: SimulationTraceSummary) => {
     )) return
     await simulationApi.deleteSimulation(traceId)
     if (boardLifecycleDisposed) return
-    // No surface teardown here, unlike `deleteVerificationRun`: reaching this line means the history panel
-    // is open, and the history panel button is disabled while `isModelPlaybackActive`, so the run
-    // being deleted cannot be the one on screen. The reachable paths — the assistant's
-    // `DeleteSimulationTraceTool` and another tab — arrive as a history reload and are handled by
-    // `reconcileOpenSimulationRunAgainstHistory`.
     simulationHistoryRequests.invalidate()
     unavailableSimulationTraceIds.delete(traceId)
     simulationRuns.value = simulationRuns.value.filter(t => t.id !== traceId)
@@ -11383,13 +11433,8 @@ const notifyTaskCancellationResult = (
     ? 'app.verificationTaskName'
     : kind === 'fuzzing' ? 'app.fuzzTaskName' : 'app.simulationTaskName')
   const task = `${taskLabel} #${result.taskId}`
-  const statusVisible = () => {
-    if (tracksRun(kind) && watchedTaskId(kind) === result.taskId) return true
-    if (!showHistoryPanel.value || activeHistoryLayer.value !== 'tasks') return false
-    const tasks = kind === 'verification' ? verificationTasks.value
-      : kind === 'simulation' ? simulationTasks.value : fuzzingTasks.value
-    return tasks.some(row => row.id === result.taskId && row.status !== 'COMPLETED')
-  }
+  const statusVisible = () => (tracksRun(kind) && watchedTaskId(kind) === result.taskId)
+    || hasVisibleCancelledTaskRow(kind, result.taskId)
   switch (result.cancellationOutcome) {
     case 'ACCEPTED':
       if (statusVisible()) return
@@ -11533,57 +11578,51 @@ const cancelAsyncSimulation = () => cancelTaskFromProgress('simulation', cancelW
 const cancelAsyncFuzzing = () => cancelTaskFromProgress('fuzzing', cancelWatchedFuzzing)
 
 const cancelWatchedVerification = async (taskId: number) => {
-  const ownsCancellation = () => !boardLifecycleDisposed && asyncVerificationTask.value.taskId === taskId
+  const ownsUnconfirmedCancellation = () => !boardLifecycleDisposed && asyncVerificationTask.value.taskId === taskId
+    && !isWatchedTaskCancelled('verification', taskId)
+  if (!ownsUnconfirmedCancellation()) return
   const initiatedInProgress = verificationPanelTracksRun.value
-  verificationCancelRequested.value = true
   try {
     const result = await boardApi.cancelTask(taskId)
-    if (!ownsCancellation()) return
+    if (!ownsUnconfirmedCancellation()) return
+    applyTaskCancellationReceipt('verification', result)
     notifyTaskCancellationResult('verification', result)
-    asyncVerificationTask.value.statusKey = taskProgressStatusKey(undefined, result.taskStatus)
-    verificationCancelRequested.value = result.cancellationAccepted
-      || result.cancellationOutcome === 'ALREADY_CANCELLED'
   } catch (error) {
-    if (!ownsCancellation()) return
-    verificationCancelRequested.value = false
+    if (!ownsUnconfirmedCancellation()) return
     await presentTaskCancellationFailure(error, t('app.failedToCancelVerificationTask'),
       initiatedInProgress && verificationPanelTracksRun.value)
   }
 }
 
 const cancelWatchedSimulation = async (taskId: number) => {
-  const ownsCancellation = () => !boardLifecycleDisposed && asyncSimulationTask.value.taskId === taskId
+  const ownsUnconfirmedCancellation = () => !boardLifecycleDisposed && asyncSimulationTask.value.taskId === taskId
+    && !isWatchedTaskCancelled('simulation', taskId)
+  if (!ownsUnconfirmedCancellation()) return
   const initiatedInProgress = simulationPanelTracksRun.value
-  simulationCancelRequested.value = true
   try {
     const result = await simulationApi.cancelTask(taskId)
-    if (!ownsCancellation()) return
+    if (!ownsUnconfirmedCancellation()) return
+    applyTaskCancellationReceipt('simulation', result)
     notifyTaskCancellationResult('simulation', result)
-    asyncSimulationTask.value.statusKey = taskProgressStatusKey(undefined, result.taskStatus)
-    simulationCancelRequested.value = result.cancellationAccepted
-      || result.cancellationOutcome === 'ALREADY_CANCELLED'
   } catch (error) {
-    if (!ownsCancellation()) return
-    simulationCancelRequested.value = false
+    if (!ownsUnconfirmedCancellation()) return
     await presentTaskCancellationFailure(error, t('app.failedToCancelSimulationTask'),
       initiatedInProgress && simulationPanelTracksRun.value)
   }
 }
 
 const cancelWatchedFuzzing = async (taskId: number) => {
-  const ownsCancellation = () => !boardLifecycleDisposed && asyncFuzzingTask.value.taskId === taskId
+  const ownsUnconfirmedCancellation = () => !boardLifecycleDisposed && asyncFuzzingTask.value.taskId === taskId
+    && !isWatchedTaskCancelled('fuzzing', taskId)
+  if (!ownsUnconfirmedCancellation()) return
   const initiatedInProgress = fuzzingPanelTracksRun.value
-  fuzzingCancelRequested.value = true
   try {
     const result = await fuzzingApi.cancelTask(taskId)
-    if (!ownsCancellation()) return
+    if (!ownsUnconfirmedCancellation()) return
+    applyTaskCancellationReceipt('fuzzing', result)
     notifyTaskCancellationResult('fuzzing', result)
-    asyncFuzzingTask.value.statusKey = taskProgressStatusKey(undefined, result.taskStatus)
-    fuzzingCancelRequested.value = result.cancellationAccepted
-      || result.cancellationOutcome === 'ALREADY_CANCELLED'
   } catch (error) {
-    if (!ownsCancellation()) return
-    fuzzingCancelRequested.value = false
+    if (!ownsUnconfirmedCancellation()) return
     await presentTaskCancellationFailure(error, t('app.failedToCancelFuzzingTask'),
       initiatedInProgress && fuzzingPanelTracksRun.value)
   }
@@ -12542,105 +12581,78 @@ const closeTraceAnimation = (clearDeepLink = true) => {
   if (clearDeepLink) clearRunDeepLink()
 }
 
-/**
- * Close any open result surface whose run an authoritative history reload no longer lists.
- *
- * Called after a successful reload; dispatch every run kind here so none misses out-of-band deletion.
- */
-const reconcileOpenRunAgainstHistory = () => {
-  reconcileOpenVerificationRunAgainstHistory()
-  reconcileOpenFuzzingRunAgainstHistory()
-  reconcileOpenSimulationRunAgainstHistory()
-}
+const recheckAddressedHistory = async (): Promise<boolean> => {
+  // Foreground exploration completion can show a persisted result without giving it a URL.
+  const foregroundExploration = !appliedDeepLinkTarget && !deepLinkTarget.value && showFuzzingResultDialog.value
+    ? fuzzingResult.value : null
+  const target = foregroundExploration
+    ? { kind: 'exploration' as const, runId: foregroundExploration.id }
+    : appliedDeepLinkTarget
+  if (!target) return true
+  const ownsRun = captureBoardRunOwner()
+  const ownsTarget = () => ownsRun() && (foregroundExploration
+    ? !appliedDeepLinkTarget && !deepLinkTarget.value && showFuzzingResultDialog.value
+      && fuzzingResult.value === foregroundExploration
+    : isSameBoardRunTarget(appliedDeepLinkTarget, target) && isSameBoardRunTarget(deepLinkTarget.value, target))
+  if (!ownsTarget()) return true
+  try {
+    // History lists can be paginated, and a counterexample can be deleted independently of its run.
+    if (target.kind === 'verification') {
+      if (target.traceId !== undefined) {
+        await boardApi.getVerificationTrace(target.traceId)
+      } else {
+        const run = await boardApi.getVerificationRun(target.runId)
+        if (!ownsTarget()) return true
+        const result = verificationResult.value
+        if (result?.historyPersistence.runId === target.runId) {
+          const savedIds = new Set(run.counterexamples.map(trace => trace.id))
+          result.traces = result.traces.filter(trace => trace.id === undefined || savedIds.has(trace.id))
+        } else if (!result && historyDetailRequests.hasPendingReplace()) {
+          // An earlier evidence response can still contain the deleted trace even though its run exists.
+          if (pendingHistoryRunTarget === target) {
+            // Give the replacement its own history intent so the first load cannot retire it.
+            await openRunTarget({ ...target }, true)
+          } else {
+            await applyDeepLinkTarget(target)
+          }
+        }
+      }
+    } else if (target.kind === 'simulation') {
+      await simulationApi.getSimulation(target.runId)
+    } else {
+      await fuzzingApi.getTask(target.runId)
+    }
+    return true
+  } catch (error) {
+    if (!ownsTarget()) return true
+    if ((error as { response?: { status?: number } } | null)?.response?.status !== 404) return false
 
-/**
- * Only absence from a populated authoritative history counts as deletion; an empty list may be scoped/loading.
- * Replay clears the dialog ref, so its persisted trace supplies the owning run id as a fallback.
- */
-const reconcileOpenVerificationRunAgainstHistory = () => {
-  const openRunId = verificationResult.value?.historyPersistence?.runId
-    ?? currentTrace.value?.verificationTaskId
-  if (typeof openRunId !== 'number') return
-  if (verificationRuns.value.length === 0) return
-  if (verificationRuns.value.some(run => run.id === openRunId)) return
-  // currentTrace also resolves from an open dialog; only activePlaybackKind proves replay is visible.
-  // Capture the surface before teardown to choose accurate wording.
-  const wasReplaying = activePlaybackKind.value === 'counterexample'
-    && currentTrace.value?.verificationTaskId === openRunId
-  dismissRunSurfacesForDeletedVerificationRun(openRunId)
-  notifyBlocked(t(wasReplaying
-    ? 'app.openCounterexampleRunDeletedElsewhere'
-    : 'app.openRunDeletedElsewhere'))
-}
-
-/**
- * Reconcile exploration after authoritative history reload, with the same persisted-id/non-empty guards.
- */
-const reconcileOpenFuzzingRunAgainstHistory = () => {
-  // Opening a finding clears the dialog ref; replay evidence retains the owning run id.
-  const openRunId = fuzzingResult.value?.id ?? activeFuzzingFinding.value?.fuzzTaskId
-  if (typeof openRunId !== 'number') return
-  if (fuzzingRuns.value.length === 0) return
-  if (fuzzingRuns.value.some(run => run.id === openRunId)) return
-  // A reload replaces exploration history with page 0; absence from a partial list proves nothing.
-  if (fuzzingRunsHasMore.value) return
-  // The finding ref can survive another replay; choose the visible surface before clearing state.
-  const wasReplaying = activePlaybackKind.value === 'fuzzing'
-    && activeFuzzingFinding.value?.fuzzTaskId === openRunId
-  if (wasReplaying) {
-    // Clears the deep link too, so the URL sync cannot reopen the deleted finding.
-    closeTraceAnimation()
-    savedTraces.value = []
+    if (foregroundExploration) {
+      closeFuzzingResult()
+      notifyBlocked(t('app.openFuzzingRunDeletedElsewhere'))
+      return true
+    }
+    const playback = activePlaybackKind.value
+    void applyDeepLinkTarget(null)
+    if (playback === 'counterexample' || playback === 'fuzzing') savedTraces.value = []
+    if (target.kind === 'simulation' && lastSimulationResult.value?.historyPersistence.runId === target.runId) {
+      lastSimulationResult.value = null
+      simulationResultStale.value = false
+    }
+    clearRunDeepLink()
+    if (target.kind === 'simulation') {
+      notifyBlocked(t('app.openSimulationRunDeletedElsewhere'))
+    } else if (target.kind === 'exploration') {
+      notifyBlocked(t(playback === 'fuzzing'
+        ? 'app.openFuzzingFindingRunDeletedElsewhere'
+        : 'app.openFuzzingRunDeletedElsewhere'))
+    } else {
+      notifyBlocked(t(target.traceId !== undefined
+        ? 'app.openCounterexampleRunDeletedElsewhere'
+        : 'app.openRunDeletedElsewhere'))
+    }
+    return true
   }
-  // Clears the deep link with the surface, so the URL sync cannot reopen the deleted run.
-  dismissFuzzingResult()
-  // Exploration produces candidate findings, so its notice must not promise a formal conclusion.
-  notifyBlocked(t(wasReplaying
-    ? 'app.openFuzzingFindingRunDeletedElsewhere'
-    : 'app.openFuzzingRunDeletedElsewhere'))
-}
-
-/**
- * lastSimulationResult outlives its surfaces, so check visibility before announcing deletion.
- * historyPersistence.runId is the saved trajectory id used by simulationRuns; empty history proves nothing.
- */
-const reconcileOpenSimulationRunAgainstHistory = () => {
-  if (!simulationAnimationState.value.visible) return
-  const openRunId = lastSimulationResult.value?.historyPersistence?.runId
-  if (typeof openRunId !== 'number') return
-  if (simulationRuns.value.length === 0) return
-  if (simulationRuns.value.some(run => run.id === openRunId)) return
-  dismissSimulationSurfacesForDeletedRun()
-  notifyBlocked(t('app.openSimulationRunDeletedElsewhere'))
-}
-
-/**
- * Tear down every surface showing the open simulation trajectory.
- *
- * No id argument: unlike verification, only one trajectory is loaded at a time — `lastSimulationResult`
- * is the single owner and the playback controls, terminal and canvas highlight all read it — so the
- * caller has already established that *this* run is the deleted one.
- *
- * Branched so `run=simulation:<id>` is cleared exactly once, by whichever closer owns the addressed
- * surface: for `run=simulation:<id>` the bar *is* the addressed surface and `closeSimulationTimeline`
- * already clears the link, so the dialog then takes the internal-transition closer. With no bar up,
- * deletion passes its known run identity to the error closer so a newer URL target survives.
- * `lastSimulationResult` is cleared after
- * both, because the bar's props read through it.
- */
-const dismissSimulationSurfacesForDeletedRun = () => {
-  if (simulationAnimationState.value.visible) {
-    closeSimulationTimeline()
-    closeSimulationResultDialog()
-  } else {
-    dismissSimulationResultDialog(lastSimulationResult.value?.historyPersistence.runId)
-  }
-  lastSimulationResult.value = null
-  // Not the "closing a surface must not clear the stale flag" case: that rule exists because
-  // `lastSimulationResult` survives a close and reopening it must still warn that the canvas moved. Here
-  // the run it described is being dropped, so the flag is cleared with its owner rather than left
-  // asserting staleness about nothing.
-  simulationResultStale.value = false
 }
 
 /**
@@ -12658,9 +12670,7 @@ const dismissSimulationSurfacesForDeletedRun = () => {
  */
 const dismissRunSurfacesForDeletedVerificationRun = (runId: number) => {
   const openRunId = verificationResult.value?.historyPersistence?.runId
-  const playingTraceRunId = currentTrace.value?.verificationTaskId
-
-  if (playingTraceRunId === runId) {
+  if (activePlaybackKind.value === 'counterexample' && currentTrace.value?.verificationTaskId === runId) {
     // Closes the replay and clears the deep link, so a reload cannot reopen the deleted run.
     closeTraceAnimation()
     savedTraces.value = []
@@ -13084,9 +13094,11 @@ const handleVerify = async (): Promise<boolean> => {
     if (isPollingAbortedError(error)) {
       return false
     }
-    if (isAsyncTaskCancelledError(error)) {
+    if (error?.code === 'TASK_STATUS_GONE') {
+      notifyInfo(t('app.taskNoLongerAvailable'))
+    } else if (isAsyncTaskCancelledError(error)) {
       verificationError.value = null
-      if (!verificationCancelRequested.value) notifyInfo(t('app.verificationCancelled'))
+      notifyObservedTaskCancellation('verification', asyncVerificationTask.value.taskId, verificationCancelRequested.value)
     } else {
       console.error('Verification failed:', error)
       presentRunFailure('verification', 'app.verificationFailed', error, verificationPanelTracksRun.value)
@@ -13195,10 +13207,12 @@ const runFuzzing = async (): Promise<boolean> => {
     return true
   } catch (error: any) {
     if (!ownsRun() || isPollingAbortedError(error)) return false
-    if (isAsyncTaskCancelledError(error)) {
+    if (error?.code === 'TASK_STATUS_GONE') {
+      notifyInfo(t('app.taskNoLongerAvailable'))
+    } else if (isAsyncTaskCancelledError(error)) {
       if (submittedTaskId) untrackFuzzTask(submittedTaskId)
       fuzzingError.value = null
-      if (!fuzzingCancelRequested.value) notifyInfo(t('app.fuzzSearchCancelled'))
+      notifyObservedTaskCancellation('fuzzing', asyncFuzzingTask.value.taskId, fuzzingCancelRequested.value)
     } else if (submittedTaskId && isFuzzTaskRecoveryPendingError(error)) {
       fuzzingError.value = null
       fuzzingSettingsNotice.value = { key: 'app.fuzzResultRecoveryPending' }
@@ -13379,9 +13393,11 @@ const handleSimulate = async (simConfig: {
     if (isPollingAbortedError(error)) {
       return false
     }
-    if (isAsyncTaskCancelledError(error)) {
+    if (error?.code === 'TASK_STATUS_GONE') {
+      notifyInfo(t('app.taskNoLongerAvailable'))
+    } else if (isAsyncTaskCancelledError(error)) {
       simulationError.value = null
-      if (!simulationCancelRequested.value) notifyInfo(t('app.simulationCancelled'))
+      notifyObservedTaskCancellation('simulation', asyncSimulationTask.value.taskId, simulationCancelRequested.value)
     } else {
       console.error('Simulation failed:', error)
       presentRunFailure('simulation', 'app.simulationFailed', error, simulationPanelTracksRun.value)
@@ -13401,13 +13417,44 @@ const handleSimulate = async (simConfig: {
 // it is an auth/not-found/client error — retrying will never succeed. Network blips and
 // 5xx are treated as transient.
 const isPermanentPollError = (error: any): boolean => {
-  if (error?.code === RUN_RESPONSE_INCOMPLETE_CODE
+  if (error?.code === 'TASK_STATUS_GONE'
+    || error?.code === RUN_RESPONSE_INCOMPLETE_CODE
     || error?.code === FUZZ_RESPONSE_INCOMPLETE_CODE) return true
   const status = error?.response?.status
   return typeof status === 'number'
     && status >= 400
     && status < 500
     && !isTransientTaskHttpStatus(status)
+}
+
+const ensureActiveWatchedTaskPoll = (kind: RunPanelKind, taskId: number, expectedEpoch: number) => {
+  throwIfPollingAborted(expectedEpoch)
+  if (isWatchedTaskCancelled(kind, taskId)) {
+    throw new AsyncTaskCancelledError(t('app.taskStatusCancelled'))
+  }
+}
+
+const readWatchedTaskStatus = async <T,>(
+  kind: RunPanelKind, taskId: number, expectedEpoch: number, read: () => Promise<T>
+): Promise<T> => {
+  ensureActiveWatchedTaskPoll(kind, taskId, expectedEpoch)
+  try {
+    return await read()
+  } catch (error: any) {
+    ensureActiveWatchedTaskPoll(kind, taskId, expectedEpoch)
+    if (error?.response?.status !== 404) throw error
+
+    invalidateTaskInboxRequests()
+    if (kind === 'verification') {
+      verificationTasks.value = verificationTasks.value.filter(item => item.id !== taskId)
+    } else if (kind === 'simulation') {
+      simulationTasks.value = simulationTasks.value.filter(item => item.id !== taskId)
+    } else {
+      fuzzingTasks.value = fuzzingTasks.value.filter(item => item.id !== taskId)
+      untrackFuzzTask(taskId)
+    }
+    throw Object.assign(new Error(t('app.taskNoLongerAvailable')), { code: 'TASK_STATUS_GONE' })
+  }
 }
 
 const completedTaskResultError = (
@@ -13455,13 +13502,16 @@ const pollAsyncVerification = async (taskId: number): Promise<void> => {
     throwIfPollingAborted(expectedPollingEpoch)
     let task: VerificationTask
     try {
-      task = await boardApi.getTask(taskId)
-      throwIfPollingAborted(expectedPollingEpoch)
+      task = await readWatchedTaskStatus(
+        'verification', taskId, expectedPollingEpoch, () => boardApi.getTask(taskId)
+      )
+      // Check at publication, after the status read's final asynchronous boundary.
+      ensureActiveWatchedTaskPoll('verification', taskId, expectedPollingEpoch)
       asyncVerificationTask.value.progress = normalizeTaskProgress(task.progress)
       asyncVerificationTask.value.statusKey = taskProgressStatusKey(task.progressStage, task.status)
       upsertVerificationTaskSummary(task)
     } catch (e: any) {
-      if (isPollingAbortedError(e)) {
+      if (isPollingAbortedError(e) || isAsyncTaskCancelledError(e)) {
         throw e
       }
       // Permanent errors (401/403/404/…) fail fast; transient errors retry.
@@ -13521,13 +13571,15 @@ const pollAsyncSimulation = async (taskId: number): Promise<SavedSimulationResul
     let task: SimulationTask
     try {
       // 获取任务进度 + 状态（瞬时网络错误容忍：进入 catch 后继续轮询）
-      task = await simulationApi.getTask(taskId)
-      throwIfPollingAborted(expectedPollingEpoch)
+      task = await readWatchedTaskStatus(
+        'simulation', taskId, expectedPollingEpoch, () => simulationApi.getTask(taskId)
+      )
+      ensureActiveWatchedTaskPoll('simulation', taskId, expectedPollingEpoch)
       asyncSimulationTask.value.progress = normalizeTaskProgress(task.progress)
       asyncSimulationTask.value.statusKey = taskProgressStatusKey(task.progressStage, task.status)
       upsertSimulationTaskSummary(task)
     } catch (error: any) {
-      if (isPollingAbortedError(error)) {
+      if (isPollingAbortedError(error) || isAsyncTaskCancelledError(error)) {
         throw error
       }
       // Permanent errors (401/403/404/task-not-found) fail fast; only transient
@@ -13591,13 +13643,15 @@ const pollAsyncFuzzing = async (taskId: number): Promise<FuzzingRun> => {
     throwIfPollingAborted(expectedPollingEpoch)
     let task: FuzzingTask
     try {
-      task = await fuzzingApi.getTask(taskId)
-      throwIfPollingAborted(expectedPollingEpoch)
+      task = await readWatchedTaskStatus(
+        'fuzzing', taskId, expectedPollingEpoch, () => fuzzingApi.getTask(taskId)
+      )
+      ensureActiveWatchedTaskPoll('fuzzing', taskId, expectedPollingEpoch)
       asyncFuzzingTask.value.progress = normalizeTaskProgress(task.progress)
       asyncFuzzingTask.value.statusKey = taskProgressStatusKey(task.progressStage, task.status)
       upsertFuzzingTaskSummary(task)
     } catch (error: any) {
-      if (isPollingAbortedError(error)) throw error
+      if (isPollingAbortedError(error) || isAsyncTaskCancelledError(error)) throw error
       if (isPermanentPollError(error)) throw error
       await waitForNextPoll(expectedPollingEpoch)
       pollCount++
@@ -16076,6 +16130,7 @@ const attackSelectionSummary = (
                 type="button"
                 class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md board-text-muted hover:board-chip-danger hover:board-text-danger"
                 :aria-label="miniTaskCancelLabel(task.kind)"
+                :disabled="pendingTaskActionKeys.has(taskActionKey('cancel', task.kind, task.id)) || isWatchedTaskCancelled(task.kind, task.id)"
                 @click="cancelMiniTask(task.kind, task.id)"
               >
                 <span class="material-symbols-outlined text-sm" aria-hidden="true">cancel</span>
@@ -16116,7 +16171,7 @@ const attackSelectionSummary = (
       :progress="asyncFuzzingTask.progress"
       :status="formatWatchedTaskStatus(asyncFuzzingTask.statusKey, cancellingFuzzingTask)"
       :task-id="asyncFuzzingTask.taskId"
-      :cancelling="cancellingFuzzingTask"
+      :cancelling="cancellingFuzzingTask || isWatchedTaskCancelled('fuzzing', asyncFuzzingTask.taskId)"
       :error="fuzzingErrorMessage"
       :failure-details="fuzzingFailureDetails"
       :configuration-error="effectiveFuzzingConfigurationError"
@@ -16424,7 +16479,7 @@ const attackSelectionSummary = (
                 <button
                   type="button"
                   class="board-panel-icon-action"
-                  :disabled="cancellingVerificationTask"
+                  :disabled="cancellingVerificationTask || isWatchedTaskCancelled('verification', asyncVerificationTask.taskId)"
                   :aria-label="t('app.cancelVerificationTask')"
                   @click="cancelAsyncVerification"
                 >
@@ -16745,7 +16800,7 @@ const attackSelectionSummary = (
                 <button
                   type="button"
                   class="board-panel-icon-action"
-                  :disabled="cancellingSimulationTask"
+                  :disabled="cancellingSimulationTask || isWatchedTaskCancelled('simulation', asyncSimulationTask.taskId)"
                   :aria-label="t('app.cancelSimulationTask')"
                   @click="cancelAsyncSimulation"
                 >

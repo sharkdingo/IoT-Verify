@@ -3506,11 +3506,11 @@ describe('ChatView', () => {
     expect(executeCommand).toHaveBeenNthCalledWith(1, {
       type: 'REFRESH_DATA',
       payload: { target: 'device_list' }
-    })
+    }, 'stream')
     expect(executeCommand).toHaveBeenNthCalledWith(2, {
       type: 'REFRESH_DATA',
       payload: { target: 'board_state' }
-    })
+    }, 'stream')
     expect(chatStore.state.streaming).toBe(true)
 
     resolveReconciliation(true)
@@ -3552,7 +3552,7 @@ describe('ChatView', () => {
         target: 'run_history',
         assistantAction: 'FORMAL_VERIFICATION_RUN'
       }
-    })
+    }, 'stream')
     expect(notifyInfo).toHaveBeenCalledWith('AI 助手已运行形式化验证，运行历史已同步。')
     wrapper.unmount()
   })
@@ -3583,9 +3583,44 @@ describe('ChatView', () => {
     expect(executeCommand).toHaveBeenCalledWith({
       type: 'REFRESH_DATA',
       payload: { target: 'board_state', assistantSummary: summary }
-    })
+    }, 'stream')
     expect(notifyInfo).toHaveBeenCalledWith(summary)
     wrapper.unmount()
+  })
+
+  it('reports received commands for their account and does not execute them after an account switch', async () => {
+    authStore.login(validToken('alice-stream'), { userId: 1, phone: '13800138000', username: 'alice' })
+    let finishRefresh!: (refreshed: boolean) => void
+    const executeCommand = vi.fn()
+      .mockImplementationOnce(() => new Promise<boolean>(resolve => { finishRefresh = resolve }))
+      .mockResolvedValue(true)
+    const historyCommand = { type: 'REFRESH_DATA', payload: { target: 'run_history' } } as const
+    const rulesCommand = { type: 'REFRESH_DATA', payload: { target: 'rule_list' } } as const
+    chatApi.createSession.mockResolvedValue(session)
+    chatApi.sendStreamChat.mockImplementation(async (...args: any[]) => {
+      const callbacks = args[2]
+      callbacks.onAccepted?.()
+      callbacks.onCommand(historyCommand)
+      callbacks.onCommand(rulesCommand)
+    })
+    chatStore.openChat()
+
+    const wrapper = mountChat({ executeCommand })
+    await flushPromises()
+    await wrapper.get('[data-testid="chat-input"]').setValue('运行验证并更新规则')
+    await wrapper.get('[data-testid="chat-send"]').trigger('click')
+    await flushPromises()
+    expect(executeCommand).toHaveBeenCalledOnce()
+    const receivedWhileRefreshPending = wrapper.emitted('stream-command-received')
+
+    authStore.login(validToken('bob-stream'), { userId: 2, phone: '13900139000', username: 'bob' })
+    await flushPromises()
+    finishRefresh(false)
+    await flushPromises()
+
+    expect(executeCommand).toHaveBeenCalledOnce()
+    expect(receivedWhileRefreshPending).toEqual([[historyCommand, 1], [rulesCommand, 1]])
+    expect(chatStore.state.reconciliationRequired).toBe(false)
   })
 
   it('keeps interactions locked until a failed reconciliation is retried successfully', async () => {

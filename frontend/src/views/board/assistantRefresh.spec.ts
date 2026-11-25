@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest'
 import {
   ASSISTANT_REFRESH_TARGETS,
   assistantRefreshEffects,
+  assistantStreamInvalidationScope,
   isAssistantRefreshTarget
 } from './assistantRefresh'
 
@@ -17,15 +18,19 @@ describe('assistant refresh targets', () => {
     expect(isAssistantRefreshTarget(undefined)).toBe(false)
   })
 
-  it('treats run history as a result read, not a board change', () => {
-    // Nothing about the model changed, so no tab needs invalidating and nothing became reversible.
-    expect(assistantRefreshEffects('run_history')).toMatchObject({ invalidatesOtherTabs: false })
+  it('refreshes only the inbox for a confirmed background task start', () => {
+    expect(assistantStreamInvalidationScope('run_history', 'SIMULATION_TASK_STARTED')).toBe('tasks')
+  })
+
+  it('refreshes tasks and results when a run-history change can affect either', () => {
+    expect(assistantStreamInvalidationScope('run_history', 'RUN_HISTORY_UPDATED')).toBe('run-history')
+    expect(assistantStreamInvalidationScope('run_history')).toBe('run-history')
   })
 
   it('invalidates other tabs for every target that reloads board model state', () => {
     for (const target of ASSISTANT_REFRESH_TARGETS) {
       if (target === 'run_history') continue
-      expect(assistantRefreshEffects(target).invalidatesOtherTabs, target).toBe(true)
+      expect(assistantStreamInvalidationScope(target), target).toBe('board')
     }
   })
 

@@ -24,7 +24,12 @@ it('starts collapsed, loads on open and lets users inspect the exact source', as
   vi.mocked(getSessionHistory).mockResolvedValue({ messages: [{ id: 5, sessionId: 's1', role: 'user', turnId: 't',
     createdAt: '2026-10-26', content: '这次检查时不要删除门锁，先讨论风险。' }], nextBeforeId: null, hasMore: false })
   await wrapper.get('[data-testid="task-memory-source"]').trigger('click'); await flushPromises()
-  expect(wrapper.text()).toContain('这次检查时不要删除门锁，先讨论风险。')
+  const receive = vi.mocked(subscribeBoardInvalidation).mock.calls[0]![1]
+  receive({ type: 'TASKS_INVALIDATED', scope: 'tasks', userId: 7, reason: 'http-mutation', issuedAt: 1 })
+  receive({ type: 'RUN_HISTORY_INVALIDATED', scope: 'run-history', userId: 7, reason: 'http-mutation', issuedAt: 2 })
+  await flushPromises()
+  expect(wrapper.get('blockquote').text()).toBe('这次检查时不要删除门锁，先讨论风险。')
+  expect(getTaskMemory).toHaveBeenCalledOnce()
   expect(wrapper.find('[data-testid="task-memory-source"]').exists()).toBe(false)
   await wrapper.get('[data-testid="task-memory-back"]').trigger('click')
   expect(wrapper.find('blockquote').exists()).toBe(false)
@@ -61,7 +66,9 @@ it('withdraws displayed scene notes when another tab replaces the scene and rele
   expect(wrapper.text()).toContain('不要删除门锁')
   expect(subscribeBoardInvalidation).toHaveBeenCalledWith(7, expect.any(Function))
   vi.mocked(getTaskMemory).mockResolvedValueOnce({ ...memory, sceneChanged: true, items: [] })
-  vi.mocked(subscribeBoardInvalidation).mock.calls[0]![1]({ type: 'BOARD_INVALIDATED', userId: 7, reason: 'http-mutation', issuedAt: 1 })
+  vi.mocked(subscribeBoardInvalidation).mock.calls[0]![1]({
+    type: 'BOARD_INVALIDATED', scope: 'board', userId: 7, reason: 'http-mutation', issuedAt: 1
+  })
   await flushPromises()
   expect(wrapper.text()).not.toContain('不要删除门锁')
   wrapper.unmount()

@@ -21,6 +21,19 @@ const source = ts.createSourceFile('Board.ts', setup, ts.ScriptTarget.Latest, tr
 
 // Execute the component's own functions so a missing guard fails the workflow assertion.
 const bind = (name: string, ports: Record<string, unknown>) => {
+  if (name.startsWith('pollAsync')) {
+    ports.isWatchedTaskCancelled ??= bind('isWatchedTaskCancelled', ports)
+    ports.ensureActiveWatchedTaskPoll ??= bind('ensureActiveWatchedTaskPoll', ports)
+    ports.readWatchedTaskStatus ??= bind('readWatchedTaskStatus', ports)
+    ports.isAsyncTaskCancelledError ??= (error: unknown) =>
+      typeof error === 'object' && error !== null && 'name' in error && error.name === 'AsyncTaskCancelledError'
+  }
+  if (name === 'notifyTaskCancellationResult') {
+    ports.hasVisibleCancelledTaskRow ??= bind('hasVisibleCancelledTaskRow', ports)
+  }
+  if (name === 'hasVisibleCancelledTaskRow') {
+    ports.hasCancelledTaskRow ??= bind('hasCancelledTaskRow', ports)
+  }
   const declaration = source.statements.find(statement => ts.isVariableStatement(statement)
     && statement.declarationList.declarations.some(item => item.name.getText(source) === name))
   if (!declaration) throw new Error(`Missing Board function ${name}`)
@@ -45,7 +58,9 @@ const bindWorkflowPanel = (ports: Record<string, any>) => {
 const bindCancellation = (suffix: string, ports: Record<string, any>) => {
   ports.computed ??= computed
   ports.pendingTaskActionKeys = ref(new Set<string>())
+  for (const kind of ['verification', 'simulation', 'fuzzing']) ports[`${kind}Tasks`] ??= ref([])
   for (const name of ['taskActionKey', 'withTaskActionLock', `watched${suffix}TaskIds`, 'watchedTaskId',
+    'isWatchedTaskCancelled', 'applyTaskCancellationReceipt',
     'isWatchedTaskCancellationPending', `cancelling${suffix}Task`, 'cancelTaskFromProgress', `cancelWatched${suffix}`]) {
     ports[name] = bind(name, ports)
   }
@@ -64,6 +79,8 @@ const bindRun = (name: string, ports: Record<string, any>) => {
   ports.historyDetailRequests ??= createPagedRequestCoordinator()
   ports.historyDetailRequests.hasPendingReplace ??= () => false
   bindWorkflowPanel(ports)
+  ports.hasVisibleCancelledTaskRow ??= bind('hasVisibleCancelledTaskRow', ports)
+  ports.notifyObservedTaskCancellation ??= bind('notifyObservedTaskCancellation', ports)
   for (const name of ['automaticRunPresentationBlock', 'automaticRunPresentation', 'completeRunPresentation',
     'deliverCompletedFuzzingRun', 'deliverSimulationRunResult', 'deliverVerificationRunResult']) ports[name] = bind(name, ports)
   return bind(name, ports)
@@ -71,8 +88,9 @@ const bindRun = (name: string, ports: Record<string, any>) => {
 
 const deferred = () => {
   let resolve!: (value?: any) => void
-  const promise = new Promise<any>(done => { resolve = done })
-  return { promise, resolve }
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<any>((done, fail) => { resolve = done; reject = fail })
+  return { promise, resolve, reject }
 }
 
 describe('side-panel opening focus', () => {
@@ -268,10 +286,10 @@ describe('tracking an existing background task', () => {
     task.value = { taskId: 18 }
     requested.value = false
     const currentRequest = cancel()
-    previous.resolve({ taskId: 17, cancellationAccepted: false, cancellationOutcome: 'ALREADY_COMPLETED', taskStatus: 'COMPLETED' })
+    previous.resolve({ taskId: 17, cancellationAccepted: true, cancellationOutcome: 'ACCEPTED', taskStatus: 'CANCELLED' })
     await oldRequest
     expect(cancelling.value).toBe(true)
-    expect(requested.value).toBe(true)
+    expect(requested.value).toBe(false)
     expect(ports.notifyTaskCancellationResult).not.toHaveBeenCalled()
 
     const accepted = { taskId: 18, cancellationAccepted: true, cancellationOutcome: 'ACCEPTED', taskStatus: 'CANCELLED' }
@@ -1412,6 +1430,104 @@ describe('verification completion', () => {
     expect(ports.navigateToRunTarget).not.toHaveBeenCalled()
     expect(ports.notifyVerificationOutcome).toHaveBeenCalledWith(state.result)
     expect(ports.loadVerificationRuns).toHaveBeenCalledOnce()
+  })
+
+  it('does not restore active progress from a status read overtaken by a cancellation receipt', async () => {
+    const state = context('SAVED', true)
+    const previousRead = deferred()
+    const cancelResponse = deferred()
+    const receipt = { taskId: 17, taskStatus: 'CANCELLED', cancellationOutcome: 'ACCEPTED',
+      cancellationAccepted: true, executionMayStillBeStopping: true }
+    class AsyncTaskCancelledError extends Error {}
+    const ports: Record<string, any> = Object.assign(state.ports, {
+      boardLifecycleDisposed: false, verificationTasks: ref([{ id: 17, status: 'RUNNING', progress: 48 }]),
+      asyncVerificationTask: ref({ taskId: 17, progress: 48, statusKey: 'app.taskStatusRunning' }),
+      normalizeTaskProgress: (progress: number) => progress,
+      taskProgressStatusKey: (_stage: unknown, status: string) => status === 'CANCELLED'
+        ? 'app.taskStatusCancelled' : 'app.taskStatusRunning',
+      AsyncTaskCancelledError, isAsyncTaskCancelledError: (error: unknown) => error instanceof AsyncTaskCancelledError,
+      notifyTaskCancellationResult: vi.fn(), waitForNextPoll: vi.fn(), isPermanentPollError: () => false
+    })
+    ports.isVerifying.value = true
+    ports.asyncVerificationActive.value = true
+    ports.boardApi.getTask.mockReturnValue(previousRead.promise)
+    ports.boardApi.cancelTask = vi.fn().mockReturnValue(cancelResponse.promise)
+    bindWorkflowPanel(ports)
+    const cancel = bindCancellation('Verification', ports)
+    const polling = bind('pollAsyncVerification', ports)(17).catch((error: unknown) => error)
+    const cancelling = cancel()
+    // The status-read helper resumes first, then the cancel receipt, then the poller's caller.
+    previousRead.resolve({ id: 17, status: 'RUNNING', progress: 31 })
+    cancelResponse.resolve(receipt)
+    await cancelling
+
+    expect(await polling).toBeInstanceOf(AsyncTaskCancelledError)
+    expect(ports.asyncVerificationTask.value).toMatchObject({ progress: 48, statusKey: 'app.taskStatusCancelled' })
+    expect(ports.upsertVerificationTaskSummary).toHaveBeenCalledExactlyOnceWith({
+      id: 17, status: 'CANCELLED', progressStage: undefined
+    })
+    expect(ports.waitForNextPoll).not.toHaveBeenCalled()
+  })
+
+  it.each([['succeeds', false], ['fails', false], ['fails', true]] as const)(
+    'keeps a confirmed status when the pending cancel later %s (inbox visible=%s)', async (outcome, inboxVisible) => {
+    const state = context('SAVED', true)
+    const statusRead = deferred()
+    const cancelResponse = deferred()
+    class AsyncTaskCancelledError extends Error {}
+    const ports: Record<string, any> = Object.assign(state.ports, {
+      boardLifecycleDisposed: false, verificationTasks: ref([{ id: 17, status: 'RUNNING' }]),
+      closeHistoryPanel: vi.fn(), loadTaskInbox: vi.fn(), notifyTaskCancellationResult: vi.fn(),
+      activeHistoryLayer: ref('tasks'), invalidateTaskInboxRequests: vi.fn(),
+      presentTaskCancellationFailure: vi.fn(), isPermanentPollError: () => false,
+      taskProgressStatusKey: (_stage: unknown, status: string) => status === 'CANCELLED'
+        ? 'app.taskStatusCancelled' : 'app.taskStatusRunning',
+      AsyncTaskCancelledError, isAsyncTaskCancelledError: (error: unknown) => error instanceof AsyncTaskCancelledError
+    })
+    ports.boardApi.getTask.mockReturnValue(statusRead.promise)
+    ports.boardApi.cancelTask = vi.fn().mockReturnValue(cancelResponse.promise)
+    ports.upsertVerificationTaskSummary = bind('upsertVerificationTaskSummary', ports)
+    ports.pollAsyncVerification = bind('pollAsyncVerification', ports)
+    const watching = bindRun('watchVerificationTask', ports)(17)
+    const cancelling = bindCancellation('Verification', ports)()
+    if (inboxVisible) ports.activeWorkflowPanel.value = { kind: 'history' }
+    statusRead.resolve({ id: 17, status: 'CANCELLED', progress: 31 })
+    await watching
+
+    if (outcome === 'succeeds') {
+      cancelResponse.resolve({ taskId: 17, taskStatus: 'CANCELLED', cancellationOutcome: 'ACCEPTED',
+        cancellationAccepted: true, executionMayStillBeStopping: true })
+    } else {
+      cancelResponse.reject(new Error('Cancel response failed'))
+    }
+    await cancelling
+
+    if (inboxVisible) {
+      expect(ports.verificationTasks.value[0].status).toBe('CANCELLED')
+      expect(ports.notifyInfo).not.toHaveBeenCalled()
+    } else {
+      expect(ports.notifyInfo).toHaveBeenCalledExactlyOnceWith('app.verificationCancelled')
+    }
+    expect(ports.notifyTaskCancellationResult).not.toHaveBeenCalled()
+    expect(ports.presentTaskCancellationFailure).not.toHaveBeenCalled()
+    expect(ports.asyncVerificationTask.value.statusKey).toBe('app.taskStatusCancelled')
+  })
+
+  it('ends a watch with a neutral notice when the task was removed before status was read', async () => {
+    const state = context('SAVED', true)
+    const ports: Record<string, any> = Object.assign(state.ports, {
+      verificationTasks: ref([{ id: 17, status: 'RUNNING' }]),
+      closeHistoryPanel: vi.fn(), loadTaskInbox: vi.fn(), boardLifecycleDisposed: false,
+      isPermanentPollError: () => true, invalidateTaskInboxRequests: vi.fn()
+    })
+    ports.boardApi.getTask.mockRejectedValue({ response: { status: 404 } })
+    ports.pollAsyncVerification = bind('pollAsyncVerification', ports)
+    await bindRun('watchVerificationTask', ports)(17)
+
+    expect(ports.presentRunFailure).not.toHaveBeenCalled()
+    expect(ports.notifyInfo).toHaveBeenCalledExactlyOnceWith('app.taskNoLongerAvailable')
+    expect(ports.verificationTasks.value).toEqual([])
+    expect(ports.isVerifying.value).toBe(false)
   })
 
   it('keeps a synchronous verdict in history after the user closes its progress panel', async () => {

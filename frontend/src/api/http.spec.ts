@@ -174,3 +174,60 @@ describe('board mutation request classification', () => {
     expect(auth.getToken()).toBe(bobToken)
   })
 })
+
+describe('run state invalidation', () => {
+  const successfulDelete = { code: 200, message: 'success' }
+  const acceptedCancellation = {
+    taskId: 12,
+    taskStatus: 'CANCELLED',
+    cancellationAccepted: true,
+    cancellationOutcome: 'ACCEPTED',
+    executionMayStillBeStopping: true
+  }
+
+  const authenticateAndWatch = () => {
+    useAuth().login(validToken('run-owner'), { userId: 7, phone: '13800138000', username: 'alice' })
+    return vi.spyOn(boardInvalidation, 'publishBoardInvalidation').mockImplementation(() => {})
+  }
+
+  const respondWith = (data: unknown) => async (config: any) => ({
+    data, status: 200, statusText: 'OK', headers: {}, config
+  })
+
+  it.each(['/verify/runs/12', '/verify/traces/12', '/simulate/traces/12', '/fuzz/runs/12'])(
+    'invalidates run history after deleting %s', async url => {
+      const publish = authenticateAndWatch()
+      await api.delete(url, { adapter: respondWith(successfulDelete) })
+      expect(publish).toHaveBeenCalledExactlyOnceWith(7, 'http-mutation', 'run-history')
+      expect(isBoardMutationRequest({ method: 'delete', url })).toBe(false)
+    }
+  )
+
+  it.each(['verify', 'simulate', 'fuzz'])('invalidates tasks after accepted %s cancellation and dismissal', async family => {
+    const publish = authenticateAndWatch()
+    await api.post(`/${family}/tasks/12/cancel`, undefined, {
+      adapter: respondWith({ ...successfulDelete, data: acceptedCancellation })
+    })
+    await api.delete(`/${family}/tasks/12`, { adapter: respondWith(successfulDelete) })
+    expect(publish.mock.calls).toEqual([
+      [7, 'http-mutation', 'tasks'],
+      [7, 'http-mutation', 'tasks']
+    ])
+  })
+
+  it('ignores unsuccessful deletes, reads, and malformed or unchanged cancellations', async () => {
+    const publish = authenticateAndWatch()
+    await api.delete('/verify/runs/12', { adapter: respondWith({ code: 404, message: 'missing' }) })
+    await api.delete('/fuzz/tasks/12', { adapter: respondWith({ ...successfulDelete, data: false }) })
+    await api.get('/verify/runs/12', { adapter: respondWith(successfulDelete) })
+    for (const data of [
+      { ...acceptedCancellation, taskId: 13 },
+      { ...acceptedCancellation, cancellationAccepted: false, cancellationOutcome: 'ALREADY_CANCELLED' }
+    ]) {
+      await api.post('/verify/tasks/12/cancel', undefined, {
+        adapter: respondWith({ ...successfulDelete, data })
+      })
+    }
+    expect(publish).not.toHaveBeenCalled()
+  })
+})

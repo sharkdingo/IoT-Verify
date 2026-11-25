@@ -16,6 +16,7 @@ import { loginRedirectTarget } from "@/router/loginRedirect";
 import { isNavigationInProgress } from "@/router";
 import {
   assistantRefreshEffects,
+  assistantStreamInvalidationScope,
   isAssistantRefreshTarget
 } from "@/views/board/assistantRefresh";
 
@@ -290,7 +291,14 @@ const invokeBoardRefresh = async (methodName: string): Promise<boolean> => {
   return refreshed;
 };
 
-const handleSystemCommand = async (cmd: StreamCommand): Promise<boolean> => {
+const handleStreamCommandReceived = (command: StreamCommand, userId: number | null) => {
+  if (userId === null || getUser()?.userId !== userId || route.meta.public) return;
+  if (command.type !== 'REFRESH_DATA' || !isAssistantRefreshTarget(command.payload?.target)) return;
+  const { target, assistantAction } = command.payload;
+  publishBoardInvalidation(userId, 'chat-tool', assistantStreamInvalidationScope(target, assistantAction));
+};
+
+const handleSystemCommand = async (cmd: StreamCommand, source?: 'stream'): Promise<boolean> => {
   if (cmd.type === 'REFRESH_DATA') {
     const target = cmd.payload?.target;
     // An unknown target is a contract mismatch, not something to guess at.
@@ -299,18 +307,19 @@ const handleSystemCommand = async (cmd: StreamCommand): Promise<boolean> => {
       return false;
     }
 
-    // One table owns which board method a target reloads and whether it changed persisted state,
-    // so this dispatch and the board's own follow-ups cannot disagree.
     const effects = assistantRefreshEffects(target);
+    // A streamed change was announced on receipt. A locally synthesized reconciliation can only
+    // ask other tabs to refresh after this tab has reconciled its own Board.
+    const broadcastAfterRefresh = source !== 'stream' && effects.invalidationScope === 'board';
     if (!isBoardChat.value) {
       const userId = getUser()?.userId;
       if (userId === undefined || route.meta.public) return false;
       // The account page owns no Board projection. Other tabs reload through invalidation;
       // this tab reloads authoritative workspace state when its Board is mounted again.
-      if (effects.invalidatesOtherTabs) publishBoardInvalidation(userId, 'chat-tool');
+      if (broadcastAfterRefresh) publishBoardInvalidation(userId, 'chat-tool');
       return true;
     }
-    return effects.invalidatesOtherTabs
+    return broadcastAfterRefresh
       ? await invokeBoardRefresh(effects.method)
       : await invokeViewMethod(effects.method);
   }
@@ -420,6 +429,7 @@ const routerViewProps = computed(() => route.name === 'account'
             :prepare-interaction="prepareBoardChatInteraction"
             :execute-command="handleSystemCommand"
             :initial-session-observations="initialChatSessionObservations"
+            @stream-command-received="handleStreamCommandReceived"
           />
           <template #fallback="{ error, retry }">
             <AssistantRecoveryPanel :error="error" @retry="retry" />

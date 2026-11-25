@@ -1,4 +1,5 @@
-import { STREAM_REFRESH_TARGETS } from '@/types/chat'
+import { STREAM_REFRESH_TARGETS, type AssistantAction } from '@/types/chat'
+import type { BoardInvalidationScope } from '@/utils/boardInvalidation'
 
 /**
  * Which board state an assistant `REFRESH_DATA` command invalidates.
@@ -19,38 +20,35 @@ export type AssistantRefreshTarget = typeof ASSISTANT_REFRESH_TARGETS[number]
 export const isAssistantRefreshTarget = (value: unknown): value is AssistantRefreshTarget =>
   typeof value === 'string' && (ASSISTANT_REFRESH_TARGETS as readonly string[]).includes(value)
 
-/**
- * What a target requires beyond reloading its own collection.
- *
- * `invalidatesOtherTabs` marks the targets that changed persisted board state, as opposed to merely
- * re-reading a list the server already owns.
- */
 export interface AssistantRefreshEffects {
   /** The `defineExpose` method on the board view that reloads this target. */
   method: string
-  /**
-   * Whether the assistant changed persisted board state, as opposed to re-reading a result list.
-   *
-   * True publishes a board invalidation, which *other* open tabs answer with a full semantic
-   * snapshot reload. `BroadcastChannel` does not deliver to the tab that posted, so this tab's own
-   * undo availability is restored by the reload path it runs directly — not by its own broadcast.
-   */
-  invalidatesOtherTabs: boolean
+  invalidationScope: BoardInvalidationScope
 }
 
 const EFFECTS: Record<AssistantRefreshTarget, AssistantRefreshEffects> = {
-  rule_list: { method: 'refreshRules', invalidatesOtherTabs: true },
-  spec_list: { method: 'refreshSpecifications', invalidatesOtherTabs: true },
-  board_state: { method: 'refreshAllBoardState', invalidatesOtherTabs: true },
-  device_list: { method: 'refreshDevices', invalidatesOtherTabs: true },
-  environment_list: { method: 'refreshEnvironmentVariables', invalidatesOtherTabs: true },
-  template_list: { method: 'refreshDeviceTemplates', invalidatesOtherTabs: true },
-
-  // Run history is result-oriented: nothing about the board model changed, so no tab needs
-  // invalidating and nothing became reversible.
-  run_history: { method: 'refreshRunHistory', invalidatesOtherTabs: false }
+  rule_list: { method: 'refreshRules', invalidationScope: 'board' },
+  spec_list: { method: 'refreshSpecifications', invalidationScope: 'board' },
+  board_state: { method: 'refreshAllBoardState', invalidationScope: 'board' },
+  device_list: { method: 'refreshDevices', invalidationScope: 'board' },
+  environment_list: { method: 'refreshEnvironmentVariables', invalidationScope: 'board' },
+  template_list: { method: 'refreshDeviceTemplates', invalidationScope: 'board' },
+  run_history: { method: 'refreshRunHistory', invalidationScope: 'run-history' }
 }
+
+const TASK_STARTED_ACTIONS = new Set<AssistantAction>([
+  'VERIFICATION_TASK_STARTED', 'SIMULATION_TASK_STARTED', 'EXPLORATION_TASK_STARTED'
+])
 
 export const assistantRefreshEffects = (
   target: AssistantRefreshTarget
 ): AssistantRefreshEffects => EFFECTS[target]
+
+export const assistantStreamInvalidationScope = (
+  target: AssistantRefreshTarget,
+  action?: AssistantAction
+): BoardInvalidationScope => {
+  if (target === 'run_history' && action && TASK_STARTED_ACTIONS.has(action)) return 'tasks'
+  // RUN_HISTORY_UPDATED covers both task mutations and evidence deletion.
+  return EFFECTS[target].invalidationScope
+}

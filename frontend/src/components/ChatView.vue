@@ -63,17 +63,23 @@ type BoardChatContext = {
   templates?: string[];
 };
 
+type SystemCommandExecutor = (command: StreamCommand, source?: 'stream') => Promise<boolean>;
+
 const props = withDefaults(defineProps<{
   boardMode?: boolean;
   getBoardContext?: () => BoardChatContext | null;
   interactionLocked?: boolean;
   prepareInteraction?: () => boolean;
-  executeCommand?: (command: StreamCommand) => Promise<boolean>;
+  executeCommand?: SystemCommandExecutor;
   initialSessionObservations?: ChatSessionObservationBaseline | null;
 }>(), {
   boardMode: false,
   interactionLocked: false
 });
+const emit = defineEmits<{
+  'stream-command-received': [command: StreamCommand, userId: number | null];
+}>();
+
 const { t, locale } = useI18n();
 const ChatMarkdown = defineAsyncComponent(() => import('@/components/ChatMarkdown.vue'));
 
@@ -1140,13 +1146,13 @@ watch(sessions, currentSessions => {
   chatStore.setUnreadCount(currentSessions.filter(session => session.hasUnreadUpdate).length);
 }, { deep: true });
 
-const invokeSystemCommand = async (command: StreamCommand): Promise<boolean> => {
+const invokeSystemCommand = async (...args: Parameters<SystemCommandExecutor>): Promise<boolean> => {
   if (!props.executeCommand) {
     console.warn('[Chat] No system-command executor is available');
     return false;
   }
   try {
-    return await props.executeCommand(command);
+    return await props.executeCommand(...args);
   } catch (error) {
     console.error('[Chat] System command failed:', error);
     return false;
@@ -1161,7 +1167,8 @@ const markReconciliationRequired = () => {
 };
 
 const reconcileAuthoritativeState = async (
-    announceSuccess = false
+    announceSuccess = false,
+    ...source: [source?: 'stream']
 ): Promise<boolean> => {
   if (reconciliationPromise) return reconciliationPromise;
   const reconciliationAuthEpoch = chatAuthEpoch;
@@ -1172,7 +1179,7 @@ const reconcileAuthoritativeState = async (
       const refreshed = await invokeSystemCommand({
         type: 'REFRESH_DATA',
         payload: { target: 'board_state' }
-      });
+      }, ...source);
       if (reconciliationAuthEpoch !== chatAuthEpoch) return false;
       if (!refreshed) {
         markReconciliationRequired();
@@ -1194,8 +1201,10 @@ const reconcileAuthoritativeState = async (
   return ownedReconciliation;
 };
 
-const executeStreamCommand = async (command: StreamCommand): Promise<boolean> => {
-  const completed = await invokeSystemCommand(command);
+const executeStreamCommand = async (command: StreamCommand, ownsRequest: () => boolean): Promise<boolean> => {
+  if (!ownsRequest()) return false;
+  const completed = await invokeSystemCommand(command, 'stream');
+  if (!ownsRequest()) return false;
   if (completed) {
     if (command.payload.assistantSummary || command.payload.assistantAction) {
       notifyInfo(command.payload.assistantSummary
@@ -1204,7 +1213,8 @@ const executeStreamCommand = async (command: StreamCommand): Promise<boolean> =>
     return true;
   }
   if (command.type === 'REFRESH_DATA' && command.payload?.target !== 'board_state') {
-    const reconciled = await reconcileAuthoritativeState();
+    const reconciled = await reconcileAuthoritativeState(false, 'stream');
+    if (!ownsRequest()) return false;
     if (reconciled) {
       notifyBlocked(t('app.chat.targetRefreshRecovered'));
       if (command.payload.assistantSummary || command.payload.assistantAction) {
@@ -2258,6 +2268,7 @@ const submitChatTurn = async (content: string, confirmation?: ChatConfirmationCo
     return;
   }
   const requestAuthEpoch = chatAuthEpoch;
+  const requestUserId = authenticatedUserId.value;
   const turnId = typeof globalThis.crypto?.randomUUID === 'function'
       ? globalThis.crypto.randomUUID()
       : `chat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
@@ -2300,7 +2311,7 @@ const submitChatTurn = async (content: string, confirmation?: ChatConfirmationCo
   let commandExecutionChain: Promise<void> = Promise.resolve();
   const queueCommandExecution = (command: StreamCommand) => {
     commandExecutionChain = commandExecutionChain.then(async () => {
-      await executeStreamCommand(command);
+      await executeStreamCommand(command, requestContextIsCurrent);
     });
   };
 
@@ -2377,7 +2388,9 @@ const submitChatTurn = async (content: string, confirmation?: ChatConfirmationCo
             if (confirmation) pendingConfirmationActions.value = [];
           },
           onCommand: (cmd: StreamCommand) => {
-            if (requestEpoch !== streamRequestEpoch) return;
+            if (!requestContextIsCurrent()) return;
+            // Other tabs can refresh while this one still has an earlier command in its queue.
+            emit('stream-command-received', cmd, requestUserId);
             queueCommandExecution(cmd);
           },
           onProgress: (progress: StreamProgress) => {

@@ -35,6 +35,7 @@ const setup = () => {
     isVerifying: ref(true), isSimulating: ref(true), isFuzzing: ref(true),
     asyncVerificationActive: ref(true), asyncSimulationActive: ref(true),
     activeVerificationTasks: ref([]), activeSimulationTasks: ref([]), activeFuzzingTasks: ref([]),
+    verificationTasks: ref([]), simulationTasks: ref([]), fuzzingTasks: ref([]),
     normalizeTaskProgress: (value: number) => value, boardLifecycleDisposed: false,
     pendingTaskActionKeys: ref(new Set<string>()), loadTaskInbox: vi.fn().mockResolvedValue(true),
     notifyTaskCancellationResult: vi.fn(),
@@ -52,6 +53,10 @@ const setup = () => {
   ports.taskProgressStatusKey = bind('taskProgressStatusKey', ports)
   ports.formatTaskProgressStage = bind('formatTaskProgressStage', ports)
   ports.formatWatchedTaskStatus = bind('formatWatchedTaskStatus', ports)
+  ports.isWatchedTaskCancelled = bind('isWatchedTaskCancelled', ports)
+  ports.ensureActiveWatchedTaskPoll = bind('ensureActiveWatchedTaskPoll', ports)
+  ports.readWatchedTaskStatus = bind('readWatchedTaskStatus', ports)
+  ports.applyTaskCancellationReceipt = bind('applyTaskCancellationReceipt', ports)
   for (const kind of ['Verification', 'Simulation', 'Fuzzing']) {
     ports[`async${kind}Task`] = bind(`async${kind}Task`, ports)
     ports[`async${kind}Task`].value.taskId = 7
@@ -199,7 +204,7 @@ describe('live task status language', () => {
       expect(status()).toBe(i18n.global.t('app.taskCancelling'))
       expect(ports[api].cancelTask).toHaveBeenCalledExactlyOnceWith(7)
     } finally {
-      resolve({ cancellationAccepted: true, cancellationOutcome: 'ACCEPTED', taskStatus: 'CANCELLED' })
+      resolve({ taskId: 7, cancellationAccepted: true, cancellationOutcome: 'ACCEPTED', taskStatus: 'CANCELLED' })
       await pending
     }
     expect(items.value.find((item: any) => item.kind === kind).status).toBe(i18n.global.t('app.taskStatusCancelled'))
@@ -231,7 +236,7 @@ describe('live task status language', () => {
     ['fuzzing', 'cancelAsyncFuzzing', 'fuzzingApi']
   ])('uses the server-confirmed %s terminal status when cancellation loses the race', async (kind, handler, api) => {
     const { ports, i18n, items } = setup()
-    ports[api] = { cancelTask: vi.fn().mockResolvedValue({ cancellationAccepted: false,
+    ports[api] = { cancelTask: vi.fn().mockResolvedValue({ taskId: 7, cancellationAccepted: false,
       cancellationOutcome: 'ALREADY_COMPLETED', taskStatus: 'COMPLETED' }) }
     await bind(handler, ports)()
     const status = () => items.value.find((entry: any) => entry.kind === kind).status
