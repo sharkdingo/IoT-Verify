@@ -1,4 +1,4 @@
-import type { APIResponse } from '@playwright/test'
+import type { APIResponse, Route } from '@playwright/test'
 import { apiBaseURL, createAuthenticatedUser, expect, test } from './support/auth'
 
 const unwrap = async (response: APIResponse) => {
@@ -41,6 +41,10 @@ test('an unavailable current-model comparison withholds historical Fix and expla
     }
   }))
   const original = await unwrap(await request.get(`${apiBaseURL}/api/board/model-fingerprints`, { headers }))
+  const { scene: originalScene, ...originalFingerprints } = original
+  expect(originalScene.nodes).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: 'unknown_light', state: 'off' })
+  ]))
   const verdict = await unwrap(await request.post(`${apiBaseURL}/api/verify`, {
     headers, data: { attackScenario: { mode: 'NONE' }, enablePrivacy: false }
   }))
@@ -53,6 +57,9 @@ test('an unavailable current-model comparison withholds historical Fix and expla
   }))
   const changed = await unwrap(await request.get(`${apiBaseURL}/api/board/model-fingerprints`, { headers }))
   expect(changed.verification).not.toBe(original.verification)
+  expect(changed.scene.nodes).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: 'unknown_light', state: 'on' })
+  ]))
 
   await page.addInitScript(auth => {
     localStorage.setItem('iot_verify_token', auth.token)
@@ -64,6 +71,21 @@ test('an unavailable current-model comparison withholds historical Fix and expla
   await expect(dialog).toBeVisible()
   await expect(page.getByTestId('verification-result-stale-banner')).toBeVisible()
   await expect(page.getByTestId('verification-trace-fix')).toHaveCount(0)
+
+  const comparisonForDifferentScene = async (route: Route) => {
+    await route.fulfill({ json: { code: 200, data: original } })
+  }
+  await page.route('**/api/board/model-fingerprints', comparisonForDifferentScene)
+  try {
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await expect(dialog.getByTestId('verification-result-comparison-banner')).toContainText(
+      'Current board comparison data could not be read'
+    )
+    await expect(dialog.getByTestId('verification-trace-replay')).toBeEnabled()
+    await expect(page.getByTestId('verification-trace-fix')).toHaveCount(0)
+  } finally {
+    await page.unroute('**/api/board/model-fingerprints', comparisonForDifferentScene)
+  }
 
   // Real saved evidence and the changed Board stay intact; only the current comparison read fails.
   let releaseComparison!: () => void
@@ -102,7 +124,7 @@ test('an unavailable current-model comparison withholds historical Fix and expla
     data: { expected: { ...runtime, state: 'on' }, desired: runtime }
   }))
   const restored = await unwrap(await request.get(`${apiBaseURL}/api/board/model-fingerprints`, { headers }))
-  expect(restored).toEqual(original)
+  expect(restored).toMatchObject(originalFingerprints)
   await page.reload({ waitUntil: 'domcontentloaded' })
   await expect(dialog).toBeVisible()
   await expect(page.getByTestId('verification-trace-fix')).toBeVisible()
@@ -141,7 +163,7 @@ test('an unavailable current-model comparison withholds historical Fix and expla
         }
         const response = await route.fetch()
         expect(response.ok()).toBe(true)
-        expect((await response.json()).data).toEqual(original)
+        expect((await response.json()).data).toMatchObject(originalFingerprints)
         if (comparisonIndex === 1) {
           comparisonStarted()
           await olderGate

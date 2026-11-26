@@ -34,7 +34,7 @@ Verified against code on 2026-10-26.
 
 | Method | Path | Note | Detail |
 | :--- | :--- | :--- | :--- |
-| GET | `/api/board/model-fingerprints` | Read current verification/exploration and simulation model identities | [board.md](board.md#current-model-fingerprints) |
+| GET | `/api/board/model-fingerprints` | Read current model identities and their source scene | [board.md](board.md#current-model-fingerprints) |
 | GET | `/api/board/nodes` | List device instances | [board.md](board.md) |
 | POST | `/api/board/nodes` | Atomically append one or more device instances | [board.md](board.md) |
 | PUT | `/api/board/nodes/layout?nodeId={nodeId}` | Replace only one device's complete canvas layout | [board.md](board.md) |

@@ -23,7 +23,7 @@ All endpoints are authenticated and scoped to the current user (`@CurrentUser`).
 Each account has one development board and one reusable template library: multiple
 tabs of that account view the same board. Moving a portable scene between accounts
 resolves dependencies in the target account without modifying the source account.
-Verified against code on 2026-10-26. Source:
+Verified against code on 2026-11-26. Source:
 `service/impl/BoardStorageServiceImpl.java`, `service/recommendation/`,
 `controller/BoardStorageController.java`, `dto/device/`, `dto/board/`, `dto/rule/`,
 `dto/spec/`, `dto/recommendation/`, `component/board/PortableSceneDiagnostics.java`,
@@ -98,7 +98,7 @@ URL delimiters, and internal whitespace. Device identity validation is defined i
 
 | Method | Path | Body / Response | Notes |
 | :--- | :--- | :--- | :--- |
-| GET | `/api/board/model-fingerprints` | → `BoardModelFingerprintsDto` | Canonical current-model identities for verification/exploration and simulation, captured under one Board lock |
+| GET | `/api/board/model-fingerprints` | → `BoardModelComparisonDto` | Canonical current-model identities and the exact semantic scene they describe |
 | GET | `/api/board/nodes` | → `DeviceNodeDto[]` | List device instances |
 | POST | `/api/board/nodes` | `DeviceBatchCreateRequestDto` → `DeviceMutationResultDto` | Atomically append one or more device instances; every `templateName` must exist. Optional environment patches commit with the devices. Reversible as one user action regardless of batch size; the result carries `canUndo`/`canRedo` |
 | PUT | `/api/board/nodes/layout?nodeId={nodeId}` | `DeviceLayoutDto` → `DeviceUpdateResultDto` | Replace only the complete canvas layout subresource (`position`, `width`, `height`); device identity and modeled runtime are preserved. A real change is one reversible edit and returns `canUndo`/`canRedo`; an unchanged command writes no history and omits both fields |
@@ -162,13 +162,15 @@ The required name contract is defined by [SpecificationDto](verification.md#spec
 
 ### Current model fingerprints
 
-`BoardModelFingerprintsDto` captures the current engine semantics and both Board input identities:
+`BoardModelComparisonDto` contains the current engine semantics, both Board input identities,
+and the scene from which they were computed:
 
 | Field | Meaning |
 | :--- | :--- |
 | `modelSemanticsVersion` | Positive integer identifying the current execution semantics |
 | `verification` | 64-character lowercase SHA-256 of modeled devices/runtime, environment, ordered rules, structured specifications, and referenced template manifests. Also used for exploration history |
 | `simulation` | 64-character lowercase SHA-256 of the same input with the specification collection emptied |
+| `scene` | Same semantic collections as the workspace snapshot described at the top of this page, without edit history; captured once and used as input to both hashes |
 
 `ModelFingerprint` owns canonical serialization for both task capture and current-Board reads.
 It sorts object/map keys and environment entries. New Board captures order modeled devices by
@@ -188,8 +190,10 @@ Run configuration such as attack/privacy settings, requested simulation steps, a
 is recorded separately and is not a claim about the current Board's content.
 
 Compare a run's [frozen model scope](verification.md#modelrunsnapshotdto) with this response,
-including after reload and undo. The endpoint reads one captured model for both identities,
-so a concurrent edit cannot mix two Board revisions in its response.
+including after reload and undo. Before comparing against a displayed Board, confirm it has the
+same model source as `scene`; otherwise the comparison is unavailable. A valid response for a
+different scene does not verify the displayed one. After a failed workspace reload, fresh matching
+comparison evidence may still describe the last successfully displayed scene.
 Both hashes reuse one canonical model tree, replacing only its specification collection for the
 simulation identity. This does not mutate the captured snapshot or change canonical hash values.
 

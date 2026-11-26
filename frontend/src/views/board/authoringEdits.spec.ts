@@ -46,6 +46,39 @@ const setup = (enqueue?: (work: () => Promise<unknown>) => Promise<unknown>) => 
 }
 
 describe('Board edit ownership and reconciliation', () => {
+  it.each([409, 503])('reconciles a rename HTTP %i from one complete Board snapshot', async status => {
+    const node = { id: 'kept', label: 'Original' }
+    const nodes = { value: [node] }
+    const label = status === 409 ? 'Changed elsewhere' : 'Requested label'
+    const renameDialogData = { node, originalLabel: node.label }
+    const ports = {
+      nodes, renameDialogData, renameDialogVisible: { value: true },
+      ensurePlaybackClosedForMutation: () => true, ensureBoardDataReady: () => true,
+      deviceLabelKey: (value: string) => value.toLowerCase(),
+      enqueueBoardMutation: (work: () => Promise<unknown>) => work(),
+      boardApi: { renameNode: vi.fn().mockRejectedValue({ response: { status } }) },
+      isDefinitiveMutationRejection: (error: { response: { status: number } }) => error.response.status === 409,
+      refreshSceneForReconciliation: vi.fn(async () => {
+        nodes.value = [{ ...node, label }]
+        return true
+      }),
+      refreshDevices: vi.fn(), refreshSpecifications: vi.fn(), refreshEnvironmentVariables: vi.fn(),
+      reloadUndoAvailability: vi.fn(), notifyBlocked: vi.fn(), notifyError: vi.fn(),
+      extractApiErrorMessage: () => 'Rename failed', t: (key: string) => key
+    }
+    const rename = bindDeletion('handleRenameDevice', 'handleDeviceRuntimeSave', ports)
+
+    const result = await rename(node.id, 'Requested label', node.label)
+
+    expect(ports.refreshSceneForReconciliation).toHaveBeenCalledOnce()
+    if (status === 409) {
+      expect(result).toBe(false)
+      expect(renameDialogData.originalLabel).toBe(label)
+    } else {
+      expect(result).toEqual({ responseConfirmed: false, environmentChanges: [] })
+    }
+  })
+
   it('identifies the locally removed device when adopting a confirmed deletion snapshot', async () => {
     const snapshot = { nodes: [] }
     const ports = {

@@ -335,7 +335,9 @@ Non-exhaustive:
   label. Renaming a device therefore never changes rule/spec identity, and labels are
   compared case-insensitively without applying NuSMV normalization rules to what the
   user sees. Single creation and rename keep the exact typed label and block a conflict;
-  they do not commit an unconfirmed suffix. Batch/import deliberately allocate unique
+  they do not commit an unconfirmed suffix. Rename conflicts and uncertain rename outcomes
+  reconcile from one complete Board snapshot rather than independent collection reads.
+  Batch/import deliberately allocate unique
   suffixes in the visible preview, then abort the whole append if the current Board has
   drifted and those previewed names are no longer available.
   Device import accepts either one JSON object or a JSON array with
@@ -974,8 +976,8 @@ specifications satisfied".
 `verify` and `verifyAsync` require a saved board with at least one specification.
 Simulation remains the no-spec workflow. Both submit run parameters only; the server
 captures the scene. Task and history comparison use the
-[authoritative model identity](../api/board.md#current-model-fingerprints); no browser-only
-scene signature determines whether a persisted result still describes the current Board.
+[authoritative model identity](../api/board.md#current-model-fingerprints). A browser comparison
+checks that the response describes the displayed scene before using its server-computed identities.
 
 Contracts for board storage and board recommendation endpoints live in
 [../api/board.md](../api/board.md). Contracts for verification, traces, and fix live in

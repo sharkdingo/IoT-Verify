@@ -268,13 +268,18 @@ describe('board mutation response contracts', () => {
     vi.clearAllMocks()
   })
 
-  it('preserves the current modeling version and rejects a missing or historical version in board comparison', async () => {
+  it('requires the model identities and the scene captured with them', async () => {
     const fingerprints = { verification: 'a'.repeat(64), simulation: 'b'.repeat(64) }
+    const { editHistory: _editHistory, ...scene } = completeBoardSnapshot()
     vi.mocked(http.get)
+      .mockResolvedValueOnce(resultEnvelope({ ...fingerprints, modelSemanticsVersion: 2, scene }))
       .mockResolvedValueOnce(resultEnvelope({ ...fingerprints, modelSemanticsVersion: 2 }))
-      .mockResolvedValueOnce(resultEnvelope(fingerprints))
-      .mockResolvedValueOnce(resultEnvelope({ ...fingerprints, modelSemanticsVersion: 0 }))
-    await expect(boardApi.getModelFingerprints()).resolves.toEqual({ ...fingerprints, modelSemanticsVersion: 2 })
+      .mockResolvedValueOnce(resultEnvelope({ ...fingerprints, scene }))
+      .mockResolvedValueOnce(resultEnvelope({ ...fingerprints, modelSemanticsVersion: 0, scene }))
+    await expect(boardApi.getModelFingerprints()).resolves.toEqual({
+      fingerprints: { ...fingerprints, modelSemanticsVersion: 2 }, scene
+    })
+    await expect(boardApi.getModelFingerprints()).rejects.toMatchObject({ code: BOARD_RESPONSE_INCOMPLETE_CODE })
     await expect(boardApi.getModelFingerprints()).rejects.toMatchObject({ code: BOARD_RESPONSE_INCOMPLETE_CODE })
     await expect(boardApi.getModelFingerprints()).rejects.toMatchObject({ code: BOARD_RESPONSE_INCOMPLETE_CODE })
   })

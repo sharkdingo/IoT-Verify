@@ -13,7 +13,7 @@ import cn.edu.nju.Iot_Verify.dto.board.BoardEditRequestDto;
 import cn.edu.nju.Iot_Verify.dto.board.BoardReplacementPreviewDto;
 import cn.edu.nju.Iot_Verify.dto.board.BoardUndoResultDto;
 import cn.edu.nju.Iot_Verify.dto.board.BoardWorkspaceSnapshotDto;
-import cn.edu.nju.Iot_Verify.dto.board.BoardModelFingerprintsDto;
+import cn.edu.nju.Iot_Verify.dto.board.BoardModelComparisonDto;
 import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
 import cn.edu.nju.Iot_Verify.dto.board.BoardLayoutDto;
 import cn.edu.nju.Iot_Verify.dto.board.CollectionMutationResultDto;
@@ -109,9 +109,10 @@ public class BoardStorageController {
     }
 
     @GetMapping("/model-fingerprints")
-    public Result<BoardModelFingerprintsDto> getModelFingerprints(@CurrentUser Long userId) {
-        var snapshot = boardDataConverter.getModelInputSnapshot(userId);
-        return Result.success(modelFingerprint.boardFingerprints(snapshot));
+    public Result<BoardModelComparisonDto> getModelFingerprints(@CurrentUser Long userId) {
+        var scene = boardService.getSemanticSnapshot(userId);
+        var snapshot = boardDataConverter.toModelInputSnapshot(scene);
+        return Result.success(new BoardModelComparisonDto(modelFingerprint.boardFingerprints(snapshot), scene));
     }
 
     @GetMapping("/nodes")

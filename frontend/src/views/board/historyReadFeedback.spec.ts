@@ -102,6 +102,7 @@ const state = () => {
     retainKnownFuzzingHistoryAvailability: (runs: unknown) => runs,
     withUnreadFuzzUnavailablePlaceholders: (runs: unknown) => runs,
     refreshCurrentBoardModelFingerprints: vi.fn().mockResolvedValue(undefined),
+    invalidateCurrentBoardModelFingerprints: vi.fn(),
     historyResultErrors: { verification: null, simulation: null, fuzzing: null },
     historyResultsLoadingEpoch: 0, loadingResultHistory: ref(false),
     fuzzingRunsPage: ref(0), fuzzingRunsHasMore: ref(false), FUZZ_RUN_HISTORY_PAGE_SIZE: 20,

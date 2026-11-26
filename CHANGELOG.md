@@ -19,6 +19,8 @@ history into a technical spec. The spec content itself now lives under
 
 #### Fixed
 
+- Run comparison no longer applies another Board revision's fingerprints to the displayed scene.
+  Device rename conflicts and uncertain responses reconcile from one complete Board snapshot.
 - Verification, simulation, and exploration notify the local worker only after cancellation commits.
   A rollback leaves work running, and a worker that loses its lease cannot record a user cancellation.
 - Verification and simulation reclaim queue slots when cancellation races with dispatch. Account

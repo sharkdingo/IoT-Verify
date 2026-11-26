@@ -21,7 +21,6 @@ const createState = new Function('ref', 'computed', 'watch', 'nodes', 'rules', '
   'boardLifecycleDisposed', 'boardAuthScopeEpoch', 'allBoardDataKeys', 'boardDataLoadState',
   'templatesLoading', 'isCurrentBoardAuthScope', 'replaceNodesFromServer', 'reconcileDanglingBoardFocus',
   'syncRuleDerivedEdges', 'syncBoardUndoAvailability', 'hydratedBoardAuthScopeEpoch', 'boardSnapshotError', 'errorDetails',
-  'isBoardDataReady',
   transpileModule(`${board.slice(start, end)}
     ${board.slice(snapshotStart, snapshotEnd)}
     return { scope: currentBoardModelFingerprints, loading: loadingCurrentBoardModelFingerprints,
@@ -36,10 +35,14 @@ afterEach(() => scopes.splice(0).forEach(scope => scope.stop()))
 const fingerprintState = () => {
   const nodes = ref([{ id: 'ac', templateName: 'AirConditioner', label: 'AC',
     width: 160, height: 120, position: { x: 10, y: 10 } }])
-  const getModelFingerprints = vi.fn().mockResolvedValue(models('a'))
+  const comparison = (hex = 'a') => ({
+    fingerprints: models(hex),
+    scene: { nodes: nodes.value, deviceTemplates: [], environmentVariables: [], rules: [], specifications: [] }
+  })
+  const getModelFingerprints = vi.fn().mockImplementation(async () => comparison())
   const getSnapshot = vi.fn()
   const dataKeys = ['templates', 'nodes', 'environment', 'rules', 'specs']
-  const loadState = reactive(Object.fromEntries(dataKeys.map(key => [key, 'loading'])))
+  const loadState = reactive(Object.fromEntries(dataKeys.map(key => [key, 'ready'])))
   const syncBoardUndoAvailability = vi.fn()
   const scope = effectScope()
   scopes.push(scope)
@@ -47,9 +50,8 @@ const fingerprintState = () => {
     ref([]), ref([]), createLatestBoardRequestGuard, { getModelFingerprints, getSnapshot }, false,
     0, dataKeys, loadState, ref(false), (epoch: number) => epoch === 0,
     vi.fn((loaded: typeof nodes.value) => { nodes.value = loaded }), vi.fn(), vi.fn(),
-    syncBoardUndoAvailability, 0, ref(null), errorDetails,
-    computed(() => dataKeys.every(key => loadState[key] === 'ready'))))!
-  return { ...state, nodes, getModelFingerprints, getSnapshot, loadState, syncBoardUndoAvailability }
+    syncBoardUndoAvailability, 0, ref(null), errorDetails))!
+  return { ...state, nodes, comparison, getModelFingerprints, getSnapshot, loadState, syncBoardUndoAvailability }
 }
 
 const models = (hex: string) => ({ verification: hex.repeat(64), simulation: hex.repeat(64), modelSemanticsVersion: 1 })
@@ -77,6 +79,36 @@ const resultStalenessState = () => {
 }
 
 describe('Board current model fingerprints', () => {
+  it('does not use another tab’s newer model to confirm the displayed scene', async () => {
+    const state = fingerprintState()
+    const displayed = { deviceTemplates: [], nodes: state.nodes.value,
+      environmentVariables: [], rules: [], specifications: [] }
+    state.getSnapshot.mockResolvedValueOnce({ ...displayed,
+      editHistory: { canUndo: false, canRedo: false, editHistoryRevision: '0:0:0' } })
+    state.getModelFingerprints.mockResolvedValueOnce({ fingerprints: models('b'),
+      scene: { ...displayed, nodes: [{ ...displayed.nodes[0], state: 'on' }] } })
+
+    expect(await state.refreshSnapshot()).toBe(true)
+    await nextTick()
+
+    expect(state.nodes.value).toEqual(displayed.nodes)
+    expect(state.scope.value).toBeNull()
+  })
+
+  it('accepts a model captured with the same devices in storage order after scene import', async () => {
+    const state = fingerprintState()
+    state.nodes.value = [state.nodes.value[0], { ...state.nodes.value[0], id: 'alarm' }]
+    await nextTick()
+    const comparison = state.comparison()
+    state.getModelFingerprints.mockResolvedValueOnce({
+      ...comparison, scene: { ...comparison.scene, nodes: [...state.nodes.value].reverse() }
+    })
+
+    await state.refresh()
+
+    expect(state.scope.value).toEqual(models('a'))
+  })
+
   it('reads fingerprints once and adopts the edit history from the same snapshot', async () => {
     const state = fingerprintState()
     const editHistory = { canUndo: true, canRedo: false, editHistoryRevision: '31:1:0' }
@@ -94,9 +126,25 @@ describe('Board current model fingerprints', () => {
   it('updates an already-rendered unknown scope when the current fingerprint arrives', async () => {
     const state = fingerprintState()
     expect(state.scope.value).toBeNull()
-    state.getModelFingerprints.mockResolvedValue(models('a'))
+    state.getModelFingerprints.mockResolvedValue(state.comparison('a'))
     await state.refresh()
     expect(state.scope.value).toEqual(models('a'))
+  })
+
+  it('accepts fresh matching evidence for the retained scene after a failed Board reload', async () => {
+    const state = fingerprintState()
+    state.getSnapshot.mockRejectedValueOnce(new Error('snapshot unavailable'))
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      expect(await state.refreshSnapshot()).toBe(false)
+      expect(state.scope.value).toBeNull()
+
+      await state.refresh()
+
+      expect(state.scope.value).toEqual(models('a'))
+    } finally {
+      diagnostic.mockRestore()
+    }
   })
 
   it.each(['a', 'b'])('withdraws an old matching fingerprint throughout a pending refresh before adopting %s', async nextModel => {
@@ -108,12 +156,12 @@ describe('Board current model fingerprints', () => {
     await state.refresh()
     expect(comparison.value).toBe('UNCHANGED')
 
-    let resolve!: (value: ReturnType<typeof models>) => void
+    let resolve!: (value: ReturnType<typeof state.comparison>) => void
     state.getModelFingerprints.mockReturnValueOnce(new Promise(done => { resolve = done }))
     const pending = state.refresh()
     expect(state.loading.value).toBe(true)
     expect(comparison.value).toBe('UNAVAILABLE')
-    resolve(models(nextModel))
+    resolve(state.comparison(nextModel))
     await pending
     expect(state.loading.value).toBe(false)
     expect(comparison.value).toBe(nextModel === 'a' ? 'UNCHANGED' : 'CHANGED')
@@ -137,7 +185,7 @@ describe('Board current model fingerprints', () => {
   it.each(['success', 'failure'] as const)('ends loading when invalidation precedes a failed snapshot and the old fingerprint %s settles', async outcome => {
     const state = fingerprintState()
     await state.refresh()
-    let resolve!: (value: ReturnType<typeof models>) => void
+    let resolve!: (value: ReturnType<typeof state.comparison>) => void
     let reject!: (error: Error) => void
     state.getModelFingerprints.mockReturnValueOnce(new Promise((done, fail) => {
       resolve = done
@@ -151,7 +199,7 @@ describe('Board current model fingerprints', () => {
     try {
       expect(await state.refreshSnapshot()).toBe(false)
       expect(Object.values(state.loadState).every(value => value === 'error')).toBe(true)
-      if (outcome === 'success') resolve(models('a'))
+      if (outcome === 'success') resolve(state.comparison('a'))
       else reject(new Error('old comparison unavailable'))
       await older
       expect(state.scope.value).toBeNull()
@@ -165,9 +213,9 @@ describe('Board current model fingerprints', () => {
 
   it.each(['success', 'failure'] as const)('preserves loading for the post-watcher request when an invalidated fingerprint %s settles', async outcome => {
     const state = fingerprintState()
-    let resolveOlder!: (value: ReturnType<typeof models>) => void
+    let resolveOlder!: (value: ReturnType<typeof state.comparison>) => void
     let rejectOlder!: (error: Error) => void
-    let resolveNewest!: (value: ReturnType<typeof models>) => void
+    let resolveNewest!: (value: ReturnType<typeof state.comparison>) => void
     state.getModelFingerprints.mockReturnValueOnce(new Promise((done, fail) => {
       resolveOlder = done
       rejectOlder = fail
@@ -178,12 +226,12 @@ describe('Board current model fingerprints', () => {
     expect(state.loading.value).toBe(false)
     await nextTick()
     expect(state.loading.value).toBe(true)
-    if (outcome === 'success') resolveOlder(models('a'))
+    if (outcome === 'success') resolveOlder(state.comparison('a'))
     else rejectOlder(new Error('old comparison unavailable'))
     await older
     expect(state.scope.value).toBeNull()
     expect(state.loading.value).toBe(true)
-    resolveNewest(models('b'))
+    resolveNewest(state.comparison('b'))
     await nextTick()
     expect(state.scope.value).toEqual(models('b'))
     expect(state.loading.value).toBe(false)
@@ -192,31 +240,31 @@ describe('Board current model fingerprints', () => {
 
   it('invalidates a known fingerprint and rejects an in-flight response after a model change', async () => {
     const state = fingerprintState()
-    state.getModelFingerprints.mockResolvedValueOnce(models('a'))
+    state.getModelFingerprints.mockResolvedValueOnce(state.comparison('a'))
     await state.refresh()
     expect(state.scope.value).toEqual(models('a'))
-    let resolve!: (value: ReturnType<typeof models>) => void
+    let resolve!: (value: ReturnType<typeof state.comparison>) => void
     state.getModelFingerprints.mockReturnValueOnce(new Promise(done => { resolve = done }))
     const pending = state.refresh()
-    state.getModelFingerprints.mockResolvedValueOnce(models('b'))
+    state.getModelFingerprints.mockImplementationOnce(async () => state.comparison('b'))
     state.nodes.value = [{ ...state.nodes.value[0], templateName: 'ChangedTemplate' }]
     expect(state.scope.value).toBeNull()
     await nextTick()
-    resolve(models('a'))
+    resolve(state.comparison('a'))
     await pending
     expect(state.scope.value).toEqual(models('b'))
   })
 
   it('keeps the newest response and represents failed refreshes as unknown', async () => {
     const state = fingerprintState()
-    let resolve!: (value: ReturnType<typeof models>) => void
+    let resolve!: (value: ReturnType<typeof state.comparison>) => void
     state.getModelFingerprints.mockReturnValueOnce(new Promise(done => { resolve = done }))
     const older = state.refresh()
     expect(state.loading.value).toBe(true)
-    state.getModelFingerprints.mockResolvedValueOnce(models('b'))
+    state.getModelFingerprints.mockResolvedValueOnce(state.comparison('b'))
     await state.refresh()
     expect(state.loading.value).toBe(false)
-    resolve(models('a'))
+    resolve(state.comparison('a'))
     await older
     expect(state.scope.value).toEqual(models('b'))
     state.getModelFingerprints.mockRejectedValueOnce(new Error('unavailable'))
@@ -227,17 +275,17 @@ describe('Board current model fingerprints', () => {
 
   it('keeps loading owned by the newest comparison request when an older request settles', async () => {
     const state = fingerprintState()
-    let resolveOlder!: (value: ReturnType<typeof models>) => void
-    let resolveNewest!: (value: ReturnType<typeof models>) => void
+    let resolveOlder!: (value: ReturnType<typeof state.comparison>) => void
+    let resolveNewest!: (value: ReturnType<typeof state.comparison>) => void
     state.getModelFingerprints.mockReturnValueOnce(new Promise(done => { resolveOlder = done }))
     state.getModelFingerprints.mockReturnValueOnce(new Promise(done => { resolveNewest = done }))
     const older = state.refresh()
     const newest = state.refresh()
-    resolveOlder(models('a'))
+    resolveOlder(state.comparison('a'))
     await older
     expect(state.scope.value).toBeNull()
     expect(state.loading.value).toBe(true)
-    resolveNewest(models('b'))
+    resolveNewest(state.comparison('b'))
     await newest
     expect(state.scope.value).toEqual(models('b'))
     expect(state.loading.value).toBe(false)
@@ -307,7 +355,7 @@ describe('Board current model fingerprints', () => {
       expect(state.scope.value).toEqual(models('a'))
       const runtimeChanged = structuredClone(incoming)
       runtimeChanged[42]!.variables[0]!.value = '25'
-      state.getModelFingerprints.mockResolvedValueOnce(models('b'))
+      state.getModelFingerprints.mockImplementationOnce(async () => state.comparison('b'))
       state.nodes.value = reconcileBoardNodeSnapshot(state.nodes.value, runtimeChanged, new Map(), new Set())
       expect(state.scope.value).toBeNull()
       await nextTick()
@@ -329,7 +377,7 @@ describe('Board current model fingerprints', () => {
   ])('still invalidates comparison evidence immediately when %s changes', async (field, value) => {
     const state = fingerprintState()
     await state.refresh()
-    state.getModelFingerprints.mockResolvedValueOnce(models('b'))
+    state.getModelFingerprints.mockImplementationOnce(async () => state.comparison('b'))
     Object.assign(state.nodes.value[0], { [field as string]: value })
     expect(state.scope.value).toBeNull()
     await nextTick()

@@ -223,12 +223,15 @@ const requireValueBasedRuleSource = (source: any, sourceType: RuleSourceItemType
     }
 }
 
-export interface BoardWorkspaceSnapshot {
+export interface BoardSemanticSnapshot {
     nodes: DeviceNode[]
     environmentVariables: ModelEnvironmentVariable[]
     rules: RuleForm[]
     specifications: Specification[]
     deviceTemplates: DeviceTemplate[]
+}
+
+export interface BoardWorkspaceSnapshot extends BoardSemanticSnapshot {
     editHistory: BoardUndoAvailability
 }
 
@@ -2321,41 +2324,45 @@ const parseBoardTemplateCatalog = (value: unknown, context: string): DeviceTempl
     return templates
 }
 
+const parseBoardSemanticSnapshot = (value: unknown, context: string): BoardSemanticSnapshot => {
+    const snapshot = requireResponseRecord(value, context)
+    const rawNodes = requireResponseArray<DeviceNode>(snapshot.nodes, `${context}.nodes`)
+        .map((node, index) => validateBoardNodeResult(node, `${context}.nodes[${index}]`))
+    const rawRules = requireResponseArray<RuleDto>(snapshot.rules, `${context}.rules`)
+        .map((rule, index) => validateBackendRuleResult(rule, `${context}.rules[${index}]`))
+    const rawSpecifications = requireResponseArray<Specification>(
+        snapshot.specifications,
+        `${context}.specifications`
+    ).map((spec, index) => validateBoardSpecificationResult(spec, `${context}.specifications[${index}]`))
+    const environmentVariables = requireResponseArray<ModelEnvironmentVariable>(
+        snapshot.environmentVariables,
+        `${context}.environmentVariables`
+    ).map((variable, index) =>
+        validateEnvironmentVariable(variable, `${context}.environmentVariables[${index}]`))
+    requireUniqueIdentities(rawNodes, node => node.id, context, 'nodes')
+    requireUniqueIdentities(environmentVariables, variable => variable.name, context, 'environmentVariables')
+    requireUniqueIdentities(rawRules, rule => Number(rule.id), context, 'rules')
+    requireUniqueIdentities(rawSpecifications, specification => specification.id, context, 'specifications')
+    return {
+        nodes: rawNodes,
+        environmentVariables,
+        rules: rawRules.map(fromRuleDto),
+        specifications: rawSpecifications,
+        deviceTemplates: parseBoardTemplateCatalog(snapshot.deviceTemplates, `${context}.deviceTemplates`)
+    }
+}
+
 export default {
     // ==== 节点 ====
     getSnapshot: async (): Promise<BoardWorkspaceSnapshot> => {
         const context = 'Board semantic snapshot'
-        const snapshot = requireResponseRecord(
-            unpack<unknown>(await api.get('/board/snapshot')),
-            context
-        )
-        const rawNodes = requireResponseArray<DeviceNode>(snapshot.nodes, `${context}.nodes`)
-            .map((node, index) => validateBoardNodeResult(node, `${context}.nodes[${index}]`))
-        const rawRules = requireResponseArray<RuleDto>(snapshot.rules, `${context}.rules`)
-            .map((rule, index) => validateBackendRuleResult(rule, `${context}.rules[${index}]`))
-        const rawSpecifications = requireResponseArray<Specification>(
-            snapshot.specifications,
-            `${context}.specifications`
-        ).map((spec, index) => validateBoardSpecificationResult(spec, `${context}.specifications[${index}]`))
-        const environmentVariables = requireResponseArray<ModelEnvironmentVariable>(
-            snapshot.environmentVariables,
-            `${context}.environmentVariables`
-        ).map((variable, index) =>
-            validateEnvironmentVariable(variable, `${context}.environmentVariables[${index}]`))
-        requireUniqueIdentities(rawNodes, node => node.id, context, 'nodes')
-        requireUniqueIdentities(environmentVariables, variable => variable.name, context, 'environmentVariables')
-        requireUniqueIdentities(rawRules, rule => Number(rule.id), context, 'rules')
-        requireUniqueIdentities(rawSpecifications, specification => specification.id, context, 'specifications')
+        const snapshot = requireResponseRecord(unpack<unknown>(await api.get('/board/snapshot')), context)
         return {
-            nodes: rawNodes,
-            environmentVariables,
-            rules: rawRules.map(fromRuleDto),
-            specifications: rawSpecifications,
-            deviceTemplates: parseBoardTemplateCatalog(snapshot.deviceTemplates, `${context}.deviceTemplates`),
+            ...parseBoardSemanticSnapshot(snapshot, context),
             editHistory: requireBoardEditAvailability(snapshot.editHistory, `${context}.editHistory`)
         }
     },
-    getModelFingerprints: async (): Promise<BoardModelFingerprints> => {
+    getModelFingerprints: async (): Promise<{ fingerprints: BoardModelFingerprints; scene: BoardSemanticSnapshot }> => {
         const value = requireResponseRecord(
             unpack<unknown>(await api.get('/board/model-fingerprints')), 'Board model comparison'
         )
@@ -2366,7 +2373,10 @@ export default {
         if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 1) {
             throw new BoardResponseContractError('Board model comparison', 'modelSemanticsVersion must be a positive integer')
         }
-        return { verification: value.verification, simulation: value.simulation, modelSemanticsVersion: version }
+        return {
+            fingerprints: { verification: value.verification, simulation: value.simulation, modelSemanticsVersion: version },
+            scene: parseBoardSemanticSnapshot(value.scene, 'Board model comparison.scene')
+        }
     },
     getNodes: async (): Promise<DeviceNode[]> => {
         const nodes = requireResponseArray<DeviceNode>(

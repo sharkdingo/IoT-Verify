@@ -777,7 +777,7 @@ import boardApi, {
   BOARD_RESPONSE_INCOMPLETE_CODE,
   type CollectionMutationResult,
   type BoardReplacementPreview,
-  type BoardWorkspaceSnapshot,
+  type BoardSemanticSnapshot, type BoardWorkspaceSnapshot,
   type DeviceLayout,
   type DeviceRecommendation,
   type EnvironmentVariablePatchResult,
@@ -3405,14 +3405,9 @@ const handleRenameDevice = async (
       return { responseConfirmed: true, environmentChanges: mutation.environmentChanges }
     } catch (error: any) {
       if (error?.response?.status === 409) {
-        const [nodesRefreshed, specsRefreshed, environmentRefreshed] = await Promise.all([
-          refreshDevices(),
-          refreshSpecifications(),
-          refreshEnvironmentVariables()
-        ])
-        await reloadUndoAvailability()
+        const refreshed = await refreshSceneForReconciliation()
         const currentNode = nodes.value.find(candidate => candidate.id === nodeId)
-        if (nodesRefreshed && specsRefreshed && environmentRefreshed && currentNode) {
+        if (refreshed && currentNode) {
           if (currentNode.label === newLabel) {
             return { responseConfirmed: false, environmentChanges: [] }
           }
@@ -3427,14 +3422,8 @@ const handleRenameDevice = async (
         return false
       }
       if (!isDefinitiveMutationRejection(error)) {
-        const [nodesRefreshed, specsRefreshed, environmentRefreshed] = await Promise.all([
-          refreshDevices(),
-          refreshSpecifications(),
-          refreshEnvironmentVariables()
-        ])
-        await reloadUndoAvailability()
-        const renamed = nodes.value.find(candidate => candidate.id === nodeId && candidate.label === newLabel)
-        if (nodesRefreshed && specsRefreshed && environmentRefreshed && renamed) {
+        const refreshed = await refreshSceneForReconciliation()
+        if (refreshed && nodes.value.some(candidate => candidate.id === nodeId && candidate.label === newLabel)) {
           return { responseConfirmed: false, environmentChanges: [] }
         }
       }
@@ -4549,6 +4538,7 @@ const adoptBoardSnapshot = (snapshot: BoardWorkspaceSnapshot, locallyRemovedNode
 
 const refreshBoardSnapshot = async (): Promise<boolean> => {
   const authScopeEpoch = boardAuthScopeEpoch
+  invalidateCurrentBoardModelFingerprints()
   boardSnapshotError.value = null
   allBoardDataKeys.forEach(key => { boardDataLoadState[key] = 'loading' })
   templatesLoading.value = true
@@ -9257,8 +9247,8 @@ let boardModelRevision = 0
 const fingerprintRequestGuard = createLatestBoardRequestGuard()
 
 // Geometry and display names can change during canvas work without changing the model.
-const boardModelSource = computed(() => JSON.stringify({
-  devices: nodes.value.map(node => ({
+const serializeBoardModelSource = (scene: BoardSemanticSnapshot) => JSON.stringify({
+  devices: scene.nodes.map(node => ({
     id: node.id,
     templateName: node.templateName,
     state: node.state,
@@ -9266,11 +9256,15 @@ const boardModelSource = computed(() => JSON.stringify({
     currentStatePrivacy: node.currentStatePrivacy,
     variables: node.variables,
     privacies: node.privacies
-  })),
-  rules: rules.value,
-  specifications: specifications.value,
-  environmentVariables: environmentVariables.value,
-  deviceTemplates: deviceTemplates.value
+  })).sort((left, right) => left.id.localeCompare(right.id)),
+  rules: scene.rules,
+  specifications: scene.specifications,
+  environmentVariables: scene.environmentVariables,
+  deviceTemplates: scene.deviceTemplates
+})
+const boardModelSource = computed(() => serializeBoardModelSource({
+  nodes: nodes.value, rules: rules.value, specifications: specifications.value,
+  environmentVariables: environmentVariables.value, deviceTemplates: deviceTemplates.value
 }))
 
 const invalidateCurrentBoardModelFingerprints = () => {
@@ -9293,11 +9287,13 @@ const refreshCurrentBoardModelFingerprints = async (
   currentBoardModelFingerprints.value = null
   loadingCurrentBoardModelFingerprints.value = true
   try {
-    const fingerprints = await boardApi.getModelFingerprints()
-    if (!boardLifecycleDisposed && fingerprintRequestGuard.isCurrent(requestEpoch)
-      && expectedModelRevision === boardModelRevision) {
-      currentBoardModelFingerprints.value = fingerprints
+    const { fingerprints, scene } = await boardApi.getModelFingerprints()
+    if (boardLifecycleDisposed || !fingerprintRequestGuard.isCurrent(requestEpoch)
+      || expectedModelRevision !== boardModelRevision || hydratedBoardAuthScopeEpoch !== boardAuthScopeEpoch
+      || serializeBoardModelSource(scene) !== boardModelSource.value) {
+      return null
     }
+    currentBoardModelFingerprints.value = fingerprints
     return fingerprints
   } catch {
     if (!boardLifecycleDisposed && fingerprintRequestGuard.isCurrent(requestEpoch)
