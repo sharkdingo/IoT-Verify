@@ -14,6 +14,7 @@
  * Fail-safe direction: anything unrecognised escalates to full validation. A new top-level directory
  * should cost a slow pipeline, not silently bypass one.
  */
+import { pathToFileURL } from 'node:url';
 
 /** Paths that cannot affect any build, test, or runtime behaviour. */
 const INERT = [
@@ -168,15 +169,8 @@ export function route(changedPaths, context = {}) {
   };
 }
 
-/** True when this module was executed directly rather than imported by the test file. */
-const runAsScript = () => {
-  const entry = process.argv[1];
-  if (!entry) return false;
-  return import.meta.url.endsWith(entry.replace(/\\/g, '/').replace(/^[A-Za-z]:/, ''));
-};
-
 // CLI: emits `key=value` lines suitable for appending to $GITHUB_OUTPUT.
-if (runAsScript()) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   // Paths arrive via CHANGED_PATHS (newline separated) so the workflow passes a computed diff without
   // shell quoting hazards. stdin stays supported for ad-hoc local use.
   const fromEnv = process.env.CHANGED_PATHS;

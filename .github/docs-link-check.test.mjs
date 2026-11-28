@@ -1,5 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   definedAnchors, headingSlug, isExternal, linksIn, shouldSkipDirectory
 } from './docs-link-check.mjs';
@@ -83,4 +88,25 @@ test('generated and vendored trees are skipped', () => {
   for (const directory of ['docs', 'api', 'architecture', 'backend']) {
     assert.equal(shouldSkipDirectory(directory), false, directory);
   }
+});
+
+test('the CLI accepts directory links and reports missing targets and headings', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'iot-verify-doc-links-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, 'examples'));
+  const page = join(root, 'guide.md');
+  const valid = '# Guide\n[examples](examples/) and [guide](#guide)';
+  const cli = fileURLToPath(new URL('./docs-link-check-cli.mjs', import.meta.url));
+  const check = () => spawnSync(process.execPath, [cli, root], { encoding: 'utf8' });
+
+  writeFileSync(page, valid);
+  const accepted = check();
+  assert.equal(accepted.status, 0, accepted.stderr);
+
+  writeFileSync(page, `${valid}\n[missing](missing.md) and [section](#missing-section)`);
+  const rejected = check();
+  assert.equal(rejected.status, 1);
+  assert.match(rejected.stderr, /2 unresolvable documentation reference/);
+  assert.match(rejected.stderr, /link: {2}missing\.md\s+cause: target does not exist/);
+  assert.match(rejected.stderr, /link: {2}#missing-section\s+cause: no heading in guide\.md/);
 });

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Boot the packaged backend, wait for it to actually serve, and run one E2E tier against it.
 #
-# Both tiers share this so the readiness probe and the process lifecycle exist once. They had been
+# All tiers share this so the readiness probe and the process lifecycle exist once. They had been
 # duplicated inline in YAML, which is where a startup bug hides: a subtly different probe in one job
 # reports "never became ready" for a backend that was fine.
 #
@@ -11,10 +11,20 @@ set -euo pipefail
 tier="${1:?usage: run-e2e.sh smoke|full|live-ai}"
 log="${RUNNER_TEMP:-/tmp}/backend-e2e.log"
 
-# Validate before starting anything: a typo in a workflow should fail in a second, not after booting
-# a backend and waiting on a readiness probe.
+# Select the complete invocation before booting a backend. Unknown tiers fail immediately.
 case "$tier" in
-  smoke|full|live-ai) ;;
+  smoke)
+    # Tag individual critical journeys. Selecting whole files silently grew smoke to 61 cases.
+    options=(--reporter=line,json --workers=2 --retries=1 --global-timeout=420000)
+    ;;
+  full)
+    # Keep a single worker and treat a flaky result as a defect in the full suite.
+    options=(--workers=1 --retries=1 --fail-on-flaky-tests --global-timeout=1800000 --reporter=line,html,json)
+    ;;
+  live-ai)
+    # Let retries absorb a transient provider outage. A reproducible failure still fails the gate.
+    options=(--reporter=line,json --workers=1 --retries=2 --global-timeout=900000)
+    ;;
   *) echo "::error::unknown tier '$tier' (expected smoke, full, or live-ai)"; exit 1 ;;
 esac
 
@@ -42,37 +52,6 @@ echo "Backend ready."
 cd frontend
 export PLAYWRIGHT_JSON_OUTPUT_FILE="$PWD/test-results/e2e-results.json"
 
-# Shared flags. --forbid-only keeps a stray test.only from silently shrinking a run to one test,
-# which is the failure mode that makes a green tick meaningless.
-common=(
-  --project=chromium
-  --forbid-only
-  --trace=retain-on-failure-and-retries
-  --reporter=line,json
-)
-
-case "$tier" in
-  smoke)
-    # Tag individual critical journeys. Selecting whole files silently grew smoke to 61 cases.
-    E2E_SUITE=smoke npx playwright test \
-      "${common[@]}" --workers=2 --retries=1 --global-timeout=420000
-    ;;
-  full)
-    # Everything except the live-AI suite, which needs a real external endpoint and has its own gate.
-    # --workers=1 and --fail-on-flaky-tests are the standing contract for the complete run: a flake
-    # here is a defect report, not noise to be retried away.
-    # The expanded suite must finish before the global deadline; per-test deadlines stay unchanged.
-    E2E_SUITE=full npx playwright test \
-      "${common[@]}" --workers=1 --retries=1 \
-      --fail-on-flaky-tests --global-timeout=1800000 --reporter=line,html,json
-    ;;
-  live-ai)
-    # Only the external-endpoint tests. No --fail-on-flaky-tests: a provider transport failure is not
-    # a defect in this repo, and treating it as one would make the gate untrustworthy. Retries absorb
-    # a transient outage; a reproducible failure still fails.
-    E2E_SUITE=live-ai npx playwright test \
-      "${common[@]}" --workers=1 --retries=2 --global-timeout=900000
-    ;;
-  *)
-    echo "::error::unknown tier '$tier' (expected smoke, full, or live-ai)"; exit 1 ;;
-esac
+# A stray test.only must fail the gate instead of silently shrinking the suite.
+E2E_SUITE="$tier" npx playwright test \
+  --project=chromium --forbid-only --trace=retain-on-failure-and-retries "${options[@]}"

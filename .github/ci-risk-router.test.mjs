@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
-import { readdirSync, readFileSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, readdirSync, readFileSync, rmdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { route } from './ci-risk-router.mjs';
@@ -34,6 +35,23 @@ function actionManifests() {
  * directions that matter: cheap changes must stay cheap, and risky changes must escalate no matter
  * how small they are.
  */
+
+test('the direct routing CLI emits outputs from a checkout path with spaces and a hash', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'iot verify # routing-'));
+  const cli = join(directory, 'ci-risk-router.mjs');
+  try {
+    copyFileSync(join(GITHUB_DIR, 'ci-risk-router.mjs'), cli);
+    const outputs = execFileSync(process.execPath, [cli], {
+      encoding: 'utf8',
+      env: { ...process.env, CHANGED_PATHS: 'backend/pom.xml', GITHUB_REF_INPUT: 'refs/heads/topic',
+        GITHUB_EVENT_INPUT: 'push', FORCE_FULL: 'false' },
+    });
+    assert.match(outputs, /^full=true$/m);
+  } finally {
+    rmSync(cli, { force: true });
+    rmdirSync(directory);
+  }
+});
 
 test('documentation-only changes run nothing', () => {
   for (const paths of [

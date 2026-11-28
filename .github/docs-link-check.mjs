@@ -1,4 +1,4 @@
-// Validates Markdown cross-references: that every relative link resolves to a file that exists,
+// Validates Markdown cross-references: that every relative link resolves to an existing file or directory,
 // and every `#fragment` resolves to a heading in the target document.
 //
 // This exists because a documentation-only push is routed as inert and skips every test tier, so
@@ -23,7 +23,6 @@ export const shouldSkipDirectory = (name) => SKIP_DIRECTORIES.has(name);
 export const headingSlug = (heading) => heading
   .replace(/^#+\s*/, '')
   .toLowerCase()
-  .replace(/`/g, '')
   .replace(/[^\w\s-]/g, '')
   .trim()
   .replace(/\s/g, '-');

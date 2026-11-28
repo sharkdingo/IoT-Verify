@@ -184,19 +184,8 @@ jobs:
         working-directory: backend
         run: mvn -B -DskipTests package
 
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm ci
-
-      - name: Restore Playwright browsers
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
-
-      - name: Install Chromium
-        working-directory: frontend
-        run: npx playwright install --with-deps chromium
+      - name: Setup E2E browser
+        uses: ./.github/actions/setup-e2e-browser
 
       - name: Run live-AI suite
         shell: bash

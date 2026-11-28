@@ -2,7 +2,7 @@
 
 Two E2E tiers selected by affected code, plus a separate live-AI gate.
 
-Verified against code on 2026-11-25 for runner selection and E2E counts. Sources: `.github/workflows/`,
+Verified against code on 2026-11-28 for runner selection and E2E counts. Sources: `.github/workflows/`,
 `.github/ci-risk-router.mjs`, `.github/check-ci-results.mjs`, `.github/scripts/run-e2e.sh`, `frontend/playwright.config.ts`,
 `frontend/scripts/run-e2e.mjs`, and `frontend/e2e/live-ai-no-mock.spec.ts`.
 
@@ -37,7 +37,7 @@ download an artifact that no job created. Full-selected routes skip these Fast j
 
 The smoke subset is tagged **per test** with `@smoke`, selected by
 [`playwright.config.ts`](../../frontend/playwright.config.ts), and used by both local and CI runners.
-The ordinary suite selects 117 cases. The 18 live-AI cases remain separate. Smoke is included
+The ordinary suite selects 172 cases. The 18 live-AI cases remain separate. Smoke is included
 in the ordinary suite and selects eight critical cases (seven browser journeys and one HTTP
 authentication check):
 
@@ -67,8 +67,9 @@ Representative narrow/desktop, keyboard/pointer and language transitions exercis
 A second theme, viewport, language or example scene needs a distinct integration risk.
 
 Parsing, encodings, formula semantics, API validation and repair algorithms belong primarily
-to their unit/component/backend tests. Browser coverage keeps one GB18030 import/preview/persist journey,
-one complete author/simulate/verify/history journey and one reviewed repair/apply/undo journey.
+to their unit/component/backend tests. Browser coverage keeps one GB18030 import journey through preview,
+receipt loss, undo and redo. The import component owns JSON/CSV payload parity and draft locking.
+Browser coverage also keeps one complete author/simulate/verify/history journey and one reviewed repair/apply/undo journey.
 The cancellation and history-context cases switch language and viewport within the same run.
 Repeated error-envelope and credential-concurrency checks belong to backend tests. Smoke retains
 the actual HTTP authentication boundary for logout and account deletion; a separate HTTP case

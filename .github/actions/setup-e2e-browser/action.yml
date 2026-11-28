@@ -1,0 +1,21 @@
+name: Setup E2E browser
+description: Install frontend dependencies and prepare Chromium for Playwright
+runs:
+  using: composite
+  steps:
+    - name: Install frontend dependencies
+      working-directory: frontend
+      shell: bash
+      run: npm ci
+
+    - name: Restore Playwright browsers
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/ms-playwright
+        # A dependency bump must not run new test code against an old browser.
+        key: playwright-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
+
+    - name: Install Chromium
+      working-directory: frontend
+      shell: bash
+      run: npx playwright install --with-deps chromium
