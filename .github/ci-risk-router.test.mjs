@@ -158,6 +158,20 @@ test('the two admission gates are high risk, and ordinary service classes are no
   assert.equal(ordinary.full, false, ordinary.reasons.join('; '));
 });
 
+for (const [file, why] of [
+  ['service/impl/ManifestConditionValidation.java', 'shared board and verification admission gate'],
+  ['service/impl/BoardTemplateImpact.java', 'board template change protection'],
+  ['util/RuleSemanticSignature.java', 'board rule admission semantics'],
+]) {
+  test(`changing only ${file} runs Full CI`, () => {
+    const path = `backend/src/main/java/cn/edu/nju/Iot_Verify/${file}`;
+    const decision = route([path], { ref: 'refs/pull/17/merge', eventName: 'pull_request' });
+    assert.equal(decision.full, true);
+    assert.equal(decision.fast, false);
+    assert.ok(decision.reasons.includes(why), decision.reasons.join('; '));
+  });
+}
+
 test('scene files and their generator are model inputs, not documentation', () => {
   // These reach real-NuSMV regressions, and the generator is their only source. They previously
   // escalated through the unclassified fail-safe: right tier, wrong reason, and silently dependent on

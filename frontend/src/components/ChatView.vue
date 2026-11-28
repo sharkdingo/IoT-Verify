@@ -1454,6 +1454,7 @@ const reconcileCompletedBackgroundSessions = async (
     }
   }
   if (!chatViewMounted || authEpoch !== chatAuthEpoch) return;
+  void refreshSelectedCompletedHistory();
   if (completedSessions.length === 0) {
     if (removedActiveSession || (handoff && reconciliationRequired.value)) await reconcileAuthoritativeState();
     return;
@@ -1662,6 +1663,7 @@ const handleSelectSession = async (sessionId: string, knownActive = false) => {
     historyLoadFailed.value = false;
     historyLoadDiagnostics.value = null;
     await refreshPendingConfirmation(sessionId, controller.signal);
+    if (requestEpoch !== historyRequestEpoch || currentSessionId.value !== sessionId) return;
     scrollToBottom(true);
     if (!knownActive) monitorSessionActivity(sessionId);
   } catch (e: any) {
@@ -1710,18 +1712,54 @@ const acknowledgeCurrentVisibleHistory = () => {
   if (sessionId) void acknowledgeVisibleTerminal(sessionId, messages.value);
 };
 
-const applyHistoryPage = (page: ChatHistoryPage, prepend: boolean) => {
+const applyHistoryPage = (page: ChatHistoryPage, prepend: boolean, retainedOlderMessages?: ChatMessage[]) => {
   if (prepend) {
     const existingIds = new Set(messages.value.map(message => message.id).filter(id => id != null));
     messages.value = [...page.messages.filter(message => message.id == null || !existingIds.has(message.id)), ...messages.value];
   } else {
     // Optimistic turns append to the local collection, never to the authoritative response.
-    messages.value = [...page.messages];
+    messages.value = [...(retainedOlderMessages ?? []), ...page.messages];
     const sessionId = currentSessionId.value;
     if (sessionId) void nextTick(() => acknowledgeVisibleTerminal(sessionId, page.messages));
   }
+  if (retainedOlderMessages) return; // The older-page cursor still describes the retained history.
   historyHasMore.value = page.hasMore && page.nextBeforeId != null;
   historyNextBeforeId.value = page.nextBeforeId;
+};
+
+const refreshSelectedCompletedHistory = async () => {
+  const sessionId = currentSessionId.value;
+  if (!sessionId || !visible.value || isAssistantBusy.value || historyAbortController.value) return;
+  const terminalId = sessions.value.find(session => session.id === sessionId)?.latestTerminalMessageId;
+  if (terminalId == null) return;
+  const includesTerminal = (history: ChatMessage[]) => history.some(message =>
+    message.role === 'assistant' && Boolean(message.executionStatus) && (message.id ?? 0) >= terminalId);
+  if (includesTerminal(messages.value)) return;
+
+  // The first activity probe can see an already finished turn. The list's persisted terminal ID
+  // then tells us whether the selected history still needs that result.
+  const controller = new AbortController();
+  const requestStreamEpoch = streamRequestEpoch;
+  historyAbortController.value = controller;
+  const ownsHistoryRead = () => historyAbortController.value === controller
+      && currentSessionId.value === sessionId && requestStreamEpoch === streamRequestEpoch;
+  try {
+    const page = await getSessionHistory(sessionId, controller.signal);
+    if (!ownsHistoryRead() || isAssistantBusy.value || !includesTerminal(page.messages)) return;
+
+    const oldestId = page.messages[0]?.id;
+    const overlap = oldestId == null ? -1 : messages.value.findIndex(message => message.id === oldestId);
+    // Keep already loaded older pages when the newest page still overlaps the displayed history.
+    applyHistoryPage(page, false, overlap >= 0 ? messages.value.slice(0, overlap) : undefined);
+    historyLoadFailed.value = false;
+    historyLoadDiagnostics.value = null;
+    scrollToBottom();
+    await refreshPendingConfirmation(sessionId, controller.signal);
+  } catch (error) {
+    if (ownsHistoryRead()) console.warn('[Chat] Could not refresh completed session history:', error);
+  } finally {
+    if (historyAbortController.value === controller) historyAbortController.value = null;
+  }
 };
 
 const loadOlderHistory = async () => {
@@ -1729,16 +1767,18 @@ const loadOlderHistory = async () => {
   const beforeId = historyNextBeforeId.value;
   if (!sessionId || beforeId == null || !historyHasMore.value || isLoadingOlderHistory.value) return;
   isLoadingOlderHistory.value = true;
+  const ownsRead = () => currentSessionId.value === sessionId && historyNextBeforeId.value === beforeId;
   const viewport = scrollRef.value;
-  const previousHeight = viewport?.scrollHeight ?? 0;
-  const previousTop = viewport?.scrollTop ?? 0;
   try {
     const page = await getSessionHistory(sessionId, { beforeId, limit: 50 });
-    if (currentSessionId.value !== sessionId) return;
+    if (!ownsRead()) return;
+    const previousHeight = viewport?.scrollHeight ?? 0;
+    const previousTop = viewport?.scrollTop ?? 0;
     applyHistoryPage(page, true);
     await nextTick();
     if (viewport) viewport.scrollTop = viewport.scrollHeight - previousHeight + previousTop;
   } catch (error) {
+    if (!ownsRead()) return;
     console.warn('[Chat] Failed to load older history:', error);
     notifyBlocked(t('app.chat.historyLoadOlderFailed'));
   } finally {

@@ -875,8 +875,10 @@ and attached instead of stranding the user between conversations. If the user ex
 another row while creation is in flight, that newer selection wins and the created row remains
 available in the sidebar rather than taking focus later.
 The client detects active-to-idle background rows through both polling and foreground session-list
-refresh, then reconciles the authoritative Board and shows a completion notice. Opening that session later loads its persisted
-terminal row and trace; live SSE progress is not replayed. Once explicit-stop or reattached remote
+refresh, then reconciles the authoritative Board and shows a completion notice. If an idle selected
+session's list entry reports a newer terminal result, the client refreshes its history and pending
+confirmation. Opening another session loads its persisted terminal row and trace; live SSE progress
+is not replayed. Once explicit-stop or reattached remote
 work is confirmed idle, authoritative history may legitimately contain only its user turn when
 admission rollback or terminal persistence did not complete; the client replaces optimistic
 state, restores a draft only when that user turn is absent, and unlocks instead of waiting forever

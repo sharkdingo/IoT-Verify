@@ -1542,6 +1542,173 @@ describe('ChatView', () => {
     wrapper.unmount()
   })
 
+  it.each([
+    { window: 'overlapping', latestStart: 53, overlaps: true },
+    { window: 'disjoint', latestStart: 151, overlaps: false }
+  ])('keeps history contiguous when a background reply creates an $window window', async ({ latestStart, overlaps }) => {
+    vi.useFakeTimers()
+    const oldPageMessage = '用户已请求的更早历史。'
+    const newMessage = '另一个标签页的最新回复。'
+    const newestId = latestStart + 49
+    let completed = false
+    let finishOlder!: (page: ChatHistoryPage) => void
+    chatApi.getSessionList.mockImplementation(async () => [{
+      ...session, latestTerminalMessageId: completed ? newestId : 100, latestExecutionStatus: 'COMPLETED'
+    }])
+    chatApi.getSessionHistory.mockImplementation(async (sessionId: string, options: { beforeId?: number }) => {
+      if (options.beforeId) {
+        return new Promise<ChatHistoryPage>(resolve => { finishOlder = resolve })
+      }
+      const start = completed ? latestStart : 51
+      return {
+        ...historyPage(Array.from({ length: 50 }, (_, index) => {
+          const id = start + index
+          return id === 100 || id === newestId
+            ? { id, role: 'assistant', content: id === newestId ? newMessage : '较旧的已有回复。', executionStatus: 'COMPLETED' }
+            : { id, role: 'user', content: `已有历史 ${id}` }
+        }), sessionId),
+        nextBeforeId: start,
+        hasMore: true
+      }
+    })
+    chatStore.openChat()
+    const wrapper = mountChat({ executeCommand: vi.fn().mockResolvedValue(true) })
+    try {
+      await flushPromises()
+      await wrapper.get('[data-testid="chat-sidebar-toggle"]').trigger('click')
+      await wrapper.get('[data-testid="chat-session-session-1"]').trigger('click')
+      await flushPromises()
+      const older = wrapper.get<HTMLButtonElement>('[data-testid="chat-load-older"]')
+      await older.trigger('click')
+      await flushPromises()
+      expect(older.element.disabled).toBe(true)
+      completed = true
+      await vi.advanceTimersByTimeAsync(5000)
+      await flushPromises()
+      expect(wrapper.text()).toContain(newMessage)
+      finishOlder(historyPage([{ id: 21, role: 'user', content: oldPageMessage }]))
+      await flushPromises()
+      expect(wrapper.text().includes(oldPageMessage)).toBe(overlaps)
+      if (!overlaps) {
+        await wrapper.get('[data-testid="chat-load-older"]').trigger('click')
+        expect(chatApi.getSessionHistory).toHaveBeenLastCalledWith(session.id, expect.objectContaining({ beforeId: latestStart }))
+        finishOlder(historyPage([], session.id))
+        await flushPromises()
+      }
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
+  })
+
+  it('displays the selected session reply when the first activity probe itself returns idle', async () => {
+    vi.useFakeTimers()
+    const sessionA = { ...session, id: 'session-a', title: '会话 A' }
+    const sessionB = { ...session, id: 'session-b', title: '会话 B' }
+    const completion = '会话 B 的后台结果。'
+    let completedB = false
+    let finishFirstProbe!: () => void
+    const executeCommand = vi.fn().mockResolvedValue(true)
+    chatApi.getSessionList.mockImplementation(async () => [sessionA, completedB
+      ? { ...sessionB, latestTerminalMessageId: 2, latestExecutionStatus: 'COMPLETED', hasUnreadUpdate: true }
+      : sessionB])
+    chatApi.getSessionHistory.mockImplementation(async (sessionId: string) => historyPage(
+      sessionId === sessionB.id && completedB
+        ? [{ id: 2, role: 'assistant', content: completion, executionStatus: 'COMPLETED' }]
+        : [], sessionId))
+    chatApi.getPendingConfirmation.mockImplementation(async (sessionId: string) => ({ sessionId, actions: [] }))
+    chatApi.getSessionActivity.mockImplementation(async (sessionId: string) => {
+      if (sessionId === sessionB.id && !completedB) await new Promise<void>(resolve => { finishFirstProbe = resolve })
+      return { sessionId, active: false }
+    })
+    chatStore.openChat()
+    const wrapper = mountChat({ executeCommand })
+    const select = async (sessionId: string) => {
+      const toggle = wrapper.get('[data-testid="chat-sidebar-toggle"]')
+      if (toggle.attributes('aria-expanded') === 'false') await toggle.trigger('click')
+      await wrapper.get(`[data-testid="chat-session-${sessionId}"]`).trigger('click')
+      await flushPromises()
+    }
+    try {
+      await flushPromises()
+      await select(sessionA.id)
+      await select(sessionB.id)
+      expect(finishFirstProbe).toBeTypeOf('function')
+      completedB = true
+      finishFirstProbe()
+      await vi.advanceTimersByTimeAsync(5000)
+      await flushPromises()
+      expect(executeCommand).toHaveBeenCalledWith({ type: 'REFRESH_DATA', payload: { target: 'board_state' } })
+      expect(wrapper.get('[data-testid="chat-session-session-b"]').find('[data-testid="chat-session-status"]').exists()).toBe(true)
+      expect(wrapper.find('[data-testid="chat-remote-execution"]').exists()).toBe(false)
+      const contentWhileStillSelected = wrapper.text()
+      await select(sessionA.id)
+      await select(sessionB.id)
+      expect(wrapper.text()).toContain(completion)
+      expect(contentWhileStillSelected).toContain(completion)
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps the selected active session monitored when the previous confirmation read is aborted', async () => {
+    vi.useFakeTimers()
+    const sessionA = { ...session, id: 'session-a', title: '会话 A' }
+    const sessionB = { ...session, id: 'session-b', title: '会话 B' }
+    const completion = '会话 B 的后台结果。'
+    let sessionBActive = false
+    let confirmationA: AbortSignal | undefined
+    let monitorB: AbortSignal | undefined
+    chatApi.getSessionList.mockImplementation(async () => [sessionA, { ...sessionB, active: sessionBActive }])
+    chatApi.getSessionHistory.mockImplementation(async (sessionId: string) => historyPage(
+      sessionId === sessionB.id && !sessionBActive
+        ? [{ role: 'assistant', content: completion, executionStatus: 'COMPLETED' }]
+        : [],
+      sessionId
+    ))
+    chatApi.getPendingConfirmation.mockImplementation((sessionId: string, signal: AbortSignal) => {
+      if (sessionId !== sessionA.id) return Promise.resolve({ sessionId, actions: [] })
+      confirmationA = signal
+      return new Promise((_, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+      })
+    })
+    chatApi.getSessionActivity.mockImplementation(async (sessionId: string, { signal }: { signal: AbortSignal }) => {
+      if (sessionId === sessionB.id) monitorB ??= signal
+      return { sessionId, active: sessionId === sessionB.id && sessionBActive }
+    })
+    chatStore.openChat()
+
+    const wrapper = mountChat({ executeCommand: vi.fn().mockResolvedValue(true) })
+    try {
+      await flushPromises()
+      await wrapper.get('[data-testid="chat-session-session-a"]').trigger('click')
+      await flushPromises()
+      expect(confirmationA?.aborted).toBe(false)
+
+      sessionBActive = true
+      await vi.advanceTimersByTimeAsync(5000)
+      const sessionButton = wrapper.get('[data-testid="chat-session-session-b"]')
+      expect(sessionButton.find('[data-testid="chat-session-active"]').exists()).toBe(true)
+      await sessionButton.trigger('click')
+      await flushPromises()
+
+      expect(confirmationA?.aborted).toBe(true)
+      expect(monitorB?.aborted).toBe(false)
+      expect(wrapper.find('[data-testid="chat-remote-execution"]').exists()).toBe(true)
+
+      sessionBActive = false
+      await vi.advanceTimersByTimeAsync(1000)
+      await flushPromises()
+      expect(wrapper.text()).toContain(completion)
+      expect(wrapper.find('[data-testid="chat-remote-execution"]').exists()).toBe(false)
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
+  })
+
   it('keeps an idle selection while another conversation runs and keeps the Board locked', async () => {
     const sessionA = { ...session, id: 'session-a', title: '会话 A', active: false }
     const sessionB = { ...session, id: 'session-b', title: '会话 B', active: false }

@@ -15,6 +15,15 @@ history into a technical spec. The spec content itself now lives under
 
 ## [Unreleased]
 
+### 2026-11-28
+
+#### Fixed
+
+- Chat continues monitoring the selected conversation for replies when a confirmation check from
+  the previous conversation finishes after a switch.
+- A background reply appears in the selected conversation even if the task finishes before the
+  first activity check reports it running.
+
 ### 2026-11-26
 
 #### Fixed
