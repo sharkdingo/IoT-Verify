@@ -23,6 +23,8 @@ history into a technical spec. The spec content itself now lives under
   the previous conversation finishes after a switch.
 - A background reply appears in the selected conversation even if the task finishes before the
   first activity check reports it running.
+- Imported boards retain repair actions for the current model when template catalogs return
+  in a different order.
 
 ### 2026-11-26
 

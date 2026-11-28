@@ -9260,7 +9260,8 @@ const serializeBoardModelSource = (scene: BoardSemanticSnapshot) => JSON.stringi
   rules: scene.rules,
   specifications: scene.specifications,
   environmentVariables: scene.environmentVariables,
-  deviceTemplates: scene.deviceTemplates
+  deviceTemplates: [...scene.deviceTemplates].sort((left, right) =>
+    left.name < right.name ? -1 : left.name === right.name ? 0 : 1)
 })
 const boardModelSource = computed(() => serializeBoardModelSource({
   nodes: nodes.value, rules: rules.value, specifications: specifications.value,

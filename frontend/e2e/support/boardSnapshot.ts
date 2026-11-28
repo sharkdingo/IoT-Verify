@@ -1,8 +1,21 @@
-import { expect } from '@playwright/test'
+import { expect, type APIRequestContext } from '@playwright/test'
+import type { BoardModelFingerprints } from '../../src/types/modelSemantics'
+import { apiBaseURL } from './auth'
 
 type BoardSnapshot = {
   deviceTemplates: { id: number }[]
   [key: string]: unknown
+}
+
+export async function readBoardModelFingerprints(request: APIRequestContext, token: string): Promise<BoardModelFingerprints> {
+  const response = await request.get(`${apiBaseURL}/api/board/model-fingerprints`, {
+    headers: { Authorization: `Bearer ${token}` }
+  })
+  expect(response.ok(), await response.text()).toBe(true)
+  const { code, data } = await response.json()
+  expect(code).toBe(200)
+  const { verification, simulation, modelSemanticsVersion } = data
+  return { verification, simulation, modelSemanticsVersion }
 }
 
 export function expectSameBoardSnapshot(actual: BoardSnapshot, expected: BoardSnapshot) {

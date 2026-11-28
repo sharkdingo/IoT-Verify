@@ -4,11 +4,10 @@ import type { APIRequestContext, APIResponse, Page } from '@playwright/test'
 import type { DeviceManifest, DeviceTemplate } from '../src/types/device'
 import type { PortableSceneFile } from '../src/types/scene'
 import type { SimulationResult } from '../src/types/simulation'
-import type { BoardModelFingerprints } from '../src/types/modelSemantics'
 import type { RuleDto } from '../src/types/rule'
 import { validateSimulationTrace, validateVerificationResult } from '../src/utils/runResponse'
 import { apiBaseURL, createAuthenticatedUser, expect, test, type AuthUser } from './support/auth'
-import { expectSameBoardSnapshot } from './support/boardSnapshot'
+import { expectSameBoardSnapshot, readBoardModelFingerprints } from './support/boardSnapshot'
 import { expandControlTool } from './support/controlCenter'
 import { clickUnderTooltip } from './support/tooltips'
 
@@ -415,12 +414,7 @@ test('distinct devices can share mode names and retain repair evidence after an 
   await expect(apply).toBeEnabled()
 
   const headers = { Authorization: `Bearer ${auth.token}` }
-  const currentModels = async (): Promise<BoardModelFingerprints> => {
-    const response = await request.get(`${apiBaseURL}/api/board/model-fingerprints`, { headers })
-    expect(response.ok(), await response.text()).toBe(true)
-    return (await response.json()).data
-  }
-  const beforeEdit = await currentModels()
+  const beforeEdit = await readBoardModelFingerprints(request, auth.token)
   expect(beforeEdit.modelSemanticsVersion).toBe(verification.modelSnapshot.modelSemanticsVersion)
   expect(beforeEdit.verification).toBe(verification.modelSnapshot.modelFingerprint)
   const original: RuleDto = imported.body.data.rules[0]
@@ -431,7 +425,7 @@ test('distinct devices can share mode names and retain repair evidence after an 
   const edited = await request.put(`${apiBaseURL}/api/board/rules/${original.id}`, { headers, data: { expected: original, desired } })
   expect(edited.ok(), await edited.text()).toBe(true)
   expect((await edited.json()).data.affectedItem.ruleString).toBe(revisedName)
-  expect(await currentModels()).toEqual(beforeEdit)
+  expect(await readBoardModelFingerprints(request, auth.token)).toEqual(beforeEdit)
 
   const refreshed = page.waitForResponse(response => response.request().method() === 'GET'
     && new URL(response.url()).pathname === '/api/board/model-fingerprints')

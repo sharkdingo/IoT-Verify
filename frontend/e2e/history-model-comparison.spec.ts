@@ -1,6 +1,6 @@
 import type { APIRequestContext, APIResponse, Page } from '@playwright/test'
 import { apiBaseURL, createAuthenticatedUser, expect, test, type AuthUser } from './support/auth'
-import type { BoardModelFingerprints } from '../src/types/modelSemantics'
+import { readBoardModelFingerprints } from './support/boardSnapshot'
 import type { VerificationResult } from '../src/types/verify'
 import type { SimulationResult, SimulationTrace } from '../src/types/simulation'
 import { validateSimulationResult, validateSimulationTrace, validateVerificationResult } from '../src/utils/runResponse'
@@ -37,16 +37,11 @@ const seedBoard = async (request: APIRequestContext, auth: AuthUser) => {
   }))
 }
 
-const currentModels = async (request: APIRequestContext, auth: AuthUser) =>
-  unwrap<BoardModelFingerprints>(await request.get(`${apiBaseURL}/api/board/model-fingerprints`, {
-    headers: headers(auth)
-  }))
-
 test('a requirement rename preserves the checked model and the name frozen in history', async ({ page, request }) => {
   test.setTimeout(120_000)
   const auth = await createAuthenticatedUser(request)
   await seedBoard(request, auth)
-  const baseline = await currentModels(request, auth)
+  const baseline = await readBoardModelFingerprints(request, auth.token)
   const result = validateVerificationResult(await unwrap<VerificationResult>(await request.post(`${apiBaseURL}/api/verify`, {
     headers: headers(auth), data: settings
   })))
@@ -69,12 +64,12 @@ test('a requirement rename preserves the checked model and the name frozen in hi
   await clickUnderTooltip(page, page.getByTestId('spec-create'))
   expect((await saved).ok()).toBe(true)
   await expect(page.locator('[data-spec-id="history_never"] h4')).toHaveText('Keep the hallway light off')
-  expect(await currentModels(request, auth)).toEqual(baseline)
+  expect(await readBoardModelFingerprints(request, auth.token)).toEqual(baseline)
   await page.getByTestId('board-undo').click()
   await expect(page.locator('[data-spec-id="history_never"] h4')).toHaveText('Safety requirement')
   await page.getByTestId('board-redo').click()
   await expect(page.locator('[data-spec-id="history_never"] h4')).toHaveText('Keep the hallway light off')
-  expect(await currentModels(request, auth)).toEqual(baseline)
+  expect(await readBoardModelFingerprints(request, auth.token)).toEqual(baseline)
   await page.goto(`/#/board?run=verification:${runId}`)
   const dialog = page.getByTestId('verification-result-dialog')
   await expect(dialog).toBeVisible()
@@ -93,7 +88,7 @@ test('a historical modeling version stays replayable and cannot repair the curre
   const runId = result.historyPersistence.runId
   const traceId = result.traces[0]?.id
   expect(traceId).toBeGreaterThan(0)
-  expect(result.modelSnapshot.modelFingerprint).toBe((await currentModels(request, auth)).verification)
+  expect(result.modelSnapshot.modelFingerprint).toBe((await readBoardModelFingerprints(request, auth.token)).verification)
 
   // The saved run and replay come from the real backend. Change only the modeling version delivered to the client.
   const previousSemanticsVersion = result.modelSnapshot.modelSemanticsVersion - 1
@@ -147,7 +142,7 @@ test('retires the rejected repair source when the current fingerprint still matc
   const { runId } = result.historyPersistence
   const traceId = result.traces[0]?.id
   expect(traceId).toBeGreaterThan(0)
-  expect(result.modelSnapshot.modelFingerprint).toBe((await currentModels(request, auth)).verification)
+  expect(result.modelSnapshot.modelFingerprint).toBe((await readBoardModelFingerprints(request, auth.token)).verification)
 
   await page.route(`**/api/verify/traces/${traceId}/fault-rules`, route => route.fulfill({ status: 409,
     json: { code: 409, message: 'Verify the current board again.', data: { reasonCode: 'MODEL_SEMANTICS_CHANGED' } } }))
