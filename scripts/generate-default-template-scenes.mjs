@@ -28,6 +28,8 @@ const device = (id, templateName, label, x, y, runtime = {}) => ({
   height: 128
 })
 
+const trustedState = (state, privacy) => ({ state, currentStateTrust: 'trusted', currentStatePrivacy: privacy })
+
 const valueSource = (fromId, fromApi, relation, value) => ({
   fromId,
   fromApi,
@@ -37,6 +39,8 @@ const valueSource = (fromId, fromApi, relation, value) => ({
 })
 
 const apiSource = (fromId, fromApi) => ({ fromId, fromApi, itemType: 'api' })
+
+const automationRule = (name, sources, toId, toApi) => ({ name, sources, toId, toApi })
 
 /**
  * A `variable` condition must say which of two questions it asks, so `variableSource` is a required
@@ -150,10 +154,8 @@ const scenes = [
     devices: [
       device('occupancy_1', 'Occupancy Sensor', 'Resident Presence', 60, 50),
       device('entry_1', 'Door Access Request', 'Door Access Request', 60, 270),
-      device('light_1', 'Light', 'Porch Light', 380, 50,
-        { state: 'off', currentStateTrust: 'trusted', currentStatePrivacy: 'public' }),
-      device('door_1', 'Door', 'Front Door', 380, 270,
-        { state: 'locked', currentStateTrust: 'trusted', currentStatePrivacy: 'private' })
+      device('light_1', 'Light', 'Porch Light', 380, 50, trustedState('off', 'public')),
+      device('door_1', 'Door', 'Front Door', 380, 270, trustedState('locked', 'private'))
     ],
     environmentVariables: [
       { name: 'occupancy', value: 'absent', trust: 'trusted', privacy: 'private' },
@@ -161,15 +163,14 @@ const scenes = [
       { name: 'illuminance', value: '20', trust: 'untrusted', privacy: 'public' }
     ],
     rules: [
-      { name: 'Light the porch for a visitor while nobody is home',
-        sources: [valueSource('occupancy_1', 'occupancy', '=', 'absent'), valueSource('entry_1', 'entryRequest', '=', 'visitor')],
-        toId: 'light_1', toApi: 'on' },
-      { name: 'Unsafe convenience: a lit porch unlocks the door',
-        sources: [{ fromId: 'light_1', fromApi: 'state', itemType: 'state', relation: '=', value: 'on' }],
-        toId: 'door_1', toApi: 'unlock' },
-      { name: 'Unlock for an authorized owner',
-        sources: [valueSource('entry_1', 'entryRequest', '=', 'authorized_owner')],
-        toId: 'door_1', toApi: 'unlock' }
+      automationRule('Light the porch for a visitor while nobody is home', [
+        valueSource('occupancy_1', 'occupancy', '=', 'absent'),
+        valueSource('entry_1', 'entryRequest', '=', 'visitor')
+      ], 'light_1', 'on'),
+      automationRule('Unsafe convenience: a lit porch unlocks the door',
+        [{ fromId: 'light_1', fromApi: 'state', itemType: 'state', relation: '=', value: 'on' }], 'door_1', 'unlock'),
+      automationRule('Unlock for an authorized owner',
+        [valueSource('entry_1', 'entryRequest', '=', 'authorized_owner')], 'door_1', 'unlock')
     ],
     specs: [
       implicationSpec("Keep the door locked for visitors while away", '4', [
@@ -190,39 +191,21 @@ const scenes = [
     templateNames: ['Alarm', 'Door', 'Light', 'Smoke Sensor'],
     devices: [
       device('smoke_1', 'Smoke Sensor', 'Kitchen Smoke Sensor', 70, 120),
-      device('alarm_1', 'Alarm', 'Whole-home Alarm', 330, 40, {
-        state: 'off', currentStateTrust: 'trusted', currentStatePrivacy: 'public'
-      }),
-      device('door_1', 'Door', 'Front Door', 590, 40, {
-        state: 'locked', currentStateTrust: 'trusted', currentStatePrivacy: 'private'
-      }),
-      device('light_1', 'Light', 'Exit Light', 590, 220, {
-        state: 'off', currentStateTrust: 'trusted', currentStatePrivacy: 'public'
-      })
+      device('alarm_1', 'Alarm', 'Whole-home Alarm', 330, 40, trustedState('off', 'public')),
+      device('door_1', 'Door', 'Front Door', 590, 40, trustedState('locked', 'private')),
+      device('light_1', 'Light', 'Exit Light', 590, 220, trustedState('off', 'public'))
     ],
     environmentVariables: [
       { name: 'illuminance', value: '20', trust: 'untrusted', privacy: 'public' },
       { name: 'smoke', value: 'detected', trust: 'trusted', privacy: 'public' }
     ],
     rules: [
-      {
-        name: 'When kitchen smoke is detected, sound the whole-home alarm',
-        sources: [valueSource('smoke_1', 'smoke', '=', 'detected')],
-        toId: 'alarm_1',
-        toApi: 'siren'
-      },
-      {
-        name: 'When the alarm sounds, unlock the front door for evacuation',
-        sources: [apiSource('alarm_1', 'siren')],
-        toId: 'door_1',
-        toApi: 'unlock'
-      },
-      {
-        name: 'When the alarm sounds, turn on the exit light',
-        sources: [apiSource('alarm_1', 'siren')],
-        toId: 'light_1',
-        toApi: 'on'
-      }
+      automationRule('When kitchen smoke is detected, sound the whole-home alarm',
+        [valueSource('smoke_1', 'smoke', '=', 'detected')], 'alarm_1', 'siren'),
+      automationRule('When the alarm sounds, unlock the front door for evacuation',
+        [apiSource('alarm_1', 'siren')], 'door_1', 'unlock'),
+      automationRule('When the alarm sounds, turn on the exit light',
+        [apiSource('alarm_1', 'siren')], 'light_1', 'on')
     ],
     specs: [
       implicationSpec("Sound the alarm when smoke is detected", '4',
@@ -241,27 +224,17 @@ const scenes = [
     templateNames: ['Air Conditioner', 'Temperature Sensor'],
     devices: [
       device('temperature_1', 'Temperature Sensor', 'Living-room Temperature Sensor', 90, 120),
-      device('ac_1', 'Air Conditioner', 'Living-room Air Conditioner', 430, 120, {
-        state: 'auto', currentStateTrust: 'trusted', currentStatePrivacy: 'private'
-      })
+      device('ac_1', 'Air Conditioner', 'Living-room Air Conditioner', 430, 120, trustedState('auto', 'private'))
     ],
     environmentVariables: [
       { name: 'humidity', value: '50', trust: 'untrusted', privacy: 'public' },
       { name: 'temperature', value: '30', trust: 'trusted', privacy: 'private' }
     ],
     rules: [
-      {
-        name: 'Unsafe conflicting rule: when the room is hot, heat the living room',
-        sources: [valueSource('temperature_1', 'temperature', '>=', '28')],
-        toId: 'ac_1',
-        toApi: 'heat'
-      },
-      {
-        name: 'When the room is hot, cool the living room',
-        sources: [valueSource('temperature_1', 'temperature', '>=', '28')],
-        toId: 'ac_1',
-        toApi: 'cool'
-      }
+      automationRule('Unsafe conflicting rule: when the room is hot, heat the living room',
+        [valueSource('temperature_1', 'temperature', '>=', '28')], 'ac_1', 'heat'),
+      automationRule('When the room is hot, cool the living room',
+        [valueSource('temperature_1', 'temperature', '>=', '28')], 'ac_1', 'cool')
     ],
     specs: [
       implicationSpec("Cool the home when it is hot", '4',
@@ -282,15 +255,9 @@ const scenes = [
     devices: [
       device('occupancy_1', 'Occupancy Sensor', 'Resident Presence Sensor', 70, 60),
       device('motion_1', 'Motion Detector', 'Porch Motion Detector', 70, 280),
-      device('alarm_1', 'Alarm', 'Entry Alarm', 360, 40, {
-        state: 'off', currentStateTrust: 'trusted', currentStatePrivacy: 'public'
-      }),
-      device('door_1', 'Door', 'Front Door', 360, 240, {
-        state: 'locked', currentStateTrust: 'trusted', currentStatePrivacy: 'private'
-      }),
-      device('light_1', 'Light', 'Porch Light', 360, 430, {
-        state: 'off', currentStateTrust: 'trusted', currentStatePrivacy: 'public'
-      })
+      device('alarm_1', 'Alarm', 'Entry Alarm', 360, 40, trustedState('off', 'public')),
+      device('door_1', 'Door', 'Front Door', 360, 240, trustedState('locked', 'private')),
+      device('light_1', 'Light', 'Porch Light', 360, 430, trustedState('off', 'public'))
     ],
     environmentVariables: [
       { name: 'occupancy', value: 'absent', trust: 'trusted', privacy: 'private' },
@@ -301,24 +268,12 @@ const scenes = [
       { name: 'illuminance', value: '20', trust: 'untrusted', privacy: 'public' }
     ],
     rules: [
-      {
-        name: 'When nobody is home, arm the entry alarm',
-        sources: [valueSource('occupancy_1', 'occupancy', '=', 'absent')],
-        toId: 'alarm_1',
-        toApi: 'strobe'
-      },
-      {
-        name: 'When porch motion is detected, unlock the front door for convenience',
-        sources: [valueSource('motion_1', 'motion', '=', 'active')],
-        toId: 'door_1',
-        toApi: 'unlock'
-      },
-      {
-        name: 'When porch motion is detected, turn on the porch light',
-        sources: [valueSource('motion_1', 'motion', '=', 'active')],
-        toId: 'light_1',
-        toApi: 'on'
-      }
+      automationRule('When nobody is home, arm the entry alarm',
+        [valueSource('occupancy_1', 'occupancy', '=', 'absent')], 'alarm_1', 'strobe'),
+      automationRule('When porch motion is detected, unlock the front door for convenience',
+        [valueSource('motion_1', 'motion', '=', 'active')], 'door_1', 'unlock'),
+      automationRule('When porch motion is detected, turn on the porch light',
+        [valueSource('motion_1', 'motion', '=', 'active')], 'light_1', 'on')
     ],
     specs: [
       implicationSpec("Enable the alarm when away", '4',
@@ -359,31 +314,19 @@ const scenes = [
       // demonstrate. Its `value` is not a second source of truth: `canonicalizeVariables` overwrites
       // it with the state-declared value, which is what it already holds.
       device('rfid_1', 'Door RFID', 'Front-door Badge Reader', 80, 120, {
-        state: 'authorized', currentStateTrust: 'trusted', currentStatePrivacy: 'private',
+        ...trustedState('authorized', 'private'),
         variables: [{ name: 'RFID', value: 'authorized', trust: 'trusted' }],
         privacies: [{ name: 'RFID', privacy: 'private' }]
       }),
-      device('door_1', 'Door', 'Front Door', 370, 70, {
-        state: 'locked', currentStateTrust: 'trusted', currentStatePrivacy: 'private'
-      }),
-      device('alarm_1', 'Alarm', 'Entry Alarm', 370, 250, {
-        state: 'off', currentStateTrust: 'trusted', currentStatePrivacy: 'public'
-      })
+      device('door_1', 'Door', 'Front Door', 370, 70, trustedState('locked', 'private')),
+      device('alarm_1', 'Alarm', 'Entry Alarm', 370, 250, trustedState('off', 'public'))
     ],
     environmentVariables: [],
     rules: [
-      {
-        name: 'When the badge is authorized, unlock the front door',
-        sources: [valueSource('rfid_1', 'RFID', '=', 'authorized')],
-        toId: 'door_1',
-        toApi: 'unlock'
-      },
-      {
-        name: 'When the badge is not authorized, sound the entry alarm',
-        sources: [valueSource('rfid_1', 'RFID', '=', 'not authorized')],
-        toId: 'alarm_1',
-        toApi: 'siren'
-      }
+      automationRule('When the badge is authorized, unlock the front door',
+        [valueSource('rfid_1', 'RFID', '=', 'authorized')], 'door_1', 'unlock'),
+      automationRule('When the badge is not authorized, sound the entry alarm',
+        [valueSource('rfid_1', 'RFID', '=', 'not authorized')], 'alarm_1', 'siren')
     ],
     specs: [
       implicationSpec("Unlock for an authorized card", '4',
@@ -544,45 +487,27 @@ const scenes = [
       device('air_quality', 'Air Quality Monitor', 'Air Quality Monitor', 40, 520),
       device('clock', 'Clock', 'Wall Clock', 40, 680),
       // `vitals` is stateful: MonitorMode drives the escalation chain.
-      device('vitals', 'Vital Signs Monitor', 'Wearable Vitals Monitor', 300, 40, {
-        state: 'normal', currentStateTrust: 'trusted', currentStatePrivacy: 'private'
-      }),
+      device('vitals', 'Vital Signs Monitor', 'Wearable Vitals Monitor', 300, 40, trustedState('normal', 'private')),
       // Column 2 — the hub. Complete tuple required: partial tuples and wildcards are rejected
       // for an instance `state`. `Home Mode` auto-returns to `;idle`, which is what makes its
       // `State` pulse repeatable and lets it sit in the middle of a chain.
-      device('care_hub', 'Home Mode', 'Care Hub', 300, 300, {
-        state: 'home;idle', currentStateTrust: 'trusted', currentStatePrivacy: 'private'
-      }),
+      device('care_hub', 'Home Mode', 'Care Hub', 300, 300, trustedState('home;idle', 'private')),
       // Column 3 — responders. Each instance state is pinned to a state its incoming command
       // moves it OUT of: an api signal is `next(mode)=End & mode!=End`, so a device already
       // resting in the command's EndState fires the rule and emits no pulse.
-      device('alarm_system', 'Alarm', 'Emergency Alarm', 580, 40, {
-        state: 'off', currentStateTrust: 'trusted', currentStatePrivacy: 'public'
-      }),
-      device('smart_lamp', 'Light', 'Bedside Lamp', 580, 200, {
-        state: 'off', currentStateTrust: 'trusted', currentStatePrivacy: 'public'
-      }),
-      device('door_lock', 'Door', 'Front Door Lock', 580, 360, {
-        state: 'locked', currentStateTrust: 'trusted', currentStatePrivacy: 'private'
-      }),
-      device('window_1', 'Care Ventilation Window', 'Electric Window', 580, 520, {
-        state: 'closed', currentStateTrust: 'trusted', currentStatePrivacy: 'public'
-      }),
+      device('alarm_system', 'Alarm', 'Emergency Alarm', 580, 40, trustedState('off', 'public')),
+      device('smart_lamp', 'Light', 'Bedside Lamp', 580, 200, trustedState('off', 'public')),
+      device('door_lock', 'Door', 'Front Door Lock', 580, 360, trustedState('locked', 'private')),
+      device('window_1', 'Care Ventilation Window', 'Electric Window', 580, 520, trustedState('closed', 'public')),
       // `off`, against the template's `InitState: 'on'`, so `→ air_purifier.on` actually pulses.
-      device('air_purifier', 'Air Purifier', 'Air Purifier', 580, 680, {
-        state: 'off', currentStateTrust: 'trusted', currentStatePrivacy: 'public'
-      }),
+      device('air_purifier', 'Air Purifier', 'Air Purifier', 580, 680, trustedState('off', 'public')),
       // `on`, because `take photo` is one of the few APIs carrying a real `StartState` guard
       // (`'on'`). The shipped scene pinned `off` instead, which made the photo rule dead and two
       // specifications about `taking photo` vacuous.
-      device('camera_1', 'Camera', 'Hallway Camera', 860, 200, {
-        state: 'on', currentStateTrust: 'trusted', currentStatePrivacy: 'private'
-      }),
+      device('camera_1', 'Camera', 'Hallway Camera', 860, 200, trustedState('on', 'private')),
       // Column 4 — outward. The only content source in the scene: `Camera` declares no
       // `Contents`, so a content-carrying command must name this device.
-      device('caregiver_phone', 'Mobile Phone', "Caregiver's Phone", 860, 40, {
-        state: 'on', currentStateTrust: 'trusted', currentStatePrivacy: 'private'
-      })
+      device('caregiver_phone', 'Mobile Phone', "Caregiver's Phone", 860, 40, trustedState('on', 'private'))
     ],
     // Exactly the required set: every non-local variable of every device's template, plus every
     // `ImpactedVariables` entry. The board layer would silently reconcile a wrong list, but
@@ -622,34 +547,19 @@ const scenes = [
       // random simulation walk almost never shows it, leaving the flagship chain invisible in the
       // animation. `signal_anomaly` goes `normal -> emergency` in one step, and "out of bed at
       // night with an abnormal reading" is the judgement a real monitor makes.
-      {
-        name: 'Treat an abnormal reading during a night-time bed exit as an emergency',
-        sources: [
-          valueSource('vitals', 'heartRate', '>', '120'),
-          valueSource('bed_sensor', 'bedOccupancy', '=', 'empty'),
-          valueSource('clock', 'time', 'in', '22,23,0,1,2,3,4,5,6')
-        ],
-        toId: 'vitals',
-        toApi: 'signal_anomaly'
-      },
-      {
-        name: 'When vitals reach emergency, sound the alarm',
-        sources: [{ fromId: 'vitals', fromApi: 'MonitorMode', itemType: 'mode', relation: '=', value: 'emergency' }],
-        toId: 'alarm_system',
-        toApi: 'siren'
-      },
-      {
-        name: 'When the alarm sounds, have the care hub raise an alert',
-        sources: [apiSource('alarm_system', 'siren')],
-        toId: 'care_hub',
-        toApi: 'send alert message'
-      },
-      {
-        name: 'While the care hub is raising an alert, unlock the front door for responders',
-        sources: [{ fromId: 'care_hub', fromApi: 'State', itemType: 'mode', relation: '=', value: 'sendingAlertMessage' }],
-        toId: 'door_lock',
-        toApi: 'unlock'
-      },
+      automationRule('Treat an abnormal reading during a night-time bed exit as an emergency', [
+        valueSource('vitals', 'heartRate', '>', '120'),
+        valueSource('bed_sensor', 'bedOccupancy', '=', 'empty'),
+        valueSource('clock', 'time', 'in', '22,23,0,1,2,3,4,5,6')
+      ], 'vitals', 'signal_anomaly'),
+      automationRule('When vitals reach emergency, sound the alarm',
+        [{ fromId: 'vitals', fromApi: 'MonitorMode', itemType: 'mode', relation: '=', value: 'emergency' }],
+        'alarm_system', 'siren'),
+      automationRule('When the alarm sounds, have the care hub raise an alert',
+        [apiSource('alarm_system', 'siren')], 'care_hub', 'send alert message'),
+      automationRule('While the care hub is raising an alert, unlock the front door for responders',
+        [{ fromId: 'care_hub', fromApi: 'State', itemType: 'mode', relation: '=', value: 'sendingAlertMessage' }],
+        'door_lock', 'unlock'),
       // The content pair is legal only because `upload to cloud` declares `AcceptsContent` and
       // the named content item exists on `contentDevice`'s own template. It is cross-device by
       // design: `Camera` declares no `Contents`, so the phone is the scene's only content source.
@@ -665,21 +575,12 @@ const scenes = [
       // --- Chain B: night-time bed exit. bed/clock -> lamp -> camera -> hub.
       // `time` never wraps (rate `'1'` is `0..1` and the clamp saturates), and rule conditions are
       // AND-only, so a 22:00-06:00 window is one `in` condition rather than two comparisons.
-      {
-        name: 'When the resident leaves the bed at night, light the way',
-        sources: [
-          valueSource('bed_sensor', 'bedOccupancy', '=', 'empty'),
-          valueSource('clock', 'time', 'in', '22,23,0,1,2,3,4,5,6')
-        ],
-        toId: 'smart_lamp',
-        toApi: 'on'
-      },
-      {
-        name: 'When the bedside lamp comes on, have the hallway camera take a photo',
-        sources: [apiSource('smart_lamp', 'on')],
-        toId: 'camera_1',
-        toApi: 'take photo'
-      },
+      automationRule('When the resident leaves the bed at night, light the way', [
+        valueSource('bed_sensor', 'bedOccupancy', '=', 'empty'),
+        valueSource('clock', 'time', 'in', '22,23,0,1,2,3,4,5,6')
+      ], 'smart_lamp', 'on'),
+      automationRule('When the bedside lamp comes on, have the hallway camera take a photo',
+        [apiSource('smart_lamp', 'on')], 'camera_1', 'take photo'),
       {
         name: 'When the camera takes a photo, have the care hub send it',
         sources: [apiSource('camera_1', 'take photo')],
@@ -690,34 +591,17 @@ const scenes = [
       },
       // --- Chain C: ventilation. air quality -> window -> purifier.
       // Closing requires fresh air, so night-time closing cannot interrupt needed ventilation.
-      {
-        name: 'When the air is stale, open the window',
-        sources: [valueSource('air_quality', 'carbonDioxide', '>', '60')],
-        toId: 'window_1',
-        toApi: 'open'
-      },
-      {
-        name: 'When the window opens, run the air purifier',
-        sources: [apiSource('window_1', 'open')],
-        toId: 'air_purifier',
-        toApi: 'on'
-      },
-      {
-        name: 'Close the window at night once the air is fresh again',
-        sources: [
-          valueSource('clock', 'time', 'in', '22,23,0,1,2,3,4,5,6'),
-          valueSource('air_quality', 'carbonDioxide', '<=', '60')
-        ],
-        toId: 'window_1',
-        toApi: 'close'
-      },
+      automationRule('When the air is stale, open the window',
+        [valueSource('air_quality', 'carbonDioxide', '>', '60')], 'window_1', 'open'),
+      automationRule('When the window opens, run the air purifier',
+        [apiSource('window_1', 'open')], 'air_purifier', 'on'),
+      automationRule('Close the window at night once the air is fresh again', [
+        valueSource('clock', 'time', 'in', '22,23,0,1,2,3,4,5,6'),
+        valueSource('air_quality', 'carbonDioxide', '<=', '60')
+      ], 'window_1', 'close'),
       // Night-time bed-exit lighting has priority over motion-based energy saving.
-      {
-        name: 'Turn the lamp off when there is no movement',
-        sources: [valueSource('motion_det', 'motion', '=', 'inactive')],
-        toId: 'smart_lamp',
-        toApi: 'off'
-      }
+      automationRule('Turn the lamp off when there is no movement',
+        [valueSource('motion_det', 'motion', '=', 'inactive')], 'smart_lamp', 'off')
     ],
     // Each entry names the question it asks and whether it is expected to hold. A property that
     // cannot fail is not a passing check, so the ones that are unfalsifiable by construction are
